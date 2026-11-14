@@ -18,15 +18,20 @@ function hiddenChars(input: unknown): number | null {
   return Math.max(0, totalChars - shown);
 }
 
+/** Control characters other than a line break and a tab, as JSON would write them, so none can hide or restyle what is shown. */
+const visibleControls = (s: string): string =>
+  s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, (c) => (c === "\u007f" ? "\\u007f" : JSON.stringify(c).slice(1, -1)));
+
 /**
  * The full command of a shell action (the title is capped), or null. For input to a running command
- * (`codex.stdin`) it is the text that will be typed, not the command already running.
+ * (`codex.stdin`) it is the text that will be typed, not the command already running, with its control
+ * characters made visible.
  */
 function shellCommand(action: AgentAction): string | null {
   if (action.kind !== "shell" || typeof action.input !== "object" || action.input === null) return null;
   const { command, reason } = action.input as { command?: unknown; reason?: unknown };
-  const shown = action.tool === "codex.stdin" ? reason : command;
-  return typeof shown === "string" ? shown : null;
+  if (action.tool === "codex.stdin") return typeof reason === "string" ? visibleControls(reason) : null;
+  return typeof command === "string" ? command : null;
 }
 
 export function DecisionCard({ action, projectName, onDecide }: Props) {

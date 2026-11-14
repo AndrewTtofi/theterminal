@@ -69,6 +69,13 @@ describe("errorMessage", () => {
     expect(errorMessage(new ApiError(503, "keychain_unavailable"))).toBe("Your keychain is unavailable. Nothing was saved.");
     expect(errorMessage(new ApiError(400, "invalid_input"))).toBe("That input was not accepted");
   });
+  it("maps the sign-in refusals", () => {
+    expect(errorMessage(new ApiError(422, "terminal_required"))).toBe(
+      "This provider signs in inside its own terminal. Run the command shown, then check again.",
+    );
+    expect(errorMessage(new ApiError(422, "invalid_cli_home"))).toBe("The CLI home folder must be an absolute path");
+    expect(errorMessage(new ApiError(422, "not_installed"))).toBe("Something went wrong");
+  });
 });
 
 describe("sign-in api", () => {

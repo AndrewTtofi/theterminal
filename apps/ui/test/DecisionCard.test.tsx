@@ -90,6 +90,17 @@ describe("DecisionCard", () => {
     expect(container.querySelector("pre.command")?.textContent).toBe("rm -rf /\n");
   });
 
+  it("makes control characters in the text to be typed visible, keeping line breaks and tabs", () => {
+    const stdin = {
+      ...action,
+      tool: "codex.stdin",
+      summary: "Type into bash: ...",
+      input: { command: "bash", kind: "writeStdin", reason: "echo hi\r\n\u0003\ttab\u007f\u001b[2Jend\n" },
+    };
+    const { container } = render(<DecisionCard action={stdin} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")?.textContent).toBe("echo hi\\r\n\\u0003\ttab\\u007f\\u001b[2Jend\n");
+  });
+
   it("shows no command block for other kinds of action", () => {
     const edit = { ...action, kind: "file_edit" as const, input: { command: "not a shell action" } };
     const { container } = render(<DecisionCard action={edit} onDecide={vi.fn()} />);

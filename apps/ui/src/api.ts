@@ -152,6 +152,8 @@ export function errorMessage(e: unknown): string {
     if (e.status === 409 && e.code === "conflict") return "Already connected";
     if (e.code === "secret_in_config") return "That field must not contain a key or token";
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
+    if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
+    if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";
