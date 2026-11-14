@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import Fastify from "fastify";
 import { openDatabase } from "../db.js";
@@ -39,6 +39,20 @@ function loadToken(dataDir: string, given?: string): string {
   return token;
 }
 
+/** The UI directory is served unauthenticated, so the data dir (token, ledger.db) must never be under it. */
+function assertDataDirOutsideUiDir(dataDir: string, uiDir: string): void {
+  const data = realpathSync.native(dataDir);
+  const ui = realpathSync.native(uiDir);
+  const rel = relative(ui, data);
+  const outside = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  if (!outside) {
+    throw new Error(
+      `Refusing to start: the data directory (${data}) is inside the UI directory (${ui}), ` +
+        "which is served without authentication. Choose a data directory outside it.",
+    );
+  }
+}
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -46,13 +60,20 @@ export async function createServer(opts: {
   token?: string;
 }): Promise<RunningServer> {
   mkdirSync(opts.dataDir, { recursive: true });
+  if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
   const ledger = new Ledger(db);
   const board = new BoardService(db, ledger);
   const token = loadToken(opts.dataDir, opts.token);
 
+  // Projections are derived state: rebuild them from the verified ledger so out-of-band edits are undone.
   const integrity = ledger.verify();
-  if (!integrity.ok) ledger.readOnly = true;
+  if (integrity.ok) {
+    board.rebuildProjections();
+  } else {
+    board.rebuildProjections({ beforeSeq: integrity.brokenAtSeq });
+    ledger.readOnly = true;
+  }
 
   const app = Fastify();
   let boundPort = 0;

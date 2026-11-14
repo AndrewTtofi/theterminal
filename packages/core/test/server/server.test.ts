@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -96,14 +96,114 @@ describe("createServer", () => {
     expect(res.status).toBe(423);
   });
 
+  /** Open the server's db directly, triggers dropped, for out-of-band edits. */
+  const tamper = (dataDir: string, fn: (db: Database.Database) => void) => {
+    const db = new Database(join(dataDir, "ledger.db"));
+    db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+    fn(db);
+    db.close();
+  };
+  const seedProjectWithCard = async (dataDir: string) => {
+    const a = await start({ dataDir, port: 0 });
+    const project = await (await post(a, "/api/projects", { name: "P", pitch: "x" })).json();
+    const card = await (await post(a, `/api/projects/${project.id}/cards`, { title: "C", stage: "plan" })).json();
+    await stop(a);
+    return { projectId: project.id as string, cardId: card.id as string };
+  };
+  const getBoard = async (s: RunningServer, projectId: string) =>
+    (await fetch(`${base(s)}/api/projects/${projectId}/board`, { headers: auth(s) })).json();
+
+  it("rebuilds projections at startup, undoing direct edits to the cards table", async () => {
+    const dataDir = tmp();
+    const { projectId, cardId } = await seedProjectWithCard(dataDir);
+    tamper(dataDir, (db) => {
+      db.prepare("UPDATE cards SET stage = 'ship'").run();
+      db.prepare(
+        `INSERT INTO cards (id, project_id, title, stage, status, created_at, updated_at)
+         VALUES ('ghost', ?, 'Ghost', 'build', 'todo', 'x', 'x')`,
+      ).run(projectId);
+    });
+
+    const b = await start({ dataDir, port: 0 });
+    expect(b.integrity.ok).toBe(true);
+    const board = await getBoard(b, projectId);
+    expect(board.columns.plan.map((c: { id: string }) => c.id)).toEqual([cardId]);
+    expect(board.columns.ship).toEqual([]);
+    expect(board.columns.build).toEqual([]);
+  });
+
+  it("drops the card of a deleted tail entry at startup", async () => {
+    const dataDir = tmp();
+    const { projectId } = await seedProjectWithCard(dataDir);
+    tamper(dataDir, (db) => db.prepare("DELETE FROM ledger WHERE seq = (SELECT MAX(seq) FROM ledger)").run());
+
+    const b = await start({ dataDir, port: 0 });
+    expect(b.integrity.ok).toBe(true);
+    const board = await getBoard(b, projectId);
+    expect(board.columns.plan).toEqual([]);
+  });
+
+  it("on a broken chain, projects only the entries before the break", async () => {
+    const dataDir = tmp();
+    const { projectId } = await seedProjectWithCard(dataDir);
+    tamper(dataDir, (db) =>
+      db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run(
+        JSON.stringify({ cardId: "evil", title: "Evil", stage: "ship" }),
+      ),
+    );
+
+    const b = await start({ dataDir, port: 0 });
+    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: 2 });
+    const board = await getBoard(b, projectId);
+    expect(Object.values(board.columns).flat()).toEqual([]);
+  });
+
+  it("serves entries before an unparseable payload over HTTP and WS", async () => {
+    const dataDir = tmp();
+    const { projectId } = await seedProjectWithCard(dataDir);
+    tamper(dataDir, (db) => db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run("{not json"));
+
+    const b = await start({ dataDir, port: 0 });
+    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: 2 });
+    const res = await fetch(`${base(b)}/api/ledger?projectId=${projectId}`, { headers: auth(b) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).map((e: { seq: number }) => e.seq)).toEqual([1]);
+    expect((await getBoard(b, projectId)).project.name).toBe("P");
+
+    const ws = new WebSocket(`ws://127.0.0.1:${b.port}/api/events`, { headers: auth(b) });
+    ws.on("error", () => undefined);
+    const first = await new Promise<{ seq: number }>((resolve, reject) => {
+      ws.once("message", (d) => resolve(JSON.parse(String(d))));
+      ws.once("close", (code) => reject(new Error(`closed ${code}`)));
+    });
+    expect(first.seq).toBe(1);
+    ws.terminate();
+  });
+
+  it("refuses to start when dataDir is inside or equal to uiDir", async () => {
+    const root = tmp();
+    writeFileSync(join(root, "index.html"), "<html>ui</html>");
+    await expect(createServer({ dataDir: join(root, "data"), uiDir: root, port: 0 })).rejects.toThrow(
+      /data directory .* inside the UI directory/i,
+    );
+    await expect(createServer({ dataDir: root, uiDir: root, port: 0 })).rejects.toThrow(
+      /data directory .* inside the UI directory/i,
+    );
+    expect(existsSync(join(root, "data", "token"))).toBe(false);
+    expect(existsSync(join(root, "token"))).toBe(false);
+    expect(existsSync(join(root, "ledger.db"))).toBe(false);
+  });
+
   it("falls back to the next port when the requested one is taken", async () => {
     const blocker = net.createServer();
     await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
     const p = (blocker.address() as net.AddressInfo).port;
     try {
       const s = await start({ dataDir: tmp(), port: p });
-      expect(s.port).toBe(p + 1);
-      expect(s.url).toContain(`:${p + 1}/`);
+      // p+1 may itself be taken by another process; any port in the fallback range will do
+      expect(s.port).toBeGreaterThan(p);
+      expect(s.port).toBeLessThanOrEqual(p + 20);
+      expect(s.url).toContain(`:${s.port}/`);
       // auth must follow the real bound port
       const res = await fetch(base(s) + "/api/health", { headers: auth(s) });
       expect(res.status).toBe(200);
@@ -174,6 +274,23 @@ describe("createServer", () => {
         expect(res.body, path).not.toContain(secret);
         expect(res.status, path).not.toBe(200);
       }
+    });
+
+    it("refuses dotfiles, token files and database files inside uiDir", async () => {
+      const root = tmp();
+      const uiDir = join(root, "ui");
+      mkdirSync(join(uiDir, ".git"), { recursive: true });
+      writeFileSync(join(uiDir, "index.html"), "<html>ui</html>");
+      for (const f of [".env", ".git/config", "token", "TOKEN", "ledger.db", "ledger.db-wal", "ledger.db-shm", "x.DB"]) {
+        writeFileSync(join(uiDir, f), "secret");
+      }
+      const s = await start({ dataDir: join(root, "data"), uiDir, port: 0 });
+      for (const path of ["/.env", "/.git/config", "/token", "/TOKEN", "/ledger.db", "/ledger.db-wal", "/ledger.db-shm", "/x.DB"]) {
+        const res = await rawGet(s.port, path);
+        expect(res.status, path).toBe(404);
+        expect(res.body, path).not.toContain("secret");
+      }
+      expect((await rawGet(s.port, "/")).status).toBe(200);
     });
 
     it("registers nothing for / without uiDir", async () => {

@@ -112,7 +112,14 @@ export class Ledger {
 
   /** Fire onAppend listeners for an entry whose transaction has committed. */
   notify(entry: LedgerEntry): void {
-    for (const fn of [...this.listeners]) fn(entry);
+    // The entry is already committed: a failing listener must not fail the command or starve the others.
+    for (const fn of [...this.listeners]) {
+      try {
+        fn(entry);
+      } catch (err) {
+        console.error("ledger listener failed", err);
+      }
+    }
   }
 
   list(q: { projectId?: string; afterSeq?: number; limit?: number } = {}): LedgerEntry[] {
@@ -126,7 +133,17 @@ export class Ledger {
     const rows = this.db
       .prepare(`SELECT * FROM ledger WHERE ${where.join(" AND ")} ORDER BY seq ASC LIMIT ?`)
       .all(...params) as Row[];
-    return rows.map(rowToEntry);
+    // Stop at the first row whose payload cannot be parsed (a tampered entry): serve what precedes it,
+    // consistent with treating the ledger as read-only from the break.
+    const entries: LedgerEntry[] = [];
+    for (const row of rows) {
+      try {
+        entries.push(rowToEntry(row));
+      } catch {
+        break;
+      }
+    }
+    return entries;
   }
 
   verify(): VerifyResult {

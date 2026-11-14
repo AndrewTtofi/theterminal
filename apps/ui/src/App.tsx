@@ -61,10 +61,14 @@ export function App() {
     refreshRef.current = () => void refresh();
     setBoard(null);
     setEntries([]);
+    // Board and ledger load independently, so one failing does not hide the other.
     void run(async () => {
-      const [initialBoard, initial] = await Promise.all([api.getBoard(selectedId), api.listLedger(selectedId)]);
+      const initialBoard = await api.getBoard(selectedId);
+      if (!cancelled) setBoard(initialBoard);
+    });
+    void run(async () => {
+      const initial = await api.listLedger(selectedId);
       if (cancelled) return;
-      setBoard(initialBoard);
       setEntries(initial);
       const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
       unsubscribe = subscribeLedger(lastSeq, (e) => {

@@ -1,5 +1,12 @@
 import Database from "better-sqlite3";
 
+/** Recreated on every open, so triggers dropped out of band do not stay gone. */
+const APPEND_ONLY_TRIGGERS = `
+  CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
+  BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
+  CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
+  BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;`;
+
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS ledger (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -13,10 +20,7 @@ const MIGRATIONS = [
     prev_hash TEXT NOT NULL,
     hash TEXT NOT NULL
   );
-  CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
-  BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
-  CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
-  BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;`,
+  ${APPEND_ONLY_TRIGGERS}`,
   `CREATE TABLE projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -49,5 +53,6 @@ export function openDatabase(file: string | ":memory:"): Db {
       db.pragma(`user_version = ${i + 1}`);
     }).immediate();
   }
+  db.exec(APPEND_ONLY_TRIGGERS);
   return db;
 }

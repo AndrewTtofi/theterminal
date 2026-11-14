@@ -122,13 +122,15 @@ export class BoardService {
     });
   }
 
-  rebuildProjections(): void {
+  /** Rebuilds the projection tables from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
+  rebuildProjections(opts: { beforeSeq?: number } = {}): void {
+    const beforeSeq = opts.beforeSeq ?? Infinity;
     this.db
       .transaction(() => {
         this.db.exec("DELETE FROM cards; DELETE FROM projects;");
         let afterSeq = 0;
         for (;;) {
-          const batch = this.ledger.list({ afterSeq, limit: 500 });
+          const batch = this.ledger.list({ afterSeq, limit: 500 }).filter((e) => e.seq < beforeSeq);
           if (batch.length === 0) break;
           for (const e of batch) this.apply(this.db, e);
           afterSeq = batch[batch.length - 1]!.seq;

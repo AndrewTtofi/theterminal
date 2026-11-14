@@ -22,6 +22,13 @@ const TYPES: Record<string, string> = {
   ".map": "application/json; charset=utf-8",
 };
 
+/** Defence in depth: never serve dotfiles/dot-dirs, token files or SQLite files, even from inside uiDir. */
+function isDenied(relPath: string): boolean {
+  const parts = relPath.split(sep);
+  const name = (parts[parts.length - 1] ?? "").toLowerCase();
+  return parts.some((p) => p.startsWith(".")) || name === "token" || /\.db(-wal|-shm)?$/.test(name);
+}
+
 /**
  * Serves the built UI. "/" is its own explicit public route so the ?token= bootstrap in auth can
  * match it; every other file goes through a public wildcard that cannot leave uiDir.
@@ -35,6 +42,7 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string): void {
     try {
       file = realpathSync(resolve(root, rel)); // resolves symlinks too
       if (file !== root && !file.startsWith(root + sep)) throw new Error("outside");
+      if (isDenied(file.slice(root.length + 1))) throw new Error("denied");
       if (!statSync(file).isFile()) throw new Error("not a file");
     } catch {
       return reply.code(404).send({ error: "not_found" });

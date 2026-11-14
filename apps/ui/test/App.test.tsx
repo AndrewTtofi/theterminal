@@ -81,3 +81,14 @@ describe("App board refresh", () => {
     expect(m.getBoard.mock.calls.length).toBeLessThanOrEqual(2);
   });
 });
+
+describe("App initial load", () => {
+  it("still renders the board when the ledger fails to load", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listLedger.mockRejectedValue(new Error("ledger down"));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    expect(await screen.findByRole("heading", { name: "Project A" })).toBeTruthy();
+    expect(await screen.findByRole("status")).toBeTruthy();
+  });
+});

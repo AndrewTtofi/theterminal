@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Worker } from "node:worker_threads";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -113,6 +113,35 @@ describe("Ledger", () => {
     expect(seen).toEqual([1]);
   });
 
+  it("list stops before the first row whose payload JSON is unparseable", () => {
+    ledger.append(created(1));
+    ledger.append(created(2));
+    ledger.append(created(3));
+    db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+    db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run("{not json");
+    expect(ledger.verify()).toEqual({ ok: false, brokenAtSeq: 2 });
+    expect(ledger.list().map((e) => e.seq)).toEqual([1]);
+    expect(ledger.list({ afterSeq: 1 })).toEqual([]);
+  });
+
+  it("isolates listeners: a throwing one neither stops the others nor makes append throw", () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => void errors.push(args));
+    try {
+      const seen: number[] = [];
+      ledger.onAppend(() => {
+        throw new Error("listener boom");
+      });
+      ledger.onAppend((e) => seen.push(e.seq));
+      expect(() => ledger.append(created(1))).not.toThrow();
+      expect(seen).toEqual([1]);
+      expect(ledger.list().map((e) => e.seq)).toEqual([1]);
+      expect(errors).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("readOnly makes append throw", () => {
     ledger.readOnly = true;
     expect(() => ledger.append(created(1))).toThrow(LedgerReadOnlyError);
@@ -145,5 +174,25 @@ describe("Ledger across connections", () => {
     expect(seqs).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
     expect(ledger.verify()).toEqual({ ok: true, count: 50 });
     db.close();
+  });
+});
+
+describe("openDatabase", () => {
+  it("recreates the append-only triggers on every open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tt-db-"));
+    try {
+      const file = join(dir, "ledger.db");
+      const a = openDatabase(file);
+      new Ledger(a).append(created(1));
+      a.exec("DROP TRIGGER ledger_no_update; DROP TRIGGER ledger_no_delete;");
+      a.close();
+
+      const b = openDatabase(file);
+      expect(() => b.prepare("UPDATE ledger SET payload='{}' WHERE seq=1").run()).toThrow(/append-only/);
+      expect(() => b.prepare("DELETE FROM ledger WHERE seq=1").run()).toThrow(/append-only/);
+      b.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
