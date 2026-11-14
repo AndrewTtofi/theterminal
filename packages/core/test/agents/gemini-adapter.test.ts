@@ -159,6 +159,7 @@ describe("GeminiAdapter", () => {
     expect(snap.policies).toEqual({ "theterminal.toml": POLICY_TOML });
     expect(snap.env.NO_BROWSER).toBe("true");
     expect(snap.env.GEMINI_CLI_NO_RELAUNCH).toBe("1");
+    expect(snap.env.GEMINI_CLI_TRUST_WORKSPACE).toBe("false"); // a repo-planted .gemini/settings.json or .env never merges in
     expect(snap.env).not.toHaveProperty("GEMINI_CLI_SYSTEM_SETTINGS_PATH");
     // api_key mode: an isolated, per-project home holds our user-scope settings; nothing of the user's ~/.gemini is read.
     const home = join(outside, "projects", "p1", "gemini-home");
@@ -194,6 +195,7 @@ describe("GeminiAdapter", () => {
     // The user's own home must stay in place for the login, so no isolated home and no settings of ours.
     expect(snap.env).not.toHaveProperty("GEMINI_CLI_HOME");
     expect(snap.env).not.toHaveProperty("GEMINI_CLI_SYSTEM_SETTINGS_PATH");
+    expect(snap.env.GEMINI_CLI_TRUST_WORKSPACE).toBe("false"); // even a worktree the user trusts stays untrusted for this run
     expect(snap.settings).toBeNull();
     expect(existsSync(join(outside, "projects"))).toBe(false);
     expect(snap.argv).toEqual(RUN_ARGS);

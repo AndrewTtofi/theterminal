@@ -142,9 +142,9 @@ function selectLines(text: string, line: number | null | undefined, limit: numbe
 /**
  * User-scope settings for the isolated home used in api_key mode (a system settings file would be ignored:
  * Gemini only honours one owned by root). The API-key auth type, the tool allowlist (nothing else is even
- * registered), folder trust on so a repo-planted `.gemini/settings.json` is ignored (the worktree is never
- * trusted in that home), no hooks, no tool discovery or call commands, no MCP server command, no legacy
- * sandbox, and no repo `.env` (one could point the API key at another host).
+ * registered), folder trust on (belt and braces next to GEMINI_CLI_TRUST_WORKSPACE=false), no hooks, no tool
+ * discovery or call commands, no MCP server command, no legacy sandbox, and no repo `.env` (one could point
+ * the API key at another host).
  */
 const HOME_SETTINGS: Rec = {
   security: { auth: { selectedType: "gemini-api-key" }, disableAlwaysAllow: true, folderTrust: { enabled: true } },
@@ -181,8 +181,10 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
  * first and then performed by us inside the worktree. `session/request_permission` is gated too, and a tool
  * call that reaches execution without either is reported as ungated: the run fails and Gemini is killed.
  *
- * Gemini is configured for this run alone through a system settings file in a temp dir (never `~/.gemini`),
- * and `authenticate` is never called: on this CLI it rewrites the user's settings and can clear their login.
+ * Gemini is configured for this run through its command line (a per-run policy directory that makes every kept
+ * tool ask and denies the rest, an empty tool allowlist, no extensions, no MCP servers) and, in api_key mode, an
+ * isolated per-project home with our own user-scope settings; the user's `~/.gemini` is never written, and
+ * `authenticate` is never called: on this CLI it rewrites the user's settings and can clear their login.
  */
 export class GeminiAdapter implements AgentAdapter {
   readonly id = "gemini" as const;
@@ -256,10 +258,15 @@ export class GeminiAdapter implements AgentAdapter {
         writeFileSync(join(home, ".gemini", "settings.json"), JSON.stringify(HOME_SETTINGS));
         env.GEMINI_CLI_HOME = home;
       }
-      // Google-login mode runs in the user's own home (the login lives there and is never read or copied), so the
-      // user's own settings stay in force: their hooks, tool discovery/call commands and MCP server command run as
-      // the user configured them. Those are the user's commands, not agent actions; the policy file, the argv
-      // overrides and the ungated-tool detector still gate everything the agent itself does.
+      // The worktree is never a trusted folder for this run, whatever the user's trust records say: a repo-planted
+      // `.gemini/settings.json` or `.env` (which an approved write could create for the next run) is not merged,
+      // project hooks are blocked and workspace MCP servers are skipped. Checked first by Gemini's trust lookup.
+      env.GEMINI_CLI_TRUST_WORKSPACE = "false";
+      // Google-login mode runs in the user's own home (the login lives there and is never read or copied), so what
+      // remains in force is the user's OWN `~/.gemini` configuration: their hooks and `tools.discoveryCommand` /
+      // `tools.callCommand` run as they configured them (plus admin-tier policies). Those are the user's commands,
+      // not agent actions; the policy file, the argv overrides and the ungated-tool detector still gate everything
+      // the agent itself does.
       env.GEMINI_CLI_NO_RELAUNCH = "1"; // the npm entry point would otherwise relaunch the CLI as a child our signals never reach
       env.NO_BROWSER = "true"; // a missing Google login fails instead of opening a browser from a background run
       return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, [...base, ...runArgs(policies)]);
