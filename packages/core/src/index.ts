@@ -9,3 +9,6 @@ export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
 export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE } from "./server/auth.js";
 export { registerLedgerStream } from "./server/events-ws.js";
+export { createServer } from "./server/server.js";
+export type { RunningServer } from "./server/server.js";
+export { defaultDataDir } from "./paths.js";
