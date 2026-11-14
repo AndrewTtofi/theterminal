@@ -51,6 +51,15 @@ describe("Ledger", () => {
     expect(ledger.list()).toEqual([]);
   });
 
+  it("rejects invalid envelopes, writing nothing", () => {
+    const bad = (patch: Partial<NewLedgerEntry>) => () => ledger.append({ ...created(1), ...patch });
+    expect(bad({ actor: { kind: "human", id: "owner", name: "x" } as never })).toThrow();
+    expect(bad({ actor: { kind: "robot", id: "" } as never })).toThrow();
+    expect(bad({ actor: { kind: "human", id: "" } })).toThrow();
+    expect(bad({ projectId: 5 as never })).toThrow();
+    expect(ledger.list()).toEqual([]);
+  });
+
   it("blocks UPDATE and DELETE via triggers", () => {
     ledger.append(created(1));
     expect(() => db.prepare("UPDATE ledger SET payload='{}' WHERE seq=1").run()).toThrow(/append-only/);

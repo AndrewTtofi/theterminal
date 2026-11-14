@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { GENESIS_HASH, eventPayloadSchemas, type LedgerEntry, type NewLedgerEntry } from "@theterminal/shared";
+import { z } from "zod";
+import { GENESIS_HASH, actorSchema, eventPayloadSchemas, type LedgerEntry, type NewLedgerEntry } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "./canonical.js";
 
@@ -80,6 +81,9 @@ export class Ledger {
     if (!schema) throw new Error(`unknown ledger event type: ${String(e.type)}`);
     const payload: unknown = schema.parse(e.payload);
 
+    const actor = actorSchema.strict().parse(e.actor);
+    const projectId = z.string().min(1).nullable().parse(e.projectId);
+
     const last = this.db.prepare("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").get() as
       | { seq: number; hash: string }
       | undefined;
@@ -87,8 +91,8 @@ export class Ledger {
       seq: (last?.seq ?? 0) + 1,
       id: this.newId(),
       ts: this.now().toISOString(),
-      projectId: e.projectId,
-      actor: e.actor,
+      projectId,
+      actor,
       type: e.type,
       payload,
       prevHash: last?.hash ?? GENESIS_HASH,
