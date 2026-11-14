@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { z } from "zod";
-import type { Actor, AdapterId, AgentAction, AgentRun, AuthMode } from "@theterminal/shared";
+import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
@@ -26,18 +28,26 @@ export type AgentRunnerDeps = {
   broker: ApprovalBroker;
   adapters: Partial<Record<AdapterId, AgentAdapter>>;
   extraSecrets: string[];
+  /** Recorded strings show this directory as `<data>`. */
+  dataDir: string;
   newId?: () => string;
+  /** How long shutdown() waits for adapters to return after aborting them. Default 5000. */
+  shutdownTimeoutMs?: number;
 };
 
 type FinishStatus = "completed" | "failed" | "stopped";
+type Scrub = (s: string) => string;
 type Session = {
   projectId: string;
+  /** Replaces this run's absolute paths in recorded strings. */
+  scrub: Scrub;
   abort: AbortController;
   done: Promise<void>;
   costUsd: number | null;
   /** Set when the runner itself failed during the run (e.g. a commit failed); fails the run. */
   failure: string | null;
 };
+type Payload = Record<string, unknown>;
 type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string };
 type GateOutcome = GateResult & { actionId: string };
 
@@ -46,6 +56,8 @@ const RUNNER: Actor = { kind: "system", id: "runner" };
 // Bounds from the agent payload schemas in @theterminal/shared; input has no schema bound, so we cap it.
 const MAX = { tool: 200, summary: 200, reason: 500, text: 4000, output: 4000, prompt: 20000, error: 1000, input: 20000 };
 const promptSchema = z.string().min(1).max(MAX.prompt);
+const INTERNAL_ERROR = "internal error";
+const NOT_ALLOWED_RESULT = "adapter reported a result for an action that was not allowed";
 
 function errorMessage(e: unknown): string {
   try {
@@ -53,6 +65,60 @@ function errorMessage(e: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+/** Adapter-reported text as a string; anything unprintable becomes "". */
+function asText(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v === null || v === undefined) return "";
+  try {
+    return String(v);
+  } catch {
+    return "";
+  }
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** A path as written and as resolved, with either separator, without a trailing separator; never a root. */
+function pathVariants(p: string): string[] {
+  const out = new Set<string>();
+  const add = (x: string) => {
+    for (const v of [x, x.replace(/\\/g, "/"), x.replace(/\//g, "\\")]) out.add(v.replace(/[\\/]+$/, ""));
+  };
+  add(p);
+  try {
+    add(realpathSync.native(p));
+  } catch {
+    // Not resolvable: the raw spelling still gets scrubbed.
+  }
+  return [...out].filter((v) => v.length > 1 && !/^[A-Za-z]:$/.test(v));
+}
+
+/**
+ * Replaces absolute directories with placeholders, longest first, only where the path ends
+ * (at a separator or a non-path character), so `/x/wt-other` is left alone when scrubbing `/x/wt`.
+ */
+function pathScrubber(dirs: [path: string, placeholder: string][]): Scrub {
+  const caseless = process.platform === "win32";
+  const fold = (s: string) => (caseless ? s.toLowerCase() : s);
+  const byVariant = new Map<string, string>();
+  for (const [dir, placeholder] of dirs) {
+    for (const v of pathVariants(dir)) if (!byVariant.has(fold(v))) byVariant.set(fold(v), placeholder);
+  }
+  if (byVariant.size === 0) return (s) => s;
+  const alternatives = [...byVariant.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
+  const re = new RegExp(`(?:${alternatives.join("|")})(?![A-Za-z0-9._~-])`, caseless ? "gi" : "g");
+  return (s) => s.replace(re, (m) => byVariant.get(fold(m))!);
+}
+
+function scrubJson(v: unknown, scrub: Scrub): unknown {
+  if (typeof v === "string") return scrub(v);
+  if (Array.isArray(v)) return v.map((x) => scrubJson(x, scrub));
+  if (v !== null && typeof v === "object") {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [scrub(k), scrubJson(x, scrub)]));
+  }
+  return v;
 }
 
 /**
@@ -63,9 +129,16 @@ function errorMessage(e: unknown): string {
 export class AgentRunner {
   private readonly sessions = new Map<string, Session>();
   private readonly newId: () => string;
+  /** Scrubs dataDir and the home directory, for strings recorded outside a live run. */
+  private readonly scrub: Scrub;
 
   constructor(private readonly deps: AgentRunnerDeps) {
     this.newId = deps.newId ?? (() => randomUUID());
+    this.scrub = pathScrubber([[deps.dataDir, "<data>"], [homedir(), "~"]]);
+  }
+
+  private runScrubber(worktreeAbs: string): Scrub {
+    return pathScrubber([[worktreeAbs, "."], [this.deps.dataDir, "<data>"], [homedir(), "~"]]);
   }
 
   async start(
@@ -85,30 +158,32 @@ export class AgentRunner {
 
     const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
+    const scrub = this.runScrubber(wt.absPath);
     const run = commitEvent(db, ledger, () => ({
       event: {
         projectId: input.projectId,
         actor,
         type: "agent.started",
         payload: {
-          runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt),
+          runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub),
           cardId: input.cardId ?? null, worktree: wt.relPath,
         },
       },
       result: () => getRun(db, runId)!,
     }));
-    this.launch(run, adapter, wt.absPath, prompt, authMode);
+    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode);
     return run;
   }
 
   /** A human decision on a pending action. The check and the commit share one transaction. */
   decide(actor: Actor, actionId: string, decision: "allow" | "deny", reason = ""): AgentAction {
     const { db, ledger, broker } = this.deps;
-    const why = this.clean(reason, MAX.reason);
+    let why = "";
     const runId = commitEvent(db, ledger, () => {
       const row = this.actionRow(actionId);
       if (!row) throw new NotFoundError("action", actionId);
       if (row.status !== "pending" || !broker.pendingIds().includes(actionId)) throw new AlreadyDecidedError(actionId);
+      why = this.clean(reason, MAX.reason, this.sessions.get(row.run_id)?.scrub ?? this.scrub);
       return {
         event: {
           projectId: row.project_id, actor, type: "agent.action.decided",
@@ -167,12 +242,18 @@ export class AgentRunner {
         // Keep stopping the others; the adapters are aborted either way.
       }
     }
-    await Promise.all(all.map(([, s]) => s.done));
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.deps.shutdownTimeoutMs ?? 5000);
+    });
+    // An adapter that ignores the abort must not hang shutdown; its run is already recorded as stopped.
+    await Promise.race([Promise.all(all.map(([, s]) => s.done)), timeout]);
+    clearTimeout(timer);
   }
 
-  private launch(run: AgentRun, adapter: AgentAdapter, cwd: string, prompt: string, authMode: AuthMode): void {
+  private launch(run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode): void {
     const abort = new AbortController();
-    const session: Session = { projectId: run.projectId, abort, done: Promise.resolve(), costUsd: null, failure: null };
+    const session: Session = { projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, failure: null };
     this.sessions.set(run.id, session);
     session.done = (async () => {
       let status: FinishStatus;
@@ -205,17 +286,16 @@ export class AgentRunner {
 
   private async gate(runId: string, s: Session, worktreeAbs: string, a: ProposedAction): Promise<GateOutcome> {
     const actionId = this.newId();
+    let recorded = false;
     try {
-      const payload = {
-        runId, actionId, kind: a.kind,
-        tool: this.clean(a.tool, MAX.tool) || "unknown",
-        summary: this.clean(a.summary, MAX.summary) || "(no summary)",
-        input: this.cleanInput(a.input),
-      };
-      commitEvent(this.deps.db, this.deps.ledger, () => ({
-        event: { projectId: s.projectId, actor: { kind: "agent", id: runId }, type: "agent.action.requested", payload },
-        result: () => undefined,
-      }));
+      const kind = (ACTION_KINDS as readonly unknown[]).includes(a.kind) ? a.kind : "other";
+      this.recordRequest(s, runId, {
+        runId, actionId, kind,
+        tool: this.clean(asText(a.tool), MAX.tool, s.scrub) || "unknown",
+        summary: this.clean(asText(a.summary), MAX.summary, s.scrub) || "(no summary)",
+        input: this.cleanInput(a.input, s.scrub),
+      });
+      recorded = true;
       if (s.abort.signal.aborted) return this.settle(s.projectId, runId, actionId, "deny", "run stopped");
       const v = classify(a, worktreeAbs, this.deps.worktrees);
       if (v.verdict !== "ask") {
@@ -224,15 +304,27 @@ export class AgentRunner {
       const r = await this.deps.broker.wait(actionId, s.abort.signal);
       // decide() has already committed a human decision; any other outcome (a stop) is recorded here.
       return this.settle(s.projectId, runId, actionId, r.decision, r.reason);
-    } catch (e) {
-      const reason = this.clean(`internal error: ${errorMessage(e)}`, MAX.reason);
+    } catch {
       try {
-        this.settle(s.projectId, runId, actionId, "deny", reason);
+        if (!recorded) {
+          // The proposal itself could not be recorded: record that an unrecordable action was denied.
+          this.recordRequest(s, runId, {
+            runId, actionId, kind: "other", tool: "unknown", summary: "(unrecordable action)", input: null,
+          });
+        }
+        this.settle(s.projectId, runId, actionId, "deny", INTERNAL_ERROR);
       } catch {
         // Nothing more we can record; deny regardless.
       }
-      return { actionId, decision: "deny", reason };
+      return { actionId, decision: "deny", reason: INTERNAL_ERROR };
     }
+  }
+
+  private recordRequest(s: Session, runId: string, payload: Payload): void {
+    commitEvent(this.deps.db, this.deps.ledger, () => ({
+      event: { projectId: s.projectId, actor: { kind: "agent", id: runId }, type: "agent.action.requested", payload },
+      result: () => undefined,
+    }));
   }
 
   /**
@@ -242,53 +334,58 @@ export class AgentRunner {
   private settle(projectId: string, runId: string, actionId: string, decision: "allow" | "deny", reason: string): GateOutcome {
     return commitEvent(this.deps.db, this.deps.ledger, () => {
       const row = this.actionRow(actionId);
-      if (row && row.status !== "pending") {
+      // Never record a decision for an action that was not recorded as requested.
+      if (!row) return { result: (): GateOutcome => ({ actionId, decision: "deny", reason }) };
+      if (row.status !== "pending") {
         const decided: GateOutcome = { actionId, decision: row.status === "allowed" ? "allow" : "deny", reason: row.reason };
         return { result: () => decided };
       }
-      const final = row ? decision : "deny";
       return {
         event: {
           projectId, actor: POLICY, type: "agent.action.decided",
-          payload: { runId, actionId, decision: final, by: "policy", reason },
+          payload: { runId, actionId, decision, by: "policy", reason },
         },
-        result: () => ({ actionId, decision: final, reason }),
+        result: () => ({ actionId, decision, reason }),
       };
     });
   }
 
   private onEmit(runId: string, s: Session, e: AdapterEvent): void {
     if (s.abort.signal.aborted) return; // the run is over; late events are dropped
-    const { db, ledger, extraSecrets } = this.deps;
+    const { db, ledger } = this.deps;
     const agent: Actor = { kind: "agent", id: runId };
+    const fail = (why: string) => {
+      s.failure ??= why;
+      s.abort.abort();
+    };
     try {
       if (e.type === "message") {
+        const text = this.clean(asText(e.text), MAX.text, s.scrub);
         commitEvent(db, ledger, () => ({
-          event: { projectId: s.projectId, actor: agent, type: "agent.message", payload: { runId, text: this.clean(e.text, MAX.text) } },
+          event: { projectId: s.projectId, actor: agent, type: "agent.message", payload: { runId, text } },
           result: () => undefined,
         }));
       } else if (e.type === "action_result") {
-        commitEvent(db, ledger, () => {
+        const output = this.clean(asText(e.output), MAX.output, s.scrub);
+        const committed = commitEvent(db, ledger, () => {
           const row = this.actionRow(e.actionId);
-          if (!row || row.run_id !== runId || row.status !== "allowed") {
-            throw new Error("result reported for an action that was not allowed");
-          }
+          if (!row || row.run_id !== runId || row.status !== "allowed") return { result: () => false };
           return {
             event: {
               projectId: s.projectId, actor: agent, type: "agent.action.completed",
-              payload: { runId, actionId: e.actionId, ok: e.ok === true, output: this.clean(e.output, MAX.output) },
+              payload: { runId, actionId: e.actionId, ok: e.ok === true, output },
             },
-            result: () => undefined,
+            result: () => true,
           };
         });
+        if (!committed) fail(NOT_ALLOWED_RESULT);
       } else if (e.type === "usage") {
         if (typeof e.costUsd === "number" && Number.isFinite(e.costUsd) && e.costUsd >= 0) {
           s.costUsd = (s.costUsd ?? 0) + e.costUsd;
         }
       }
-    } catch (err) {
-      s.failure ??= truncate(redact(`internal error: ${errorMessage(err)}`, extraSecrets), MAX.error);
-      s.abort.abort();
+    } catch {
+      fail(INTERNAL_ERROR);
     }
   }
 
@@ -297,6 +394,7 @@ export class AgentRunner {
     const { db, ledger } = this.deps;
     const s = this.sessions.get(runId);
     s?.abort.abort();
+    this.sessions.delete(runId); // even if its adapter never returns
     const run = getRun(db, runId);
     if (!run || run.status !== "running") return;
     for (const a of listActions(db, runId)) {
@@ -308,7 +406,7 @@ export class AgentRunner {
       return {
         event: {
           projectId: cur.projectId, actor: RUNNER, type: "agent.finished",
-          payload: { runId, status, costUsd: s?.costUsd ?? null, error: error === null ? null : this.clean(error, MAX.error) },
+          payload: { runId, status, costUsd: s?.costUsd ?? null, error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub) },
         },
         result: () => undefined,
       };
@@ -324,15 +422,20 @@ export class AgentRunner {
       .get(actionId) as ActionRow | undefined;
   }
 
-  /** Redact, then truncate: never the other way round. */
-  private clean(s: string, max: number): string {
-    return truncate(redact(s, this.deps.extraSecrets), max);
+  /** Scrub paths, redact, then truncate: never truncate first. */
+  private clean(s: string, max: number, scrub: Scrub): string {
+    return truncate(redact(scrub(s), this.deps.extraSecrets), max);
   }
 
-  private cleanInput(input: unknown): unknown {
-    const value = redact(input === undefined ? null : input, this.deps.extraSecrets);
-    const json = JSON.stringify(value);
-    if (json === undefined) return null;
-    return json.length > MAX.input ? truncate(json, MAX.input) : value;
+  /**
+   * Normalises to plain JSON first (class instances and toJSON values become plain data that redact
+   * can see into); a value that cannot be serialised throws and is denied by the gate.
+   */
+  private cleanInput(input: unknown, scrub: Scrub): unknown {
+    const json = JSON.stringify(input ?? null);
+    const plain: unknown = json === undefined ? null : JSON.parse(json);
+    const value = redact(scrubJson(plain, scrub), this.deps.extraSecrets);
+    const out = JSON.stringify(value);
+    return out.length > MAX.input ? truncate(out, MAX.input) : value;
   }
 }

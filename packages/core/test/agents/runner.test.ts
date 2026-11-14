@@ -1,6 +1,6 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapter } from "../../src/agents/adapter.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
@@ -35,13 +35,15 @@ afterEach(async () => {
   rmSync(dataDir, { recursive: true, force: true });
 });
 
-function makeRunner(adapters: Partial<Record<"claude" | "fake", AgentAdapter>>, broker = new ApprovalBroker()) {
-  const r = new AgentRunner({ db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET] });
+function makeRunner(adapters: Partial<Record<"claude" | "fake", AgentAdapter>>, broker = new ApprovalBroker(), shutdownTimeoutMs?: number) {
+  const r = new AgentRunner({ db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs });
   runners.push(r);
   return r;
 }
 const fakeRunner = (script: FakeStep[]) => makeRunner({ fake: new FakeAdapter(script) });
 
+const allStrings = (v: unknown): string[] =>
+  typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(allStrings) : [];
 const agentEvents = () => ledger.list().filter((e) => e.type.startsWith("agent."));
 const untilFinished = (runId: string) =>
   vi.waitFor(() => expect(getRun(db, runId)!.status).not.toBe("running"), { timeout: 5000 });
@@ -155,15 +157,80 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(types).toEqual(["agent.started", "agent.action.requested", "agent.action.decided", "agent.finished"]);
   });
 
-  it("fails closed: a gate error is denied as 'internal error' and the denial is recorded", async () => {
-    const runner = fakeRunner([{ propose: { ...write, kind: "bogus" as never }, result: { ok: true, output: "x" } }]);
+  it("fails closed: an unrecordable action is recorded as a fallback request and denied", async () => {
+    const runner = fakeRunner([{ propose: { ...write, input: { n: 10n } }, result: { ok: true, output: "x" } }]);
     const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilFinished(run.id);
-    const decided = agentEvents().filter((e) => e.type === "agent.action.decided");
-    expect(decided).toHaveLength(1);
-    expect(decided[0]!.payload).toMatchObject({ decision: "deny", by: "policy" });
-    expect((decided[0]!.payload as { reason: string }).reason).toMatch(/^internal error/);
-    expect(agentEvents().filter((e) => e.type === "agent.action.completed")).toEqual([]);
+    const gated = agentEvents().filter((e) => e.type.startsWith("agent.action."));
+    expect(gated.map((e) => e.type)).toEqual(["agent.action.requested", "agent.action.decided"]);
+    expect(gated[0]!.payload).toMatchObject({ kind: "other", tool: "unknown", summary: "(unrecordable action)", input: null });
+    expect(gated[1]!.payload).toMatchObject({ decision: "deny", by: "policy", reason: "internal error" });
+    expect(gated[1]!.actor).toEqual({ kind: "system", id: "policy" });
+  });
+
+  it("coerces an unknown kind to 'other' and a non-string tool or summary to strings", async () => {
+    const runner = fakeRunner([{ propose: { ...write, kind: "bogus" as never, tool: 42 as never, summary: null as never } }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilPending();
+    expect(listActions(db, run.id)[0]).toMatchObject({ kind: "other", tool: "42", summary: "(no summary)", status: "pending" });
+  });
+
+  it("normalises class instances and toJSON values before redacting them", async () => {
+    class Holder {
+      api_key = FAKE_KEY;
+      label = "holder";
+    }
+    const withToJson = { toJSON: () => ({ password: "hunter2-probe", note: `key ${FAKE_KEY}` }) };
+    const runner = fakeRunner([{ propose: { ...read, input: { a: new Holder(), b: withToJson } }, result: { ok: true, output: "ok" } }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(JSON.stringify(ledger.list())).not.toContain(FAKE_KEY);
+    expect(JSON.stringify(ledger.list())).not.toContain("hunter2-probe");
+    expect(listActions(db, run.id)[0]).toMatchObject({
+      status: "completed",
+      input: { a: { api_key: "[REDACTED]", label: "holder" }, b: { password: "[REDACTED]", note: "key [REDACTED]" } },
+    });
+  });
+
+  it("records the worktree, dataDir and home directory as '.', '<data>' and '~'", async () => {
+    const pathy: AgentAdapter = {
+      id: "fake",
+      async start(o) {
+        const g = await o.gate({
+          tool: "Bash", kind: "shell", summary: `cat ${join(o.cwd, "a.txt")}`,
+          input: { file: join(o.cwd, "a.txt"), data: join(dataDir, "other"), home: join(homedir(), "notes") },
+          paths: [],
+        });
+        o.emit({ type: "action_result", actionId: g.actionId, ok: true, output: `wrote ${join(o.cwd, "b.txt")}` });
+        o.emit({ type: "message", text: `home is ${homedir()}` });
+        throw new Error(`failed in ${join(o.cwd, "c")}`);
+      },
+    };
+    const runner = makeRunner({ fake: pathy });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilPending();
+    runner.decide(owner, listPendingActions(db, projectId)[0]!.id, "allow", `ok ${dataDir}`);
+    await untilFinished(run.id);
+    const [action] = listActions(db, run.id);
+    expect(action).toMatchObject({
+      summary: `cat .${sep}a.txt`,
+      input: { file: `.${sep}a.txt`, data: `<data>${sep}other`, home: `~${sep}notes` },
+      output: `wrote .${sep}b.txt`,
+      reason: "ok <data>",
+    });
+    expect(getRun(db, run.id)!.error).toBe(`failed in .${sep}c`);
+    const strings = allStrings(ledger.list().map((e) => e.payload));
+    expect(strings.filter((s) => s.includes(dataDir) || s.includes(homedir()))).toEqual([]);
+    expect(strings).toContain("home is ~");
+  });
+
+  it("shutdown does not hang on an adapter that ignores abort, and forgets the session", async () => {
+    const hanging: AgentAdapter = { id: "fake", start: () => new Promise(() => {}) };
+    const runner = makeRunner({ fake: hanging }, new ApprovalBroker(), 50);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await runner.shutdown();
+    expect(getRun(db, run.id)!.status).toBe("stopped");
+    expect((runner as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(0);
   });
 
   it("recoverOnStartup denies pending actions and fails running runs", async () => {
