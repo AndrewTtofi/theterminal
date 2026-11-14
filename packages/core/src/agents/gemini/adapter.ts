@@ -632,7 +632,12 @@ class GeminiRun {
     this.tracker.mediate();
     const argv = args ?? [];
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
-    const summary = `Run: ${[command, ...argv].join(" ").slice(0, MAX_COMMAND)}`;
+    // Where it runs and how many variables it sets are part of what the reviewer approves.
+    const context = cwd != null || (env != null && env.length > 0)
+      ? ` (in ${cwd == null ? "." : display(this.o.cwd, cwd)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
+      : "";
+    const line = [command, ...argv].join(" ");
+    const summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
     const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths: cwd == null ? [] : [cwd] });
     if (g.decision !== "allow") throw new Error(g.reason);
     let dir = this.o.cwd;

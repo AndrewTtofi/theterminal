@@ -461,7 +461,8 @@ describe("GeminiAdapter", () => {
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
     expect(h.proposed).toHaveLength(1);
     expect(h.proposed[0]).toMatchObject({ tool: "terminal/create", kind: "shell", paths: [] });
-    expect(h.proposed[0]!.summary).toBe(`Run: ${process.execPath} -e ${probe}`.slice(0, 155));
+    const suffix = " (in ., +1 env)";
+    expect(h.proposed[0]!.summary).toBe(`Run: ${`${process.execPath} -e ${probe}`.slice(0, 150 - suffix.length)}${suffix}`);
     expect(h.proposed[0]!.input).toEqual({ command: process.execPath, args: ["-e", probe], env: [{ name: "FAKE_EXTRA", value: "yes" }] });
     const out = logged("terminal/output")[0]!.result;
     expect(out.truncated).toBe(false);
@@ -490,6 +491,7 @@ describe("GeminiAdapter", () => {
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
     expect(h.proposed[0]!.paths).toEqual([join(worktree, "pkg")]);
+    expect(h.proposed[0]!.summary).toBe(`Run: ${process.execPath} -e process.stdout.write(process.cwd()) (in pkg)`);
     expect(logged("terminal/output")[0]!.result.output).toBe(join(worktree, "pkg"));
   });
 
