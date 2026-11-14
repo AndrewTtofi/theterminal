@@ -5,7 +5,10 @@ export type FakeStep =
   | { message: string }
   | { throw: string };
 
-/** Scripted adapter for tests and demos. Only registered when THETERMINAL_FAKE_AGENT=1. */
+/**
+ * Scripted adapter for tests and demos. Only registered when THETERMINAL_FAKE_AGENT=1; its script is a JSON array of
+ * steps in THETERMINAL_FAKE_SCRIPT, read once at createServer time (e2e/global-setup.ts sets both).
+ */
 export class FakeAdapter implements AgentAdapter {
   readonly id = "fake" as const;
 
