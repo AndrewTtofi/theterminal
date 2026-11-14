@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { createServer } from "./server/server.js";
-import { defaultDataDir } from "./paths.js";
+import { defaultDataDir, defaultUiDir } from "./paths.js";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -29,7 +29,7 @@ if (values.port !== undefined) {
 const running = await createServer({
   dataDir: values["data-dir"] ?? defaultDataDir(),
   port,
-  uiDir: values["ui-dir"],
+  uiDir: values["ui-dir"] ?? defaultUiDir(),
 });
 console.log(`The Terminal is running at ${running.url}`);
 
