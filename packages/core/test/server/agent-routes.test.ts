@@ -120,6 +120,20 @@ describe("agent API", { timeout: 15000 }, () => {
     expect([...new Set(which.mock.calls.map(([cmd]) => cmd))].sort()).toEqual(["codex", "gemini"]);
   });
 
+  it("locates the bundled programs once at startup, not on every listing or run start", async () => {
+    const lookups = { claude: vi.fn(() => null), codex: vi.fn(() => null), gemini: vi.fn(() => null) };
+    process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
+    const { s, projectId } = await start(null, { bundled: lookups });
+    await availability(s);
+    await availability(s);
+    for (const adapter of ["codex", "gemini"]) {
+      const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter, prompt: "go" }));
+      await untilFinished(s, run.id);
+    }
+    for (const fn of Object.values(lookups)) expect(fn).toHaveBeenCalledOnce();
+  });
+
   it("a provider with a test binary override reports available only under the fake env", async () => {
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
     process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;

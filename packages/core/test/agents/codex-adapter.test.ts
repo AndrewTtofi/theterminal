@@ -687,13 +687,23 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(bin).not.toHaveBeenCalled();
     });
 
-    it("runs a bundled JS entry with this Node", async () => {
+    it.each([
+      ["win32", "x64"],
+      ["linux", "x64"],
+    ] as const)("on %s-%s with @openai/codex but no native package, falls back to PATH, never the JS launcher", async (platform, arch) => {
       script([]);
+      const { bundledCodex } = await import("../../src/agents/bundled.js");
+      const coreDir = join(dir, "core");
+      const pkg = join(coreDir, "node_modules", "@openai", "codex");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@openai/codex", bin: { codex: "bin/codex.js" } }));
+      writeFileSync(join(pkg, "bin", "codex.js"), "");
       const spawn = await recordingSpawn();
-      const entry = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
-      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => ({ file: process.execPath, args: [entry] }), spawn: spawn as never }));
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => bundledCodex({ coreDir, platform, arch }), bin, spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
-      expect(spawn).toHaveBeenCalledWith(process.execPath, [entry, "app-server"], expect.objectContaining({ shell: false }));
+      expect(bin).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
     });
 
     it("uses the package's own bundled Codex when none is injected", async () => {

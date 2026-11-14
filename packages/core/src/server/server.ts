@@ -183,7 +183,10 @@ export async function createServer(opts: {
   bundled?: Partial<BundledPrograms>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
-  const bundled: BundledPrograms = { ...BUNDLED, ...opts.bundled };
+  // Located once, at startup: every listing and run start reuses the result.
+  const lookups: BundledPrograms = { ...BUNDLED, ...opts.bundled };
+  const located = { claude: lookups.claude(), codex: lookups.codex(), gemini: lookups.gemini() };
+  const bundled: BundledPrograms = { claude: () => located.claude, codex: () => located.codex, gemini: () => located.gemini };
   // Read once, at startup: the adapters and the install state below must agree for the server's lifetime.
   const fakeCli: Partial<Record<Provider, CliCommand>> = Object.fromEntries(
     PROVIDERS.flatMap((p) => {
