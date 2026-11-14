@@ -41,6 +41,7 @@ describe("ConnectionsSideBar", () => {
   });
 
   it("shows unavailable entries disabled, with the Plan 5B note", async () => {
+    m.getConnectionCatalog.mockResolvedValue(CONNECTION_CATALOG.map((e) => (e.provider === "aws" ? { ...e, available: false } : e)));
     renderWithConnections(<ConnectionsSideBar />);
     await waitFor(() => expect((screen.getByRole("button", { name: "GitHub" }) as HTMLButtonElement).disabled).toBe(false));
     const aws = screen.getByText("AWS").closest("li")!;

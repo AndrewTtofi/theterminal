@@ -8,6 +8,7 @@ import { SignInPanel } from "./SignInPanel";
 import { useShell } from "../shell/model";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
+const DETECTED_NOTE = "Filled in by detection. Use Detect this computer in the Capacity view.";
 const ENV_VARS: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
 /** "Claude (Anthropic)" → "Claude". */
@@ -61,6 +62,8 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
 
   const fieldsOf = (storage: ConnectionField["storage"]) => entry.fields.filter((f) => f.storage === storage);
   const provider = isProvider(entry.provider) ? entry.provider : null;
+  // Hardware is written by detection only: its values are shown, never edited here.
+  const detected = entry.kind === "hardware";
   const info = model.agentsInfo;
 
   const act = async (task: () => Promise<void>) => {
@@ -130,18 +133,33 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
         <div key={f.name} className="connection-field">
           <label htmlFor={id}>{f.label}</label>
           <div className="secret-row">
-            <input
-              id={id}
-              type="password"
-              autoComplete="new-password"
-              data-1p-ignore=""
-              data-lpignore="true"
-              spellCheck={false}
-              value={secrets[f.name] ?? ""}
-              placeholder={stored ? "Stored in your keychain" : ""}
-              disabled={locked || busy}
-              onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
-            />
+            {f.input === "multiline" ? (
+              <textarea
+                id={id}
+                rows={4}
+                autoComplete="off"
+                data-1p-ignore=""
+                data-lpignore="true"
+                spellCheck={false}
+                value={secrets[f.name] ?? ""}
+                placeholder={stored ? "Stored in your keychain" : ""}
+                disabled={locked || busy}
+                onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
+              />
+            ) : (
+              <input
+                id={id}
+                type="password"
+                autoComplete="new-password"
+                data-1p-ignore=""
+                data-lpignore="true"
+                spellCheck={false}
+                value={secrets[f.name] ?? ""}
+                placeholder={stored ? "Stored in your keychain" : ""}
+                disabled={locked || busy}
+                onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
+              />
+            )}
             {locked && (
               <button type="button" onClick={() => setReplacing((r) => ({ ...r, [f.name]: true }))}>
                 Replace
@@ -153,17 +171,24 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
         </div>
       );
     }
+    const common = {
+      id,
+      spellCheck: false,
+      value: values[f.name] ?? "",
+      disabled: busy,
+      readOnly: detected,
+    };
+    const onChange = (e: { target: { value: string } }) => setValues((v) => ({ ...v, [f.name]: e.target.value }));
     return (
       <div key={f.name} className="connection-field">
         <label htmlFor={id}>{f.label}</label>
-        <input
-          id={id}
-          type="text"
-          spellCheck={false}
-          value={values[f.name] ?? ""}
-          disabled={busy}
-          onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
-        />
+        {f.input === "multiline" ? (
+          <textarea {...common} rows={4} onChange={onChange} />
+        ) : f.input === "number" ? (
+          <input {...common} type="number" min="0" step="0.01" onChange={onChange} />
+        ) : (
+          <input {...common} type="text" onChange={onChange} />
+        )}
         {f.help && <p className="field-help">{f.help}</p>}
       </div>
     );
@@ -175,7 +200,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
       aria-label={entry.label}
       onSubmit={(e) => {
         e.preventDefault();
-        void save();
+        if (!detected) void save();
       }}
     >
       <h2>{entry.label}</h2>
@@ -188,7 +213,14 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
       )}
       <div className="connection-field">
         <label htmlFor={`${uid}-name`}>Name</label>
-        <input id={`${uid}-name`} type="text" value={name} disabled={busy} onChange={(e) => setName(e.target.value)} />
+        <input
+          id={`${uid}-name`}
+          type="text"
+          value={name}
+          disabled={busy}
+          readOnly={detected}
+          onChange={(e) => setName(e.target.value)}
+        />
       </div>
       {provider && info && (
         <ProviderModeSection
@@ -212,16 +244,19 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
         </div>
       )}
       {entry.fields.map(field)}
+      {detected && <p className="field-help">{DETECTED_NOTE}</p>}
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
       <div className="connection-actions">
-        <button type="submit" disabled={busy || name.trim() === ""}>
-          Save
-        </button>
-        {conn && (
+        {!detected && (
+          <button type="submit" disabled={busy || name.trim() === ""}>
+            Save
+          </button>
+        )}
+        {conn && !detected && (
           <button type="button" disabled={busy} onClick={() => void test()}>
             Test connection
           </button>

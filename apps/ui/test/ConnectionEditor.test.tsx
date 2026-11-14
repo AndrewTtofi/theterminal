@@ -191,4 +191,65 @@ describe("ConnectionEditor", () => {
     expect(screen.queryByRole("group", { name: /sign-in/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
   });
+
+  it("a number field renders as a number input", async () => {
+    renderWithConnections(<ConnectionEditor id="connection:new:claude" />);
+    const budget = (await screen.findByLabelText("Monthly budget (USD)")) as HTMLInputElement;
+    expect(budget.type).toBe("number");
+    expect(budget.min).toBe("0");
+    expect(budget.step).toBe("0.01");
+    expect(screen.getByText("Capacity shows this month's spend against it.")).toBeTruthy();
+  });
+
+  it("a multiline secret is a textarea, empty with the keychain placeholder and Replace once stored", async () => {
+    const gcp = connection({ id: "g1", kind: "cloud", provider: "gcp", name: "Google Cloud", config: { project: "demo-project" }, secretFields: ["serviceAccountJson"] });
+    m.listConnections.mockResolvedValue([gcp]);
+    m.updateConnection.mockResolvedValue(gcp);
+    renderWithConnections(<ConnectionEditor id="connection:g1" />);
+    const json = (await screen.findByLabelText("Service account key (JSON)")) as HTMLTextAreaElement;
+    expect(json.tagName).toBe("TEXTAREA");
+    expect(json.rows).toBe(4);
+    await waitFor(() => expect(json.placeholder).toBe("Stored in your keychain"));
+    expect(json.value).toBe("");
+    expect(json.disabled).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Replace" }));
+    expect(json.disabled).toBe(false);
+    await userEvent.type(json, "{{}");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(m.updateConnection).toHaveBeenCalledWith("g1", { secrets: { serviceAccountJson: "{}" } });
+  });
+
+  it("a private multiline field is a textarea sent as a private value", async () => {
+    m.addConnection.mockResolvedValue(connection({ id: "m1", kind: "mcp", provider: "mcp_stdio", secretFields: [] }));
+    renderWithConnections(<ConnectionEditor id="connection:new:mcp_stdio" />);
+    const args = (await screen.findByLabelText("Arguments")) as HTMLTextAreaElement;
+    expect(args.tagName).toBe("TEXTAREA");
+    expect(screen.getByLabelText("Environment variables").tagName).toBe("TEXTAREA");
+    await userEvent.type(screen.getByLabelText("Command"), "npx");
+    await userEvent.type(args, "-y{enter}example-server");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(m.addConnection).toHaveBeenCalledWith({
+      kind: "mcp", provider: "mcp_stdio", name: "MCP server", private: { command: "npx", args: "-y\nexample-server" },
+    });
+  });
+
+  it("This computer shows its detected values read-only, with the detection note and no Save", async () => {
+    const hw = connection({ id: "h1", kind: "hardware", provider: "local_hardware", name: "This computer", config: { cores: "8" }, secretFields: [] });
+    m.listConnections.mockResolvedValue([hw]);
+    renderWithConnections(<ConnectionEditor id="connection:h1" />);
+    const cores = (await screen.findByLabelText("Cores")) as HTMLInputElement;
+    expect(cores.value).toBe("8");
+    expect(cores.readOnly).toBe(true);
+    expect(screen.getByText("Filled in by detection. Use Detect this computer in the Capacity view.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Remove connection" })).toBeTruthy();
+  });
+
+  it("a refused connection shows its own message", async () => {
+    m.addConnection.mockRejectedValue(new ApiError(400, "connection_unsupported"));
+    renderWithConnections(<ConnectionEditor id="connection:new:claude" />);
+    await userEvent.type(keyInput(), KEY);
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("This connection cannot be used that way");
+  });
 });

@@ -66,6 +66,7 @@ describe("errorMessage", () => {
   it("maps the connection errors", () => {
     expect(errorMessage(new ApiError(409, "conflict"))).toBe("Already connected");
     expect(errorMessage(new ApiError(400, "secret_in_config"))).toBe("That field must not contain a key or token");
+    expect(errorMessage(new ApiError(400, "connection_unsupported"))).toBe("This connection cannot be used that way");
     expect(errorMessage(new ApiError(503, "keychain_unavailable"))).toBe("Your keychain is unavailable. Nothing was saved.");
     expect(errorMessage(new ApiError(400, "invalid_input"))).toBe("That input was not accepted");
   });

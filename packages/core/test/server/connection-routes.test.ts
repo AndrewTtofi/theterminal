@@ -122,6 +122,13 @@ describe("connections API", { timeout: 15000 }, () => {
     expect(await (await get(s, "/api/ledger")).text()).not.toContain(KEY);
   });
 
+  it("refuses to add This computer through the API with 400 connection_unsupported", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "hardware", provider: "local_hardware", name: "This computer", config: { cores: "8" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "connection_unsupported" });
+  });
+
   it("refuses an unknown field with 400 invalid_input", async () => {
     const s = await start();
     const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "C", secrets: { token: KEY } });

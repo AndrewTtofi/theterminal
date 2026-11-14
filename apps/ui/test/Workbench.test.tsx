@@ -26,6 +26,9 @@ function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsMode
   };
 }
 
+/** Every provider is available since 5B; this catalog keeps one unavailable to cover that path. */
+const withoutAws = CONNECTION_CATALOG.map((e) => (e.provider === "aws" ? { ...e, available: false } : e));
+
 const board: Board = {
   project: { id: "p1", name: "Local Model Hub", pitch: "", createdAt: "" },
   columns: { plan: [], design: [], build: [], ship: [], operate: [] },
@@ -170,8 +173,8 @@ describe("Workbench", () => {
     expect(within(side).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
   });
 
-  it("lists the connection catalog, with Plan 5B entries disabled, and opens an editor tab from a row", async () => {
-    const { container } = render(<Workbench model={model()} />);
+  it("lists the connection catalog, with unavailable entries disabled, and opens an editor tab from a row", async () => {
+    const { container } = render(<Workbench model={model({ connections: connectionsModel({ catalog: withoutAws }) })} />);
     await userEvent.click(view("Connections"));
     const side = screen.getByRole("complementary", { name: "Side bar" });
     for (const label of ["Claude (Anthropic)", "Codex (OpenAI)", "Gemini (Google)", "GitHub"]) {
@@ -215,12 +218,12 @@ describe("Workbench", () => {
   });
 
   it("prunes a restored new-connection tab for a provider that is not available", () => {
-    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false }) })} />);
+    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false, catalog: withoutAws }) })} />);
     act(() => {
       testDock.api!.open("connection:new:aws", "AWS", "main");
       testDock.api!.open("connection:new:github", "GitHub", "main");
     });
-    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true }) })} />);
+    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, catalog: withoutAws }) })} />);
     expect(container.querySelector('[data-panel="connection:new:aws"]')).toBeNull();
     expect(container.querySelector('[data-panel="connection:new:github"]')).toBeTruthy();
   });
