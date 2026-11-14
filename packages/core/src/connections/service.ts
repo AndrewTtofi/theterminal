@@ -19,7 +19,7 @@ import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
-import { MAX_SECRET_BYTES, type SecretStore } from "../secrets/store.js";
+import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -92,13 +92,24 @@ type Row = {
 };
 
 /** One keychain write (`value`) or delete (`null`) for a field. */
-type KeychainOp = { field: string; value: string | null };
+type KeychainOp = { field: string; value: string | null; secret: boolean };
 /** What a done op replaced, so it can be put back: `undefined` means nothing was stored. */
 type Undo = { account: string; previous: string | undefined };
 
 const UNTESTABLE = "Testing is not available for this connection yet";
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
+
+/** Caller-supplied field names are echoed in errors only when they have this plain shape. */
+const PLAIN_FIELD_NAME = /^[a-z][A-Za-z0-9]{0,40}$/;
+
+/** Writes and deletes for the given secret and private values, secrets first. */
+function toOps(secrets: Record<string, string | null>, priv: Record<string, string | null>): KeychainOp[] {
+  return [
+    ...Object.entries(secrets).map(([field, value]) => ({ field, value, secret: true })),
+    ...Object.entries(priv).map(([field, value]) => ({ field, value, secret: false })),
+  ];
+}
 
 function invalid(path: (string | number)[], message: string): never {
   throw new z.ZodError([{ code: "custom", path, message }]);
@@ -124,6 +135,11 @@ export class ConnectionService {
   /** Every secret value loaded or set in this process, removed ones included, for redaction. */
   private readonly seen = new Set<string>();
   private state: "ok" | "unavailable" = "ok";
+  /** Whether a `load()` has succeeded since the process started. */
+  private loaded = false;
+  private loading: Promise<void> | null = null;
+  /** Per-connection tail of the operation chain; operations on one id run one at a time. */
+  private readonly locks = new Map<string, Promise<unknown>>();
 
   constructor(deps: ConnectionServiceDeps) {
     this.db = deps.db;
@@ -156,6 +172,7 @@ export class ConnectionService {
     }
     this.cache = next;
     this.state = "ok";
+    this.loaded = true;
   }
 
   keychainState(): "ok" | "unavailable" {
@@ -171,7 +188,7 @@ export class ConnectionService {
   }
 
   async add(actor: Actor, input: AddConnectionInput): Promise<Connection> {
-    const name = connectionNameSchema.parse(input.name);
+    const name = this.checkName(input.name);
     const entry = this.availableEntry(input.provider);
     if (entry.kind !== input.kind) invalid(["provider"], "provider does not belong to this kind");
     const config = this.checkConfig(entry, input.config ?? {});
@@ -190,20 +207,25 @@ export class ConnectionService {
       connectionId, kind: entry.kind, provider: entry.provider, name, config,
       secretFields: Object.keys(secrets).sort(), privateFields: Object.keys(priv).sort(),
     });
-    const ops: KeychainOp[] = [...Object.entries(secrets), ...Object.entries(priv)].map(([field, value]) => ({ field, value }));
-    await this.commitWithKeychain(connectionId, ops, () => {
-      this.assertNoConflict(entry);
-      return { projectId: null, actor, type: "connection.added", payload };
+    const ops = toOps(secrets, priv);
+    return this.exclusive(connectionId, async () => {
+      await this.commitWithKeychain(connectionId, ops, () => {
+        this.assertNoConflict(entry);
+        return { projectId: null, actor, type: "connection.added", payload };
+      });
+      return this.get(connectionId);
     });
-    for (const v of Object.values(secrets)) this.seen.add(v);
-    return this.get(connectionId);
   }
 
-  async update(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
+  update(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
+    return this.exclusive(id, () => this.updateNow(actor, id, patch));
+  }
+
+  private async updateNow(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
     const row = this.requireRow(id);
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
-    if (patch.name !== undefined) changes.name = connectionNameSchema.parse(patch.name);
+    if (patch.name !== undefined) changes.name = this.checkName(patch.name);
     if (patch.config !== undefined) changes.config = this.checkConfig(entry, patch.config);
     if (patch.enabled !== undefined) changes.enabled = z.boolean().parse(patch.enabled);
     const secrets = patch.secrets ?? {};
@@ -225,20 +247,22 @@ export class ConnectionService {
       connectionId: id, name: (changes.name as string | undefined) ?? row.name, changes,
     });
     // Writes before deletes: a failed write then leaves nothing deleted.
-    const ops: KeychainOp[] = [
-      ...[...Object.entries(secrets), ...Object.entries(priv)].filter(([, v]) => v !== null),
-      ...[...Object.entries(secrets), ...Object.entries(priv)].filter(([, v]) => v === null),
-    ].map(([field, value]) => ({ field, value }));
+    const all = toOps(secrets, priv);
+    const ops = [...all.filter((op) => op.value !== null), ...all.filter((op) => op.value === null)];
     await this.commitWithKeychain(id, ops, () => {
       this.requireRow(id);
       return { projectId: null, actor, type: "connection.updated", payload };
     });
-    for (const v of Object.values(secrets)) if (v !== null) this.seen.add(v);
     return this.get(id);
   }
 
-  async remove(actor: Actor, id: string): Promise<void> {
+  remove(actor: Actor, id: string): Promise<void> {
+    return this.exclusive(id, () => this.removeNow(actor, id));
+  }
+
+  private async removeNow(actor: Actor, id: string): Promise<void> {
     const row = this.requireRow(id);
+    if (this.storedFields(row).length > 0) await this.ensureKeychain();
     commitEvent(this.db, this.ledger, () => {
       this.requireRow(id);
       return { event: { projectId: null, actor, type: "connection.removed", payload: { connectionId: id, name: row.name } }, result: () => undefined };
@@ -250,7 +274,11 @@ export class ConnectionService {
     this.cache.delete(id);
   }
 
-  async test(actor: Actor, id: string): Promise<{ ok: boolean; message: string }> {
+  test(actor: Actor, id: string): Promise<{ ok: boolean; message: string }> {
+    return this.exclusive(id, () => this.testNow(actor, id));
+  }
+
+  private async testNow(actor: Actor, id: string): Promise<{ ok: boolean; message: string }> {
     const row = this.requireRow(id);
     const tester = catalogFor(row.provider)?.available ? this.testers[row.provider] : undefined;
     let result: { ok: boolean; message: string };
@@ -308,12 +336,16 @@ export class ConnectionService {
    * in this call is undone (best effort: the previous value is put back, or the entry deleted) and the error rethrown.
    */
   private async commitWithKeychain(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
+    if (ops.length > 0) await this.ensureKeychain();
     const cached = this.cache.get(connectionId) ?? {};
     const done: Undo[] = [];
     try {
       for (const op of ops) {
         const account = accountFor(connectionId, op.field);
-        done.push({ account, previous: cached[op.field] });
+        // A value the cache does not hold (an entry the projection does not list) is read, so undo can restore it.
+        const previous = Object.hasOwn(cached, op.field) ? cached[op.field] : ((await this.secrets.get(account)) ?? undefined);
+        if (previous !== undefined && op.secret) this.seen.add(previous);
+        done.push({ account, previous });
         if (op.value === null) await this.secrets.delete(account);
         else await this.secrets.set(account, op.value);
       }
@@ -329,8 +361,41 @@ export class ConnectionService {
     for (const op of ops) {
       if (op.value === null) delete next[op.field];
       else next[op.field] = op.value;
+      if (op.value !== null && op.secret) this.seen.add(op.value);
     }
     this.cache.set(connectionId, next);
+  }
+
+  /**
+   * Makes sure the cache reflects the keychain before it is changed: loads it if no load has succeeded yet (or the
+   * last one failed). Throws `SecretStoreUnavailableError`, before anything is written, when the keychain stays down.
+   */
+  private async ensureKeychain(): Promise<void> {
+    if (this.loaded && this.state === "ok") return;
+    this.loading ??= this.load().finally(() => {
+      this.loading = null;
+    });
+    await this.loading;
+    if (this.state !== "ok") throw new SecretStoreUnavailableError();
+  }
+
+  /** Runs `fn` after every earlier operation on the same connection has settled. */
+  private exclusive<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(id) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this.locks.set(id, tail);
+    void tail.then(() => {
+      if (this.locks.get(id) === tail) this.locks.delete(id);
+    });
+    return run;
+  }
+
+  /** Names reach the ledger too, so a name that `redact` would change is refused like a config value. */
+  private checkName(input: string): string {
+    const name = connectionNameSchema.parse(input);
+    if (redact(name, this.secretValues()) !== name) throw new SecretInConfigError();
+    return name;
   }
 
   private availableEntry(provider: ConnectionProvider): CatalogEntry {
@@ -350,7 +415,7 @@ export class ConnectionService {
   private checkFields(entry: CatalogEntry, storage: FieldStorage, names: string[]): void {
     for (const name of names) {
       if (!entry.fields.some((f) => f.name === name && f.storage === storage)) {
-        throw new UnknownFieldError(`unknown ${storage} field: ${name}`);
+        throw new UnknownFieldError(PLAIN_FIELD_NAME.test(name) ? `unknown ${storage} field: ${name}` : "unknown field");
       }
     }
   }

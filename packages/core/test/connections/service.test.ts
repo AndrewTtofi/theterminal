@@ -320,3 +320,113 @@ describe("test", () => {
     expect(seen!.signal.aborted).toBe(true);
   });
 });
+
+describe("review fixes", () => {
+  const failCommit = () =>
+    vi.spyOn(ledger, "appendInTransaction").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+  it("keeps the old key when an update on a cold service fails to commit", async () => {
+    const c = await addClaude(make());
+    const cold = make(); // no load()
+    const spy = failCommit();
+    await expect(cold.update(owner, c.id, { secrets: { apiKey: KEY2 } })).rejects.toThrow("disk full");
+    spy.mockRestore();
+    expect(await store.get(`connection/${c.id}/apiKey`)).toBe(KEY);
+    const svc = make();
+    await svc.load();
+    expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY);
+  });
+
+  it("reads a value missing from the cache before overwriting it, and puts it back on failure", async () => {
+    const svc = make();
+    const c = await svc.add(owner, { kind: "llm", provider: "claude", name: "Claude", config: {} });
+    await store.set(`connection/${c.id}/apiKey`, KEY); // an entry the projection does not list
+    const spy = failCommit();
+    await expect(svc.update(owner, c.id, { secrets: { apiKey: KEY2 } })).rejects.toThrow("disk full");
+    spy.mockRestore();
+    expect(await store.get(`connection/${c.id}/apiKey`)).toBe(KEY);
+  });
+
+  it("refuses keychain writes while the keychain stays unavailable, writing nothing", async () => {
+    await addClaude(make());
+    const failing = new MemorySecretStore({ failOn: new Set(["get"]) });
+    const svc = make({ secrets: failing });
+    await expect(
+      svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", config: {}, secrets: { apiKey: KEY2 } }),
+    ).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+    expect(ledger.list()).toHaveLength(1);
+    expect(failing.size()).toBe(0);
+    expect(svc.keychainState()).toBe("unavailable");
+    await expect(svc.remove(owner, "conn1")).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+    expect(ledger.list()).toHaveLength(1);
+  });
+
+  it("reloads once the keychain is back: state ok and loaded values redactable", async () => {
+    const c = await addClaude(make());
+    let down = true;
+    const recovering: SecretStore = {
+      get: async (a) => {
+        if (down) throw new SecretStoreUnavailableError();
+        return store.get(a);
+      },
+      set: (a, v) => store.set(a, v),
+      delete: (a) => store.delete(a),
+    };
+    const svc = make({ secrets: recovering });
+    await svc.load();
+    expect(svc.keychainState()).toBe("unavailable");
+    expect(svc.secretValues()).toEqual([]);
+    down = false;
+    await svc.update(owner, c.id, { secrets: { apiKey: KEY2 } });
+    expect(svc.keychainState()).toBe("ok");
+    expect(svc.secretValues().sort()).toEqual([KEY, KEY2].sort());
+    expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY2);
+  });
+
+  it("serialises concurrent updates of one connection", async () => {
+    const svc = make();
+    const c = await svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", config: {} });
+    await Promise.all([
+      svc.update(owner, c.id, { secrets: { apiKey: "AIzaTESTKEY" } }),
+      svc.update(owner, c.id, { private: { cliHome: "gemini-home" } }),
+    ]);
+    expect(svc.credentialsFor("gemini")).toMatchObject({ apiKey: "AIzaTESTKEY", cliHome: "gemini-home" });
+    expect(svc.get(c.id)).toMatchObject({ secretFields: ["apiKey"], private: { cliHome: "gemini-home" } });
+  });
+
+  it("rejects a name that looks like a secret on add and update", async () => {
+    const svc = make();
+    await expect(svc.add(owner, { kind: "llm", provider: "claude", name: KEY, config: {} })).rejects.toBeInstanceOf(SecretInConfigError);
+    const c = await addClaude(svc);
+    await expect(svc.update(owner, c.id, { name: `my ${KEY}` })).rejects.toBeInstanceOf(SecretInConfigError);
+    await expect(svc.update(owner, c.id, { name: "copy of AIzaTESTKEY" })).resolves.toBeDefined();
+    await expect(svc.update(owner, c.id, { name: `again ${KEY}` })).rejects.toBeInstanceOf(SecretInConfigError);
+    expect(types()).toEqual(["connection.added", "connection.updated"]);
+  });
+
+  it("names an unknown field only when it is a plain identifier", async () => {
+    const svc = make();
+    const attempt = (secrets: Record<string, string>) =>
+      svc.add(owner, { kind: "llm", provider: "claude", name: "Claude", config: {}, secrets });
+    await expect(attempt({ token: "x" })).rejects.toThrow("unknown secret field: token");
+    const err = await attempt({ [KEY]: "x" }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(UnknownFieldError);
+    expect((err as Error).message).toBe("unknown field");
+  });
+
+  it("records a tester that throws as unreachable", async () => {
+    const svc = make({
+      testers: {
+        claude: async () => {
+          throw new Error(`boom ${KEY}`);
+        },
+      },
+    });
+    const c = await addClaude(svc);
+    expect(await svc.test(owner, c.id)).toEqual({ ok: false, message: "Could not reach the provider" });
+    expect(ledger.list()[1]).toMatchObject({ type: "connection.tested", payload: { ok: false, message: "Could not reach the provider" } });
+    expect(svc.get(c.id).status.state).toBe("failed");
+  });
+});
