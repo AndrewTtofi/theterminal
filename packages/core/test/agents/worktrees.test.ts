@@ -91,6 +91,33 @@ describe("WorktreeManager", () => {
     expect(await git(wt.absPath, "rev-parse", "--abbrev-ref", "HEAD")).toBe("run/run-a");
   });
 
+  it("recovers an empty repo/.git directory", async () => {
+    mkdirSync(join(dataDir, "projects", "proj1", "repo", ".git"), { recursive: true });
+    await mgr.ensureProjectRepo("proj1");
+    const wt = await mgr.createRunWorktree("proj1", "run-a");
+    expect(await git(wt.absPath, "rev-parse", "--abbrev-ref", "HEAD")).toBe("run/run-a");
+  });
+
+  it("never touches an outer repository when repo/.git is empty", async () => {
+    const outer = realpathSync(mkdtempSync(join(tmpdir(), "wt-outer-")));
+    try {
+      await git(outer, "init");
+      await git(outer, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-m", "outer");
+      const nested = join(outer, "data");
+      mkdirSync(join(nested, "projects", "proj1", "repo", ".git"), { recursive: true });
+      const branches = await git(outer, "branch");
+      const trees = await git(outer, "worktree", "list");
+      const m = new WorktreeManager(nested);
+      await m.ensureProjectRepo("proj1");
+      const wt = await m.createRunWorktree("proj1", "run-a");
+      expect(await git(wt.absPath, "rev-parse", "--abbrev-ref", "HEAD")).toBe("run/run-a");
+      expect(await git(outer, "branch")).toBe(branches);
+      expect(await git(outer, "worktree", "list")).toBe(trees);
+    } finally {
+      rmSync(outer, { recursive: true, force: true });
+    }
+  });
+
   it("gives two runs separate worktrees on separate branches", async () => {
     const a = await mgr.createRunWorktree("proj1", "run-a");
     const b = await mgr.createRunWorktree("proj1", "run-b");

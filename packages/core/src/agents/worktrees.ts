@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { devNull } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -12,16 +12,17 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 const COMMIT_IDENTITY = ["-c", "user.name=The Terminal", "-c", "user.email=agent@theterminal.localhost", "-c", "commit.gpgsign=false"];
 
 /** Drops every inherited GIT_* variable and ignores global/system git config. */
-function gitEnv(): NodeJS.ProcessEnv {
+function gitEnv(cwd: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (!/^GIT_/i.test(k)) env[k] = v;
   }
-  return { ...env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+  // Never let git discover a repository above the directory it runs in.
+  return { ...env, GIT_CEILING_DIRECTORIES: dirname(resolve(cwd)), GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
 }
 
 const defaultGit: GitRunner = async (args, cwd) => {
-  const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv() });
+  const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv(cwd) });
   return stdout;
 };
 
@@ -62,7 +63,11 @@ export class WorktreeManager {
   private async initRepo(projectId: string): Promise<string> {
     const repo = join(this.dataDir, "projects", projectId, "repo");
     mkdirSync(repo, { recursive: true });
-    if (!existsSync(join(repo, ".git"))) await this.git(["init"], repo);
+    await this.git(["init"], repo); // idempotent; also repairs an empty .git
+    const gitDir = (await this.git(["rev-parse", "--absolute-git-dir"], repo)).trim();
+    if (fold(normalize(gitDir)) !== fold(join(realpathSync.native(repo), ".git"))) {
+      throw new Error("project repo is not its own git repository");
+    }
     const hasHead = await this.git(["rev-parse", "--verify", "HEAD"], repo).then(
       () => true,
       () => false,
