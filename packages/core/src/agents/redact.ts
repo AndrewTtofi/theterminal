@@ -129,11 +129,18 @@ const SHELL_SEPARATOR = /[;|&\r\n]/;
  *   header sits in (`-H "Authorization: Bearer $TOKEN" url`); whitespace or a comma may not follow;
  * - other value: the reference ends the string or is followed by whitespace or a shell separator.
  */
-function isEnvReference(s: string, pos: number, header: boolean): boolean {
+function isEnvReference(s: string, pos: number, header: boolean, structured: boolean): boolean {
   const m = ENV_REFERENCE.exec(s.slice(pos, pos + 128));
   if (!m) return false;
   const next = s[pos + m[0].length];
-  if (m[1] !== undefined) return s.startsWith(m[1], pos + m[0].length);
+  const closesValue = (c: string | undefined) => c === '"' || c === "'" || c === "\\" || c === "," || c === "}";
+  if (m[1] !== undefined) {
+    // The matching quote must follow at once, and the value must end there: end of string, whitespace, a
+    // separator, or (in a header or JSON) the end of the enclosing string, field or object.
+    if (!s.startsWith(m[1], pos + m[0].length)) return false;
+    const after = s[pos + m[0].length + m[1].length];
+    return after === undefined || isBlank(after) || SHELL_SEPARATOR.test(after) || (structured && closesValue(after));
+  }
   if (next === undefined || SHELL_SEPARATOR.test(next)) return true;
   if (header) return next === '"' || next === "'" || next === "\\";
   return isBlank(next);
@@ -158,7 +165,7 @@ function redactPairs(s: string): string {
       const scheme = AUTH_SCHEME.exec(s);
       if (scheme) pos += scheme[0].length;
     }
-    if (isEnvReference(s, pos, header)) continue;
+    if (isEnvReference(s, pos, header, header || /^[\\"']/.test(m[2]!))) continue;
     const escaped = s[pos] === "\\" && (s[pos + 1] === '"' || s[pos + 1] === "'");
     const q = escaped ? s[pos + 1]! : s[pos];
     let end: number;
