@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 // A scripted fake of `gemini --acp`: an ACP agent over NDJSON JSON-RPC on stdio, with no dependencies.
 //
+// Fidelity notes (gemini-cli 0.68.0):
+// - It models the ACP agent only, not the npm `bundle/gemini.js` wrapper that relaunches the CLI as a child
+//   (the adapter disables that relaunch with GEMINI_CLI_NO_RELAUNCH).
+// - A read_file whose client read was denied is still reported as a `completed` tool call, never `failed`.
+// - Edits ask through session/request_permission (with the diff) and then write through fs/write_text_file; with
+//   the stock CLI that depends on the adapter's policy file, which makes every tool call ask.
+// - The real CLI never calls terminal/*; the terminal steps here exercise the adapter's implementation.
+//
 // THETERMINAL_FAKE_SCRIPT: JSON, either an array of steps or { config, steps }.
-//   config: { protocolVersion?, modes?: SessionModeState | null, exitAt?: "initialize" | "session/new" }
+//   config: { protocolVersion?, modes?: SessionModeState | null, exitAt?: <method>, failAt?: <method> }
 //   steps (run in order when the prompt arrives):
 //     { type: "message", text }
 //     { type: "read", path, line?, limit?, toolCall?: boolean }        // toolCall: wrap in tool_call in_progress/completed
-//     { type: "write", path, content, permission?: boolean }          // permission: ask first (edit kind), as gemini does
+//     { type: "write", path, content, permission?: boolean, writeContent?: string }
+//                                                    // permission: ask first (edit kind, diff newText = content), as gemini does;
+//                                                    // writeContent: what fs/write_text_file then carries (default content)
 //     { type: "terminal", command, args?, cwd?, env?, outputByteLimit?, skipWait?: boolean }
 //     { type: "requestPermission", toolCall, options, result?: string }  // result: text content on completion
 //     { type: "ungatedTool", toolCallId?, kind, title, locations?, status? } // in_progress then completed, no gate
@@ -18,7 +28,8 @@
 //     { type: "fail", message }                                      // prompt fails with a JSON-RPC error
 //     { type: "stop", reason }                                       // stopReason for the prompt
 // THETERMINAL_FAKE_LOG: NDJSON file; every message received and every step outcome is appended.
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const raw = JSON.parse(process.env.THETERMINAL_FAKE_SCRIPT ?? "[]");
@@ -63,15 +74,19 @@ function envSnapshot() {
     if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$)/i.test(k)) picked[k] = v;
   }
   let settings = null;
+  const policies = {};
   const p = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
   if (p) {
     try {
       settings = JSON.parse(readFileSync(p, "utf8"));
+      for (const dir of settings.policyPaths ?? []) {
+        for (const f of readdirSync(dir)) policies[f] = readFileSync(join(dir, f), "utf8");
+      }
     } catch (e) {
       settings = { error: String(e) };
     }
   }
-  return { env: picked, settings, argv: process.argv.slice(2), cwd: process.cwd() };
+  return { env: picked, settings, policies, argv: process.argv.slice(2), cwd: process.cwd() };
 }
 
 async function runStep(step) {
@@ -87,7 +102,7 @@ async function runStep(step) {
       const r = await request("fs/read_text_file", { sessionId: SESSION, path: step.path, ...(step.line !== undefined && { line: step.line }), ...(step.limit !== undefined && { limit: step.limit }) });
       log({ step: "read", path: step.path, ...r });
       if (step.toolCall) {
-        update({ sessionUpdate: "tool_call_update", toolCallId: id, status: r.error ? "failed" : "completed", kind: "read", content: [] });
+        update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed", kind: "read", content: [] });
       }
       return;
     }
@@ -109,7 +124,7 @@ async function runStep(step) {
           return;
         }
       }
-      const r = await request("fs/write_text_file", { sessionId: SESSION, path: step.path, content: step.content });
+      const r = await request("fs/write_text_file", { sessionId: SESSION, path: step.path, content: step.writeContent ?? step.content });
       log({ step: "write", path: step.path, ...r });
       if (step.permission) {
         update({ sessionUpdate: "tool_call_update", toolCallId: id, status: r.error ? "failed" : "completed", kind: "edit", content: [{ type: "content", content: { type: "text", text: r.error ? "write failed" : "written" } }] });
@@ -206,6 +221,10 @@ function onMessage(msg) {
   if (config.exitAt === msg.method) {
     process.stderr.write("fake gemini: exiting at " + msg.method + "\n");
     process.exit(1);
+  }
+  if (config.failAt === msg.method) {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "Authentication required." } });
+    return;
   }
   switch (msg.method) {
     case "initialize":

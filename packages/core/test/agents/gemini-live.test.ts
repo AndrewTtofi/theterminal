@@ -20,27 +20,40 @@ describe.skipIf(process.env.THETERMINAL_LIVE_GEMINI !== "1")("GeminiAdapter live
   });
   afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
 
-  it("runs a tiny read-only prompt with the read routed through the client and gated", async () => {
+  it("gates a shell command before anything runs and routes the read through the client", async () => {
     writeFileSync(join(dataDir, EMPTY_GITCONFIG), ""); // the adapter only needs dataDir for the empty global git config
     const proposed: ProposedAction[] = [];
     const events: AdapterEvent[] = [];
+    const timeline: string[] = [];
     let n = 0;
     const wt = realpathSync(mkdtempSync(join(tmpdir(), "gemini-live-wt-")));
     writeFileSync(join(wt, "README.md"), "The magic word is pineapple.\n");
     try {
       const r = await new GeminiAdapter({ dataDir }).start({
         cwd: wt,
-        prompt: "Read README.md and reply with the magic word only. Do not modify anything.",
+        projectId: "live",
+        prompt: "First run ls. Then read README.md and reply with the magic word only. Do not modify anything.",
         authMode: "api_key",
         signal: new AbortController().signal,
         gate: async (a) => {
           proposed.push(a);
-          const ok = a.kind === "file_read";
-          return { decision: ok ? "allow" : "deny", reason: ok ? "read" : "read-only test", actionId: `act-${++n}` };
+          timeline.push(`gate:${a.kind}`);
+          const ok = a.kind === "file_read" || a.kind === "shell";
+          return { decision: ok ? "allow" : "deny", reason: ok ? "allowed by the live test" : "read-only test", actionId: `act-${++n}` };
         },
-        emit: (e) => events.push(e),
+        emit: (e) => {
+          events.push(e);
+          timeline.push(`event:${e.type}`);
+        },
+        recordDenied: async (a, reason) => {
+          timeline.push(`denied:${a.kind}:${reason}`);
+        },
       });
       expect(r).toEqual({ status: "completed" });
+      // The shell command asked (through session/request_permission) before any result was produced.
+      expect(timeline.indexOf("gate:shell")).toBeGreaterThanOrEqual(0);
+      expect(timeline.indexOf("gate:shell")).toBeLessThan(timeline.indexOf("event:action_result"));
+      expect(timeline.some((t) => t.startsWith("denied:"))).toBe(false);
       expect(proposed.some((a) => a.tool === "fs/read_text_file")).toBe(true);
       expect(events.some((e) => e.type === "action_result" && e.ok)).toBe(true);
       expect(events.some((e) => e.type === "message" && /pineapple/i.test(e.text))).toBe(true);

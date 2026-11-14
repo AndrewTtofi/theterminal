@@ -10,15 +10,19 @@
  */
 export type ToolStatus = "pending" | "in_progress" | "completed" | "failed";
 
+export type Diff = { path: string; newText: string };
+
 export type TrackedCall = {
   id: string;
   kind: string | null;
   status: ToolStatus;
   title: string;
   locations: string[];
+  /** The file contents an approved permission request promised to write (its `diff` content). */
+  diffs: Diff[];
   /** How the call came under the gate; null until it does. */
   gated: "permission" | "mediated" | null;
-  /** The allowed action id of its permission request, when there is one. */
+  /** The allowed action id of its permission request, when there is one and its result is still owed. */
   actionId: string | null;
   /** The call was reported in progress at some point, i.e. it did run. */
   ran: boolean;
@@ -34,6 +38,7 @@ export type TrackerEvent =
 /** A call of one of these kinds may still be performed through the client fs methods after it starts. */
 const CLIENT_MEDIATED_KINDS = new Set(["read", "edit"]);
 const MAX_TRACKED = 1000;
+const inFlight = (c: TrackedCall): boolean => c.status === "pending" || c.status === "in_progress";
 
 export class ToolCallTracker {
   private readonly calls = new Map<string, TrackedCall>();
@@ -41,10 +46,27 @@ export class ToolCallTracker {
   constructor(private readonly samePath: (a: string, b: string) => boolean) {}
 
   /** Records that we answered a permission request for `u`; `actionId` is set when it was allowed. */
-  permission(u: ToolCallUpdate, actionId: string | null): void {
+  permission(u: ToolCallUpdate, actionId: string | null, diffs: Diff[] = []): void {
     const call = this.upsert(u);
     call.gated = "permission";
     call.actionId = actionId;
+    call.diffs = diffs;
+  }
+
+  /**
+   * The one allowed, still-running permission-gated call whose approved diff for `real` (a resolved path) is
+   * exactly `content`, so a write of it needs no second approval. Null when none or several match.
+   */
+  claimWrite(real: string, content: string, resolve: (p: string) => string | null): TrackedCall | null {
+    const matches = [...this.calls.values()].filter(
+      (c) => c.gated === "permission" && c.actionId !== null && inFlight(c) && c.diffs.some((d) => d.newText === content && resolve(d.path) === real),
+    );
+    return matches.length === 1 ? matches[0]! : null;
+  }
+
+  /** The call's result has been reported already; its completion must not report another. */
+  disown(call: TrackedCall): void {
+    call.actionId = null;
   }
 
   /** Attributes a client fs/terminal request, for `path` when it has one, to the one in-flight ungated call it can belong to. */
@@ -87,7 +109,7 @@ export class ToolCallTracker {
     let call = this.calls.get(u.toolCallId);
     if (!call) {
       if (this.calls.size >= MAX_TRACKED) throw new Error("too many open tool calls");
-      call = { id: u.toolCallId, kind: null, status: "pending", title: "", locations: [], gated: null, actionId: null, ran: false };
+      call = { id: u.toolCallId, kind: null, status: "pending", title: "", locations: [], diffs: [], gated: null, actionId: null, ran: false };
       this.calls.set(call.id, call);
     }
     if (typeof u.kind === "string") call.kind = u.kind;

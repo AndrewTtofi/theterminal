@@ -20,6 +20,19 @@ const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fa
 const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
 const SECRET = "sk-ant-TESTKEY0123456789abcdef";
 const MiB = 1024 * 1024;
+const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
+const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
+const POLICY_TOML = ["run_shell_command", "read_file", "write_file", "replace"]
+  .map((t) => `[[rule]]\ntoolName = "${t}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`)
+  .join("\n");
+const settingsFor = (selectedType: string) => ({
+  security: { auth: { selectedType }, disableAlwaysAllow: true },
+  tools: { core: CORE_TOOLS, allowed: [], discoveryCommand: "", callCommand: "", sandbox: false },
+  mcp: { serverCommand: "" },
+  hooksConfig: { enabled: false },
+  advanced: { ignoreLocalEnv: true },
+  policyPaths: [expect.stringMatching(/policies$/)],
+});
 
 type Step = Record<string, unknown>;
 type Script = Step[] | { config?: Record<string, unknown>; steps: Step[] };
@@ -37,6 +50,8 @@ const FAKE_ENV: Record<string, string> = {
   VERTEXAI_LOCATION: "nowhere",
   GIT_DIR: "/nonexistent/fake.git",
   GIT_AUTHOR_EMAIL: "someone@example.com",
+  ANTHROPIC_API_KEY: "sk-ant-TESTKEYotherprovider00000000",
+  OPENAI_API_KEY: "sk-TESTKEYotherprovider0000000000000",
 };
 
 beforeEach(() => {
@@ -81,11 +96,12 @@ function policyGate(ask: (a: ProposedAction) => GateResult = () => ({ decision: 
 function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult> = policyGate(), authMode: AdapterStartOptions["authMode"] = "api_key") {
   const proposed: ProposedAction[] = [];
   const decisions: (GateResult & { actionId: string })[] = [];
+  const denied: [ProposedAction, string][] = [];
   const events: AdapterEvent[] = [];
   let n = 0;
   const abort = new AbortController();
   const opts: AdapterStartOptions = {
-    cwd: worktree, prompt: "do it", authMode, signal: abort.signal,
+    cwd: worktree, projectId: "p1", prompt: "do it", authMode, signal: abort.signal,
     gate: async (a) => {
       proposed.push(a);
       const d = { ...(await decide(a)), actionId: `act-${++n}` };
@@ -93,8 +109,11 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
       return d;
     },
     emit: (e) => events.push(e),
+    recordDenied: async (a, reason) => {
+      denied.push([a, reason]);
+    },
   };
-  return { opts, proposed, decisions, events, abort };
+  return { opts, proposed, decisions, denied, events, abort };
 }
 
 /** Spawns the fake through node and remembers the child, so a test can check it was killed. */
@@ -134,12 +153,11 @@ describe("GeminiAdapter", () => {
     expect(init.params.clientCapabilities).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true });
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.cwd).toBe(worktree);
-    expect(snap.argv).toEqual(["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"]);
-    expect(snap.settings).toEqual({
-      security: { auth: { selectedType: "gemini-api-key" }, disableAlwaysAllow: true },
-      tools: { core: ["read_file", "write_file", "replace", "run_shell_command"], allowed: [] },
-    });
+    expect(snap.argv).toEqual(ACP_ARGS);
+    expect(snap.settings).toEqual(settingsFor("gemini-api-key"));
+    expect(snap.policies).toEqual({ "theterminal.toml": POLICY_TOML });
     expect(snap.env.NO_BROWSER).toBe("true");
+    expect(snap.env.GEMINI_CLI_NO_RELAUNCH).toBe("1");
     const session = readLog().find((e) => e.method === "session/new")!;
     expect(session.params).toEqual({ cwd: worktree, mcpServers: [] });
     const prompt = readLog().find((e) => e.method === "session/prompt")!;
@@ -166,14 +184,29 @@ describe("GeminiAdapter", () => {
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.env).not.toHaveProperty("GEMINI_API_KEY");
     expect(snap.env).not.toHaveProperty("GOOGLE_API_KEY");
-    expect(snap.settings.security.auth.selectedType).toBe("oauth-personal");
+    expect(snap.settings).toEqual(settingsFor("oauth-personal"));
     expect(methodsCalled()).not.toContain("authenticate");
   });
 
-  it("google mode reports a missing login when gemini exits before the session exists", async () => {
-    script({ config: { exitAt: "session/new" }, steps: [] });
+  it("google mode reports a missing login when session/new fails", async () => {
+    script({ config: { failAt: "session/new" }, steps: [] });
     const r = await adapter().start(harness(policyGate(), "google").opts);
     expect(r).toEqual({ status: "failed", error: "Gemini is not logged in; run 'gemini' once yourself" });
+  });
+
+  it("reports an early exit with the redacted stderr tail rather than a login problem", async () => {
+    script({ config: { exitAt: "session/new" }, steps: [] });
+    const r = await adapter().start(harness(policyGate(), "google").opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini exited unexpectedly: fake gemini: exiting at session/new" });
+  });
+
+  it("refuses a prompt that gemini would run as a slash or shell command, without starting it", async () => {
+    const { spawn, children } = fakeSpawn();
+    for (const prompt of ["/init", "  /extensions install x", "$ls", "\n$ rm -rf"]) {
+      const r = await adapter({ spawn }).start({ ...harness().opts, prompt });
+      expect(r).toEqual({ status: "failed", error: "Gemini treats a prompt starting with / or $ as a command; rephrase it" });
+    }
+    expect(children).toEqual([]);
   });
 
   it("api_key mode without a key fails with the exact message without starting gemini", async () => {
@@ -191,12 +224,33 @@ describe("GeminiAdapter", () => {
     expect(children).toEqual([]);
   });
 
-  it("refuses a .cmd shim rather than running it through a shell", async () => {
-    const { spawn, children } = fakeSpawn();
-    const r = await new GeminiAdapter({ dataDir: outside, bin: () => "C:\\Users\\alice\\AppData\\Roaming\\npm\\gemini.cmd", apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
-    expect(r.status).toBe("failed");
-    expect(r.error).toMatch(/\.cmd/);
-    expect(children).toEqual([]);
+  describe("npm .cmd shim", () => {
+    const shim = () => join(outside, "npm", "gemini.CMD");
+    const pkg = () => join(outside, "npm", "node_modules", "@google", "gemini-cli", "package.json");
+    const target = () => join(outside, "npm", "node_modules", "@google", "gemini-cli", "bundle", "gemini.js");
+    const readFile = (p: string) => {
+      if (p !== pkg()) throw new Error("ENOENT");
+      return JSON.stringify({ name: "@google/gemini-cli", bin: { gemini: "bundle/gemini.js" } });
+    };
+
+    it("runs the package's bin script with node instead of a shell", async () => {
+      script([]);
+      const spawn = vi.fn((_file: string, args: string[], o: object) => nodeSpawn(process.execPath, [FAKE, ...args.slice(1)], o as never));
+      const exists = vi.fn((p: string) => p === target());
+      const r = await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [target(), ...ACP_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
+      expect(spawn.mock.calls[0]![2]).not.toHaveProperty("shell");
+    });
+
+    it("refuses the shim when the package or its bin script is missing", async () => {
+      const spawn = vi.fn();
+      const refused = { status: "failed", error: "Gemini CLI must be a native executable on Windows (found a .cmd shim)" };
+      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
+      expect(spawn).not.toHaveBeenCalled();
+    });
   });
 
   it("rejects unsupported auth modes", async () => {
@@ -275,6 +329,18 @@ describe("GeminiAdapter", () => {
     expect(h.events).toEqual([]);
   });
 
+  it("a read tool whose client read was denied still completes (as gemini reports it) without being ungated", async () => {
+    const path = join(outside, "secret.txt");
+    writeFileSync(path, "outside secret\n");
+    script([{ type: "read", path, toolCall: true }, { type: "message", text: "went on" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.decisions[0]).toMatchObject({ decision: "deny", reason: "outside worktree" });
+    expect(logged("read")[0]!.error).toBeDefined();
+    expect(h.denied).toEqual([]);
+    expect(h.events).toEqual([{ type: "message", text: "went on" }]);
+  });
+
   it("reads only regular files and caps them at 8 MiB", async () => {
     mkdirSync(join(worktree, "dir"));
     writeFileSync(join(worktree, "big.txt"), Buffer.alloc(8 * MiB + 1, 0x61));
@@ -290,23 +356,43 @@ describe("GeminiAdapter", () => {
     ]);
   });
 
-  it("a write asks; Allow writes the file (creating parent directories) and reports the result", async () => {
+  it("an edit asks once: the write carrying exactly the approved diff is performed under that approval", async () => {
     const path = join(worktree, "sub", "dir", "notes.md");
     script([{ type: "write", path, content: "# notes\n", permission: true }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
-    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([
-      ["gemini", "file_edit", `Write ${path}`, [path]],
-      ["fs/write_text_file", "file_write", "Write sub/dir/notes.md", [path]],
-    ]);
-    expect(h.proposed[1]!.input).toEqual({ path, content: "# notes\n" });
+    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([["gemini", "file_edit", `Write ${path}`, [path]]]);
     expect(readFileSync(path, "utf8")).toBe("# notes\n");
     expect(logged("permission")[0]!.result).toEqual({ outcome: { outcome: "selected", optionId: "proceed_once" } });
     expect(logged("write")[0]!.result).toEqual({});
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "written" }]);
+  });
+
+  it("a write that differs from the approved diff is gated again as file_write", async () => {
+    const path = join(worktree, "notes.md");
+    script([{ type: "write", path, content: "approved\n", permission: true, writeContent: "something else\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([
+      ["gemini", "file_edit", `Write ${path}`, [path]],
+      ["fs/write_text_file", "file_write", "Write notes.md", [path]],
+    ]);
+    expect(h.proposed[1]!.input).toEqual({ path, content: "something else\n" });
+    expect(readFileSync(path, "utf8")).toBe("something else\n");
     expect(h.events).toEqual([
-      { type: "action_result", actionId: "act-2", ok: true, output: "wrote 8 bytes" },
+      { type: "action_result", actionId: "act-2", ok: true, output: "wrote 15 bytes" },
       { type: "action_result", actionId: "act-1", ok: true, output: "written" },
     ]);
+  });
+
+  it("a write with no approval in flight is gated as file_write and creates parent directories", async () => {
+    const path = join(worktree, "sub", "dir", "notes.md");
+    script([{ type: "write", path, content: "# notes\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([["fs/write_text_file", "file_write", "Write sub/dir/notes.md", [path]]]);
+    expect(readFileSync(path, "utf8")).toBe("# notes\n");
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "wrote 8 bytes" }]);
   });
 
   it("Deny on the write leaves no file and returns an error to the agent", async () => {
@@ -331,7 +417,7 @@ describe("GeminiAdapter", () => {
   });
 
   it("a terminal asks as shell, runs the command without a shell in the worktree, and returns the output", async () => {
-    const probe = "process.stdout.write(JSON.stringify({ cwd: process.cwd(), key: process.env.GEMINI_API_KEY ?? null, git: process.env.GIT_CONFIG_NOSYSTEM, extra: process.env.FAKE_EXTRA }))";
+    const probe = "process.stdout.write(JSON.stringify({ cwd: process.cwd(), key: process.env.GEMINI_API_KEY ?? null, git: process.env.GIT_CONFIG_NOSYSTEM, extra: process.env.FAKE_EXTRA, others: Object.keys(process.env).filter((k) => /^(ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i.test(k)) }))";
     script([{ type: "terminal", command: process.execPath, args: ["-e", probe], env: [{ name: "FAKE_EXTRA", value: "yes" }] }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
@@ -342,7 +428,7 @@ describe("GeminiAdapter", () => {
     const out = logged("terminal/output")[0]!.result;
     expect(out.truncated).toBe(false);
     expect(out.exitStatus).toEqual({ exitCode: 0, signal: null });
-    expect(JSON.parse(out.output)).toEqual({ cwd: worktree, key: null, git: "1", extra: "yes" });
+    expect(JSON.parse(out.output)).toEqual({ cwd: worktree, key: null, git: "1", extra: "yes", others: [] });
     expect(logged("terminal/wait_for_exit")[0]!.result).toEqual({ exitCode: 0, signal: null });
     expect(logged("terminal/release")[0]!.result).toEqual({});
     expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: out.output }]);
@@ -489,8 +575,9 @@ describe("GeminiAdapter", () => {
     const r = await adapter({ spawn }).start(h.opts);
     expect(r).toEqual({ status: "failed", error: "agent executed an ungated tool" });
     await waitExit(children[0]!);
-    expect(h.proposed).toEqual([
-      { tool: "gemini", kind: "other", summary: "Ungated tool: rm -rf /", input: expect.objectContaining({ toolCallId: "tc-x", kind: "execute" }), paths: [] },
+    expect(h.proposed).toEqual([]);
+    expect(h.denied).toEqual([
+      [{ tool: "gemini", kind: "other", summary: "Ungated tool: rm -rf /", input: expect.objectContaining({ toolCallId: "tc-x", kind: "execute" }), paths: [] }, "agent executed an ungated tool"],
     ]);
     expect(h.events).toEqual([{ type: "message", text: "about to run" }]);
     expect(existsSync(later)).toBe(false);
@@ -501,7 +588,7 @@ describe("GeminiAdapter", () => {
     script([{ type: "ungatedTool", toolCallId: "tc-r", kind: "read", title: "Read README.md", locations: [{ path: join(worktree, "README.md") }] }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
-    expect(h.proposed[0]).toMatchObject({ kind: "other", summary: "Ungated tool: Read README.md" });
+    expect(h.denied[0]![0]).toMatchObject({ kind: "other", summary: "Ungated tool: Read README.md" });
   });
 
   it("a completed tool call we never saw before is ungated, while one that failed before running is ignored", async () => {
@@ -513,7 +600,8 @@ describe("GeminiAdapter", () => {
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
     expect(h.events).toEqual([{ type: "message", text: "still here" }]);
-    expect(h.proposed).toHaveLength(1);
+    expect(h.denied).toHaveLength(1);
+    expect(h.denied[0]![0]).toMatchObject({ summary: "Ungated tool: unknown tool", input: expect.objectContaining({ toolCallId: "ghost" }) });
   });
 
   it("a mode change away from default fails the run", async () => {
@@ -528,6 +616,9 @@ describe("GeminiAdapter", () => {
     const r = await adapter().start(h.opts);
     expect(r).toEqual({ status: "failed", error: "unknown request from agent: fs/delete_file" });
     expect(h.proposed).toEqual([]);
+    expect(h.denied).toEqual([
+      [{ tool: "fs/delete_file", kind: "other", summary: "Unsupported request: fs/delete_file", input: { sessionId: "fake-session", path: join(worktree, "README.md") }, paths: [] }, "unknown request from agent: fs/delete_file"],
+    ]);
     expect(existsSync(join(worktree, "README.md"))).toBe(true);
   });
 
@@ -537,6 +628,9 @@ describe("GeminiAdapter", () => {
     const r = await adapter().start(h.opts);
     expect(r).toEqual({ status: "failed", error: "malformed request from agent: fs/read_text_file" });
     expect(h.proposed).toEqual([]);
+    expect(h.denied).toEqual([
+      [{ tool: "fs/read_text_file", kind: "other", summary: "Unsupported request: fs/read_text_file", input: { sessionId: "fake-session", path: 42 }, paths: [] }, "malformed request from agent: fs/read_text_file"],
+    ]);
   });
 
   it("a request or update for another session fails the run", async () => {
@@ -646,11 +740,10 @@ describe("GeminiAdapter through the runner", () => {
       const actions = listActions(db, run.id);
       expect(actions.map((a) => [a.kind, a.status, a.decidedBy])).toEqual([
         ["file_edit", "completed", "human"],
-        ["file_write", "completed", "human"],
         ["shell", "completed", "human"],
       ]);
       expect(readFileSync(join(outside, run.worktree, "hello.txt"), "utf8")).toBe(`hi\n${SECRET}\n`);
-      const shell = actions[2]!;
+      const shell = actions[1]!;
       expect(shell.output).toBe("line two is [REDACTED]\n");
       expect(JSON.stringify(actions)).not.toContain(SECRET); // the write's input and the message are redacted too
       const log = logged("terminal/output")[0]!.result.output as string;

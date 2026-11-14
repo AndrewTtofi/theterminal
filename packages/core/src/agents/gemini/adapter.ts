@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, open, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -12,7 +12,7 @@ import { redact } from "../redact.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
 import { Terminals, type ExitStatus } from "./terminals.js";
-import { ToolCallTracker, type ToolCallUpdate, type ToolStatus } from "./tool-calls.js";
+import { ToolCallTracker, type Diff, type ToolCallUpdate, type ToolStatus } from "./tool-calls.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 type Spawn = typeof nodeSpawn;
@@ -20,8 +20,9 @@ type Rec = Record<string, unknown>;
 
 const NO_API_KEY = "No Gemini API key configured";
 const NO_CLI = "Gemini CLI is not installed or not on PATH";
-const CMD_SHIM = "Gemini CLI on PATH is a .cmd shim, which cannot be run without a shell; install a native gemini executable";
+const CMD_SHIM = "Gemini CLI must be a native executable on Windows (found a .cmd shim)";
 const NOT_LOGGED_IN = "Gemini is not logged in; run 'gemini' once yourself";
+const COMMAND_PROMPT = "Gemini treats a prompt starting with / or $ as a command; rephrase it";
 const STOPPED = "run stopped";
 const UNGATED = "agent executed an ungated tool";
 const MODE_CHANGED = "agent changed its approval mode";
@@ -34,19 +35,30 @@ const PROTOCOL_VERSION = 1;
 /** The Gemini approval mode in which every tool asks (`autoEdit` and `yolo` auto-approve; `plan` is read-only). */
 const DEFAULT_MODE = "default";
 /**
- * Gemini's built-in tools that run only through our gate: `read_file` reads through `fs/read_text_file`;
- * `write_file` and `replace` ask permission and then write through `fs/write_text_file`; `run_shell_command`
- * asks permission. Everything else (glob, grep, list_directory, read_many_files, web fetch and search,
- * memory, todos, skills, subagents) would run inside Gemini without asking, so it is not loaded.
+ * Gemini's built-in tools that can run only through our gate: `read_file` reads through `fs/read_text_file`;
+ * `write_file` and `replace` write through `fs/write_text_file`; `run_shell_command` runs inside Gemini after
+ * `session/request_permission`. Everything else (glob, grep, list_directory, read_many_files, web fetch and
+ * search, memory, todos, skills, subagents) would run inside Gemini without asking, so it is not loaded.
  */
 const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
+/**
+ * Gemini's policy engine turns each `tools.core` entry into an allow rule (user tier, priority 4.25) and
+ * auto-allows "safe" shell commands, so the allowlist alone would let these tools run without asking. A
+ * user-tier policy file (priority 999 -> 4.999) outranks both, and a rule with `argsPattern` skips the shell
+ * heuristics: every call of these tools reaches `session/request_permission`, where our gate decides.
+ */
+const POLICY_TOML = ["run_shell_command", "read_file", "write_file", "replace"]
+  .map((tool) => `[[rule]]\ntoolName = "${tool}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`)
+  .join("\n");
 /** `--extensions none` loads no extension; the MCP allowlist names a server that does not exist, so none connects. */
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
+/** Variables of every provider's key family: a terminal command run for the agent never sees them. */
+const PROVIDER_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i;
 const MAX_COMMAND = 150;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
 const MESSAGE_PAUSE_MS = 250;
-const STDERR_TAIL = 500;
+const STDERR_TAIL = 200;
 const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -102,6 +114,16 @@ function contentText(v: unknown): string {
 
 const toolName = (tc: Rec): string => (typeof tc.name === "string" && tc.name !== "" ? tc.name : "gemini");
 
+/** The files a tool call's `diff` content promises to write. */
+function diffsOf(v: unknown): Diff[] {
+  if (!Array.isArray(v)) return [];
+  const diffs: Diff[] = [];
+  for (const c of v) {
+    if (isRecord(c) && c.type === "diff" && typeof c.path === "string" && typeof c.newText === "string") diffs.push({ path: c.path, newText: c.newText });
+  }
+  return diffs;
+}
+
 /** Lines `line` (1-based) onwards, at most `limit` of them, each with its line ending. */
 function selectLines(text: string, line: number | null | undefined, limit: number | null | undefined): string {
   if (line == null && limit == null) return text;
@@ -110,11 +132,40 @@ function selectLines(text: string, line: number | null | undefined, limit: numbe
   return lines.slice(start, limit == null ? undefined : start + Math.max(Math.floor(limit), 0)).join("");
 }
 
-function geminiSettings(mode: AuthMode): Rec {
+/**
+ * System-scope settings for one run (system is merged last, so these beat the user's and the workspace's):
+ * the auth type of the chosen mode, the tool allowlist with nothing pre-approved, no hooks, no tool
+ * discovery or call commands, no MCP server command, no legacy sandbox, no repo `.env` (one could point
+ * the API key at another host), and our policy directory in place of the user's.
+ */
+function geminiSettings(mode: AuthMode, policiesDir: string): Rec {
   return {
     security: { auth: { selectedType: mode === "google" ? "oauth-personal" : "gemini-api-key" }, disableAlwaysAllow: true },
-    tools: { core: CORE_TOOLS, allowed: [] },
+    tools: { core: CORE_TOOLS, allowed: [], discoveryCommand: "", callCommand: "", sandbox: false },
+    mcp: { serverCommand: "" },
+    hooksConfig: { enabled: false },
+    advanced: { ignoreLocalEnv: true },
+    policyPaths: [policiesDir],
   };
+}
+
+/**
+ * The script behind an npm `.cmd` shim: `<dir>/node_modules/@google/gemini-cli/package.json`'s `bin.gemini`.
+ * Node cannot run a `.cmd` without a shell, and a shell would re-parse our arguments, so the script is run
+ * with node directly. Null when the package or the script is not there.
+ */
+function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: string) => boolean): string | null {
+  const dir = join(dirname(shim), "node_modules", "@google", "gemini-cli");
+  let pkg: unknown;
+  try {
+    pkg = JSON.parse(readFile(join(dir, "package.json")));
+  } catch {
+    return null;
+  }
+  const bin = isRecord(pkg) && isRecord(pkg.bin) ? pkg.bin.gemini : undefined;
+  if (typeof bin !== "string" || bin === "") return null;
+  const target = join(dir, bin);
+  return exists(target) ? target : null;
 }
 
 /**
@@ -132,6 +183,8 @@ export class GeminiAdapter implements AgentAdapter {
   private readonly bin: () => string | null;
   private readonly apiKey: () => string | undefined;
   private readonly spawn: Spawn;
+  private readonly exists: (p: string) => boolean;
+  private readonly readFile: (p: string) => string;
   private readonly command: { file: string; args: string[] } | undefined;
   private readonly worktrees: WorktreeManager;
 
@@ -142,6 +195,9 @@ export class GeminiAdapter implements AgentAdapter {
     bin?: () => string | null;
     apiKey?: () => string | undefined;
     spawn?: Spawn;
+    /** Injectable for tests: the file system used to look behind an npm .cmd shim. */
+    exists?: (p: string) => boolean;
+    readFile?: (p: string) => string;
     /** Test override: spawn this program (with these arguments before the ACP flags) instead of the CLI. */
     command?: { file: string; args: string[] };
   }) {
@@ -149,12 +205,16 @@ export class GeminiAdapter implements AgentAdapter {
     this.bin = opts.bin ?? (() => which("gemini"));
     this.apiKey = opts.apiKey ?? (() => process.env.GEMINI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
+    this.exists = opts.exists ?? existsSync;
+    this.readFile = opts.readFile ?? ((p) => readFileSync(p, "utf8"));
     this.command = opts.command;
     this.worktrees = new WorktreeManager(opts.dataDir);
   }
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
+    // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
+    if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
     const env = this.env(o.authMode);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
@@ -165,15 +225,25 @@ export class GeminiAdapter implements AgentAdapter {
     } else {
       const bin = this.bin();
       if (bin === null) return { status: "failed", error: NO_CLI };
-      if (/\.(?:cmd|bat)$/i.test(bin)) return { status: "failed", error: CMD_SHIM }; // a shim needs a shell; never spawn with one
-      file = bin;
-      args = ACP_ARGS;
+      if (/\.cmd$/i.test(bin)) {
+        const target = shimTarget(bin, this.readFile, this.exists);
+        if (target === null) return { status: "failed", error: CMD_SHIM };
+        file = process.execPath;
+        args = [target, ...ACP_ARGS];
+      } else {
+        file = bin;
+        args = ACP_ARGS;
+      }
     }
     const settingsDir = mkdtempSync(join(tmpdir(), "theterminal-gemini-"));
     try {
       const settings = join(settingsDir, "settings.json");
-      writeFileSync(settings, JSON.stringify(geminiSettings(o.authMode)));
+      const policies = join(settingsDir, "policies");
+      mkdirSync(policies);
+      writeFileSync(join(policies, "theterminal.toml"), POLICY_TOML);
+      writeFileSync(settings, JSON.stringify(geminiSettings(o.authMode, policies)));
       env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = settings; // system settings win the merge over the user's and the workspace's
+      env.GEMINI_CLI_NO_RELAUNCH = "1"; // the npm entry point would otherwise relaunch the CLI as a child our signals never reach
       env.NO_BROWSER = "true"; // a missing Google login fails instead of opening a browser from a background run
       return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, args);
     } finally {
@@ -219,9 +289,10 @@ class GeminiRun {
     const fold = (p: string) => (isWindows ? p.toLowerCase() : p);
     this.tracker = new ToolCallTracker((a, b) => fold(resolve(o.cwd, a)) === fold(resolve(o.cwd, b)));
     this.terminals = new Terminals(spawn, (id, status, output) => this.onTerminalExit(id, status, output));
-    this.terminalEnv = { ...env };
-    delete this.terminalEnv.GEMINI_API_KEY;
-    delete this.terminalEnv.GOOGLE_API_KEY;
+    this.terminalEnv = {};
+    for (const [k, v] of Object.entries(env)) {
+      if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
+    }
   }
 
   async run(file: string, args: string[]): Promise<StartResult> {
@@ -282,16 +353,23 @@ class GeminiRun {
     return { status: "failed", error: `Gemini stopped: ${stopReason}` };
   }
 
-  /** A setup request with a short timeout. In Google-login mode a failure here means Gemini could not log in. */
+  /**
+   * A setup request with a short timeout. In Google-login mode, a `session/new` error (that is where Gemini
+   * authenticates) or a timeout (a missing login makes it prompt on stdin) means Gemini could not log in.
+   */
   private async setup(method: string, params: unknown): Promise<unknown> {
     let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Gemini did not answer ${method} in time`)), SETUP_TIMEOUT_MS);
+    const timedOut = Symbol("timeout");
+    const timeout = new Promise<typeof timedOut>((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), SETUP_TIMEOUT_MS);
     });
     try {
-      return await Promise.race([this.peer.request(method, params), timeout]);
+      const res = await Promise.race([this.peer.request(method, params), timeout]);
+      if (res !== timedOut) return res;
+      if (this.o.authMode === "google") throw new Error(NOT_LOGGED_IN);
+      throw new Error(`Gemini did not answer ${method} in time`);
     } catch (e) {
-      if (this.o.authMode === "google" && !this.o.signal.aborted) throw new Error(NOT_LOGGED_IN);
+      if (this.o.authMode === "google" && method === "session/new" && errorMessage(e).startsWith("rpc error:")) throw new Error(NOT_LOGGED_IN);
       throw e;
     } finally {
       clearTimeout(timer);
@@ -368,9 +446,9 @@ class GeminiRun {
     }
     if (ev === null) return;
     if (ev.type === "result") return this.o.emit({ type: "action_result", actionId: ev.actionId, ok: ev.ok, output: contentText(u.content) });
-    // Recorded through the gate (the runner denies it as the run ends) and the run fails: nothing more of it may run.
+    // Recorded as requested and denied (no one is asked about something that already ran) and the run fails.
     const title = ev.call.title || `${ev.call.kind ?? "unknown"} tool`;
-    void this.o.gate({ tool: toolName(u), kind: "other", summary: `Ungated tool: ${title}`, input: u, paths: [] }).catch(() => undefined);
+    void this.o.recordDenied({ tool: toolName(u), kind: "other", summary: `Ungated tool: ${title}`, input: u, paths: [] }, UNGATED).catch(() => undefined);
     this.fail(UNGATED);
   }
 
@@ -418,20 +496,25 @@ class GeminiRun {
       case "terminal/release":
         return this.onTerminal(method, this.params(method, params));
       default:
-        this.fail(`unknown request from agent: ${method}`);
-        throw new Error("unknown request");
+        throw this.unsupported(method, params, `unknown request from agent: ${method}`);
     }
   }
 
   /** The request's params when they are an object for our session; otherwise the run fails. */
   private params(method: string, params: unknown): Rec {
-    if (!isRecord(params) || params.sessionId !== this.sessionId) throw this.malformed(method);
+    if (!isRecord(params) || params.sessionId !== this.sessionId) throw this.malformed(method, params);
     return params;
   }
 
-  private malformed(method: string): Error {
-    this.fail(`malformed request from agent: ${method}`);
-    return new Error("malformed request");
+  private malformed(method: string, params: unknown): Error {
+    return this.unsupported(method, params, `malformed request from agent: ${method}`);
+  }
+
+  /** A request we refuse outright: recorded as requested and denied, answered with an error, and the run fails. */
+  private unsupported(method: string, params: unknown, reason: string): Error {
+    void this.o.recordDenied({ tool: method, kind: "other", summary: `Unsupported request: ${method}`, input: params, paths: [] }, reason).catch(() => undefined);
+    this.fail(reason);
+    return new Error(reason);
   }
 
   private result(actionId: string, ok: boolean, output: string): void {
@@ -440,7 +523,7 @@ class GeminiRun {
 
   private async onPermission(p: Rec): Promise<unknown> {
     const tc = p.toolCall;
-    if (!isRecord(tc) || typeof tc.toolCallId !== "string" || !Array.isArray(p.options)) throw this.malformed("session/request_permission");
+    if (!isRecord(tc) || typeof tc.toolCallId !== "string" || !Array.isArray(p.options)) throw this.malformed("session/request_permission", p);
     this.flushText();
     const kind = typeof tc.kind === "string" ? tc.kind : null;
     const title = typeof tc.title === "string" && tc.title !== "" ? tc.title : `${kind ?? "unknown"} tool`;
@@ -462,13 +545,13 @@ class GeminiRun {
       this.result(g.actionId, false, NO_ALLOW_ONCE);
       return reject();
     }
-    this.tracker.permission(this.asUpdate(tc), g.actionId);
+    this.tracker.permission(this.asUpdate(tc), g.actionId, diffsOf(tc.content));
     return { outcome: { outcome: "selected", optionId: once.optionId } };
   }
 
   private async onRead(method: string, p: Rec): Promise<unknown> {
     const { path, line, limit } = p;
-    if (!isString(path) || !optional(line, isNumber) || !optional(limit, isNumber)) throw this.malformed(method);
+    if (!isString(path) || !optional(line, isNumber) || !optional(limit, isNumber)) throw this.malformed(method, p);
     this.flushText();
     this.tracker.mediate(path);
     const input: Rec = { path, ...(line != null && { line }), ...(limit != null && { limit }) };
@@ -488,12 +571,24 @@ class GeminiRun {
 
   private async onWrite(method: string, p: Rec): Promise<unknown> {
     const { path, content } = p;
-    if (!isString(path) || !isString(content)) throw this.malformed(method);
+    if (!isString(path) || !isString(content)) throw this.malformed(method, p);
     this.flushText();
     this.tracker.mediate(path);
+    const inside = (q: string) => this.worktrees.resolveInside(this.o.cwd, q);
+    const real = inside(path);
+    // The write an allowed permission request promised, byte for byte: performed under that approval, not asked again.
+    const approved = real === null ? null : this.tracker.claimWrite(real, content, inside);
+    if (approved !== null) {
+      try {
+        await writeAtomic(real!, content);
+      } catch (e) {
+        this.tracker.disown(approved); // this is the call's result; its completion must not report another
+        return this.refuse(approved.actionId!, errorMessage(e));
+      }
+      return {};
+    }
     const g = await this.o.gate({ tool: method, kind: "file_write", summary: `Write ${display(this.o.cwd, path)}`, input: { path, content }, paths: [path] });
     if (g.decision !== "allow") throw new Error(g.reason);
-    const real = this.worktrees.resolveInside(this.o.cwd, path);
     if (real === null) return this.refuse(g.actionId, OUTSIDE);
     try {
       await writeAtomic(real, content);
@@ -506,8 +601,8 @@ class GeminiRun {
 
   private async onTerminalCreate(method: string, p: Rec): Promise<unknown> {
     const { command, args, env, cwd, outputByteLimit } = p;
-    if (!isString(command) || !optional(args, isStringArray) || !optional(cwd, isString) || !optional(outputByteLimit, isNumber)) throw this.malformed(method);
-    if (!optional(env, (v): v is { name: string; value: string }[] => Array.isArray(v) && v.every(isEnvVar))) throw this.malformed(method);
+    if (!isString(command) || !optional(args, isStringArray) || !optional(cwd, isString) || !optional(outputByteLimit, isNumber)) throw this.malformed(method, p);
+    if (!optional(env, (v): v is { name: string; value: string }[] => Array.isArray(v) && v.every(isEnvVar))) throw this.malformed(method, p);
     this.flushText();
     this.tracker.mediate();
     const argv = args ?? [];
@@ -531,12 +626,9 @@ class GeminiRun {
 
   private async onTerminal(method: string, p: Rec): Promise<unknown> {
     const id = p.terminalId;
-    if (!isString(id)) throw this.malformed(method);
+    if (!isString(id)) throw this.malformed(method, p);
     const known = (ok: boolean) => {
-      if (!ok) {
-        this.fail(`unknown terminal from agent: ${method}`);
-        throw new Error("unknown terminal");
-      }
+      if (!ok) throw this.unsupported(method, p, `unknown terminal from agent: ${method}`);
     };
     switch (method) {
       case "terminal/output": {
