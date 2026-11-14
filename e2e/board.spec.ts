@@ -31,9 +31,10 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await expect(items).toHaveCount(3);
   for (const [i, text] of expected.entries()) await expect(items.nth(i)).toContainText(text);
 
-  // 5. a context without the cookie is rejected
+  // 5. a context without the cookie is rejected. Node-side requests use the loopback address:
+  // Node on Windows does not resolve *.localhost (browser navigation still uses the app host).
   const anon = await browser.newContext();
-  const res = await anon.request.get(`${origin}/api/projects`);
+  const res = await anon.request.get(`http://127.0.0.1:${new URL(url).port}/api/projects`);
   expect(res.status()).toBe(401);
   await anon.close();
 
