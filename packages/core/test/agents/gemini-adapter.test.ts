@@ -57,8 +57,9 @@ const FAKE_ENV: Record<string, string> = {
 };
 
 beforeEach(() => {
-  worktree = realpathSync(mkdtempSync(join(tmpdir(), "gemini-wt-")));
-  outside = realpathSync(mkdtempSync(join(tmpdir(), "gemini-outside-")));
+  // The native realpath expands Windows short names (RUNNER~1), as WorktreeManager.resolveInside does.
+  worktree = realpathSync.native(mkdtempSync(join(tmpdir(), "gemini-wt-")));
+  outside = realpathSync.native(mkdtempSync(join(tmpdir(), "gemini-outside-")));
   logFile = join(outside, "fake.log");
   writeFileSync(join(worktree, "README.md"), "hello from the worktree\n");
   for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
