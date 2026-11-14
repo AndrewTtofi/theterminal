@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pathScrubber } from "../../src/agents/scrub-paths.js";
+import { pathScrubber, usernameScrubber } from "../../src/agents/scrub-paths.js";
 
 // Fake paths only; none of them exist, so only the raw spellings are scrubbed.
 const dirs: [string, string][] = [
@@ -152,5 +152,30 @@ describe("pathScrubber", () => {
   it("never scrubs a root", () => {
     const roots = pathScrubber([["/", "~"], ["C:\\", "<data>"]], { caseless: false });
     expect(roots("/x C:\\y")).toBe("/x C:\\y");
+  });
+});
+
+describe("usernameScrubber", () => {
+  const user = usernameScrubber("alice", { caseless: true });
+
+  it("replaces the username as a whole word", () => {
+    expect(user("-rw-r--r--  1 alice  staff  12 Jan  1 00:00 a.txt")).toBe("-rw-r--r--  1 <user>  staff  12 Jan  1 00:00 a.txt");
+    expect(user("alice\n")).toBe("<user>\n");
+    expect(user("mail alice@example.com")).toBe("mail <user>@example.com");
+    expect(user("owner: alice, ALICE and Alice")).toBe("owner: <user>, <user> and <user>");
+  });
+
+  it("leaves longer words that contain it alone", () => {
+    for (const s of ["malice", "alicex", "alice_x", "x_alice", "alice.bak", "alice-1", "1alice"]) expect(user(s)).toBe(s);
+  });
+
+  it("matches case only when asked, and ignores short or empty names", () => {
+    expect(usernameScrubber("alice", { caseless: false })("Alice alice")).toBe("Alice <user>");
+    expect(usernameScrubber("al", { caseless: true })("al is here")).toBe("al is here");
+    expect(usernameScrubber("", { caseless: true })("x")).toBe("x");
+  });
+
+  it("treats regex characters in the name literally", () => {
+    expect(usernameScrubber("a+b", { caseless: false })("a+b aab")).toBe("<user> aab");
   });
 });

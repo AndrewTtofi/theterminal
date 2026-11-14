@@ -86,3 +86,18 @@ export function pathScrubber(
       return i === -1 ? match : entries[i]![1];
     });
 }
+
+/** Characters that continue a name: a username next to one of these is part of a longer word. */
+const WORD = "A-Za-z0-9_.\\-";
+const MIN_USERNAME = 3;
+
+/**
+ * Replaces the OS username with `<user>` wherever it stands as a whole word (`ls -l` owners, `whoami`, an email
+ * local part). Names shorter than three characters are left alone: they would match too much ordinary text.
+ */
+export function usernameScrubber(username: string, opts: { caseless?: boolean } = {}): Scrub {
+  if (username.length < MIN_USERNAME) return (s) => s;
+  const caseless = opts.caseless ?? (process.platform === "darwin" || process.platform === "win32");
+  const re = new RegExp(`(?<![${WORD}])${escapeRegExp(username)}(?![${WORD}])`, caseless ? "giu" : "gu");
+  return (s) => s.replace(re, "<user>");
+}

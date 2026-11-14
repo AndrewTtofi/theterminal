@@ -36,7 +36,7 @@ afterEach(async () => {
 });
 
 function makeRunner(adapters: Partial<Record<"claude" | "fake", AgentAdapter>>, broker = new ApprovalBroker(), shutdownTimeoutMs?: number) {
-  const r = new AgentRunner({ db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs });
+  const r = new AgentRunner({ db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs, username: "alice" });
   runners.push(r);
   return r;
 }
@@ -240,6 +240,24 @@ describe("AgentRunner with the FakeAdapter", () => {
     const strings = allStrings(ledger.list().map((e) => e.payload));
     expect(strings.filter((s) => s.includes(dataDir) || s.includes(homedir()))).toEqual([]);
     expect(strings).toContain("home is ~");
+  });
+
+  it("records the OS username as <user>, as a whole word only", async () => {
+    const runner = fakeRunner([
+      { message: "-rw-r--r--  1 alice  staff  0 a.txt; mail alice@example.com; malice alicex alice_x" },
+      { propose: { tool: "Bash", kind: "shell", summary: "whoami", input: { command: "ls -l", user: "alice" }, paths: [] } },
+    ]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "whoami says alice" });
+    await untilPending();
+    runner.stop(owner, run.id);
+    await untilFinished(run.id);
+    const text = JSON.stringify(agentEvents().map((e) => e.payload));
+    expect(text).toContain("whoami says <user>");
+    expect(text).toContain('"user":"<user>"');
+    expect(text).toContain("1 <user>  staff");
+    expect(text).toContain("<user>@example.com");
+    expect(text).toContain("malice alicex alice_x");
+    expect(text).not.toMatch(/(?<![A-Za-z0-9_.-])alice(?![A-Za-z0-9_.-])/);
   });
 
   it("shutdown does not hang on an adapter that ignores abort, and forgets the session", async () => {

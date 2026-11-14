@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -11,7 +11,7 @@ import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction } from "./a
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
 import { redact, truncate } from "./redact.js";
-import { pathScrubber, type Scrub } from "./scrub-paths.js";
+import { pathScrubber, usernameScrubber, type Scrub } from "./scrub-paths.js";
 import type { WorktreeManager } from "./worktrees.js";
 
 export class AdapterUnavailableError extends Error {
@@ -33,7 +33,17 @@ export type AgentRunnerDeps = {
   newId?: () => string;
   /** How long shutdown() waits for adapters to return after aborting them. Default 5000. */
   shutdownTimeoutMs?: number;
+  /** Recorded strings show this name as `<user>`. Default: the OS username. */
+  username?: string;
 };
+
+function osUsername(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return ""; // no passwd entry: nothing to scrub
+  }
+}
 
 type FinishStatus = "completed" | "failed" | "stopped";
 type Session = {
@@ -110,16 +120,23 @@ function scrubJson(v: unknown, scrub: Scrub): unknown {
 export class AgentRunner {
   private readonly sessions = new Map<string, Session>();
   private readonly newId: () => string;
-  /** Scrubs dataDir and the home directory, for strings recorded outside a live run. */
+  /** Scrubs dataDir, the home directory and the username, for strings recorded outside a live run. */
   private readonly scrub: Scrub;
+  private readonly scrubUser: Scrub;
 
   constructor(private readonly deps: AgentRunnerDeps) {
     this.newId = deps.newId ?? (() => randomUUID());
-    this.scrub = pathScrubber([[deps.dataDir, "<data>"], [homedir(), "~"]]);
+    this.scrubUser = usernameScrubber(deps.username ?? osUsername());
+    this.scrub = this.withUser(pathScrubber([[deps.dataDir, "<data>"], [homedir(), "~"]]));
   }
 
   private runScrubber(worktreeAbs: string): Scrub {
-    return pathScrubber([[worktreeAbs, "."], [this.deps.dataDir, "<data>"], [homedir(), "~"]]);
+    return this.withUser(pathScrubber([[worktreeAbs, "."], [this.deps.dataDir, "<data>"], [homedir(), "~"]]));
+  }
+
+  /** Paths first, so a home directory becomes `~` rather than a path ending in `<user>`. */
+  private withUser(paths: Scrub): Scrub {
+    return (s) => this.scrubUser(paths(s));
   }
 
   async start(
