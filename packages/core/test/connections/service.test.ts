@@ -430,3 +430,96 @@ describe("review fixes", () => {
     expect(svc.get(c.id).status.state).toBe("failed");
   });
 });
+
+describe("re-review fixes", () => {
+  // Matches no token pattern, so only the loaded secret values can catch it.
+  const PLAIN = "plain-TESTVALUE-0000";
+
+  it("loads a cold cache before checking a name, so a stored secret is refused", async () => {
+    const c = await addClaude(make(), PLAIN);
+    const cold = make(); // no load()
+    await expect(cold.update(owner, c.id, { name: PLAIN })).rejects.toBeInstanceOf(SecretInConfigError);
+    await expect(
+      cold.add(owner, { kind: "llm", provider: "gemini", name: `x ${PLAIN}`, config: {} }),
+    ).rejects.toBeInstanceOf(SecretInConfigError);
+    expect(types()).toEqual(["connection.added"]);
+  });
+
+  it("refuses a name equal to a stored secret once the keychain comes back", async () => {
+    const c = await addClaude(make(), PLAIN);
+    let down = true;
+    const recovering: SecretStore = {
+      get: async (a) => {
+        if (down) throw new SecretStoreUnavailableError();
+        return store.get(a);
+      },
+      set: (a, v) => store.set(a, v),
+      delete: (a) => store.delete(a),
+    };
+    const svc = make({ secrets: recovering });
+    await svc.load();
+    // Still down: a name-only update proceeds on pattern redaction alone.
+    await svc.update(owner, c.id, { name: "Renamed" });
+    down = false;
+    await expect(svc.update(owner, c.id, { name: PLAIN })).rejects.toBeInstanceOf(SecretInConfigError);
+    expect(svc.keychainState()).toBe("ok");
+  });
+
+  it("gives up on a tester that ignores the signal and releases the connection", async () => {
+    const svc = new ConnectionService({
+      db, ledger, secrets: store, newId, testTimeoutMs: 5,
+      testers: { claude: () => new Promise(() => undefined) },
+    });
+    const c = await addClaude(svc);
+    expect(await svc.test(owner, c.id)).toEqual({ ok: false, message: "Could not reach the provider" });
+    expect(ledger.list()[1]).toMatchObject({ type: "connection.tested", payload: { ok: false, message: "Could not reach the provider" } });
+    await svc.update(owner, c.id, { name: "Still usable" });
+    expect(svc.get(c.id).name).toBe("Still usable");
+  });
+
+  /** A store whose next `get` reads the value now but answers only when released. */
+  function gatedStore() {
+    let armed = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const gated: SecretStore = {
+      get: async (a) => {
+        const value = await store.get(a);
+        if (armed) await gate;
+        return value;
+      },
+      set: (a, v) => store.set(a, v),
+      delete: (a) => store.delete(a),
+    };
+    return { gated, arm: () => (armed = true), release: () => release() };
+  }
+
+  it("a concurrent load does not drop a value set while it ran", async () => {
+    const { gated, arm, release } = gatedStore();
+    const svc = make({ secrets: gated });
+    const c = await addClaude(svc);
+    await svc.load();
+    arm();
+    const loading = svc.load();
+    await svc.update(owner, c.id, { secrets: { apiKey: KEY2 } });
+    release();
+    await loading;
+    expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY2);
+  });
+
+  it("a concurrent load does not bring back a removed connection", async () => {
+    const { gated, arm, release } = gatedStore();
+    const svc = make({ secrets: gated });
+    const c = await addClaude(svc);
+    await svc.load();
+    arm();
+    const loading = svc.load();
+    await svc.remove(owner, c.id);
+    release();
+    await loading;
+    expect((svc as unknown as { cache: Map<string, unknown> }).cache.has(c.id)).toBe(false);
+    // A new connection reusing nothing from the removed one starts with no cached key.
+    const again = await svc.add(owner, { kind: "llm", provider: "claude", name: "Claude", config: {} });
+    expect(svc.credentialsFor("claude")).toEqual({ connectionId: again.id, name: "Claude" });
+  });
+});

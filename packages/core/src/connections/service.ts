@@ -97,6 +97,9 @@ type KeychainOp = { field: string; value: string | null; secret: boolean };
 type Undo = { account: string; previous: string | undefined };
 
 const UNTESTABLE = "Testing is not available for this connection yet";
+const UNREACHABLE = "Could not reach the provider";
+/** How long past its own timeout a tester may run before it is abandoned. */
+const TESTER_GRACE_MS = 1000;
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
 
@@ -140,6 +143,10 @@ export class ConnectionService {
   private loading: Promise<void> | null = null;
   /** Per-connection tail of the operation chain; operations on one id run one at a time. */
   private readonly locks = new Map<string, Promise<unknown>>();
+  /** Bumped when a cache-changing operation on a connection starts and ends; lets a load keep newer entries. */
+  private readonly versions = new Map<string, number>();
+  /** Cache-changing operations in progress per connection. */
+  private readonly inFlight = new Map<string, number>();
 
   constructor(deps: ConnectionServiceDeps) {
     this.db = deps.db;
@@ -151,8 +158,13 @@ export class ConnectionService {
     this.testTimeoutMs = deps.testTimeoutMs ?? 10_000;
   }
 
-  /** Reads every stored value into the cache. A keychain failure leaves the cache empty and marks it unavailable. */
+  /**
+   * Reads every stored value into the cache. A keychain failure leaves the cache empty and marks it unavailable.
+   * Safe to run alongside other operations: a connection changed or removed while the load ran keeps its current
+   * cache entry (or none), never the values the load read before the change.
+   */
   async load(): Promise<void> {
+    const startVersions = new Map(this.versions);
     const next = new Map<string, Record<string, string>>();
     try {
       for (const row of this.rows()) {
@@ -170,7 +182,13 @@ export class ConnectionService {
       this.state = "unavailable";
       return;
     }
-    this.cache = next;
+    const merged = new Map<string, Record<string, string>>();
+    for (const { id } of this.rows()) {
+      const changed = (this.versions.get(id) ?? 0) !== (startVersions.get(id) ?? 0) || (this.inFlight.get(id) ?? 0) > 0;
+      const entry = changed ? this.cache.get(id) : next.get(id);
+      if (entry) merged.set(id, entry);
+    }
+    this.cache = merged;
     this.state = "ok";
     this.loaded = true;
   }
@@ -188,6 +206,7 @@ export class ConnectionService {
   }
 
   async add(actor: Actor, input: AddConnectionInput): Promise<Connection> {
+    await this.tryLoad();
     const name = this.checkName(input.name);
     const entry = this.availableEntry(input.provider);
     if (entry.kind !== input.kind) invalid(["provider"], "provider does not belong to this kind");
@@ -223,6 +242,7 @@ export class ConnectionService {
 
   private async updateNow(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
     const row = this.requireRow(id);
+    await this.tryLoad();
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
     if (patch.name !== undefined) changes.name = this.checkName(patch.name);
@@ -260,7 +280,11 @@ export class ConnectionService {
     return this.exclusive(id, () => this.removeNow(actor, id));
   }
 
-  private async removeNow(actor: Actor, id: string): Promise<void> {
+  private removeNow(actor: Actor, id: string): Promise<void> {
+    return this.mutating(id, () => this.removeTracked(actor, id));
+  }
+
+  private async removeTracked(actor: Actor, id: string): Promise<void> {
     const row = this.requireRow(id);
     if (this.storedFields(row).length > 0) await this.ensureKeychain();
     commitEvent(this.db, this.ledger, () => {
@@ -289,13 +313,23 @@ export class ConnectionService {
       const stored = new Map(this.storedFields(row));
       const pick = (storage: FieldStorage) =>
         Object.fromEntries(Object.entries(values).filter(([f]) => stored.get(f) === storage));
+      // A tester that ignores the signal must still let go of the connection's lock.
+      let timer: NodeJS.Timeout | undefined;
+      const hung = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("tester timed out")), this.testTimeoutMs + TESTER_GRACE_MS);
+      });
       try {
-        result = await tester(
-          { config: JSON.parse(row.config), private: pick("private"), secrets: pick("secret") },
-          { fetch: this.fetchImpl, signal: AbortSignal.timeout(this.testTimeoutMs) },
-        );
+        result = await Promise.race([
+          tester(
+            { config: JSON.parse(row.config), private: pick("private"), secrets: pick("secret") },
+            { fetch: this.fetchImpl, signal: AbortSignal.timeout(this.testTimeoutMs) },
+          ),
+          hung,
+        ]);
       } catch {
-        result = { ok: false, message: "Could not reach the provider" };
+        result = { ok: false, message: UNREACHABLE };
+      } finally {
+        clearTimeout(timer);
       }
     }
     // Redact before truncating, so a cut can never leave half a secret unmatched.
@@ -337,6 +371,10 @@ export class ConnectionService {
    */
   private async commitWithKeychain(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
     if (ops.length > 0) await this.ensureKeychain();
+    await this.mutating(connectionId, () => this.applyAndCommit(connectionId, ops, build));
+  }
+
+  private async applyAndCommit(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
     const cached = this.cache.get(connectionId) ?? {};
     const done: Undo[] = [];
     try {
@@ -371,12 +409,35 @@ export class ConnectionService {
    * last one failed). Throws `SecretStoreUnavailableError`, before anything is written, when the keychain stays down.
    */
   private async ensureKeychain(): Promise<void> {
+    await this.tryLoad();
+    if (this.state !== "ok") throw new SecretStoreUnavailableError();
+  }
+
+  /**
+   * Loads the cache if no load has succeeded yet or the last one failed, so name and config checks see every stored
+   * secret. Never throws: with the keychain still down, callers go on with pattern redaction only.
+   */
+  private async tryLoad(): Promise<void> {
     if (this.loaded && this.state === "ok") return;
     this.loading ??= this.load().finally(() => {
       this.loading = null;
     });
     await this.loading;
-    if (this.state !== "ok") throw new SecretStoreUnavailableError();
+  }
+
+  /** Marks a cache-changing operation on `id` for the duration of `fn`, so a concurrent `load()` keeps its result. */
+  private async mutating<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const bump = () => this.versions.set(id, (this.versions.get(id) ?? 0) + 1);
+    this.inFlight.set(id, (this.inFlight.get(id) ?? 0) + 1);
+    bump();
+    try {
+      return await fn();
+    } finally {
+      bump();
+      const left = this.inFlight.get(id)! - 1;
+      if (left === 0) this.inFlight.delete(id);
+      else this.inFlight.set(id, left);
+    }
   }
 
   /** Runs `fn` after every earlier operation on the same connection has settled. */
