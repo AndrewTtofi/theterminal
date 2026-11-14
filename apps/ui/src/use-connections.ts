@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
 import type { CatalogEntry, Connection } from "@theterminal/shared";
 import { api } from "./api";
@@ -10,6 +10,8 @@ export type ConnectionsModel = {
   list: Connection[];
   /** True once the list was read from the server; until then nothing is known to be missing. */
   loaded: boolean;
+  /** The last attempt to read the list failed; `refresh()` retries. */
+  loadError: boolean;
   refresh(): void;
   add(i: NewConnection): Promise<Connection>;
   update(id: string, patch: ConnectionPatch): Promise<Connection>;
@@ -22,14 +24,32 @@ export function useConnections(): ConnectionsModel {
   const [catalog, setCatalog] = useState<CatalogEntry[]>(() => [...CONNECTION_CATALOG]);
   const [list, setList] = useState<Connection[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  // Every refresh and every completed write takes a new number; a list response is applied only if its
+  // request is still the latest, so an older read never overwrites a newer write or read.
+  const seq = useRef(0);
+  const loadedRef = useRef(false);
+  const latestRead = useRef(0);
 
   const refresh = useCallback(() => {
+    const mine = ++seq.current;
+    latestRead.current = mine;
     void api.listConnections().then(
       (l) => {
+        if (mine !== seq.current) {
+          // Superseded. A newer read will answer; if only a write came after this read and nothing was
+          // ever loaded, read again so the list still becomes known.
+          if (mine === latestRead.current && !loadedRef.current) refresh();
+          return;
+        }
+        loadedRef.current = true;
         setList(l);
         setLoaded(true);
+        setLoadError(false);
       },
-      () => {},
+      () => {
+        if (mine === latestRead.current) setLoadError(true);
+      },
     );
   }, []);
 
@@ -39,12 +59,15 @@ export function useConnections(): ConnectionsModel {
   }, [refresh]);
 
   return useMemo(() => {
-    const upsert = (c: Connection) =>
+    const upsert = (c: Connection) => {
+      seq.current++;
       setList((prev) => (prev.some((p) => p.id === c.id) ? prev.map((p) => (p.id === c.id ? c : p)) : [...prev, c]));
+    };
     return {
       catalog,
       list,
       loaded,
+      loadError,
       refresh,
       add: async (i) => {
         const c = await api.addConnection(i);
@@ -58,14 +81,16 @@ export function useConnections(): ConnectionsModel {
       },
       remove: async (id) => {
         await api.removeConnection(id);
+        seq.current++;
         setList((prev) => prev.filter((p) => p.id !== id));
       },
       test: async (id) => {
         const r = await api.testConnection(id);
         const status = { state: r.ok ? "ok" : "failed", message: r.message, testedAt: new Date().toISOString() } as const;
+        seq.current++;
         setList((prev) => prev.map((p) => (p.id === id ? { ...p, status } : p)));
         return r;
       },
     };
-  }, [catalog, list, loaded, refresh]);
+  }, [catalog, list, loaded, loadError, refresh]);
 }

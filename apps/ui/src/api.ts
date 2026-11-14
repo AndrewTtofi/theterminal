@@ -37,7 +37,7 @@ export class ApiError extends Error {
 
 async function request<T>(
   path: string,
-  init?: { method: "POST" | "PATCH"; body: unknown } | { method: "DELETE" },
+  init?: { method: "POST" | "PATCH"; body: unknown } | { method: "POST" | "DELETE" },
 ): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -133,7 +133,7 @@ export const api = {
     request<Connection>(`/api/connections/${enc(id)}`, { method: "PATCH", body: patch }),
   removeConnection: (id: string) => request<void>(`/api/connections/${enc(id)}`, { method: "DELETE" }),
   testConnection: (id: string) =>
-    request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST", body: {} }),
+    request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST" }),
   getStatus: () => request<Status>("/api/status"),
 };
 

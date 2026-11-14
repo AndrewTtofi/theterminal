@@ -133,6 +133,9 @@ legend { color: var(--muted); padding: 0 4px; }
 button.danger { background: var(--danger); }
 button.danger:hover:not(:disabled) { background: #b3412e; }
 .muted { color: var(--muted); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.connections-side .error { padding: 4px 8px; }
+.connections-side .error button { margin-left: 8px; }
 .provider-auth { border: 1px solid var(--line-strong); border-radius: 2px; margin: 12px 0; padding: 8px; }
 .provider-auth label { display: block; }
 

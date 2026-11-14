@@ -44,7 +44,9 @@ describe("ConnectionEditor", () => {
     expect(screen.getByRole("group", { name: "Claude sign-in" })).toBeTruthy();
     expect(screen.getByText(KEYCHAIN_NOTE)).toBeTruthy();
     expect(keyInput().type).toBe("password");
-    expect(keyInput().getAttribute("autocomplete")).toBe("off");
+    expect(keyInput().getAttribute("autocomplete")).toBe("new-password");
+    expect(keyInput().hasAttribute("data-1p-ignore")).toBe(true);
+    expect(keyInput().getAttribute("data-lpignore")).toBe("true");
     expect(screen.getByText("Not connected")).toBeTruthy();
 
     await userEvent.type(keyInput(), KEY);
@@ -120,6 +122,16 @@ describe("ConnectionEditor", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Already connected");
   });
 
+  it("trims the name of a new connection", async () => {
+    m.addConnection.mockResolvedValue(connection({ name: "Work" }));
+    renderWithConnections(<ConnectionEditor id="connection:new:claude" />);
+    await waitFor(() => expect(m.listConnections).toHaveBeenCalled());
+    await userEvent.clear(screen.getByLabelText("Name"));
+    await userEvent.type(screen.getByLabelText("Name"), "  Work ");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(m.addConnection).toHaveBeenCalledWith({ kind: "llm", provider: "claude", name: "Work" });
+  });
+
   it("a key pasted into a config field is refused with its own message", async () => {
     m.addConnection.mockRejectedValue(new ApiError(400, "secret_in_config"));
     renderWithConnections(<ConnectionEditor id="connection:new:gemini" />);
@@ -147,7 +159,7 @@ describe("ConnectionEditor", () => {
     await userEvent.clear(home);
     await userEvent.type(home, "other-home");
     await userEvent.clear(screen.getByLabelText("Name"));
-    await userEvent.type(screen.getByLabelText("Name"), "My Codex");
+    await userEvent.type(screen.getByLabelText("Name"), "  My Codex  ");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(m.updateConnection).toHaveBeenCalledWith("c2", { name: "My Codex", private: { cliHome: "other-home" } });
   });

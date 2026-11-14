@@ -16,6 +16,7 @@ function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsMode
     catalog: [...CONNECTION_CATALOG],
     list: [],
     loaded: true,
+    loadError: false,
     refresh: vi.fn(),
     add: vi.fn(),
     update: vi.fn(),
@@ -179,7 +180,7 @@ describe("Workbench", () => {
     expect(aws.getAttribute("aria-disabled")).toBe("true");
     expect(aws.textContent).toContain("Arrives with Plan 5B");
 
-    await userEvent.click(within(side).getByRole("button", { name: /GitHub/ }));
+    await userEvent.click(within(side).getByRole("button", { name: "GitHub" }));
     const tab = container.querySelector('[data-panel="connection:new:github"]')!;
     expect(within(tab as HTMLElement).getByLabelText("Personal access token")).toBeTruthy();
   });
@@ -198,6 +199,29 @@ describe("Workbench", () => {
     rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, list: [conn] }) })} />);
     expect(container.querySelector('[data-panel="connection:gone"]')).toBeNull();
     expect(container.querySelector('[data-panel="connection:c1"]')).toBeTruthy();
+
+    // Only the first load prunes: a later list without c1 leaves its tab to say it no longer exists.
+    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, list: [] }) })} />);
+    expect(container.querySelector('[data-panel="connection:c1"]')?.textContent).toBe("This connection no longer exists.");
+  });
+
+  it("keeps connection tabs open when the list fails to load", () => {
+    const failed = () => connectionsModel({ loaded: false, loadError: true });
+    const { container, rerender } = render(<Workbench model={model({ connections: failed() })} />);
+    act(() => testDock.api!.open("connection:c1", "Claude (Anthropic)", "main"));
+    rerender(<Workbench model={model({ connections: failed() })} />);
+    expect(container.querySelector('[data-panel="connection:c1"]')).toBeTruthy();
+  });
+
+  it("prunes a restored new-connection tab for a provider that is not available", () => {
+    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false }) })} />);
+    act(() => {
+      testDock.api!.open("connection:new:aws", "AWS", "main");
+      testDock.api!.open("connection:new:github", "GitHub", "main");
+    });
+    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true }) })} />);
+    expect(container.querySelector('[data-panel="connection:new:aws"]')).toBeNull();
+    expect(container.querySelector('[data-panel="connection:new:github"]')).toBeTruthy();
   });
 
   it("shows the Plan 5B placeholder for GitHub and Capacity", async () => {

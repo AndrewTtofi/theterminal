@@ -196,7 +196,7 @@ describe("App needs-you strip", () => {
 describe("App provider settings", () => {
   const openCodex = async () => {
     await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
-    await userEvent.click(screen.getByRole("button", { name: /Codex \(OpenAI\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Codex (OpenAI)" }));
   };
 
   it("shows the provider sign-in settings in a connection's editor tab with no project selected", async () => {
@@ -234,6 +234,38 @@ describe("App connections", () => {
       } as unknown as LedgerEntry);
     });
     expect(m.listConnections).toHaveBeenCalledTimes(2);
+  });
+
+  it("a stale list response that resolves after a new connection is saved leaves its tab open", async () => {
+    const saved = {
+      id: "c1", kind: "llm", provider: "claude", name: "Claude", enabled: true, config: {}, private: {}, secretFields: ["apiKey"],
+      status: { state: "untested", message: "", testedAt: null }, createdAt: "", updatedAt: "",
+    } as const;
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+    const row = screen.getByRole("button", { name: "Claude (Anthropic)" }) as HTMLButtonElement;
+    await waitFor(() => expect(row.disabled).toBe(false));
+    await userEvent.click(row);
+
+    // A refresh is issued (a ledger entry) and answers only after the save.
+    let answerStale!: (l: never[]) => void;
+    m.listConnections.mockImplementationOnce(() => new Promise((r) => (answerStale = r)));
+    await act(async () => {
+      h.onEntry!({
+        seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "system", id: "runner" },
+        type: "connection.used", payload: {}, prevHash: "", hash: "",
+      } as unknown as LedgerEntry);
+    });
+    m.addConnection.mockResolvedValue({ ...saved, secretFields: [...saved.secretFields] });
+    await userEvent.type(screen.getByLabelText("API key"), "sk-ant-TESTKEY-0000000000");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.querySelector('[data-panel="connection:c1"]')).toBeTruthy());
+
+    await act(async () => answerStale([]));
+    const tab = document.querySelector('[data-panel="connection:c1"]') as HTMLElement;
+    expect(tab).toBeTruthy();
+    expect((within(tab).getByLabelText("API key") as HTMLInputElement).placeholder).toBe("Stored in your keychain");
   });
 });
 

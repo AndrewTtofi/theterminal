@@ -78,7 +78,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
       const config = collect(fieldsOf("config"), values);
       try {
         if (!conn) {
-          const body: NewConnection = { kind: entry.kind, provider: entry.provider, name };
+          const body: NewConnection = { kind: entry.kind, provider: entry.provider, name: name.trim() };
           if (Object.keys(config).length > 0) body.config = config;
           if (Object.keys(typed).length > 0) body.secrets = typed;
           const priv = collect(fieldsOf("private"), values);
@@ -90,7 +90,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           return;
         }
         const patch: ConnectionPatch = {};
-        if (name !== conn.name) patch.name = name;
+        if (name.trim() !== conn.name) patch.name = name.trim();
         if (!sameRecord(config, conn.config)) patch.config = config;
         const priv: Record<string, string | null> = {};
         for (const f of fieldsOf("private")) {
@@ -130,7 +130,9 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
             <input
               id={id}
               type="password"
-              autoComplete="off"
+              autoComplete="new-password"
+              data-1p-ignore=""
+              data-lpignore="true"
               spellCheck={false}
               value={secrets[f.name] ?? ""}
               placeholder={stored ? "Stored in your keychain" : ""}

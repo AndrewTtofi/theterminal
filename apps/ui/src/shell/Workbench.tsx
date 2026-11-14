@@ -61,11 +61,14 @@ export function Workbench({ model }: Props) {
     setDockReady(true);
   }, []);
 
-  // A restored layout can hold tabs for connections removed since; close them once the list is known.
+  // A restored layout can hold tabs for connections removed since: close them once, on the first successful
+  // load. Later removals leave the tab saying the connection no longer exists.
   const { loaded, list, catalog } = model.connections;
+  const pruned = useRef(false);
   useEffect(() => {
     const dock = dockRef.current;
-    if (!dockReady || !loaded || !dock) return;
+    if (pruned.current || !dockReady || !loaded || !dock) return;
+    pruned.current = true;
     for (const id of staleConnectionPanels(dock.panelIds(), list, catalog)) dock.close(id as DockPanelId);
   }, [dockReady, loaded, list, catalog]);
 

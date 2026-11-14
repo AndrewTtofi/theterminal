@@ -36,6 +36,8 @@ describe("connections api", () => {
     await api.testConnection("c1");
     expect(call(f, 2)[0]).toBe("/api/connections/c1/test");
     expect(call(f, 2)[1]).toMatchObject({ method: "POST" });
+    expect(call(f, 2)[1].body).toBeUndefined();
+    expect(call(f, 2)[1].headers).toBeUndefined();
   });
 
   it("removes with DELETE and accepts an empty 204", async () => {

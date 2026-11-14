@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { CatalogEntry, Connection, ConnectionKind } from "@theterminal/shared";
 import { errorMessage } from "../api";
 import { useShell } from "../shell/model";
@@ -25,9 +25,11 @@ function matches(entry: CatalogEntry, query: string): boolean {
 /** Extensions-style list of every connection the catalog offers, grouped by kind. */
 export function ConnectionsSideBar() {
   const { model, dock } = useShell();
-  const { catalog, list, update } = model.connections;
+  const { catalog, list, loaded, loadError, refresh, update } = model.connections;
+  const uid = useId();
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(() => new Set());
 
   const groups = GROUPS.map((g) => ({ ...g, entries: catalog.filter((e) => e.kind === g.kind && matches(e, query)) })).filter(
     (g) => g.entries.length > 0,
@@ -35,7 +37,16 @@ export function ConnectionsSideBar() {
 
   const toggle = (conn: Connection) => {
     setError(null);
-    update(conn.id, { enabled: !conn.enabled }).catch((e: unknown) => setError(errorMessage(e)));
+    setToggling((s) => new Set(s).add(conn.id));
+    update(conn.id, { enabled: !conn.enabled })
+      .catch((e: unknown) => setError(errorMessage(e)))
+      .finally(() =>
+        setToggling((s) => {
+          const next = new Set(s);
+          next.delete(conn.id);
+          return next;
+        }),
+      );
   };
 
   return (
@@ -48,6 +59,14 @@ export function ConnectionsSideBar() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
+      {loadError && (
+        <div className="error" role="alert">
+          Couldn't load connections
+          <button type="button" onClick={refresh}>
+            Retry
+          </button>
+        </div>
+      )}
       {error && (
         <p className="error" role="alert">
           {error}
@@ -61,27 +80,32 @@ export function ConnectionsSideBar() {
             {g.entries.map((entry) => {
               const conn = entry.available ? list.find((c) => c.provider === entry.provider) : undefined;
               const state = conn ? conn.status.state : "not-connected";
+              const statusId = `${uid}-${entry.provider}-status`;
+              const noteId = `${uid}-${entry.provider}-note`;
               return (
                 <li
                   key={entry.provider}
                   className={`connection-row${entry.available ? "" : " unavailable"}`}
                   aria-disabled={entry.available ? undefined : true}
                 >
+                  {/* Until the list has loaded, a row cannot know whether to open a new or an existing tab. */}
                   <button
                     type="button"
                     className="connection-open"
-                    disabled={!entry.available}
-                    title={entry.description}
+                    aria-label={entry.label}
+                    aria-describedby={`${statusId} ${noteId}`}
+                    disabled={!entry.available || !loaded}
                     onClick={() => dock()?.open(editorPanelId(entry, conn), entry.label, "main")}
                   >
-                    <span
-                      className={`status-dot ${state}`}
-                      role="img"
-                      aria-label={conn ? DOT_LABEL[conn.status.state] : "Not connected"}
-                    />
+                    <span className={`status-dot ${state}`} aria-hidden="true" />
+                    <span id={statusId} className="visually-hidden">
+                      {conn ? DOT_LABEL[conn.status.state] : "Not connected"}
+                    </span>
                     <span className="connection-text">
                       <span className="connection-label">{entry.label}</span>
-                      <span className="connection-note">{entry.available ? entry.description : "Arrives with Plan 5B"}</span>
+                      <span id={noteId} className="connection-note">
+                        {entry.available ? entry.description : "Arrives with Plan 5B"}
+                      </span>
                     </span>
                   </button>
                   {conn && (
@@ -91,6 +115,7 @@ export function ConnectionsSideBar() {
                       className="switch"
                       aria-checked={conn.enabled}
                       aria-label={`Enable ${entry.label}`}
+                      disabled={!loaded || toggling.has(conn.id)}
                       onClick={() => toggle(conn)}
                     />
                   )}
