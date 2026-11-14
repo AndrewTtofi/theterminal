@@ -1,8 +1,14 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
+import { redact } from "../packages/core/dist/index.js";
 
-// The agent server keeps secrets in memory and answers connection tests with a stub (see global-setup.ts). Its fake
-// agent's shell step prints this same key once allowed.
-const KEY = "sk-ant-TESTKEY-e2e-00000000000000";
+// The agent server keeps secrets in memory and answers connection tests with a stub that looks for TESTKEY (see
+// global-setup.ts). Its fake agent's shell step prints this same key, bare, once allowed. The key matches no built-in
+// redaction pattern, so only the stored secret itself can redact it from the agent's output.
+const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
+
+test("the stored key matches no built-in redaction pattern, so the live redaction is what the test proves", () => {
+  expect(redact(KEY)).toBe(KEY);
+});
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Ledger lines whose description is exactly `text` (each line is "<time> · <description>"). */
@@ -11,19 +17,53 @@ const line = (ledger: Locator, text: string) => ledger.filter({ hasText: new Reg
 const ledgerItems = (page: Page) => page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
 const openView = (page: Page, name: string) => page.getByRole("navigation", { name: "Views" }).getByRole("button", { name }).click();
 
+/** The seq of the last ledger entry, read in the page (it carries the cookie). */
+function latestSeq(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    let last = 0;
+    for (;;) {
+      const res = await fetch(`/api/ledger?afterSeq=${last}&limit=500`);
+      if (!res.ok) throw new Error(`GET /api/ledger: ${res.status}`);
+      const entries = (await res.json()) as { seq: number }[];
+      if (entries.length === 0) return last;
+      last = entries[entries.length - 1]!.seq;
+    }
+  });
+}
+
 /**
- * Collects every response body and WebSocket frame that contains the key. `check()` awaits the pending body reads,
- * so none is still in flight when the test asserts.
+ * Whether `body` is ledger JSON (an entry, or an array of them) in which every entry holding the key has `seq` at most
+ * `since`. Earlier specs let the fake agent print the key before this spec stored it, when it was not yet a secret:
+ * those entries are not leaks, and the ledger keeps serving them.
+ */
+function onlyEntriesBefore(body: string, since: number): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const entries: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  return entries.every((e) => {
+    if (typeof e !== "object" || e === null || typeof (e as { seq?: unknown }).seq !== "number") return false;
+    return !JSON.stringify(e).includes(KEY) || (e as { seq: number }).seq <= since;
+  });
+}
+
+/**
+ * Collects every response body and WebSocket frame, to check that none written after `since` (the ledger seq when the
+ * test began) contains the key. `check()` awaits the pending body reads, so none is still in flight when the test
+ * asserts.
  */
 function watchForLeaks(page: Page) {
-  const leaks: string[] = [];
+  const seen: { source: string; body: string }[] = [];
   const reads: Promise<void>[] = [];
   let frames = 0;
   page.on("response", (res) => {
     reads.push(
       res.text().then(
         (body) => {
-          if (body.includes(KEY)) leaks.push(res.url());
+          seen.push({ source: res.url(), body });
         },
         () => undefined, // no body (a redirect or an aborted request)
       ),
@@ -32,14 +72,15 @@ function watchForLeaks(page: Page) {
   page.on("websocket", (ws) => {
     ws.on("framereceived", ({ payload }) => {
       frames++;
-      if (String(payload).includes(KEY)) leaks.push(`${ws.url()} (frame)`);
+      seen.push({ source: `${ws.url()} (frame)`, body: String(payload) });
     });
   });
   return {
     frames: () => frames,
-    async check() {
+    async check(since: number) {
       await Promise.all(reads);
       expect(reads.length).toBeGreaterThan(0);
+      const leaks = seen.filter(({ body }) => body.includes(KEY) && !onlyEntriesBefore(body, since)).map(({ source }) => source);
       expect(leaks).toEqual([]);
     },
   };
@@ -65,6 +106,7 @@ async function removeConnection(editor: Locator) {
 test("adds a Claude connection, tests it, and never sees the key in a response or a WebSocket frame", async ({ page }) => {
   const watch = watchForLeaks(page);
   await page.goto(process.env.TT_E2E_AGENT_URL!);
+  const since = await latestSeq(page);
 
   const editor = await addClaude(page);
   await expect(editor.getByText("Not tested", { exact: true })).toBeVisible();
@@ -82,7 +124,7 @@ test("adds a Claude connection, tests it, and never sees the key in a response o
   // Leave the server without a Claude connection for the next test.
   await removeConnection(editor);
   await expect(line(ledger, 'Owner removed "Claude"')).toHaveCount(1);
-  await watch.check();
+  await watch.check(since);
 });
 
 /** The outputs of the project's completed actions, read from the ledger API in the page (it carries the cookie). */
@@ -115,6 +157,7 @@ test("a stored key is redacted from agent output, and stays redacted after the c
   const watch = watchForLeaks(page);
   const project = "Redaction Project";
   await page.goto(process.env.TT_E2E_AGENT_URL!);
+  const since = await latestSeq(page);
   await page.getByLabel("New project name").fill(project);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: project })).toHaveClass(/selected/);
@@ -123,15 +166,15 @@ test("a stored key is redacted from agent output, and stays redacted after the c
   await runAndAllowShell(page, "Print the key", 1);
   // The ledger panel names the completed action; its output is in the entry's payload.
   await expect(ledgerItems(page).filter({ hasText: / · Agent [0-9a-f]{8} finished an action$/ })).toHaveCount(1);
-  expect(await completedOutputs(page, project)).toEqual(["key=[REDACTED]"]);
+  expect(await completedOutputs(page, project)).toEqual(["[REDACTED]"]);
 
   await openView(page, "Connections");
   await page.getByRole("button", { name: "Claude (Anthropic)", exact: true }).click();
   await removeConnection(editor);
 
   await runAndAllowShell(page, "Print the key again", 2);
-  expect(await completedOutputs(page, project)).toEqual(["key=[REDACTED]", "key=[REDACTED]"]);
-  await watch.check();
+  expect(await completedOutputs(page, project)).toEqual(["[REDACTED]", "[REDACTED]"]);
+  await watch.check(since);
 });
 
 test("GET /api/connections without the session cookie is rejected", async ({ browser }) => {
