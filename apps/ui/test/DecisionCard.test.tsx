@@ -70,6 +70,21 @@ describe("DecisionCard", () => {
     expect(onDecide).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a shell action's full command in the card body, not only the capped title", () => {
+    const command = `npm run build -- ${"--flag ".repeat(60)}&& rm -rf ./out`;
+    const long = { ...action, summary: `Run: ${command.slice(0, 150)}`, input: { command, description: "build" } };
+    const { container } = render(<DecisionCard action={long} onDecide={vi.fn()} />);
+    const pre = container.querySelector("pre.command");
+    expect(pre?.textContent).toBe(command);
+    expect(pre?.closest("details")).toBeNull();
+  });
+
+  it("shows no command block for other kinds of action", () => {
+    const edit = { ...action, kind: "file_edit" as const, input: { command: "not a shell action" } };
+    const { container } = render(<DecisionCard action={edit} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")).toBeNull();
+  });
+
   it("says how much of a truncated input is hidden", () => {
     const preview = `{"command":"echo ${"z".repeat(3970)}…[truncated]`;
     const truncated = { ...action, input: { truncated: true, sha256: "ab".repeat(32), totalChars: 25000, preview } };

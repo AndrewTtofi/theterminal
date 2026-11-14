@@ -16,6 +16,13 @@ function hiddenChars(input: unknown): number | null {
   return Math.max(0, totalChars - shown);
 }
 
+/** The full command of a shell action (the title is capped), or null. */
+function shellCommand(action: AgentAction): string | null {
+  if (action.kind !== "shell" || typeof action.input !== "object" || action.input === null) return null;
+  const { command } = action.input as { command?: unknown };
+  return typeof command === "string" ? command : null;
+}
+
 export function DecisionCard({ action, onDecide }: Props) {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
@@ -36,10 +43,12 @@ export function DecisionCard({ action, onDecide }: Props) {
   };
 
   const hidden = hiddenChars(action.input);
+  const command = shellCommand(action);
 
   return (
     <article className="decision-card" aria-label={`Decision: ${action.summary}`}>
       <h3>Agent wants to: {action.summary}</h3>
+      {command !== null && <pre className="command">{command}</pre>}
       <details>
         <summary>Details</summary>
         <pre>{JSON.stringify(action.input, null, 2)}</pre>
