@@ -32,6 +32,11 @@ describe("toolToAction", () => {
     ["WebSearch", { query: "q" }, { kind: "web", paths: [] }],
     ["mcp__server__tool", { a: 1 }, { kind: "mcp", paths: [] }],
     ["Task", { prompt: "go" }, { kind: "other", paths: [] }],
+    ["PowerShell", { command: "Get-ChildItem" }, { kind: "shell", paths: [], summary: "Run: Get-ChildItem" }],
+    ["Monitor", { description: "d", timeout_ms: 1, command: "tail -f log" }, { kind: "shell", paths: [], summary: "Run: tail -f log" }],
+    ["Monitor", { description: "d", timeout_ms: 1, ws: { url: "wss://example.com/s" } }, { kind: "shell", paths: [], summary: "Run: watch wss://example.com/s" }],
+    ["Agent", { description: "helper", prompt: "go", isolation: "remote" }, { kind: "other", paths: [], summary: "Run remote agent: helper" }],
+    ["Task", { description: "helper", prompt: "go", isolation: "remote" }, { kind: "other", paths: [], summary: "Run remote agent: helper" }],
     ["SomethingNew", { file_path: "a.ts" }, { kind: "other", paths: [] }],
   ];
   it.each(cases)("maps %s %j", (tool, input, expected) => {
@@ -56,6 +61,26 @@ describe("toolToAction", () => {
     expect(toolToAction("Read", { file_path: "~/.ssh/id_rsa" }, CWD).paths).toEqual([join(homedir(), ".ssh/id_rsa")]);
     expect(toolToAction("Read", { file_path: "~" }, CWD).paths).toEqual([homedir()]);
     expect(toolToAction("Read", { file_path: "~other/x" }, CWD).paths).toEqual([]);
+  });
+
+  it("caps the PowerShell command and remote agent description in summaries", () => {
+    expect(toolToAction("PowerShell", { command: "y".repeat(300) }, CWD).summary).toBe(`Run: ${"y".repeat(150)}`);
+    expect(toolToAction("Agent", { description: "d".repeat(300), isolation: "remote" }, CWD).summary).toBe(`Run remote agent: ${"d".repeat(120)}`);
+  });
+
+  // The CLI trims path input before expanding "~", so padded paths must never be judged as written.
+  const pads = [" ", "\t", "\n"];
+  const padded = (p: string) => pads.flatMap((w) => [`${w}${p}`, `${p}${w}`]);
+  it.each([
+    ["Read", "file_path"],
+    ["Grep", "path"],
+    ["Glob", "path"],
+    ["NotebookEdit", "notebook_path"],
+  ])("asks for whitespace-padded paths in %s.%s", (tool, field) => {
+    for (const p of [...padded("~/.ssh/id_rsa"), ...padded("/etc/passwd"), ...padded("~"), ...padded("src/a.ts")]) {
+      const input: Record<string, unknown> = { [field]: p, pattern: "x" };
+      expect(toolToAction(tool, input, CWD).paths, JSON.stringify(p)).toEqual([]);
+    }
   });
 
   it("asks for path fields that are not strings", () => {
@@ -140,19 +165,28 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
 }
 
 describe("ClaudeAdapter", () => {
-  let savedKey: string | undefined;
-  let savedToken: string | undefined;
+  // Fake values for everything the adapter must strip or keep; the real environment is restored afterwards.
+  const FAKE_ENV: Record<string, string> = {
+    ANTHROPIC_API_KEY: "sk-ant-TESTKEYfromprocessenv0000",
+    ANTHROPIC_AUTH_TOKEN: "fake-auth-token-value",
+    CLAUDE_CODE_OAUTH_TOKEN: "fake-oauth-token-value",
+    ANTHROPIC_BASE_URL: "https://proxy.example.com",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+  };
+  const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    savedToken = process.env.ANTHROPIC_AUTH_TOKEN;
-    process.env.ANTHROPIC_API_KEY = "sk-ant-TESTKEYfromprocessenv0000";
-    process.env.ANTHROPIC_AUTH_TOKEN = "fake-auth-token-value";
+    for (const [k, v] of Object.entries(FAKE_ENV)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
   });
   afterEach(() => {
-    if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = savedKey;
-    if (savedToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
-    else process.env.ANTHROPIC_AUTH_TOKEN = savedToken;
+    for (const k of Object.keys(FAKE_ENV)) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
   });
 
   it("passes a locked-down configuration with a fail-closed PreToolUse hook", async () => {
@@ -168,6 +202,8 @@ describe("ClaudeAdapter", () => {
     expect(options).not.toHaveProperty("canUseTool");
     expect(options.allowDangerouslySkipPermissions).toBeFalsy();
     expect(options.abortController).toBeInstanceOf(AbortController);
+    expect(options.strictMcpConfig).toBe(true);
+    expect(options.persistSession).toBe(false);
     const pre = options.hooks!.PreToolUse!;
     expect(pre).toHaveLength(1);
     expect(pre[0]!.onFailure).toBe("block");
@@ -224,12 +260,15 @@ describe("ClaudeAdapter", () => {
     expect(h.events.filter((e) => e.type === "action_result")).toEqual([]);
   });
 
-  it("api_key mode passes the configured key and drops any auth token", async () => {
+  it("api_key mode passes the configured key and drops anything that could redirect or override it", async () => {
     const q = fakeQuery([success(0)]);
     await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
     const env = q.calls[0]!.options.env!;
     expect(env.ANTHROPIC_API_KEY).toBe(FAKE_KEY);
-    expect(env).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
+    for (const k of ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) {
+      expect(env).not.toHaveProperty(k);
+    }
+    expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000"); // a copy, not the real env
   });
 
@@ -248,6 +287,9 @@ describe("ClaudeAdapter", () => {
     const env = q.calls[0]!.options.env!;
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(env).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
+    for (const k of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) expect(env).not.toHaveProperty(k);
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("fake-oauth-token-value"); // the user's own CLI login is left alone
+    expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(apiKey).not.toHaveBeenCalled();
   });
 
@@ -255,6 +297,21 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     await new ClaudeAdapter({ query: q.fn }).start(harness().opts);
     expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000");
+  });
+
+  it("records a remote agent through the gate but never lets it run, even when allowed", async () => {
+    const q = fakeQuery([{ tool: "Agent", input: { description: "helper", prompt: "go", isolation: "remote" }, id: "tu-1", response: "ran" }, success(0)]);
+    const h = harness();
+    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    expect(r.status).toBe("completed");
+    expect(h.proposed).toEqual([expect.objectContaining({ tool: "Agent", kind: "other", summary: "Run remote agent: helper" })]);
+    expect(q.preDecisions[0]!.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "remote agents are not supported",
+    });
+    expect(h.events).toEqual([
+      { type: "action_result", actionId: "act-1", ok: false, output: "remote agents are not supported" },
+      { type: "usage", costUsd: 0 },
+    ]);
   });
 
   it("fails when Claude reports an error result, still reporting its cost", async () => {

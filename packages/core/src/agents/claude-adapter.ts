@@ -10,6 +10,8 @@ type StartResult = { status: "completed" | "failed"; error?: string };
 const NO_API_KEY = "No Anthropic API key configured";
 const STOPPED = "run stopped";
 const MAX_COMMAND = 150;
+const MAX_DESCRIPTION = 120;
+const REMOTE_AGENT = "remote agents are not supported";
 /** Hook timeout in seconds: a gate may wait on a human for a long time. A timeout blocks the tool. */
 const GATE_TIMEOUT_S = 24 * 60 * 60;
 
@@ -24,18 +26,26 @@ function errorMessage(e: unknown): string {
 }
 
 /**
- * A path field from tool input, or null when it cannot be judged (not a string, empty, or `~user`).
- * `~` and `~/…` are expanded as Claude Code does, so a home path is never resolved inside the worktree.
+ * A path field from tool input, or null when it cannot be judged (not a string, empty, padded with whitespace,
+ * or `~user`). The CLI trims a path and then expands `~` and `~/…`; padding is refused rather than mirrored, and
+ * `~` is expanded the same way, so a home path is never resolved inside the worktree.
  */
 function pathField(v: unknown): string | null {
-  if (typeof v !== "string" || v === "") return null;
-  if (v === "~") return homedir();
-  if (/^~[\\/]/.test(v)) return join(homedir(), v.slice(2));
-  if (v.startsWith("~")) return null;
-  return v;
+  if (typeof v !== "string" || v !== v.trim()) return null;
+  const p = v.trim(); // already trimmed; kept so the "~" checks below match what the CLI sees
+  if (p === "") return null;
+  if (p === "~") return homedir();
+  if (/^~[\\/]/.test(p)) return join(homedir(), p.slice(2));
+  if (p.startsWith("~")) return null;
+  return p;
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** An Agent (or legacy Task) call that would run on a remote machine, outside our gate. */
+const isRemoteAgent = (tool: string, input: Record<string, unknown>): boolean =>
+  (tool === "Agent" || tool === "Task") && input.isolation === "remote";
 
 /**
  * Maps an SDK tool call to a ProposedAction. `kind` and `paths` come only from the tool name and the tool's own
@@ -78,7 +88,13 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
       return action("file_write", `Write ${paths[0] ? display(paths[0]) : "(no path)"}`, paths);
     }
     case "Bash":
+    case "PowerShell":
       return action("shell", `Run: ${str(input.command).slice(0, MAX_COMMAND)}`);
+    case "Monitor": {
+      const ws = isRecord(input.ws) ? str(input.ws.url) : "";
+      const what = typeof input.command === "string" ? input.command : `watch ${ws}`;
+      return action("shell", `Run: ${what.slice(0, MAX_COMMAND)}`);
+    }
     case "WebFetch":
       return action("web", `Fetch ${str(input.url)}`);
     case "WebSearch":
@@ -88,6 +104,7 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
     const paths = one(tool === "NotebookEdit" ? input.notebook_path : input.file_path);
     return action("file_edit", `Edit ${paths[0] ? display(paths[0]) : "(no path)"}`, paths);
   }
+  if (isRemoteAgent(tool, input)) return action("other", `Run remote agent: ${str(input.description).slice(0, MAX_DESCRIPTION)}`);
   if (tool.startsWith("mcp__")) return action("mcp", `MCP tool ${tool}`);
   return action("other", `Use ${tool}`);
 }
@@ -100,8 +117,6 @@ const asOutput = (v: unknown): string => {
     return String(v);
   }
 };
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Drives Claude Code through the Agent SDK. Every tool call is gated in a fail-closed PreToolUse hook. */
 export class ClaudeAdapter implements AgentAdapter {
@@ -132,6 +147,11 @@ export class ClaudeAdapter implements AgentAdapter {
         const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
         const g = await o.gate(toolToAction(input.tool_name, toolInput, o.cwd));
         if (g.decision !== "allow") return deny(g.reason);
+        if (isRemoteAgent(input.tool_name, toolInput)) {
+          // Recorded and decided above, but a remote agent would run outside the gate: never let it start.
+          o.emit({ type: "action_result", actionId: g.actionId, ok: false, output: REMOTE_AGENT });
+          return deny(REMOTE_AGENT);
+        }
         actionIds.set(input.tool_use_id ?? toolUseID, g.actionId);
         return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: g.reason } };
       } catch (e) {
@@ -159,6 +179,8 @@ export class ClaudeAdapter implements AgentAdapter {
       abortController: controller,
       permissionMode: "default",
       settingSources: [],
+      strictMcpConfig: true, // only our (empty) MCP config: no user, project or plugin servers
+      persistSession: false, // no transcripts written under the user's Claude config dir
       hooks: {
         PreToolUse: [{ hooks: [pre], onFailure: "block", timeout: GATE_TIMEOUT_S }],
         PostToolUse: [{ hooks: [post] }],
@@ -208,10 +230,15 @@ export class ClaudeAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AdapterStartOptions["authMode"]): Record<string, string | undefined> | string {
     const env: Record<string, string | undefined> = { ...process.env };
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    if (mode === "subscription") return env; // the user's own Claude Code login is used
+    // Inherited settings that could send requests elsewhere or authenticate with something other than our choice.
+    for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) {
+      delete env[k];
+    }
+    // Keep the shell in the worktree root after every command, so relative paths resolve where the gate judged them.
+    env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
+    if (mode === "subscription") return env; // the user's own Claude Code login is used, untouched
     if (mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
     const key = this.apiKey();
     if (!key) return NO_API_KEY;
     env.ANTHROPIC_API_KEY = key;
