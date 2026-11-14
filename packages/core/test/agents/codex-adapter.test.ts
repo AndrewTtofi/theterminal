@@ -250,15 +250,22 @@ describe("CodexAdapter (fake app-server)", () => {
     });
   });
 
-  it("asks separately for network access during an accepted command, without reusing its command", async () => {
-    script([{ approve: "command", command: "npm install", itemId: "i1", network: { host: "registry.example.com", protocol: "https" } }]);
-    const { result, proposed } = run(make(), (a) => ({ decision: a.kind === "web" ? "deny" : "allow", reason: "r" }));
+  it("always declines network access during an accepted command, recording it as denied without asking anyone", async () => {
+    script([{ approve: "command", command: "npm install", itemId: "i1", output: "installed", network: { host: "registry.example.com", protocol: "https" } }]);
+    // Even a gate that allows everything is never asked: accepting could re-run the command outside the sandbox.
+    const { result, proposed, denied, events } = run(make(), () => ({ decision: "allow", reason: "r" }));
     expect(await result).toEqual({ status: "completed" });
-    expect(proposed.map((a) => [a.kind, a.summary])).toEqual([
-      ["shell", "Run: npm install"],
-      ["web", "Network access to registry.example.com (https)"],
-    ]);
+    expect(proposed.map((a) => [a.kind, a.summary])).toEqual([["shell", "Run: npm install"]]);
+    expect(denied).toEqual([[
+      {
+        kind: "web", tool: "codex.network", summary: "Network access to registry.example.com (https)",
+        input: { host: "registry.example.com", protocol: "https" }, paths: [],
+      },
+      "network access is not supported in Codex runs",
+    ]]);
     expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
+    // The command's result still belongs to the command's action.
+    expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "installed" }]);
   });
 
   it("uses the command announced in item/started when the approval omits it", async () => {

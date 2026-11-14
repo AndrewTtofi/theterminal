@@ -17,6 +17,7 @@ const CMD_SHIM = "Codex CLI must be a native executable on Windows (found a .cmd
 const NO_API_KEY = "No OpenAI API key configured";
 const NOT_LOGGED_IN = "Codex is not logged in; run 'codex login' yourself";
 const CANNOT_GATE = "Codex approval policy cannot gate every action";
+const NETWORK_DENIED = "network access is not supported in Codex runs";
 const HAS_RULES = "Codex has 'always allow' rules that would bypass approvals; remove them from your Codex rules folder or use API-key mode";
 const RULES_UNCHECKED = "Codex rules could not be checked; use API-key mode";
 const MCP_ENABLED = "Codex MCP servers could not be disabled; remove them or use API-key mode";
@@ -127,7 +128,7 @@ export function codexApprovalToAction(
   const display = (path: string) => displayPath(cwd, path);
 
   if (method === P.COMMAND_APPROVAL && isRecord(p.networkApprovalContext)) {
-    // Network access for a command that is already running: approving it grants egress, not the command.
+    // Network access for a command that is already running: a separate web action, never the command itself.
     const host = str(p.networkApprovalContext.host);
     const protocol = str(p.networkApprovalContext.protocol);
     return {
@@ -408,9 +409,16 @@ class CodexSession {
       });
       throw new Error(reason);
     }
+    if (method === P.COMMAND_APPROVAL && isRecord(p.networkApprovalContext)) {
+      // Never asked: accepting may re-run the command outside the sandbox (orchestrator.rs). Recorded and declined.
+      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd), NETWORK_DENIED).catch((e: unknown) => {
+        this.fail(`gate error: ${redact(errorMessage(e))}`);
+      });
+      return decline;
+    }
     // The command item was announced before this request; its command fills in one the request leaves out.
     const cached = this.commands.get(itemId);
-    const request = method === P.COMMAND_APPROVAL && cached !== undefined && !isRecord(p.networkApprovalContext)
+    const request = method === P.COMMAND_APPROVAL && cached !== undefined
       ? { ...p, command: p.command ?? cached.command, cwd: p.cwd ?? cached.cwd }
       : params;
     const action = codexApprovalToAction(method, request, this.o.cwd, this.fileChanges.get(itemId));
