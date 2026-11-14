@@ -40,6 +40,13 @@ function pathField(v: unknown): string | null {
   return p;
 }
 
+/**
+ * A glob pattern that can be judged as a path: plain path characters plus `*`, `?` and `**`, and no `..`
+ * anywhere. Braces, classes, escapes, negation and the like could spell a way out, so they ask a human.
+ */
+const PLAIN_GLOB = /^[\p{L}\p{N}\p{M}_\-./ *?]*$/u;
+const isPlainGlob = (v: unknown): v is string => typeof v === "string" && PLAIN_GLOB.test(v) && !v.includes("..");
+
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -53,9 +60,10 @@ const isRemoteAgent = (tool: string, input: Record<string, unknown>): boolean =>
  * judged yields no paths (asks a human) and unknown tools are `other` (always ask).
  */
 export function toolToAction(tool: string, input: Record<string, unknown>, cwd: string): ProposedAction {
+  // Summaries use / on every platform.
   const display = (p: string): string => {
     const rel = relative(cwd, resolve(cwd, p));
-    return rel === "" ? "." : rel.startsWith("..") || isAbsolute(rel) ? p : rel;
+    return (rel === "" ? "." : rel.startsWith("..") || isAbsolute(rel) ? p : rel).replace(/\\/g, "/");
   };
   const one = (field: unknown, fallback?: string): string[] => {
     const p = pathField(field == null && fallback !== undefined ? fallback : field);
@@ -70,13 +78,13 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
     }
     case "Glob": {
       const root = one(input.path, ".");
-      const pattern = one(input.pattern);
+      const pattern = isPlainGlob(input.pattern) ? one(input.pattern) : [];
       // The pattern itself may be absolute or climb out, so it is checked as a path too.
       const paths = root.length && pattern.length ? [...root, ...pattern] : [];
       return action("file_read", `Find files: ${str(input.pattern)} in ${root[0] ? display(root[0]) : "(no path)"}`, paths);
     }
     case "Grep": {
-      const paths = one(input.path, ".");
+      const paths = input.glob === undefined || isPlainGlob(input.glob) ? one(input.path, ".") : [];
       return action("file_read", `Search: ${str(input.pattern)} in ${paths[0] ? display(paths[0]) : "(no path)"}`, paths);
     }
     case "LS": {

@@ -54,7 +54,28 @@ describe("toolToAction", () => {
     const abs = join(process.cwd(), CWD, "src", "a.ts");
     const a = toolToAction("Read", { file_path: abs }, join(process.cwd(), CWD));
     expect(a.paths).toEqual([abs]);
-    expect(a.summary).toBe(`Read ${join("src", "a.ts")}`);
+    expect(a.summary).toBe("Read src/a.ts");
+  });
+
+  it("shows / separators in summaries on every platform", () => {
+    expect(toolToAction("Read", { file_path: "src\\a.ts" }, CWD).summary).toBe("Read src/a.ts");
+    expect(toolToAction("LS", { path: "src\\deep\\dir" }, CWD).summary).toBe("List src/deep/dir");
+    expect(toolToAction("Grep", { pattern: "x", path: "a\\b" }, CWD).summary).toBe("Search: x in a/b");
+  });
+
+  it.each(["{..,x}/*", "x/{a,..}/*", "[.][.]/*", "..*/x", "src/\\*.ts", "a/b..c/*", "!(x)/*", "src/{a,b}.ts"])(
+    "asks for the Glob pattern %j",
+    (pattern) => {
+      expect(toolToAction("Glob", { pattern }, CWD).paths).toEqual([]);
+      expect(toolToAction("Grep", { pattern: "x", glob: pattern }, CWD).paths).toEqual([]);
+    },
+  );
+
+  it("still judges plain Glob and Grep glob patterns by path", () => {
+    expect(toolToAction("Glob", { pattern: "src/**/*.ts" }, CWD).paths).toEqual([".", "src/**/*.ts"]);
+    expect(toolToAction("Glob", { pattern: "docs/file-?.md" }, CWD).paths).toEqual([".", "docs/file-?.md"]);
+    expect(toolToAction("Grep", { pattern: "x", glob: "*.ts" }, CWD).paths).toEqual(["."]);
+    expect(toolToAction("Grep", { pattern: "x", glob: 3 }, CWD).paths).toEqual([]);
   });
 
   it("expands a home-relative path so it is never mistaken for a worktree path", () => {
