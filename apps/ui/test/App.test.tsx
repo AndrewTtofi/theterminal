@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Board, LedgerEntry } from "@theterminal/shared";
 
@@ -29,7 +29,7 @@ vi.mock("../src/api", () => ({
     decideAction: vi.fn(),
     startRun: vi.fn(),
     stopRun: vi.fn(),
-    setClaudeAuth: vi.fn(),
+    setProviderAuth: vi.fn(),
   },
   errorMessage: () => "err",
   subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
@@ -43,6 +43,7 @@ vi.mock("../src/api", () => ({
 }));
 
 import { api } from "../src/api";
+import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
 
 const mk = (id: string): Board => ({
@@ -50,6 +51,15 @@ const mk = (id: string): Board => ({
   columns: { plan: [], design: [], build: [], ship: [], operate: [] },
 });
 const m = vi.mocked(api);
+const AGENTS: AgentsInfo = {
+  adapters: ["claude", "fake"],
+  providers: {
+    claude: { mode: "api_key", installed: true },
+    codex: { mode: "api_key", installed: false },
+    gemini: { mode: "api_key", installed: false },
+  },
+  acks: { claude: "claude ack", codex: "codex ack", gemini: "gemini ack" },
+};
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -58,7 +68,7 @@ beforeEach(() => {
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
   m.listProjects.mockResolvedValue([mk("A").project, mk("B").project]);
   m.listLedger.mockResolvedValue([]);
-  m.getAgents.mockResolvedValue({ adapters: ["fake"], claudeAuthMode: "api_key", subscriptionAck: "ack" });
+  m.getAgents.mockResolvedValue(AGENTS);
   m.listRuns.mockResolvedValue([]);
   m.listPendingActions.mockResolvedValue([]);
   m.listAllPendingActions.mockResolvedValue([]);
@@ -169,5 +179,27 @@ describe("App needs-you strip", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Allow" }));
     expect(m.decideAction.mock.calls[0]!.slice(0, 2)).toEqual(["a1", "allow"]);
     await waitFor(() => expect(screen.queryByText("Needs you")).toBeNull());
+  });
+});
+
+describe("App provider settings", () => {
+  it("shows the provider sign-in settings with no project selected", async () => {
+    render(<App />);
+    expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
+    expect(screen.getByText("Select or create a project.")).toBeTruthy();
+  });
+
+  it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
+    m.setProviderAuth.mockRejectedValue(new Error("nope"));
+    render(<App />);
+    const codex = within(await screen.findByRole("group", { name: "Codex sign-in" }));
+    await userEvent.click(codex.getByLabelText("My own ChatGPT plan"));
+    await userEvent.click(codex.getByLabelText("I understand and accept this risk"));
+    await userEvent.click(codex.getByRole("button", { name: "Confirm" }));
+    expect(m.setProviderAuth).toHaveBeenCalledWith({ provider: "codex", mode: "chatgpt", acknowledgement: "codex ack" });
+    await waitFor(() => expect(m.getAgents).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect((codex.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(true),
+    );
   });
 });

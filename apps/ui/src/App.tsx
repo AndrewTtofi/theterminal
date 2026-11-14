@@ -3,7 +3,7 @@ import type { AdapterId, AgentAction, AgentRun, Board as BoardData, LedgerEntry,
 import { api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health } from "./api";
 import { AgentPanel } from "./components/AgentPanel";
-import { ClaudeAuthSetting } from "./components/ClaudeAuthSetting";
+import { ProviderAuthSettings } from "./components/ProviderAuthSettings";
 import { DecisionCard } from "./components/DecisionCard";
 import { Board } from "./components/Board";
 import { LedgerPanel } from "./components/LedgerPanel";
@@ -220,6 +220,7 @@ export function App() {
               {agentsInfo && (
                 <AgentPanel
                   adapters={agentsInfo.adapters}
+                  providers={agentsInfo.providers}
                   runs={runs}
                   selectedRunId={selectedRunId}
                   actions={runActions}
@@ -249,24 +250,41 @@ export function App() {
             <p className="empty">Select or create a project.</p>
           )}
         </main>
-        {selectedId && (
+        {(agentsInfo || selectedId) && (
           <div>
             {agentsInfo && (
-              <ClaudeAuthSetting
-                key={agentsInfo.claudeAuthMode}
-                mode={agentsInfo.claudeAuthMode}
-                subscriptionAck={agentsInfo.subscriptionAck}
-                onChange={(mode, acknowledgement) =>
-                  run(async () => {
-                    const res = await api.setClaudeAuth(
-                      acknowledgement ? { mode, acknowledgement } : { mode },
+              <ProviderAuthSettings
+                modes={{
+                  claude: agentsInfo.providers.claude.mode,
+                  codex: agentsInfo.providers.codex.mode,
+                  gemini: agentsInfo.providers.gemini.mode,
+                }}
+                acks={agentsInfo.acks}
+                onChange={async (provider, mode, acknowledgement) => {
+                  try {
+                    setError(null);
+                    const res = await api.setProviderAuth(
+                      acknowledgement ? { provider, mode, acknowledgement } : { provider, mode },
                     );
-                    setAgentsInfo((prev) => (prev ? { ...prev, claudeAuthMode: res.mode } : prev));
-                  })
-                }
+                    setAgentsInfo((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            providers: { ...prev.providers, [provider]: { ...prev.providers[provider], mode: res.mode } },
+                          }
+                        : prev,
+                    );
+                    return true;
+                  } catch (e) {
+                    setError(errorMessage(e));
+                    // Re-sync with the server's actual mode.
+                    void api.getAgents().then(setAgentsInfo, () => {});
+                    return false;
+                  }
+                }}
               />
             )}
-            <LedgerPanel entries={entries} />
+            {selectedId && <LedgerPanel entries={entries} />}
           </div>
         )}
       </div>

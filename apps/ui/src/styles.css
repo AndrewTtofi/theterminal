@@ -28,6 +28,6 @@ input, select { font: inherit; background: var(--bg); color: inherit; border: 1p
 .agent-panel { margin-top: 16px; } .agent-panel label { display: block; margin-bottom: 6px; }
 .agent-panel textarea { display: block; width: 100%; font: inherit; background: var(--bg); color: inherit; border: 1px solid var(--line); border-radius: 4px; }
 .runs li { display: flex; gap: 6px; padding: 2px 0; } .runs button.selected { font-weight: 600; }
-.claude-auth { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; } .claude-auth label { display: block; }
+.provider-auth { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; } .provider-auth label { display: block; }
 .warning { background: #fff3cd; color: #664d03; border: 1px solid #e0b84a; border-radius: 4px; padding: 6px; margin-top: 6px; }
 @media (prefers-color-scheme: dark) { .warning { background: #3d3112; color: #f1deb0; border-color: #7a6320; } }

@@ -85,6 +85,15 @@ describe("describeEntry agent events", () => {
     );
   });
 
+  it("describes provider auth changes", () => {
+    const d = (provider: string, mode: string) =>
+      describeEntry(entry(20, "settings.provider_auth_changed", { provider, mode }));
+    expect(d("claude", "api_key")).toBe("Owner set Claude to use API key");
+    expect(d("claude", "subscription")).toBe("Owner set Claude to use own subscription");
+    expect(d("codex", "chatgpt")).toBe("Owner set Codex to use own ChatGPT plan");
+    expect(d("gemini", "google")).toBe("Owner set Gemini to use own Google account");
+  });
+
   it("falls back for unknown types", () => {
     expect(describeEntry(entry(14, "something.new" as LedgerEntry["type"], {}, runner))).toBe(
       "System recorded something.new",

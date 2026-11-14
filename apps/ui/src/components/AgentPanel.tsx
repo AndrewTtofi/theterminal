@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ActionKind, AdapterId, AgentAction, AgentRun } from "@theterminal/shared";
+import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Provider } from "@theterminal/shared";
 
 const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
@@ -11,8 +11,12 @@ const KIND_ICON: Record<ActionKind, string> = {
   other: "•",
 };
 
+const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
+
 type Props = {
   adapters: AdapterId[];
+  /** Per-provider install state; a missing entry means the adapter is always available. */
+  providers?: Partial<Record<Provider, { mode: AuthMode; installed: boolean }>>;
   runs: AgentRun[];
   selectedRunId: string | null;
   actions: AgentAction[];
@@ -25,11 +29,16 @@ type Props = {
 const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
 const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
-export function AgentPanel({ adapters, runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
+export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
-  const chosen = adapter || adapters[0] || "";
+  // The bundled Claude SDK runs without the CLI when signed in with an API key.
+  const available = (a: AdapterId) => {
+    const info = a === "fake" ? undefined : providers?.[a];
+    return !info || info.installed || (a === "claude" && info.mode === "api_key");
+  };
+  const chosen = adapter || adapters.find(available) || "";
   const selected = runs.find((r) => r.id === selectedRunId);
 
   return (
@@ -52,8 +61,9 @@ export function AgentPanel({ adapters, runs, selectedRunId, actions, onStart, on
           Agent
           <select value={chosen} onChange={(e) => setAdapter(e.target.value as AdapterId)}>
             {adapters.map((a) => (
-              <option key={a} value={a}>
-                {a}
+              <option key={a} value={a} disabled={!available(a)}>
+                {ADAPTER_NAMES[a]}
+                {available(a) ? "" : " (not installed)"}
               </option>
             ))}
           </select>

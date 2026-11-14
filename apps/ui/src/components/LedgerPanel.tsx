@@ -45,6 +45,17 @@ export function describeEntry(e: LedgerEntry): string {
       return `Agent run ${p.status}`;
     case "settings.claude_auth_changed":
       return `${who} set Claude to use ${p.mode === "subscription" ? "own subscription" : "API key"}`;
+    case "settings.provider_auth_changed": {
+      const how =
+        p.mode === "api_key"
+          ? "API key"
+          : p.mode === "chatgpt"
+            ? "own ChatGPT plan"
+            : p.mode === "google"
+              ? "own Google account"
+              : "own subscription";
+      return `${who} set ${cap(p.provider)} to use ${how}`;
+    }
     default:
       return `${who} recorded ${e.type}`;
   }

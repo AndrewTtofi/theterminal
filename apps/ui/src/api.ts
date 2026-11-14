@@ -1,4 +1,4 @@
-import type { AdapterId, AgentAction, AgentRun, Board, Card, LedgerEntry, PendingAgentAction, Project, Stage } from "@theterminal/shared";
+import type { AdapterId, AgentAction, AgentRun, AuthMode, Board, Card, LedgerEntry, PendingAgentAction, Project, Provider, Stage } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -42,8 +42,8 @@ async function request<T>(path: string, init?: { method: "POST"; body: unknown }
 
 export type AgentsInfo = {
   adapters: AdapterId[];
-  claudeAuthMode: "api_key" | "subscription";
-  subscriptionAck: string;
+  providers: Record<Provider, { mode: AuthMode; installed: boolean }>;
+  acks: Record<Provider, string>;
 };
 
 const enc = encodeURIComponent;
@@ -58,8 +58,8 @@ export const api = {
   moveCard: (cardId: string, to: Stage) =>
     request<Card>(`/api/cards/${encodeURIComponent(cardId)}/move`, { method: "POST", body: { to } }),
   getAgents: () => request<AgentsInfo>("/api/agents"),
-  setClaudeAuth: (i: { mode: "api_key" | "subscription"; acknowledgement?: string }) =>
-    request<{ mode: "api_key" | "subscription" }>("/api/settings/claude-auth", { method: "POST", body: i }),
+  setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
+    request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
   startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string }) =>
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),

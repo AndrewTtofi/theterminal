@@ -91,4 +91,40 @@ describe("AgentPanel", () => {
     await userEvent.click(start);
     expect(box.value).toBe("");
   });
+
+  it("disables providers that are not installed, except Claude with an API key", () => {
+    render(
+      <AgentPanel
+        adapters={["claude", "codex", "gemini"]}
+        providers={{
+          claude: { mode: "api_key", installed: false },
+          codex: { mode: "api_key", installed: false },
+          gemini: { mode: "api_key", installed: true },
+        }}
+        runs={[]} selectedRunId={null} actions={[]}
+        onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()}
+      />,
+    );
+    const opt = (n: RegExp) => screen.getByRole("option", { name: n }) as HTMLOptionElement;
+    expect(opt(/^Claude$/).disabled).toBe(false);
+    expect(opt(/Codex \(not installed\)/).disabled).toBe(true);
+    expect(opt(/^Gemini$/).disabled).toBe(false);
+  });
+
+  it("disables Claude when not installed in subscription mode, and defaults to an enabled adapter", () => {
+    render(
+      <AgentPanel
+        adapters={["claude", "codex"]}
+        providers={{
+          claude: { mode: "subscription", installed: false },
+          codex: { mode: "api_key", installed: true },
+          gemini: { mode: "api_key", installed: true },
+        }}
+        runs={[]} selectedRunId={null} actions={[]}
+        onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()}
+      />,
+    );
+    expect((screen.getByRole("option", { name: /Claude \(not installed\)/ }) as HTMLOptionElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("codex");
+  });
 });
