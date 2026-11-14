@@ -9,7 +9,9 @@ const isTruncated = (input: unknown): boolean =>
   typeof input === "object" && input !== null && (input as { truncated?: unknown }).truncated === true;
 
 /**
- * Decides what needs a human: outside paths are denied, inside reads are allowed, the rest asks. */
+ * Decides what needs a human: outside paths are denied, and so is a shell command whose recorded input was
+ * truncated or redacted (a human cannot review all of it); inside reads are allowed; the rest asks.
+ */
 export function classify(a: ProposedAction, worktreeAbs: string, wt: WorktreeManager): Verdict {
   const raw: unknown = a.paths;
   const paths: unknown[] = Array.isArray(raw) ? raw : [];

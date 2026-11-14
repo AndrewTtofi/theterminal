@@ -346,7 +346,7 @@ export class AgentRunner {
       const { a, input } = this.recordProposal(runId, s, actionId, proposed);
       recorded = true;
       if (s.abort.signal.aborted) return this.settle(s.projectId, runId, actionId, "deny", "run stopped");
-      const v = classify({ ...a, input }, worktreeAbs, this.deps.worktrees) // classify sees what was recorded;
+      const v = classify({ ...a, input }, worktreeAbs, this.deps.worktrees); // classify sees what was recorded
       if (v.verdict !== "ask") {
         return this.settle(s.projectId, runId, actionId, v.verdict === "auto_allow" ? "allow" : "deny", v.reason);
       }
