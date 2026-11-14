@@ -77,25 +77,32 @@ function lineEnd(s: string, from: number): number {
   return end;
 }
 
-/** End of a YAML block scalar body: the following lines indented deeper than the key's line. */
+const isBreak = (c: string | undefined) => c === "\n" || c === "\r";
+const isBlank = (c: string | undefined) => c === " " || c === "\t";
+
+/**
+ * End of a YAML block scalar body: the following lines indented deeper than the key's line.
+ * `\n`, `\r\n` and a lone `\r` all break lines. The key's indentation is read by scanning back
+ * only to the start of its own line, and the body forward from the header, so the cost is linear
+ * in the lines visited (a header always ends its line, so each line is scanned back at most once).
+ */
 function blockScalarEnd(s: string, keyIndex: number, from: number): number {
-  const lineStart = s.lastIndexOf("\n", keyIndex - 1) + 1;
+  let lineStart = keyIndex;
+  while (lineStart > 0 && !isBreak(s[lineStart - 1])) lineStart--;
   let indent = 0;
-  while (s[lineStart + indent] === " " || s[lineStart + indent] === "\t") indent++;
+  while (isBlank(s[lineStart + indent])) indent++;
   let end = from;
-  let pos = s.indexOf("\n", from);
-  while (pos !== -1) {
-    const next = pos + 1;
-    let eol = s.indexOf("\n", next);
-    if (eol === -1) eol = s.length;
-    let ind = 0;
-    while (next + ind < eol && (s[next + ind] === " " || s[next + ind] === "\t")) ind++;
-    const blank = next + ind >= eol || s[next + ind] === "\r";
-    if (!blank) {
-      if (ind <= indent) break;
-      end = eol;
+  let pos = from; // at a line break or the end of the string
+  while (pos < s.length) {
+    const next = pos + (s[pos] === "\r" && s[pos + 1] === "\n" ? 2 : 1);
+    let i = next;
+    while (isBlank(s[i])) i++;
+    if (i < s.length && !isBreak(s[i])) {
+      if (i - next <= indent) break;
+      while (i < s.length && !isBreak(s[i])) i++;
+      end = i;
     }
-    pos = eol >= s.length ? -1 : eol;
+    pos = i;
   }
   return end;
 }

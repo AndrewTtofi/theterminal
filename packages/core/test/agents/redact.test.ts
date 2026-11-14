@@ -214,6 +214,11 @@ describe("redact: leak fixes", () => {
       expect(r(`password: ${h}\n  FAKE1\nnext: x`)).toBe(`password: ${REDACTED}\nnext: x`);
     }
   });
+  it("redacts YAML block bodies with CR-only and CRLF line breaks", () => {
+    expect(r("password: |\r  FAKE1\r  FAKE2\rnext: x")).toBe(`password: ${REDACTED}\rnext: x`);
+    expect(r("a: 1\r  password: |\r    FAKE1\r  keep: y")).toBe(`a: 1\r  password: ${REDACTED}\r  keep: y`);
+    expect(r("password: |\r\n  FAKE1\r\n  FAKE2\r\nnext: x")).toBe(`password: ${REDACTED}\r\nnext: x`);
+  });
   it("is linear on large input", () => {
     const inputs = [
       "a".repeat(1_000_000),
@@ -234,6 +239,10 @@ describe("redact: leak fixes", () => {
       '\\"password\\":\\"\\\\'.repeat(60_000),
       "password: |2 # c\n".repeat(60_000),
       "password: | # password: | #".repeat(40_000) + "\r",
+      "password: |\r".repeat(40_000),
+      "password: | #\r".repeat(70_000),
+      "password: |\r  x\r".repeat(60_000),
+      "x\r".repeat(300_000) + "password: |\r  FAKE1\r".repeat(30_000),
     ];
     for (const input of inputs) {
       const t = performance.now();
