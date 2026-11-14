@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, open, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
@@ -704,12 +704,20 @@ async function readCapped(real: string): Promise<string> {
   }
 }
 
-/** Writes through a temp file in the same directory, then renames it into place. */
+/** Writes through a temp file in the same directory, then renames it into place, keeping an existing file's mode. */
 async function writeAtomic(real: string, content: string): Promise<void> {
   await mkdir(dirname(real), { recursive: true });
   const tmp = join(dirname(real), `.${basename(real)}.${randomUUID()}.tmp`);
   await writeFile(tmp, content, "utf8");
   try {
+    const mode = await stat(real).then(
+      (st) => st.mode & 0o7777,
+      (e: NodeJS.ErrnoException) => {
+        if (e.code === "ENOENT") return null;
+        throw e;
+      },
+    );
+    if (mode !== null) await chmod(tmp, mode);
     await rename(tmp, real);
   } catch (e) {
     await unlink(tmp).catch(() => undefined);

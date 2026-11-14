@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -419,6 +419,17 @@ describe("GeminiAdapter", () => {
     expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([["fs/write_text_file", "file_write", "Write sub/dir/notes.md", [path]]]);
     expect(readFileSync(path, "utf8")).toBe("# notes\n");
     expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "wrote 8 bytes" }]);
+  });
+
+  it("overwriting a file keeps its mode", async () => {
+    const path = join(worktree, "run.sh");
+    writeFileSync(path, "#!/bin/sh\necho old\n");
+    chmodSync(path, 0o755);
+    script([{ type: "write", path, content: "#!/bin/sh\necho new\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(readFileSync(path, "utf8")).toBe("#!/bin/sh\necho new\n");
+    if (process.platform !== "win32") expect(statSync(path).mode & 0o7777).toBe(0o755);
   });
 
   it("Deny on the write leaves no file and returns an error to the agent", async () => {
