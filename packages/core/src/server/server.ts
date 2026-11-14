@@ -17,6 +17,7 @@ import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
+import { GeminiAdapter } from "../agents/gemini/adapter.js";
 import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
@@ -98,17 +99,18 @@ function fakeCliCommand(p: Provider): { file: string; args: string[] } | undefin
 }
 
 /**
- * Claude and Codex always (their CLIs are looked up at run start, not here); the scripted fake adapter only
+ * Claude, Codex and Gemini always (their CLIs are looked up at run start, not here); the scripted fake adapter only
  * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
  */
 function buildAdapters(dataDir: string, which: Which): Partial<Record<AdapterId, AgentAdapter>> {
   const codexCommand = fakeCliCommand("codex");
+  const geminiCommand = fakeCliCommand("gemini");
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
     claude: new ClaudeAdapter({ dataDir }),
     // The API key is read from OPENAI_API_KEY when each run starts.
     codex: new CodexAdapter({ dataDir, bin: () => which("codex"), ...(codexCommand && { command: codexCommand }) }),
-    // Gemini registration point: add the Gemini adapter here, the same way as Codex, with
-    // fakeCliCommand("gemini"). Until then a gemini run is rejected as unavailable.
+    // The API key is read from GEMINI_API_KEY when each run starts.
+    gemini: new GeminiAdapter({ dataDir, bin: () => which("gemini"), ...(geminiCommand && { command: geminiCommand }) }),
   };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;

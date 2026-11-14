@@ -20,10 +20,12 @@ import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
-  "THETERMINAL_FAKE_CODEX_SCRIPT",
+  "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
+const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
 const FAKE_OPENAI_KEY = "sk-TESTKEY-openai-0000000000000000";
+const FAKE_GEMINI_KEY = "AIza-TESTKEY-gemini-000000000000000";
 /** A PATH lookup that finds nothing, so tests never depend on which CLIs this machine has. */
 const noCli = () => null;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -86,7 +88,7 @@ describe("agent API", { timeout: 15000 }, () => {
   it("GET /api/agents lists registered adapters, each provider's mode and install state, and the acknowledgements", async () => {
     const { s } = await start(script, { which: (cmd) => (cmd === "codex" ? "/fake/bin/codex" : null) });
     expect(await json(get(s, "/api/agents"))).toEqual({
-      adapters: ["claude", "codex", "fake"],
+      adapters: ["claude", "codex", "gemini", "fake"],
       providers: {
         claude: { mode: "api_key", installed: false },
         codex: { mode: "api_key", installed: true },
@@ -101,13 +103,14 @@ describe("agent API", { timeout: 15000 }, () => {
 
   it("a provider with a test binary override reports installed only under the fake env", async () => {
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
     const installed = async (s: RunningServer) =>
       Object.fromEntries(
         Object.entries((await json<{ providers: Record<string, { installed: boolean }> }>(get(s, "/api/agents"))).providers)
           .map(([p, v]) => [p, v.installed]),
       );
     const { s: withFake } = await start(script);
-    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: false });
+    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: true });
 
     delete process.env.THETERMINAL_FAKE_AGENT;
     const { s: real } = await start(null);
@@ -181,17 +184,46 @@ describe("agent API", { timeout: 15000 }, () => {
     expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
   });
 
-  it("a Gemini run is 400 invalid_input until its adapter is registered", async () => {
+  it("with the fake env and THETERMINAL_GEMINI_BIN, a Gemini run goes start, ask, allow, completed", async () => {
+    process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
+    process.env.THETERMINAL_FAKE_GEMINI_SCRIPT = JSON.stringify([
+      { type: "write", path: "notes.txt", content: "hello", permission: true },
+      { type: "message", text: "All done." },
+    ]);
     const { s, projectId } = await start(script);
-    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "go" });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "invalid_input" });
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "write the notes" });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect(run).toMatchObject({ adapter: "gemini", authMode: "api_key", status: "running" });
+
+    await untilPending(s, projectId);
+    const [action] = await pending(s, projectId);
+    expect(action).toMatchObject({ runId: run.id, kind: "file_edit" });
+    expect((await post(s, `/api/actions/${action!.id}/decision`, { decision: "allow" })).status).toBe(200);
+
+    await untilFinished(s, run.id);
+    const detail = await getRun(s, run.id);
+    expect(detail.run).toMatchObject({ status: "completed", error: null });
+    expect(detail.actions.map((a) => [a.kind, a.status, a.decidedBy])).toEqual([["file_edit", "completed", "human"]]);
+    const ledger = JSON.stringify(await json(get(s, `/api/ledger?projectId=${projectId}`)));
+    expect(ledger).not.toContain(FAKE_GEMINI_KEY);
   });
 
-  it("registers claude and codex when the fake env var is unset, and rejects a fake run with 400", async () => {
+  it("ignores THETERMINAL_GEMINI_BIN without the fake env: the run fails because Gemini is not on PATH", async () => {
+    delete process.env.THETERMINAL_FAKE_AGENT;
+    process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
+    const { s, projectId } = await start(null);
+    const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "go" }));
+    await untilFinished(s, run.id);
+    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Gemini CLI is not installed or not on PATH" });
+  });
+
+  it("registers claude, codex and gemini when the fake env var is unset, and rejects a fake run with 400", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
     const { s, projectId } = await start(null);
-    expect((await json<{ adapters: string[] }>(get(s, "/api/agents"))).adapters).toEqual(["claude", "codex"]);
+    expect((await json<{ adapters: string[] }>(get(s, "/api/agents"))).adapters).toEqual(["claude", "codex", "gemini"]);
     const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "invalid_input" });
