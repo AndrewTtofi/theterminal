@@ -1,8 +1,9 @@
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
+import type { AdapterEvent, AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
 
 export type FakeStep =
   | { propose: ProposedAction; result?: { ok: boolean; output: string } }
   | { message: string }
+  | { usage: Omit<Extract<AdapterEvent, { type: "usage" }>, "type"> }
   | { throw: string };
 
 /**
@@ -20,6 +21,10 @@ export class FakeAdapter implements AgentAdapter {
       if ("throw" in step) throw new Error(step.throw);
       if ("message" in step) {
         o.emit({ type: "message", text: step.message });
+        continue;
+      }
+      if ("usage" in step) {
+        o.emit({ type: "usage", ...step.usage });
         continue;
       }
       const gate = await o.gate(step.propose);

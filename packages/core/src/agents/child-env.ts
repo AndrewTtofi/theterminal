@@ -1,6 +1,9 @@
 import { join } from "node:path";
 import type { AuthMode, Provider } from "@theterminal/shared";
-import { EMPTY_GITCONFIG } from "./worktrees.js";
+import { EMPTY_GITCONFIG, assertEmptyGitconfig } from "./worktrees.js";
+
+/** Throws SharedGitconfigModifiedError when the shared empty git config has content (see worktrees.ts). */
+export { assertEmptyGitconfig };
 
 /** Inherited git variables (identity, repository, config) would override what the worktree is set up with. */
 const INHERITED_GIT_ENV = /^GIT_/i;
@@ -15,6 +18,7 @@ const INHERITED_PROVIDER_ENV: Record<Provider, RegExp> = {
  * The child-process environment for a provider CLI. A copy: `base` (default process.env) is never changed.
  * Strips inherited git and provider variables, points git at the empty global config, and in api_key mode
  * re-adds only the given key. Login modes pass no key, so the user's own CLI login is used untouched.
+ * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
  */
 export function buildChildEnv(
   provider: Provider,
@@ -37,5 +41,6 @@ export function buildChildEnv(
     else if (provider === "codex") env.OPENAI_API_KEY = env.CODEX_API_KEY = opts.apiKey;
     else env.GEMINI_API_KEY = opts.apiKey;
   }
+  assertEmptyGitconfig(opts.dataDir); // a modified shared config fails the run before the CLI starts
   return env;
 }

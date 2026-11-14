@@ -77,6 +77,15 @@ describe("agent.finished", () => {
     bad("agent.finished", { runId: "r1", status: "running", costUsd: null, error: null });
     bad("agent.finished", { runId: "r1", status: "failed", costUsd: null, error: "x".repeat(1001) });
   });
+  it("carries optional token totals: non-negative integers or null", () => {
+    const base = { runId: "r1", status: "completed", costUsd: null, error: null };
+    ok("agent.finished", { ...base, inputTokens: 10, outputTokens: 5 });
+    ok("agent.finished", { ...base, inputTokens: null, outputTokens: null });
+    ok("agent.finished", { ...base, inputTokens: 0 });
+    bad("agent.finished", { ...base, inputTokens: -1 });
+    bad("agent.finished", { ...base, outputTokens: 1.5 });
+    bad("agent.finished", { ...base, outputTokens: Number.POSITIVE_INFINITY });
+  });
 });
 
 describe("settings.claude_auth_changed", () => {

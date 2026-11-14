@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { EMPTY_GITCONFIG, WorktreeManager, gitEnv } from "../../src/agents/worktrees.js";
+import { buildChildEnv } from "../../src/agents/child-env.js";
+import { EMPTY_GITCONFIG, SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, gitEnv } from "../../src/agents/worktrees.js";
 
 const run = promisify(execFile);
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
@@ -87,9 +88,26 @@ describe("WorktreeManager", () => {
     expect(env.GIT_CONFIG_GLOBAL).toBe(cfg);
     expect(env.GIT_CONFIG_GLOBAL).not.toBe(devNull);
     expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
-    writeFileSync(cfg, "[user]\n\temail = someone@example.com\n"); // tampered: emptied again
-    await mgr.ensureProjectRepo("proj1");
+    chmodSync(cfg, 0o644);
+    writeFileSync(cfg, "[user]\n\temail = someone@example.com\n"); // tampered: never silently emptied, git is not run
+    await expect(mgr.ensureProjectRepo("proj1")).rejects.toThrow(SharedGitconfigModifiedError);
+    expect(existsSync(join(dataDir, "projects", "proj1", "repo", ".git"))).toBe(false);
+  });
+
+  it("creates the shared git config empty and read-only on construction", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
     expect(readFileSync(cfg, "utf8")).toBe("");
+    if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
+    expect(ensureEmptyGitconfig(dataDir)).toBe(cfg); // idempotent on a read-only file
+  });
+
+  it("a shared git config with a byte in it fails buildChildEnv before any CLI starts", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir })).not.toThrow();
+    chmodSync(cfg, 0o644);
+    writeFileSync(cfg, "x");
+    expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir })).toThrow(SharedGitconfigModifiedError);
+    expect(() => buildChildEnv("codex", "chatgpt", { dataDir })).toThrow("shared git config was modified");
   });
 
   it("a plain git commit in a worktree uses the neutral identity, not the user's global one", async () => {

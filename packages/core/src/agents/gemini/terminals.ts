@@ -28,7 +28,7 @@ export class Terminals {
 
   constructor(
     private readonly spawn: typeof nodeSpawn,
-    private readonly onExit: (terminalId: string, status: ExitStatus, output: string) => void,
+    private readonly onExit: (terminalId: string, status: ExitStatus, output: string, truncated: boolean) => void,
   ) {}
 
   create(command: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; outputByteLimit?: number | null }): string {
@@ -43,7 +43,7 @@ export class Terminals {
         settled = true;
         t.exit = status;
         resolve(status);
-        this.onExit(terminalId, status, t.output);
+        this.onExit(terminalId, status, t.output, t.truncated);
       };
       child.on("error", (e) => {
         this.append(t, `${e.message}\n`);

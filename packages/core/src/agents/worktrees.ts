@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -19,6 +19,51 @@ const REPO_CONFIG: [key: string, value: string][] = [
  * work here: git on Windows cannot open `\\.\nul` as a config file.
  */
 export const EMPTY_GITCONFIG = ".theterminal-empty-gitconfig";
+
+const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
+
+export class SharedGitconfigModifiedError extends Error {
+  constructor() {
+    super("shared git config was modified");
+    this.name = "SharedGitconfigModifiedError";
+  }
+}
+
+/**
+ * Creates the shared empty git config if it is missing and makes it read-only (best effort on Windows, where
+ * chmod only sets the read-only attribute), so `git config --global` in a run fails instead of writing to it.
+ * An existing file is never rewritten: content in it is caught by `assertEmptyGitconfig`. Returns its path.
+ */
+export function ensureEmptyGitconfig(dataDir: string): string {
+  const file = join(dataDir, EMPTY_GITCONFIG);
+  mkdirSync(dataDir, { recursive: true });
+  try {
+    writeFileSync(file, "", { flag: "wx", mode: 0o444 });
+  } catch (e) {
+    if (errCode(e) !== "EEXIST") throw e;
+  }
+  try {
+    chmodSync(file, 0o444);
+  } catch {
+    // Best effort: the check before every run still fails closed.
+  }
+  return file;
+}
+
+/**
+ * Throws SharedGitconfigModifiedError unless the shared git config is missing (git then reads no global config)
+ * or an empty regular file. A symlink or directory in its place counts as modified.
+ */
+export function assertEmptyGitconfig(dataDir: string): void {
+  let st;
+  try {
+    st = lstatSync(join(dataDir, EMPTY_GITCONFIG));
+  } catch (e) {
+    if (errCode(e) === "ENOENT") return;
+    throw new SharedGitconfigModifiedError();
+  }
+  if (!st.isFile() || st.size > 0) throw new SharedGitconfigModifiedError();
+}
 
 /** Drops every inherited GIT_* variable and ignores global/system git config. */
 export function gitEnv(cwd: string, emptyGlobalConfig: string): NodeJS.ProcessEnv {
@@ -43,7 +88,6 @@ const gitRunner =
     return stdout;
   };
 
-const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 
 function assertId(kind: string, id: string): void {
   if (!ID_PATTERN.test(id)) throw new Error(`invalid ${kind}`);
@@ -61,7 +105,7 @@ export class WorktreeManager {
     private readonly dataDir: string,
     git?: GitRunner,
   ) {
-    this.emptyGlobalConfig = join(dataDir, EMPTY_GITCONFIG);
+    this.emptyGlobalConfig = ensureEmptyGitconfig(dataDir);
     this.git = git ?? gitRunner(this.emptyGlobalConfig);
   }
 
@@ -85,7 +129,9 @@ export class WorktreeManager {
   private async initRepo(projectId: string): Promise<string> {
     const repo = join(this.dataDir, "projects", projectId, "repo");
     mkdirSync(repo, { recursive: true });
-    writeFileSync(this.emptyGlobalConfig, ""); // (re)emptied before any git call
+    // Before any git call: recreated if it was deleted, and never used once something was written to it.
+    ensureEmptyGitconfig(this.dataDir);
+    assertEmptyGitconfig(this.dataDir);
     await this.git(["init"], repo); // idempotent; also repairs an empty .git
     const gitDir = (await this.git(["rev-parse", "--absolute-git-dir"], repo)).trim();
     if (fold(normalize(gitDir)) !== fold(join(realpathSync.native(repo), ".git"))) {

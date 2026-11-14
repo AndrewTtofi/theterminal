@@ -1,5 +1,9 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildChildEnv } from "../../src/agents/child-env.js";
+import { assertEmptyGitconfig, buildChildEnv } from "../../src/agents/child-env.js";
+import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
 const base = {
@@ -80,4 +84,38 @@ describe("buildChildEnv", () => {
     const env = buildChildEnv("codex", "api_key", { dataDir: DATA_DIR, base });
     expect(keys(env, /^(openai_|codex_)/i)).toEqual([]);
   });
+});
+
+describe("assertEmptyGitconfig", () => {
+  const withDir = (fn: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "gitcfg-"));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("accepts a missing or empty file", () =>
+    withDir((dir) => {
+      expect(() => assertEmptyGitconfig(dir)).not.toThrow();
+      writeFileSync(join(dir, EMPTY_GITCONFIG), "");
+      expect(() => assertEmptyGitconfig(dir)).not.toThrow();
+    }));
+
+  it("rejects a file with content, a directory, and (POSIX) a symlink to an empty file", () =>
+    withDir((dir) => {
+      const cfg = join(dir, EMPTY_GITCONFIG);
+      writeFileSync(cfg, "[user]\n");
+      expect(() => assertEmptyGitconfig(dir)).toThrow(SharedGitconfigModifiedError);
+      rmSync(cfg);
+      mkdirSync(cfg);
+      expect(() => assertEmptyGitconfig(dir)).toThrow(SharedGitconfigModifiedError);
+      if (process.platform !== "win32") {
+        rmSync(cfg, { recursive: true });
+        writeFileSync(join(dir, "elsewhere"), "");
+        symlinkSync(join(dir, "elsewhere"), cfg);
+        expect(() => assertEmptyGitconfig(dir)).toThrow(SharedGitconfigModifiedError);
+      }
+    }));
 });

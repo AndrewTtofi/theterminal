@@ -14,7 +14,7 @@ export { createServer } from "./server/server.js";
 export type { RunningServer } from "./server/server.js";
 export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
-export { WorktreeManager } from "./agents/worktrees.js";
+export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction } from "./agents/adapter.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";

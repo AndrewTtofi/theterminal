@@ -6,7 +6,8 @@ export type GateResult = { decision: "allow" | "deny"; reason: string };
 export type AdapterEvent =
   | { type: "message"; text: string }
   | { type: "action_result"; actionId: string; ok: boolean; output: string }
-  | { type: "usage"; costUsd: number };
+  /** Each a finite number >= 0; absent means not reported. The runner sums each separately per run. */
+  | { type: "usage"; costUsd?: number; inputTokens?: number; outputTokens?: number };
 
 export interface AdapterStartOptions {
   cwd: string;
@@ -23,6 +24,13 @@ export interface AdapterStartOptions {
    * policy, without asking anyone. Resolves once recorded.
    */
   recordDenied: (a: ProposedAction, reason: string) => Promise<void>;
+  /**
+   * The runner's own cleaning without the length cap: redacts the secrets known right now (read on every call),
+   * scrubs this run's paths, and redacts again. Adapters pass full text to the gate and let the runner cap it;
+   * an adapter that caps a string for layout (a part of a summary) must apply this first, so a cut can never
+   * leave a fragment of a secret that no pattern matches.
+   */
+  clean: (s: string) => string;
 }
 
 export interface AgentAdapter {

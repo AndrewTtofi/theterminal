@@ -48,6 +48,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_GEMINI !== "1")("GeminiAdapter live
         recordDenied: async (a, reason) => {
           timeline.push(`denied:${a.kind}:${reason}`);
         },
+        clean: (s) => s,
       });
       expect(r).toEqual({ status: "completed" });
       // The shell command asked (through session/request_permission) before any result was produced.
@@ -69,7 +70,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_GEMINI !== "1")("GeminiAdapter live
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Live" }).id;
     const runner = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
-      adapters: { gemini: new GeminiAdapter({ dataDir }) }, extraSecrets: [], dataDir,
+      adapters: { gemini: new GeminiAdapter({ dataDir }) }, extraSecrets: () => [], dataDir,
     });
     try {
       const run = await runner.start(owner, {

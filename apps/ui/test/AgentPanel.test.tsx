@@ -14,6 +14,8 @@ const run: AgentRun = {
   status: "completed",
   worktree: "w/run1",
   costUsd: 0.5,
+  inputTokens: null,
+  outputTokens: null,
   error: null,
   startedAt: "",
   finishedAt: null,

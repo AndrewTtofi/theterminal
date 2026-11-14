@@ -1,3 +1,4 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HookCallbackMatcher, HookInput, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -5,11 +6,13 @@ import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
-import { DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
-import { EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
+import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { AgentRunner, DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
+import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
+import { BoardService } from "../../src/board/board-service.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { openDatabase, type Db } from "../../src/db.js";
-import { getSetting } from "../../src/events/projections.js";
+import { getRun, getSetting, listActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderSettings, toolToAction as indexToolToAction } from "../../src/index.js";
 
@@ -47,9 +50,9 @@ describe("toolToAction", () => {
     expect(a.summary.length).toBeGreaterThan(0);
   });
 
-  it("caps the command in a Bash summary at 150 characters", () => {
+  it("passes the whole command to the gate: the runner redacts before it caps", () => {
     const a = toolToAction("Bash", { command: "x".repeat(400) }, CWD);
-    expect(a.summary).toBe(`Run: ${"x".repeat(150)}`);
+    expect(a.summary).toBe(`Run: ${"x".repeat(400)}`);
   });
 
   it("summarises absolute paths inside the worktree relative to it", () => {
@@ -87,8 +90,8 @@ describe("toolToAction", () => {
   });
 
   it("caps the PowerShell command and remote agent description in summaries", () => {
-    expect(toolToAction("PowerShell", { command: "y".repeat(300) }, CWD).summary).toBe(`Run: ${"y".repeat(150)}`);
-    expect(toolToAction("Agent", { description: "d".repeat(300), isolation: "remote" }, CWD).summary).toBe(`Run remote agent: ${"d".repeat(120)}`);
+    expect(toolToAction("PowerShell", { command: "y".repeat(300) }, CWD).summary).toBe(`Run: ${"y".repeat(300)}`);
+    expect(toolToAction("Agent", { description: "d".repeat(300), isolation: "remote" }, CWD).summary).toBe(`Run remote agent: ${"d".repeat(300)}`);
   });
 
   // The CLI trims path input before expanding "~", so padded paths must never be judged as written.
@@ -184,6 +187,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     },
     emit: (e) => events.push(e),
     recordDenied: async () => {},
+    clean: (t) => t,
   };
   return { opts, proposed, events, abort };
 }
@@ -383,6 +387,14 @@ describe("ClaudeAdapter", () => {
     ]);
   });
 
+  it("reports the result's cost and token usage", async () => {
+    const usage = { input_tokens: 120, output_tokens: 34, cache_read_input_tokens: 7, cache_creation_input_tokens: 0 };
+    const q = fakeQuery([{ msg: { type: "result", subtype: "success", is_error: false, result: "done", total_cost_usd: 0.25, usage } }]);
+    const h = harness();
+    expect(await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "completed" });
+    expect(h.events).toEqual([{ type: "usage", costUsd: 0.25, inputTokens: 120, outputTokens: 34 }]);
+  });
+
   it("fails when Claude reports an error result, still reporting its cost", async () => {
     const q = fakeQuery([{ msg: { type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0.5, errors: ["too many turns"] } }]);
     const h = harness();
@@ -423,6 +435,40 @@ describe("ClaudeAdapter", () => {
     h.abort.abort();
     expect(await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "failed", error: "run stopped" });
     expect(q.calls).toHaveLength(0);
+  });
+});
+
+describe("ClaudeAdapter through the runner", () => {
+  // A stored secret (not matched by any pattern) that straddles where summaries used to be cut.
+  const STORED = "stored-conn-value-0123456789";
+
+  it.each([
+    ["a Bash command cut at 150", "Bash", { command: `echo ${"a".repeat(136)} ${STORED}` }],
+    ["a remote agent description cut at 120", "Agent", { description: `${"d".repeat(110)} ${STORED}`, prompt: "go", isolation: "remote" }],
+  ])("leaves no fragment of a stored secret across the old cap (%s) in the recorded summary", async (_label, tool, input) => {
+    const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "claude-runner-")));
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Claude" }).id;
+    const q = fakeQuery([{ tool, input, id: "tu-1", response: "ok" }, success(0)]);
+    const claude = new ClaudeAdapter({ dataDir, query: q.fn, apiKey: () => FAKE_KEY });
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(), adapters: { claude }, extraSecrets: () => [STORED], dataDir,
+    });
+    try {
+      const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "go" });
+      // A shell command holding a secret is denied by policy; the remote agent waits for a human.
+      await vi.waitFor(() => expect(listActions(db, run.id)).toHaveLength(1), { timeout: 5000 });
+      runner.stop(owner, run.id);
+      await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 5000 });
+      const [action] = listActions(db, run.id);
+      expect(action!.summary).toContain("[REDACTED]");
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
+    } finally {
+      await runner.shutdown();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -71,6 +71,8 @@ const MIGRATIONS = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );`,
+  `ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER;
+  ALTER TABLE agent_runs ADD COLUMN output_tokens INTEGER;`,
 ];
 
 export type Db = Database.Database;

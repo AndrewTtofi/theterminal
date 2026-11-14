@@ -38,7 +38,11 @@ export type AgentRunnerDeps = {
   worktrees: WorktreeManager;
   broker: ApprovalBroker;
   adapters: Partial<Record<AdapterId, AgentAdapter>>;
-  extraSecrets: string[];
+  /**
+   * The secrets to redact beyond the built-in patterns. Read on every clean, so a secret stored while a run is
+   * live is redacted from that run's next event.
+   */
+  extraSecrets: () => string[];
   /** Recorded strings show this directory as `<data>`. */
   dataDir: string;
   newId?: () => string;
@@ -65,7 +69,10 @@ type Session = {
   scrub: Scrub;
   abort: AbortController;
   done: Promise<void>;
+  /** Per-run sums of what the adapter reported; null until something was reported. */
   costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
   /** Set when the runner itself failed during the run (e.g. a commit failed); fails the run. */
   failure: string | null;
 };
@@ -114,6 +121,15 @@ function asText(v: unknown): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Adds a reported amount to a run's sum. Anything but a finite number >= 0 (an integer, for token counts) is
+ * ignored; an unreported amount leaves the sum as it is, so "never reported" stays null.
+ */
+function addUsage(sum: number | null, v: unknown, integer = false): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || (integer && !Number.isInteger(v))) return sum;
+  return (sum ?? 0) + v;
 }
 
 function scrubJson(v: unknown, scrub: Scrub): unknown {
@@ -273,7 +289,9 @@ export class AgentRunner {
 
   private launch(run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode): void {
     const abort = new AbortController();
-    const session: Session = { projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, failure: null };
+    const session: Session = {
+      projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, inputTokens: null, outputTokens: null, failure: null,
+    };
     this.sessions.set(run.id, session);
     session.done = (async () => {
       let status: FinishStatus;
@@ -284,6 +302,7 @@ export class AgentRunner {
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
+          clean: (s) => this.clean(asText(s), Infinity, scrub),
         });
         status = r.status;
         error = r.status === "failed" ? (r.error ?? "agent failed") : null;
@@ -443,9 +462,10 @@ export class AgentRunner {
         });
         if (!committed) fail(NOT_ALLOWED_RESULT);
       } else if (e.type === "usage") {
-        if (typeof e.costUsd === "number" && Number.isFinite(e.costUsd) && e.costUsd >= 0) {
-          s.costUsd = (s.costUsd ?? 0) + e.costUsd;
-        }
+        const { costUsd, inputTokens, outputTokens } = e; // each read once
+        s.costUsd = addUsage(s.costUsd, costUsd);
+        s.inputTokens = addUsage(s.inputTokens, inputTokens, true);
+        s.outputTokens = addUsage(s.outputTokens, outputTokens, true);
       }
     } catch {
       fail(INTERNAL_ERROR);
@@ -469,7 +489,10 @@ export class AgentRunner {
       return {
         event: {
           projectId: cur.projectId, actor: RUNNER, type: "agent.finished",
-          payload: { runId, status, costUsd: s?.costUsd ?? null, error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub) },
+          payload: {
+            runId, status, costUsd: s?.costUsd ?? null, inputTokens: s?.inputTokens ?? null, outputTokens: s?.outputTokens ?? null,
+            error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub),
+          },
         },
         result: () => undefined,
       };
@@ -490,7 +513,15 @@ export class AgentRunner {
    * pass runs before scrubbing so a secret that contains the username or a path is still matched whole.
    */
   private clean(s: string, max: number, scrub: Scrub): string {
-    return truncate(redact(scrub(redact(s, this.deps.extraSecrets)), this.deps.extraSecrets), max);
+    const secrets = this.secrets();
+    return truncate(redact(scrub(redact(s, secrets)), secrets), max);
+  }
+
+  /** The extra secrets as of now; anything that is not a list of strings is a failure, never "no secrets". */
+  private secrets(): string[] {
+    const list = this.deps.extraSecrets();
+    if (!Array.isArray(list) || list.some((x) => typeof x !== "string")) throw new TypeError("extraSecrets must return strings");
+    return list;
   }
 
   /**
@@ -501,7 +532,8 @@ export class AgentRunner {
   private cleanInput(input: unknown, scrub: Scrub): unknown {
     const json = JSON.stringify(input ?? null);
     const plain: unknown = json === undefined ? null : JSON.parse(json);
-    const value = redact(scrubJson(redact(plain, this.deps.extraSecrets), scrub), this.deps.extraSecrets);
+    const secrets = this.secrets();
+    const value = redact(scrubJson(redact(plain, secrets), scrub), secrets);
     const out = JSON.stringify(value);
     if (out.length <= MAX.input) return value;
     return {

@@ -428,7 +428,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const projectId = board.createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
     const runner = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
-      adapters: { fake: new FakeAdapter(script) }, extraSecrets: [], dataDir,
+      adapters: { fake: new FakeAdapter(script) }, extraSecrets: () => [], dataDir,
     });
     const app = Fastify();
     try {
@@ -462,7 +462,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const projectId = new BoardService(db, ledger).createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
     const crashed = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
-      adapters: { fake: new FakeAdapter(script) }, extraSecrets: [], dataDir,
+      adapters: { fake: new FakeAdapter(script) }, extraSecrets: () => [], dataDir,
     });
     const run = await crashed.start({ kind: "human", id: "owner" }, { projectId, adapter: "fake", prompt: "go" });
     await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: 5000, interval: 25 });

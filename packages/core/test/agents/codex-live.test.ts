@@ -28,6 +28,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CODEX !== "1")("CodexAdapter live",
       },
       emit: () => {},
       recordDenied: async () => {},
+      clean: (s) => s,
     });
     expect(r).toEqual({ status: "completed" });
     expect(proposed.some((a) => a.kind === "file_write" || a.kind === "shell")).toBe(true);

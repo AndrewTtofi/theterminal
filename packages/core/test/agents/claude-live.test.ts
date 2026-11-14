@@ -38,6 +38,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
       },
       emit: (e) => events.push(e),
       recordDenied: async () => {},
+      clean: (s) => s,
     });
     expect(r).toEqual({ status: "completed" });
     expect(proposed.some((a) => a.tool === "Read")).toBe(true);
@@ -53,7 +54,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Live" }).id;
     const runner = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(worktree), broker: new ApprovalBroker(),
-      adapters: { claude: new ClaudeAdapter({ dataDir: worktree }) }, extraSecrets: [], dataDir: worktree,
+      adapters: { claude: new ClaudeAdapter({ dataDir: worktree }) }, extraSecrets: () => [], dataDir: worktree,
     });
     try {
       const run = await runner.start(owner, {

@@ -43,7 +43,7 @@ function makeRunner(
   gateTimeoutMs?: number,
 ) {
   const r = new AgentRunner({
-    db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs, gateTimeoutMs, username: "alice",
+    db, ledger, worktrees, broker, adapters, extraSecrets: () => [EXTRA_SECRET], dataDir, shutdownTimeoutMs, gateTimeoutMs, username: "alice",
   });
   runners.push(r);
   return r;
@@ -321,7 +321,7 @@ describe("AgentRunner with the FakeAdapter", () => {
   it("redacts extra secrets before the username scrub can break them apart", async () => {
     const secret = "alice:Fake-Pw-0001";
     const runner = new AgentRunner({
-      db, ledger, worktrees, broker: new ApprovalBroker(), extraSecrets: [secret], dataDir, username: "alice",
+      db, ledger, worktrees, broker: new ApprovalBroker(), extraSecrets: () => [secret], dataDir, username: "alice",
       adapters: {
         fake: new FakeAdapter([
           { message: `login ${secret} done` },
@@ -467,5 +467,71 @@ describe("AgentRunner with the FakeAdapter", () => {
     const card = board.addCard(owner, projectId, { title: "C", stage: "plan" });
     const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: card.id });
     expect(run.cardId).toBe(card.id);
+  });
+});
+
+describe("AgentRunner: live secrets and usage totals", () => {
+  const LATE_SECRET = "late-added-secret-0002";
+
+  it("reads extraSecrets on every clean: a secret added after construction is redacted from the next message", async () => {
+    const secrets: string[] = [];
+    let release!: () => void;
+    const go = new Promise<void>((r) => (release = r));
+    const adapter: AgentAdapter = {
+      id: "fake",
+      async start(o) {
+        o.emit({ type: "message", text: `before ${LATE_SECRET}` });
+        await go;
+        o.emit({ type: "message", text: `after ${LATE_SECRET}` });
+        return { status: "completed" };
+      },
+    };
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { fake: adapter }, extraSecrets: () => secrets, dataDir });
+    runners.push(runner);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await vi.waitFor(() => expect(agentEvents().some((e) => e.type === "agent.message")).toBe(true));
+    secrets.push(LATE_SECRET);
+    release();
+    await untilFinished(run.id);
+    const texts = agentEvents().filter((e) => e.type === "agent.message").map((e) => (e.payload as { text: string }).text);
+    expect(texts).toEqual([`before ${LATE_SECRET}`, "after [REDACTED]"]);
+  });
+
+  it("hands the adapter a clean() that redacts live secrets and scrubs paths without truncating", async () => {
+    const secrets: string[] = [];
+    const seen: string[] = [];
+    const adapter: AgentAdapter = {
+      id: "fake",
+      async start(o) {
+        secrets.push(LATE_SECRET);
+        seen.push(o.clean(`${"x".repeat(5000)} ${LATE_SECRET} ${join(o.cwd, "a.txt")} ${FAKE_KEY}`));
+        return { status: "completed" };
+      },
+    };
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { fake: adapter }, extraSecrets: () => secrets, dataDir });
+    runners.push(runner);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(seen).toEqual([`${"x".repeat(5000)} [REDACTED] .${sep}a.txt [REDACTED]`]);
+  });
+
+  it("sums cost and token counts separately per run and writes all three in agent.finished, ignoring bad values", async () => {
+    const runner = fakeRunner([
+      { usage: { costUsd: 0.1, inputTokens: 10 } },
+      { usage: { outputTokens: 5 } },
+      { usage: { inputTokens: -1, outputTokens: Number.NaN, costUsd: Number.POSITIVE_INFINITY } },
+    ]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const finished = agentEvents().at(-1)!;
+    expect(finished.type).toBe("agent.finished");
+    expect(finished.payload).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
+    expect(getRun(db, run.id)).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
+  });
+
+  it("records null token totals when the adapter reports none", async () => {
+    const run = await fakeRunner([{ message: "hi" }]).start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(agentEvents().at(-1)!.payload).toMatchObject({ costUsd: 0, inputTokens: null, outputTokens: null });
   });
 });

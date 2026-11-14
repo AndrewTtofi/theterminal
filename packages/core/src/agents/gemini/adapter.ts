@@ -68,6 +68,8 @@ const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
 const MESSAGE_PAUSE_MS = 250;
 const STDERR_TAIL = 200;
+/** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
+const STDERR_KEEP = 4096;
 const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -305,6 +307,8 @@ class GeminiRun {
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
   private stderrTail = "";
+  /** The latest cumulative USD cost from an ACP usage_update, if any. */
+  private costUsd: number | undefined;
   private closing: Promise<void> | null = null;
 
   constructor(
@@ -315,7 +319,7 @@ class GeminiRun {
   ) {
     const fold = (p: string) => (isWindows ? p.toLowerCase() : p);
     this.tracker = new ToolCallTracker((a, b) => fold(resolve(o.cwd, a)) === fold(resolve(o.cwd, b)));
-    this.terminals = new Terminals(spawn, (id, status, output) => this.onTerminalExit(id, status, output));
+    this.terminals = new Terminals(spawn, (id, status, output, truncated) => this.onTerminalExit(id, status, output, truncated));
     this.terminalEnv = {};
     for (const [k, v] of Object.entries(env)) {
       if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
@@ -331,7 +335,7 @@ class GeminiRun {
     this.exited = new Promise((resolve) => this.child.on("close", () => resolve()));
     this.child.on("error", (e) => this.fail(`Gemini could not be started: ${redact(errorMessage(e))}`));
     this.child.stderr!.on("data", (chunk: Buffer) => {
-      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL);
+      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_KEEP);
     });
     this.peer = new JsonRpcPeer(
       { input: this.child.stdout!, output: this.child.stdin! },
@@ -375,6 +379,7 @@ class GeminiRun {
     this.inTurn = true;
     const res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
     this.inTurn = false;
+    if (this.costUsd !== undefined) this.o.emit({ type: "usage", costUsd: this.costUsd });
     const stopReason = isRecord(res) && typeof res.stopReason === "string" ? res.stopReason : "unknown";
     if (stopReason === "end_turn") return { status: "completed" };
     return { status: "failed", error: `Gemini stopped: ${stopReason}` };
@@ -406,7 +411,13 @@ class GeminiRun {
   private describe(e: unknown): string {
     const msg = errorMessage(e);
     if (msg === "rpc closed: eof") {
-      const tail = redact(this.stderrTail.trim());
+      // Cleaned before the tail is cut, so the cut never leaves part of a secret behind; no tail if that fails.
+      let tail = "";
+      try {
+        tail = this.o.clean(this.stderrTail).trim().slice(-STDERR_TAIL);
+      } catch {
+        // Report the exit without the tail.
+      }
       return tail === "" ? "Gemini exited unexpectedly" : `Gemini exited unexpectedly: ${tail}`;
     }
     if (msg === "rpc closed: protocol error") return "Gemini sent a malformed message";
@@ -457,6 +468,13 @@ class GeminiRun {
         return this.onToolCall(u);
       case "current_mode_update":
         if (u.currentModeId !== DEFAULT_MODE) this.fail(MODE_CHANGED);
+        return;
+      case "usage_update":
+        // gemini-cli 0.68.0 sends `used` and `size` (context-window fill, not consumption: never mapped to tokens)
+        // and no `cost`, so Gemini runs report no usage. ACP's optional `cost` is the cumulative session cost: the
+        // latest USD amount is reported once, when the turn ends; omitted leaves it, null clears it.
+        if (u.cost === null) this.costUsd = undefined;
+        else if (isRecord(u.cost)) this.costUsd = u.cost.currency === "USD" && isNumber(u.cost.amount) ? u.cost.amount : undefined;
         return;
       default:
         return;
@@ -635,10 +653,11 @@ class GeminiRun {
     const argv = args ?? [];
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
     // Where it runs and how many variables it sets are part of what the reviewer approves.
+    // Both parts are capped for layout, so both are cleaned (the run's live redaction) before they are cut.
     const context = cwd != null || (env != null && env.length > 0)
-      ? ` (in ${cwd == null ? "." : cap(display(this.o.cwd, cwd), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
+      ? ` (in ${cwd == null ? "." : cap(this.o.clean(display(this.o.cwd, cwd)), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
       : "";
-    const line = [command, ...argv].join(" ");
+    const line = this.o.clean([command, ...argv].join(" "));
     const summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
     const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths: cwd == null ? [] : [cwd] });
     if (g.decision !== "allow") throw new Error(g.reason);
@@ -682,11 +701,12 @@ class GeminiRun {
     }
   }
 
-  private onTerminalExit(terminalId: string, status: ExitStatus, output: string): void {
+  private onTerminalExit(terminalId: string, status: ExitStatus, output: string, truncated: boolean): void {
     const actionId = this.terminalActions.get(terminalId);
     if (actionId === undefined) return;
     this.terminalActions.delete(terminalId);
-    this.result(actionId, status.exitCode === 0, output);
+    // A kept tail starts wherever the cut fell, possibly inside a secret: drop that partial word from the record.
+    this.result(actionId, status.exitCode === 0, truncated ? output.replace(/^\S*/, "") : output);
   }
 
   /** Records that an allowed action was not performed after all, and tells the agent it was denied. */

@@ -8,6 +8,7 @@ import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } fr
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { GeminiAdapter } from "../../src/agents/gemini/adapter.js";
 import { classify } from "../../src/agents/policy.js";
+import { redact } from "../../src/agents/redact.js";
 import { AgentRunner } from "../../src/agents/runner.js";
 import { WorktreeManager, EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -19,6 +20,8 @@ import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
 const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
 const SECRET = "sk-ant-TESTKEY0123456789abcdef";
+/** A stored secret no pattern matches: only the run's live secrets redact it. */
+const STORED = "stored-conn-value-0123456789";
 const MiB = 1024 * 1024;
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
 /** The per-run arguments: the policy directory varies, the allowlist name matches no tool. */
@@ -115,6 +118,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     recordDenied: async (a, reason) => {
       denied.push([a, reason]);
     },
+    clean: (t) => t,
   };
   return { opts, proposed, decisions, denied, events, abort };
 }
@@ -517,8 +521,50 @@ describe("GeminiAdapter", () => {
     expect(h.proposed[0]!.summary).toBe(`Run: npm run build (in ${shown})`);
   });
 
+  it("cleans a terminal's cwd and command with the run's live secrets before capping them for the summary", async () => {
+    script([
+      { type: "terminal", command: "npm", args: ["run", "build"], cwd: join(worktree, `${"d".repeat(52)}${STORED}`) },
+      { type: "terminal", command: "echo", args: ["a".repeat(134), STORED] },
+    ]);
+    const h = harness(() => ({ decision: "deny", reason: "no" }));
+    h.opts.clean = (t) => redact(t, [STORED]);
+    await adapter().start(h.opts);
+    expect(h.proposed.map((a) => a.summary)).toEqual([
+      `Run: npm run build (in ${"d".repeat(52)}[REDACT…)`,
+      `Run: echo ${"a".repeat(134)} [REDACTED]`,
+    ]);
+  });
+
+  it("records the output of a truncated terminal without the partial word its cut left at the start", async () => {
+    script([{ type: "terminal", command: process.execPath, args: ["-e", `process.stdout.write("${STORED} tail")`], outputByteLimit: 12 }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(logged("terminal/output")[0]!.result).toMatchObject({ output: "3456789 tail", truncated: true });
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: " tail" }]);
+  });
+
+  it("emits a reported cumulative USD cost once, at the end of the turn; context-size usage alone is not reported", async () => {
+    script([
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1200, size: 1000000 } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1500, size: 1000000, cost: { amount: 0.01, currency: "USD" } } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1800, size: 1000000, cost: { amount: 0.03, currency: "USD" } } },
+      { type: "message", text: "done" },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.events.filter((e) => e.type === "usage")).toEqual([{ type: "usage", costUsd: 0.03 }]);
+
+    script([
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1200, size: 1000000 } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1300, size: 1000000, cost: { amount: 5, currency: "EUR" } } },
+    ]);
+    const h2 = harness();
+    expect(await adapter().start(h2.opts)).toEqual({ status: "completed" });
+    expect(h2.events.filter((e) => e.type === "usage")).toEqual([]);
+  });
+
   it("caps terminal output at 1 MiB keeping the tail, and reports a non-zero exit", async () => {
-    const code = "process.stdout.write('x'.repeat(1536 * 1024) + 'TAIL'); process.exitCode = 3";
+    const code = "process.stdout.write('xxxxxxx\\n'.repeat(192 * 1024) + 'TAIL'); process.exitCode = 3";
     script([{ type: "terminal", command: process.execPath, args: ["-e", code] }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
@@ -527,7 +573,7 @@ describe("GeminiAdapter", () => {
     expect(out.output.length).toBeLessThanOrEqual(MiB);
     expect(out.output.endsWith("TAIL")).toBe(true);
     expect(out.exitStatus).toEqual({ exitCode: 3, signal: null });
-    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: out.output }]);
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: out.output.replace(/^\S*/, "") }]);
   });
 
   it("honours a smaller outputByteLimit and refuses terminals it did not create", async () => {
@@ -781,7 +827,7 @@ describe("GeminiAdapter through the runner", () => {
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
     const worktrees = new WorktreeManager(outside);
     const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
-    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: [], dataDir: outside });
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [], dataDir: outside });
     try {
       // The fake does not know the worktree the runner creates: it resolves relative paths against its cwd.
       script([
@@ -810,6 +856,38 @@ describe("GeminiAdapter through the runner", () => {
       expect(JSON.stringify(actions)).not.toContain(SECRET); // the write's input and the message are redacted too
       const log = logged("terminal/output")[0]!.result.output as string;
       expect(log).toContain(SECRET); // the agent itself saw the real output; only the record is redacted
+    } finally {
+      await runner.shutdown();
+      db.close();
+    }
+  }, 30_000);
+
+  it("leaves no fragment of a stored secret across the cwd and command caps in the recorded summaries", async () => {
+    const owner = { kind: "human", id: "owner" } as const;
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
+    const worktrees = new WorktreeManager(outside);
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside });
+    try {
+      script([
+        { type: "terminal", command: "npm", args: ["run", "build"], cwd: `${"d".repeat(52)}${STORED}` },
+        { type: "terminal", command: "echo", args: ["a".repeat(136), STORED] },
+      ]);
+      const run = await runner.start(owner, { projectId, adapter: "gemini", prompt: "build" });
+      await vi.waitFor(
+        () => {
+          for (const a of listPendingActions(db, projectId)) runner.decide(owner, a.id, "deny", "no");
+          expect(getRun(db, run.id)!.status).not.toBe("running");
+        },
+        { timeout: 20_000, interval: 50 },
+      );
+      expect(listActions(db, run.id).map((a) => a.summary)).toEqual([
+        `Run: npm run build (in ${"d".repeat(52)}[REDACT…)`,
+        `Run: echo ${"a".repeat(136)} [REDACTE`,
+      ]);
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
     } finally {
       await runner.shutdown();
       db.close();

@@ -39,7 +39,7 @@ describe("agent projections", () => {
     const run = getRun(db, "r1")!;
     expect(run).toMatchObject({
       id: "r1", projectId: "p1", cardId: "c1", adapter: "fake", authMode: "none", prompt: "do it",
-      status: "completed", worktree: "wt/r1", costUsd: 0.5, error: null,
+      status: "completed", worktree: "wt/r1", costUsd: 0.5, inputTokens: null, outputTokens: null, error: null,
     });
     expect(run.finishedAt).toBe(ledger.list().at(-1)!.ts);
     expect(run.startedAt).toBe(ledger.list()[0]!.ts);
@@ -96,6 +96,19 @@ describe("agent projections", () => {
     expect(getSetting(db, "auth_mode:claude")).toBe("subscription");
     emit("settings.claude_auth_changed", { mode: "api_key", acknowledgement: "" }, human, null);
     expect(getSetting(db, "auth_mode:claude")).toBe("api_key");
+  });
+
+  it("projects token totals from agent.finished, NULL for entries without them, and rebuilds the same rows", () => {
+    for (const r of ["r1", "r2"]) {
+      emit("agent.started", { runId: r, adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: `wt/${r}` });
+    }
+    emit("agent.finished", { runId: "r1", status: "completed", costUsd: 0.1, inputTokens: 10, outputTokens: 5, error: null });
+    emit("agent.finished", { runId: "r2", status: "completed", costUsd: null, error: null }); // written before token totals existed
+    expect(getRun(db, "r1")).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
+    expect(getRun(db, "r2")).toMatchObject({ costUsd: null, inputTokens: null, outputTokens: null });
+    const live = listRuns(db, "p1");
+    rebuildAllProjections(db, ledger);
+    expect(listRuns(db, "p1")).toEqual(live);
   });
 
   it("rebuild after mixed board + agent history equals the live projections", () => {

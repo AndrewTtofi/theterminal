@@ -5,10 +5,20 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
+import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
+import { AgentRunner } from "../../src/agents/runner.js";
+import { BoardService } from "../../src/board/board-service.js";
+import { openDatabase } from "../../src/db.js";
+import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
+import { Ledger } from "../../src/ledger/ledger.js";
+import { redact } from "../../src/agents/redact.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { CodexAdapter as IndexCodexAdapter, codexApprovalToAction as indexCodexApprovalToAction } from "../../src/index.js";
 
+// A stored secret no pattern matches, and the clean() a runner would pass with it in its live secrets.
+const STORED = "stored-conn-value-0123456789";
+const liveClean = (t: string) => redact(t, [STORED]);
 const FAKE = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_KEY = "sk-TESTKEY0123456789abcdef";
 const CMD = "item/commandExecution/requestApproval";
@@ -23,9 +33,9 @@ describe("codexApprovalToAction", () => {
     });
   });
 
-  it("caps the command in the summary at 150 characters and has no paths without a cwd", () => {
+  it("passes the whole command in the summary (the runner caps after redacting) and has no paths without a cwd", () => {
     const a = codexApprovalToAction(CMD, { itemId: "i1", command: "x".repeat(400) }, CWD);
-    expect(a.summary).toBe(`Run: ${"x".repeat(150)}`);
+    expect(a.summary).toBe(`Run: ${"x".repeat(400)}`);
     expect(a.input).toEqual({ command: "x".repeat(400) });
     expect(a.paths).toEqual([]);
   });
@@ -51,9 +61,21 @@ describe("codexApprovalToAction", () => {
     expect(a).toMatchObject({ kind: "file_write", paths: ["a.ts", "../b.ts"] });
   });
 
-  it("caps each diff preview at 4000 characters", () => {
+  it("caps each diff preview at 4000 characters, cleaned before the cut", () => {
     const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff: "d".repeat(9000) }]);
     expect((a.input as { changes: { diff: string }[] }).changes[0]!.diff).toHaveLength(4000);
+    const diff = `${"d".repeat(3990)}${STORED}${"d".repeat(100)}`;
+    const b = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff }], liveClean);
+    const shown = (b.input as { changes: { diff: string }[] }).changes[0]!.diff;
+    expect(shown).toBe(`${"d".repeat(3990)}[REDACTED]`);
+  });
+
+  it("cleans a stdin approval's command and input with the run's live secrets before capping them", () => {
+    const a = codexApprovalToAction(
+      CMD, { itemId: "s1", kind: "writeStdin", command: `${"c".repeat(55)}${STORED}`, reason: `${"b".repeat(75)}${STORED}` }, CWD, undefined, liveClean,
+    );
+    expect(a.summary).toBe(`Type into ${"c".repeat(55)}[REDA: ${"b".repeat(75)}[REDA`);
+    expect(a.summary).not.toContain(STORED.slice(0, 3));
   });
 
   it("adds a requested grant root to the paths so policy judges it", () => {
@@ -162,6 +184,7 @@ describe("CodexAdapter (fake app-server)", () => {
     const proposed: ProposedAction[] = [];
     const denied: [ProposedAction, string][] = [];
     const events: AdapterEvent[] = [];
+    const usage: AdapterEvent[] = []; // kept apart: the fake reports token totals at the end of every turn
     let n = 0;
     const result = adapter.start({
       cwd: dir,
@@ -174,13 +197,14 @@ describe("CodexAdapter (fake app-server)", () => {
         const id = `act-${++n}`;
         return { ...(await decide(a)), actionId: id };
       },
-      emit: (e) => events.push(e),
+      emit: (e) => (e.type === "usage" ? usage : events).push(e),
       recordDenied: async (a, reason) => {
         denied.push([a, reason]);
       },
+      clean: (t) => t,
       ...o,
     });
-    return { result, proposed, denied, events };
+    return { result, proposed, denied, events, usage };
   }
 
   it("runs a command the gate allows (announced before its approval), answers accept and reports its result", async () => {
@@ -217,11 +241,11 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: "boom" }]);
   });
 
-  it("caps a result's output at 4000 characters", async () => {
+  it("passes a result's whole output on (the runner caps it after redacting)", async () => {
     script([{ approve: "command", command: "yes", itemId: "i1", output: "y".repeat(10_000) }]);
     const { result, events } = run(make());
     await result;
-    expect((events[0] as { output: string }).output).toHaveLength(4000);
+    expect((events[0] as { output: string }).output).toHaveLength(10_000);
   });
 
   it("answers decline for a denied command and reports no result", async () => {
@@ -401,11 +425,48 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(r.error!.length).toBeLessThanOrEqual(300);
   });
 
-  it("emits no usage when only token counts are reported", async () => {
+  it("through the runner: a stored secret across the old command and stdin caps leaves no fragment in the record", async () => {
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Codex" }).id;
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make() },
+      extraSecrets: () => [STORED], dataDir: dir,
+    });
+    script([
+      // Cut at 150 before: "echo " + 136 + " " leaves 8 characters of the secret. Denied by policy (it holds a secret).
+      { approve: "command", command: `echo ${"a".repeat(136)} ${STORED}`, itemId: "i1" },
+      // Cut at 80 before: 72 typed characters leave 8 of the secret. The command itself is clean, so a human allows it.
+      { approve: "command", command: "cat", itemId: "i2", stdin: `${"b".repeat(72)}${STORED}` },
+    ]);
+    try {
+      const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "go" });
+      await vi.waitFor(
+        () => {
+          for (const a of listPendingActions(db, projectId)) runner.decide(owner, a.id, "allow", "fine");
+          expect(getRun(db, run.id)!.status).not.toBe("running");
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      const summaries = listActions(db, run.id).map((a) => a.summary);
+      expect(summaries).toEqual([
+        `Run: echo ${"a".repeat(136)} [REDACTED]`,
+        "Run: cat",
+        `Type into cat: ${"b".repeat(72)}[REDACTE`,
+      ]);
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
+    } finally {
+      await runner.shutdown();
+    }
+  });
+
+  it("emits the thread's token totals once, at turn completion", async () => {
     script([{ message: "hi" }]);
-    const { result, events } = run(make());
+    const { result, events, usage } = run(make());
     await result;
-    expect(events.some((e) => e.type === "usage")).toBe(false);
+    expect(usage).toEqual([{ type: "usage", inputTokens: 6, outputTokens: 4 }]);
+    expect(events).toEqual([{ type: "message", text: "hi" }]);
   });
 
   it.each([

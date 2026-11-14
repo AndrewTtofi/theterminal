@@ -177,7 +177,7 @@ export async function createServer(opts: {
     worktrees: new WorktreeManager(opts.dataDir),
     broker: new ApprovalBroker(),
     adapters,
-    extraSecrets: [token, ...secretEnvValues(process.env)],
+    extraSecrets: () => [token, ...secretEnvValues(process.env)], // read on every clean: secrets added later are redacted at once
     dataDir: opts.dataDir,
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });

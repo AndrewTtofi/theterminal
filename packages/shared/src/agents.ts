@@ -27,6 +27,9 @@ export type AgentRun = {
   /** Relative to dataDir. */
   worktree: string;
   costUsd: number | null;
+  /** Totals the provider reported for the run (estimates); null when it reported none. */
+  inputTokens: number | null;
+  outputTokens: number | null;
   error: string | null;
   startedAt: string;
   finishedAt: string | null;
@@ -117,6 +120,9 @@ export const agentPayloadSchemas = {
       runId: id,
       status: z.enum(["completed", "failed", "stopped"]),
       costUsd: z.number().finite().nullable(),
+      // Absent in entries written before token totals were recorded.
+      inputTokens: z.number().int().nonnegative().nullable().optional(),
+      outputTokens: z.number().int().nonnegative().nullable().optional(),
       error: z.string().max(1000).nullable(),
     })
     .strict(),
