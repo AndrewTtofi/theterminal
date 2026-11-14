@@ -106,7 +106,8 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
   );
 
   app.get("/api/status", async () => {
-    await connections.retryIfUnavailable();
+    // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
+    void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
     return {
       runningAgents: counts.runningAgents,

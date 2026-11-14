@@ -681,3 +681,74 @@ describe("final fix wave", () => {
     }
   });
 });
+
+describe("residuals", () => {
+  /** A store whose reads and writes fail while `down` is set. */
+  function switchable() {
+    const s = { down: false, gets: 0 };
+    const secrets: SecretStore = {
+      get: async (a) => {
+        s.gets++;
+        if (s.down) throw new SecretStoreUnavailableError();
+        return store.get(a);
+      },
+      set: async (a, v) => {
+        if (s.down) throw new SecretStoreUnavailableError();
+        return store.set(a, v);
+      },
+      delete: (a) => store.delete(a),
+    };
+    return { s, secrets };
+  }
+
+  it("a failed write with the keychain still down keeps the cache: a status read 30 s later still yields the key", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const c = await addClaude(make(), KEY);
+      const { s, secrets } = switchable();
+      const svc = make({ secrets });
+      await svc.load();
+      s.down = true;
+      await expect(svc.update(owner, c.id, { secrets: { apiKey: KEY2 } })).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+      expect(svc.keychainState()).toBe("unavailable");
+      vi.advanceTimersByTime(30_000);
+      await svc.retryIfUnavailable(); // what a status read does
+      expect(svc.keychainState()).toBe("unavailable");
+      expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY);
+      expect(svc.secretValues()).toContain(KEY);
+
+      // Back up: the next probe clears the mark, still without replacing the cache.
+      s.down = false;
+      await store.set(`connection/${c.id}/apiKey`, "changed-behind-our-back");
+      vi.advanceTimersByTime(30_000);
+      await svc.retryIfUnavailable();
+      expect(svc.keychainState()).toBe("ok");
+      expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed load after a good one keeps the values already loaded", async () => {
+    const c = await addClaude(make(), KEY);
+    const { s, secrets } = switchable();
+    const seen: string[] = [];
+    const svc = make({ secrets, testers: { claude: async (i) => (seen.push(i.secrets.apiKey ?? "(none)"), { ok: true, message: "Connected" }) } });
+    await svc.load();
+    s.down = true;
+    await svc.load();
+    expect(svc.keychainState()).toBe("unavailable");
+    await svc.test(owner, c.id); // its retry fails too
+    expect(seen).toEqual([KEY]);
+    expect(svc.secretValues()).toContain(KEY);
+  });
+
+  it("does not use request values shorter than 8 characters to check the name and config", async () => {
+    const svc = make();
+    const x = join("/", "x");
+    const c = await svc.add(owner, { kind: "llm", provider: "gemini", name: `Gemini${x}`, config: {}, private: { cliHome: x } });
+    expect(c.name).toBe(`Gemini${x}`);
+    const u = await svc.update(owner, c.id, { name: `Work${x}`, private: { cliHome: x } });
+    expect(u.name).toBe(`Work${x}`);
+  });
+});

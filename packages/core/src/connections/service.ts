@@ -111,9 +111,14 @@ const MIN_SECRET_LENGTH = 8;
 /** How long after a failed load the next read-driven retry (a test, a status read) may try again. */
 const RETRY_LOAD_MS = 30_000;
 
-/** The non-null string values of a request's secret and private fields, so names and config are checked against them too. */
+/**
+ * The non-null string values of a request's secret and private fields, so names and config are checked against them
+ * too. Values shorter than a secret may be (a private folder such as `/x`) are left out: they would refuse ordinary names.
+ */
 function requestValues(...groups: Record<string, string | null>[]): string[] {
-  return groups.flatMap((g) => Object.values(g)).filter((v): v is string => typeof v === "string");
+  return groups
+    .flatMap((g) => Object.values(g))
+    .filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
 }
 
 /** Writes and deletes for the given secret and private values, secrets first. */
@@ -173,7 +178,8 @@ export class ConnectionService {
   }
 
   /**
-   * Reads every stored value into the cache. A keychain failure leaves the cache empty and marks it unavailable.
+   * Reads every stored value into the cache. A keychain failure marks it unavailable and leaves the cache as it was
+   * (empty before the first good load; never values dropped that a good load already read).
    * Safe to run alongside other operations: a connection changed or removed while the load ran keeps its current
    * cache entry (or none), never the values the load read before the change.
    */
@@ -194,7 +200,6 @@ export class ConnectionService {
         next.set(row.id, values);
       }
     } catch {
-      this.cache = new Map();
       this.state = "unavailable";
       return;
     }
@@ -216,15 +221,34 @@ export class ConnectionService {
   }
 
   /**
-   * While the keychain is unavailable, loads it again, at most once per RETRY_LOAD_MS: a read (a connection test, a
-   * status read) is enough for the state to recover once the keychain is back. Never throws.
+   * While the keychain is unavailable, tries it again, at most once per RETRY_LOAD_MS: a read (a connection test, a
+   * status read) is enough for the state to recover once the keychain is back. After a failed load it loads again.
+   * After a failed write (the cache is good) it only probes with one read that leaves the cache alone, and clears the
+   * mark when that read succeeds. Never throws.
    */
   async retryIfUnavailable(): Promise<void> {
     if (this.keychainState() === "ok") return;
     const now = Date.now();
     if (now - this.lastRetryAt < RETRY_LOAD_MS) return;
     this.lastRetryAt = now;
-    await this.reload();
+    if (this.state === "unavailable") return this.reload();
+    const account = this.firstStoredAccount();
+    if (account === null) return; // nothing to read: only a good write can show the keychain is back
+    try {
+      await this.secrets.get(account);
+      this.writeFailed = false;
+    } catch {
+      // Still down: the cache and the state stay as they are.
+    }
+  }
+
+  /** The keychain account of some field the projection lists, or null when none is stored. */
+  private firstStoredAccount(): string | null {
+    for (const row of this.rows()) {
+      const [first] = this.storedFields(row);
+      if (first) return accountFor(row.id, first[0]);
+    }
+    return null;
   }
 
   list(): Connection[] {

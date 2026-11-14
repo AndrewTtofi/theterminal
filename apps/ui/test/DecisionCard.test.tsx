@@ -101,6 +101,15 @@ describe("DecisionCard", () => {
     expect(container.querySelector("pre.command")?.textContent).toBe("echo hi\\r\n\\u0003\ttab\\u007f\\u001b[2Jend\n");
   });
 
+  it("makes C1 controls and bidi and zero-width characters in the text to be typed visible", () => {
+    const typed = "a\u0085b\u009bc​d‏e‪f‮g⁦h⁩i j";
+    const stdin = { ...action, tool: "codex.stdin", summary: "Type into bash: ...", input: { command: "bash", kind: "writeStdin", reason: typed } };
+    const { container } = render(<DecisionCard action={stdin} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")?.textContent).toBe(
+      "a\\u0085b\\u009bc\\u200bd\\u200fe\\u202af\\u202eg\\u2066h\\u2069i j",
+    );
+  });
+
   it("shows no command block for other kinds of action", () => {
     const edit = { ...action, kind: "file_edit" as const, input: { command: "not a shell action" } };
     const { container } = render(<DecisionCard action={edit} onDecide={vi.fn()} />);

@@ -310,7 +310,45 @@ describe("final fix wave", () => {
     expect((await send(s, "PATCH", `/api/connections/${added.id}`, { secrets: { apiKey: NEW_KEY } })).status).toBe(503);
     expect(await memory.get(`connection/${added.id}/apiKey`)).toBe(KEY);
     down = false;
-    const st = await json<{ connections: { keychain: string } }>(get(s, "/api/status"));
-    expect(st.connections.keychain).toBe("ok");
+    // The retry runs in the background: a later status read sees its outcome.
+    await vi.waitFor(async () => {
+      const st = await json<{ connections: { keychain: string } }>(get(s, "/api/status"));
+      expect(st.connections.keychain).toBe("ok");
+    });
+  });
+});
+
+describe("residuals", () => {
+  it("GET /api/status answers with the current state without waiting for a keychain retry that hangs", async () => {
+    const memory = new MemorySecretStore();
+    let mode: "up" | "down" | "hung" = "up";
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    const store = {
+      get: async (a: string) => {
+        if (mode === "down") throw new SecretStoreUnavailableError();
+        if (mode === "hung") await released;
+        return memory.get(a);
+      },
+      set: (a: string, v: string) => memory.set(a, v),
+      delete: (a: string) => memory.delete(a),
+    };
+    const first = await start({ secrets: memory });
+    const dataDir = dirs.at(-1)!;
+    await json<Connection>(addClaude(first));
+    await running.pop()!.close();
+    mode = "down";
+    const s = await start({ dataDir, secrets: store });
+    mode = "hung";
+    try {
+      const res = await Promise.race([
+        get(s, "/api/status"),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("status waited for the keychain")), 2000)),
+      ]);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { connections: { keychain: string } }).connections.keychain).toBe("unavailable");
+    } finally {
+      release();
+    }
   });
 });
