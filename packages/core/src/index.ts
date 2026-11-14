@@ -5,3 +5,5 @@ export { Ledger, LedgerReadOnlyError } from "./ledger/ledger.js";
 export type { VerifyResult } from "./ledger/ledger.js";
 export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent } from "./board/projections.js";
+export { registerRoutes } from "./server/routes.js";
+export type { RouteDeps } from "./server/routes.js";
