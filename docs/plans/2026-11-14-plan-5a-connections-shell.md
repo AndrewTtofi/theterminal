@@ -191,6 +191,37 @@ Then set: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`;
 
 ---
 
+### Task 1B: Bundle the agent programs inside The Terminal
+
+The author decided that everything ships inside the app. Codex and Gemini CLI become dependencies of `@theterminal/core` and are used by default; nothing has to be on PATH. This replaces Plan 2B's "use the user's installed CLI" rule.
+
+**Files:** Modify `packages/core/package.json` (add `@openai/codex` and `@google/gemini-cli`, exact versions matching the protocol research: 0.169.0 and 0.68.0), `packages/core/src/agents/codex/adapter.ts`, `gemini/adapter.ts`, `claude-adapter.ts`, `packages/core/src/server/server.ts`, `agent-routes.ts`. Create `packages/core/src/agents/bundled.ts`. Tests: `packages/core/test/agents/bundled.test.ts` plus the adapter and route tests.
+
+**Interfaces:**
+```ts
+// bundled.ts
+export type BundledCli = { file: string; args: string[] }; // spawn process.execPath with a JS entry, or a native binary directly
+export function bundledCodex(): BundledCli | null;   // resolve from @openai/codex's package.json bin via createRequire; prefer its platform-native binary package if present
+export function bundledGemini(): BundledCli | null;  // @google/gemini-cli bin "gemini" → [process.execPath, <bundle/gemini.js>] (keeps GEMINI_CLI_NO_RELAUNCH)
+export function bundledClaude(): string | null;      // path of the Claude Code binary shipped in the Agent SDK's platform package, for subscription mode
+```
+Rules:
+- Default lookup order per provider: bundled first, then (only if the bundled one is missing) the PATH lookup used today.
+- `installed` in `GET /api/agents` becomes `available` and is true when the bundled program resolves. Rename the field and update the UI and tests: the "(not installed)" label becomes "(unavailable)" and should never show in a normal install.
+- Claude subscription mode uses the SDK's bundled Claude Code (the user's own login is still read by Claude Code itself, never by us). Remove the "Claude Code is not installed or not on PATH" requirement unless the bundled binary is missing.
+- Resolution never uses a shell. Every resolved path must live inside the package's own directory: resolve the real path and check containment, as the Windows shim rule does.
+- Plan 2B's protocol pins stay: the bundled versions are exactly the ones the adapters were verified against. A future version bump re-runs the protocol checks.
+- Test-only overrides (`THETERMINAL_CODEX_BIN` / `THETERMINAL_GEMINI_BIN` under `THETERMINAL_FAKE_AGENT=1`) still win over the bundled programs.
+- The lockfile must include both packages' platform-native optional dependencies for darwin-arm64 and win32-x64, so CI's `--frozen-lockfile` works.
+
+- [ ] **Step 1: Write failing tests:** bundled resolution returns paths inside node_modules and nothing outside; `/api/agents` reports `available: true` for all three in a normal test server; a codex run uses the bundled entry (assert the spawn command via an injected spawn); PATH is consulted only when the bundled lookup returns null.
+- [ ] **Step 2:** Run `pnpm test`. Expected: FAIL.
+- [ ] **Step 3:** Implement. Add the dependencies.
+- [ ] **Step 4:** Run `pnpm test && pnpm e2e`. Expected: PASS.
+- [ ] **Step 5: Commit:** `feat(agents): bundle Codex and Gemini CLI and use them by default`
+
+---
+
 ### Task 2: Secret store (keychain, memory, chunking)
 
 **Files:** Create `packages/core/src/secrets/store.ts`, `keychain-store.ts`, `memory-store.ts`. Tests `packages/core/test/secrets/store.test.ts`, `keychain-live.test.ts` (`describe.skipIf(process.env.THETERMINAL_LIVE_KEYCHAIN !== "1")`). Add `@napi-rs/keyring` to core.
@@ -501,6 +532,7 @@ Rules:
 - The Owner adds Claude, OpenAI, Gemini and GitHub credentials in the Connections view; they live in the OS keychain, never appear in any response, file or ledger entry, and a connection test runs read-only calls.
 - A run uses exactly its provider's configured key through an allowlisted environment; the use is recorded as `connection.used`; a stored key is redacted from agent traffic immediately and stays redacted after removal.
 - The workspace opens in the VS Code-style shell with the board as home, a working bottom panel, a saved layout and a live status bar; pending decisions are visible in every layout.
+- Claude, Codex and Gemini work out of the box with no separate installs; the bundled programs are used by default.
 - The Owner can sign in to their own Claude, ChatGPT or Google subscription from the Connections view, using the provider's own login page; The Terminal never sees the credentials.
 - Codex runs record token counts; `agent.finished` carries tokens for the capacity view.
 - `pnpm test` and `pnpm e2e` are green on macOS and Windows CI without touching a real keychain.
