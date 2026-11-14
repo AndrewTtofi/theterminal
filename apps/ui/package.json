@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@theterminal/shared": "workspace:*",
-    "dockview-react": "8.9.0",
+    "dockview-react": "8.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   }

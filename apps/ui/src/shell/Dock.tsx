@@ -1,8 +1,9 @@
 import { useMemo, useRef } from "react";
 import type { ComponentType, FunctionComponent } from "react";
 import { DockviewReact, themeDark } from "dockview-react";
-import type { DockviewApi, DockviewReadyEvent, IDockviewPanel, IDockviewPanelProps, SerializedDockview } from "dockview-react";
+import type { DockviewApi, DockviewReadyEvent, IDockviewPanel, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
+import { BOTTOM_SHARE, buildDefault, componentOf, restoreOrDefault } from "./dock-layout";
 import { loadLayout, resetLayout, saveLayout } from "./layout-store";
 
 export type DockPanelId = "board" | "agent_feed" | "ledger" | `connection:${string}`;
@@ -21,25 +22,6 @@ const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bo
   agent_feed: { title: "Agent feed", where: "bottom" },
   ledger: { title: "Ledger", where: "bottom" },
 };
-const BOTTOM_SHARE = 0.3;
-
-/** The registry key for a panel id: `connection:<x>` panels share the `connection` component. */
-const componentOf = (id: string) => id.split(":")[0]!;
-
-function buildDefault(api: DockviewApi): void {
-  api.addPanel({ id: "board", component: "board", title: "Board" });
-  api.addPanel({
-    id: "agent_feed",
-    component: "agent_feed",
-    title: "Agent feed",
-    position: { direction: "below" },
-    initialHeight: Math.round(api.height * BOTTOM_SHARE) || undefined,
-  });
-  api.addPanel({ id: "ledger", component: "ledger", title: "Ledger", position: { referencePanel: "agent_feed", direction: "within" } });
-  const bottom = api.getPanel("ledger")?.group;
-  if (bottom && api.height > 0) bottom.api.setSize({ height: Math.round(api.height * BOTTOM_SHARE) });
-}
-
 function bottomPanel(api: DockviewApi): IDockviewPanel | undefined {
   return BOTTOM_IDS.map((id) => api.getPanel(id)).find((p) => p !== undefined);
 }
@@ -135,24 +117,20 @@ export function Dock({ panels, onReady, layoutKey }: Props) {
 
   const handleReady = (event: DockviewReadyEvent) => {
     const api = event.api;
-    const saved = loadLayout(layoutKey);
-    let restored = false;
-    if (saved) {
-      try {
-        api.fromJSON(saved as SerializedDockview);
-        restored = api.panels.length > 0;
-      } catch {
-        restored = false;
-      }
-    }
-    if (!restored) {
-      api.clear();
-      buildDefault(api);
-    }
+    restoreOrDefault(api, loadLayout(layoutKey), Object.keys(panels));
     api.onDidLayoutChange(() => saveLayout(api.toJSON(), layoutKey));
     saveLayout(api.toJSON(), layoutKey);
     onReadyRef.current(makeDockApi(api, layoutKey));
   };
 
-  return <DockviewReact className="dock-host" theme={themeDark} components={components} onReady={handleReady} />;
+  // Floating groups are off: one could sit over the Needs-you strip, which must stay visible.
+  return (
+    <DockviewReact
+      className="dock-host"
+      theme={themeDark}
+      components={components}
+      onReady={handleReady}
+      disableFloatingGroups
+    />
+  );
 }

@@ -18,6 +18,17 @@ const PANELS = { board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBot
 
 type Props = { model: WorkbenchModel };
 
+/** True for text inputs, textareas, selects and contenteditable elements. */
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target.closest("[contenteditable='true'], [contenteditable='']")) return true;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  if (target instanceof HTMLInputElement) {
+    return !["button", "checkbox", "radio", "submit", "reset", "range", "color", "file", "image"].includes(target.type);
+  }
+  return false;
+}
+
 /**
  * VS Code-style shell: activity bar, side bar for the selected view, the docked main and bottom areas,
  * and a status bar. The Needs-you strip sits outside the dock so decisions surface in every layout.
@@ -32,6 +43,8 @@ export function Workbench({ model }: Props) {
   const pending = model.pending.length;
 
   const selectView = (v: ViewId) => {
+    // The Board view's home is the Board tab: bring it back if it was closed.
+    if (v === "board") dockRef.current?.focus("board");
     if (v === view) {
       setSideOpen((open) => !open);
       return;
@@ -44,9 +57,10 @@ export function Workbench({ model }: Props) {
     dockRef.current = api;
   }, []);
 
-  // Ctrl/Cmd+J toggles the bottom panel, as in VS Code.
+  // Ctrl/Cmd+J toggles the bottom panel, as in VS Code, except while the Owner is typing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isTyping(e.target)) return;
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "j") {
         e.preventDefault();
         dockRef.current?.toggleBottom();

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AgentAction, AgentRun, Board, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
 
@@ -7,6 +7,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { Workbench } from "../src/shell/Workbench";
 import type { WorkbenchModel } from "../src/shell/model";
+import { testDock } from "./test-dock";
 
 const board: Board = {
   project: { id: "p1", name: "Local Model Hub", pitch: "", createdAt: "" },
@@ -178,6 +179,46 @@ describe("Workbench", () => {
     expect(container.querySelector('[data-panel="agent_feed"]')).toBeNull();
     const strip = screen.getByRole("region", { name: "Needs you" });
     expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
+  });
+
+  it("reopens and focuses the Board tab when the Board view is selected", async () => {
+    const { container } = render(<Workbench model={model()} />);
+    act(() => testDock.api!.close("board"));
+    expect(container.querySelector('[data-panel="board"]')).toBeNull();
+    await userEvent.click(view("Agents"));
+    await userEvent.click(view("Board"));
+    const board = container.querySelector('[data-panel="board"]');
+    expect(board).toBeTruthy();
+    expect(board!.getAttribute("data-active")).toBe("true");
+  });
+
+  it("toggles the bottom panel with Ctrl+J and Cmd+J, but not while typing", async () => {
+    const { container } = render(<Workbench model={model()} />);
+    const ledgerShown = () => container.querySelector('[data-panel="ledger"]') !== null;
+
+    await userEvent.click(screen.getByLabelText("New project name"));
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(ledgerShown()).toBe(true);
+
+    await userEvent.click(view("Agents"));
+    await userEvent.click(screen.getByLabelText("Prompt"));
+    await userEvent.keyboard("{Meta>}j{/Meta}");
+    expect(ledgerShown()).toBe(true);
+
+    const editable = document.createElement("div");
+    editable.contentEditable = "true";
+    document.body.append(editable);
+    editable.focus();
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(ledgerShown()).toBe(true);
+    editable.remove();
+
+    await userEvent.click(view("Agents"));
+    (document.activeElement as HTMLElement | null)?.blur();
+    await userEvent.keyboard("{Meta>}j{/Meta}");
+    expect(ledgerShown()).toBe(false);
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(ledgerShown()).toBe(true);
   });
 
   it("does not show the strip when nothing is pending", () => {
