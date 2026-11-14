@@ -50,4 +50,32 @@ describe("DecisionCard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Allow" }));
     expect(await screen.findByText("Already decided")).toBeTruthy();
   });
+
+  it("sends one decision when Allow is double-clicked", async () => {
+    let resolve!: () => void;
+    const onDecide = vi.fn().mockReturnValue(new Promise<void>((r) => (resolve = r)));
+    render(<DecisionCard action={action} onDecide={onDecide} />);
+    const allow = screen.getByRole("button", { name: "Allow" });
+    await userEvent.dblClick(allow);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(true);
+    resolve();
+  });
+
+  it("sends one decision when Confirm deny is double-clicked", async () => {
+    const onDecide = vi.fn().mockReturnValue(new Promise<void>(() => {}));
+    render(<DecisionCard action={action} onDecide={onDecide} />);
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.dblClick(screen.getByRole("button", { name: "Confirm deny" }));
+    expect(onDecide).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders hostile summary and input as inert text", () => {
+    const evil = { ...action, summary: '<img src=x onerror="window.__pwned=1">', input: { x: "<script>window.__pwned=1</script>" } };
+    const { container } = render(<DecisionCard action={evil} onDecide={vi.fn()} />);
+    expect(container.querySelector("img, script")).toBeNull();
+    expect(container.textContent).toContain('<img src=x onerror="window.__pwned=1">');
+    expect(container.querySelector("pre")?.textContent).toContain("<script>");
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
 });

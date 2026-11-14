@@ -63,4 +63,32 @@ describe("AgentPanel", () => {
     );
     expect(screen.getByText(/write notes\.md · allowed · decided by policy/)).toBeTruthy();
   });
+
+  const mount = (onStart: () => unknown) =>
+    render(
+      <AgentPanel adapters={["fake"]} runs={[]} selectedRunId={null} actions={[]}
+        onStart={onStart as never} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+    );
+
+  it("starts only one run on a double click", async () => {
+    const onStart = vi.fn().mockReturnValue(new Promise(() => {}));
+    mount(onStart);
+    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
+    await userEvent.dblClick(screen.getByRole("button", { name: "Start agent" }));
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the prompt when starting fails and clears it on success", async () => {
+    const onStart = vi.fn().mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("x")).mockResolvedValue(undefined);
+    mount(onStart);
+    const box = screen.getByLabelText("Prompt") as HTMLTextAreaElement;
+    await userEvent.type(box, "hello");
+    const start = screen.getByRole("button", { name: "Start agent" });
+    await userEvent.click(start);
+    expect(box.value).toBe("hello");
+    await userEvent.click(start);
+    expect(box.value).toBe("hello");
+    await userEvent.click(start);
+    expect(box.value).toBe("");
+  });
 });

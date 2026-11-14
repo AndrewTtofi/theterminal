@@ -204,13 +204,18 @@ export function App() {
                   runs={runs}
                   selectedRunId={selectedRunId}
                   actions={runActions}
-                  onStart={(adapter: AdapterId, prompt) =>
-                    run(async () => {
+                  onStart={async (adapter: AdapterId, prompt) => {
+                    try {
+                      setError(null);
                       const started = await api.startRun(selectedId, { adapter, prompt });
                       setSelectedRunId(started.id);
                       refreshAgents.current();
-                    })
-                  }
+                      return true;
+                    } catch (e) {
+                      setError(errorMessage(e));
+                      return false;
+                    }
+                  }}
                   onSelectRun={setSelectedRunId}
                   onStop={(runId) =>
                     void run(async () => {

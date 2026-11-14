@@ -10,14 +10,19 @@ type Props = {
 export function DecisionCard({ action, onDecide }: Props) {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   const decide = async (decision: "allow" | "deny", why?: string) => {
+    if (busy) return;
+    setBusy(true);
     setNote(null);
     try {
       await (why ? onDecide(action.id, decision, why) : onDecide(action.id, decision));
     } catch (e) {
       setNote(e instanceof ApiError && e.status === 409 ? "Already decided" : "Something went wrong");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -34,7 +39,7 @@ export function DecisionCard({ action, onDecide }: Props) {
             Reason (optional)
             <input value={reason} onChange={(e) => setReason(e.target.value)} />
           </label>
-          <button type="button" onClick={() => void decide("deny", reason.trim())}>
+          <button type="button" disabled={busy} onClick={() => void decide("deny", reason.trim())}>
             Confirm deny
           </button>
           <button type="button" onClick={() => setDenying(false)}>
@@ -43,10 +48,10 @@ export function DecisionCard({ action, onDecide }: Props) {
         </div>
       ) : (
         <div className="decision-actions">
-          <button type="button" onClick={() => void decide("allow")}>
+          <button type="button" disabled={busy} onClick={() => void decide("allow")}>
             Allow
           </button>
-          <button type="button" onClick={() => setDenying(true)}>
+          <button type="button" disabled={busy} onClick={() => setDenying(true)}>
             Deny
           </button>
         </div>
