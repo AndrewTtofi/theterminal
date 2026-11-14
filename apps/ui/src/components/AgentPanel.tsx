@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Provider } from "@theterminal/shared";
 
-const KIND_ICON: Record<ActionKind, string> = {
+export const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
   file_write: "✏️",
   file_edit: "✏️",
@@ -11,7 +11,7 @@ const KIND_ICON: Record<ActionKind, string> = {
   other: "•",
 };
 
-const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
+export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
 
 type Props = {
   adapters: AdapterId[];
@@ -19,15 +19,16 @@ type Props = {
   providers?: Partial<Record<Provider, { mode: AuthMode; installed: boolean }>>;
   runs: AgentRun[];
   selectedRunId: string | null;
-  actions: AgentAction[];
+  /** The selected run's actions; omit them when another panel (the Agent feed) shows them. */
+  actions?: AgentAction[];
   /** Resolve false (or reject) when starting failed, so the prompt is kept. */
   onStart: (adapter: AdapterId, prompt: string) => Promise<boolean | void> | void;
   onSelectRun: (runId: string | null) => void;
   onStop: (runId: string) => void;
 };
 
-const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
-const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
+export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
+export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
 export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
@@ -96,7 +97,7 @@ export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, 
           </li>
         ))}
       </ul>
-      {selected && (
+      {selected && actions && (
         <ul className="run-actions" aria-label="Run actions">
           {actions.map((a) => (
             <li key={a.id}>

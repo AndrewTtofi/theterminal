@@ -74,9 +74,10 @@ export const api = {
       body: reason ? { decision, reason } : { decision },
     }),
   health: () => request<Health>("/api/health"),
-  listLedger: (projectId: string, afterSeq = 0, limit = 500) =>
+  /** A project's entries, or every project's when `projectId` is null. */
+  listLedger: (projectId: string | null, afterSeq = 0, limit = 500) =>
     request<LedgerEntry[]>(
-      `/api/ledger?projectId=${encodeURIComponent(projectId)}&afterSeq=${afterSeq}&limit=${limit}`,
+      `/api/ledger?${projectId === null ? "" : `projectId=${encodeURIComponent(projectId)}&`}afterSeq=${afterSeq}&limit=${limit}`,
     ),
 };
 

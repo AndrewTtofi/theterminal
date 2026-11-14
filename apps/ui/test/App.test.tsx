@@ -42,6 +42,8 @@ vi.mock("../src/api", () => ({
   },
 }));
 
+vi.mock("../src/shell/Dock", () => import("./test-dock"));
+
 import { api } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
@@ -183,8 +185,12 @@ describe("App needs-you strip", () => {
 });
 
 describe("App provider settings", () => {
-  it("shows the provider sign-in settings with no project selected", async () => {
+  const openConnections = () =>
+    userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+
+  it("shows the provider sign-in settings in the Connections view with no project selected", async () => {
     render(<App />);
+    await openConnections();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
     expect(screen.getByText("Select or create a project.")).toBeTruthy();
   });
@@ -192,6 +198,7 @@ describe("App provider settings", () => {
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
     m.setProviderAuth.mockRejectedValue(new Error("nope"));
     render(<App />);
+    await openConnections();
     const codex = within(await screen.findByRole("group", { name: "Codex sign-in" }));
     await userEvent.click(codex.getByLabelText("My own ChatGPT plan"));
     await userEvent.click(codex.getByLabelText("I understand and accept this risk"));
@@ -201,5 +208,31 @@ describe("App provider settings", () => {
     await waitFor(() =>
       expect((codex.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(true),
     );
+  });
+});
+
+describe("App ledger scope", () => {
+  const entry = (seq: number, projectId: string, name: string): LedgerEntry => ({
+    seq, id: `e${seq}`, ts: "2026-01-01T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type: "project.created", payload: { name }, prevHash: "", hash: "",
+  });
+
+  it("shows every project's entries when All projects is chosen, and the project's again after", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listLedger.mockImplementation((projectId) =>
+      Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
+    );
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    expect(m.listLedger).toHaveBeenCalledWith(null);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(2));
+
+    await userEvent.click(screen.getByRole("radio", { name: "This project" }));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
   });
 });

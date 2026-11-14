@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AdapterId, AgentAction, AgentRun, Board as BoardData, LedgerEntry, PendingAgentAction, Project, Stage } from "@theterminal/shared";
+import type { AgentAction, AgentRun, Board as BoardData, LedgerEntry, PendingAgentAction, Project } from "@theterminal/shared";
 import { api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health } from "./api";
-import { AgentPanel } from "./components/AgentPanel";
-import { ProviderAuthSettings } from "./components/ProviderAuthSettings";
-import { DecisionCard } from "./components/DecisionCard";
-import { Board } from "./components/Board";
-import { LedgerPanel } from "./components/LedgerPanel";
-import { ProjectList } from "./components/ProjectList";
+import { Workbench } from "./shell/Workbench";
+import type { LedgerScope, WorkbenchModel } from "./shell/model";
 
 /** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
 function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
@@ -41,6 +37,8 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [board, setBoard] = useState<BoardData | null>(null);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
+  const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
+  const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const refreshAgents = useRef<() => void>(() => {});
@@ -153,6 +151,103 @@ export function App() {
     };
   }, [selectedId, run]);
 
+  // The "All projects" ledger scope loads and streams every project's entries while it is chosen.
+  useEffect(() => {
+    if (ledgerScope !== "all") return;
+    let cancelled = false;
+    let unsubscribe = () => {};
+    setAllEntries([]);
+    void run(async () => {
+      const initial = await api.listLedger(null);
+      if (cancelled) return;
+      setAllEntries(initial);
+      const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
+      unsubscribe = subscribeLedger(lastSeq, (e) => {
+        setAllEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+      });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [ledgerScope, run]);
+
+  const model: WorkbenchModel = {
+    projects,
+    selectedId,
+    onSelectProject: setSelectedId,
+    onCreateProject: (name) =>
+      void run(async () => {
+        const p = await api.createProject({ name });
+        setProjects((prev) => [...prev, p]);
+        setSelectedId(p.id);
+      }),
+    board: selectedId ? board : null,
+    onAddCard: (stage, title) =>
+      void run(async () => {
+        if (!selectedId) return;
+        await api.addCard(selectedId, { title, stage });
+        refreshRef.current();
+      }),
+    onMoveCard: (cardId, to) =>
+      void run(async () => {
+        await api.moveCard(cardId, to);
+        refreshRef.current();
+      }),
+    agentsInfo,
+    runs,
+    selectedRunId,
+    runActions,
+    onStartRun: async (adapter, prompt) => {
+      if (!selectedId) return false;
+      try {
+        setError(null);
+        const started = await api.startRun(selectedId, { adapter, prompt });
+        setSelectedRunId(started.id);
+        refreshAgents.current();
+        return true;
+      } catch (e) {
+        setError(errorMessage(e));
+        return false;
+      }
+    },
+    onSelectRun: setSelectedRunId,
+    onStopRun: (runId) =>
+      void run(async () => {
+        await api.stopRun(runId);
+        refreshAgents.current();
+      }),
+    pending,
+    onDecide: async (id, decision, reason) => {
+      try {
+        await api.decideAction(id, decision, reason);
+      } finally {
+        refreshPending.current();
+        refreshAgents.current();
+      }
+    },
+    entries: ledgerScope === "all" ? allEntries : entries,
+    ledgerScope,
+    onLedgerScopeChange: setLedgerScope,
+    onProviderAuthChange: async (provider, mode, acknowledgement) => {
+      try {
+        setError(null);
+        const res = await api.setProviderAuth(acknowledgement ? { provider, mode, acknowledgement } : { provider, mode });
+        setAgentsInfo((prev) =>
+          prev
+            ? { ...prev, providers: { ...prev.providers, [provider]: { ...prev.providers[provider], mode: res.mode } } }
+            : prev,
+        );
+        return true;
+      } catch (e) {
+        setError(errorMessage(e));
+        // Re-sync with the server's actual mode.
+        void api.getAgents().then(setAgentsInfo, () => {});
+        return false;
+      }
+    },
+  };
+
   return (
     <div className="app">
       {health?.integrity === "broken" && (
@@ -165,129 +260,7 @@ export function App() {
           {error}
         </div>
       )}
-      <div className="layout">
-        <ProjectList
-          projects={projects}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onCreate={(name) =>
-            void run(async () => {
-              const p = await api.createProject({ name });
-              setProjects((prev) => [...prev, p]);
-              setSelectedId(p.id);
-            })
-          }
-        />
-        <main>
-          {pending.length > 0 && (
-            <section className="needs-you" aria-label="Needs you">
-              <h2>Needs you</h2>
-              {pending.map((a) => (
-                <DecisionCard
-                  key={a.id}
-                  action={a}
-                  projectName={a.projectName}
-                  onDecide={async (id, decision, reason) => {
-                    try {
-                      await api.decideAction(id, decision, reason);
-                    } finally {
-                      refreshPending.current();
-                      refreshAgents.current();
-                    }
-                  }}
-                />
-              ))}
-            </section>
-          )}
-          {board && selectedId ? (
-            <>
-              <h1>{board.project.name}</h1>
-              <Board
-                board={board}
-                onAddCard={(stage: Stage, title) =>
-                  void run(async () => {
-                    await api.addCard(selectedId, { title, stage });
-                    refreshRef.current();
-                  })
-                }
-                onMoveCard={(cardId, to) =>
-                  void run(async () => {
-                    await api.moveCard(cardId, to);
-                    refreshRef.current();
-                  })
-                }
-              />
-              {agentsInfo && (
-                <AgentPanel
-                  adapters={agentsInfo.adapters}
-                  providers={agentsInfo.providers}
-                  runs={runs}
-                  selectedRunId={selectedRunId}
-                  actions={runActions}
-                  onStart={async (adapter: AdapterId, prompt) => {
-                    try {
-                      setError(null);
-                      const started = await api.startRun(selectedId, { adapter, prompt });
-                      setSelectedRunId(started.id);
-                      refreshAgents.current();
-                      return true;
-                    } catch (e) {
-                      setError(errorMessage(e));
-                      return false;
-                    }
-                  }}
-                  onSelectRun={setSelectedRunId}
-                  onStop={(runId) =>
-                    void run(async () => {
-                      await api.stopRun(runId);
-                      refreshAgents.current();
-                    })
-                  }
-                />
-              )}
-            </>
-          ) : (
-            <p className="empty">Select or create a project.</p>
-          )}
-        </main>
-        {(agentsInfo || selectedId) && (
-          <div>
-            {agentsInfo && (
-              <ProviderAuthSettings
-                modes={{
-                  claude: agentsInfo.providers.claude.mode,
-                  codex: agentsInfo.providers.codex.mode,
-                  gemini: agentsInfo.providers.gemini.mode,
-                }}
-                acks={agentsInfo.acks}
-                onChange={async (provider, mode, acknowledgement) => {
-                  try {
-                    setError(null);
-                    const res = await api.setProviderAuth(
-                      acknowledgement ? { provider, mode, acknowledgement } : { provider, mode },
-                    );
-                    setAgentsInfo((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            providers: { ...prev.providers, [provider]: { ...prev.providers[provider], mode: res.mode } },
-                          }
-                        : prev,
-                    );
-                    return true;
-                  } catch (e) {
-                    setError(errorMessage(e));
-                    // Re-sync with the server's actual mode.
-                    void api.getAgents().then(setAgentsInfo, () => {});
-                    return false;
-                  }
-                }}
-              />
-            )}
-            {selectedId && <LedgerPanel entries={entries} />}
-          </div>
-        )}
-      </div>
+      <Workbench model={model} />
     </div>
   );
 }
