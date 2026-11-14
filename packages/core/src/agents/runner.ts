@@ -134,6 +134,10 @@ export class AgentRunner {
     const adapter = this.deps.adapters[input.adapter];
     if (!adapter) throw new AdapterUnavailableError(input.adapter);
     const prompt = promptSchema.parse(input.prompt);
+    const cardId = input.cardId ?? null;
+    if (cardId !== null && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
+      throw new NotFoundError("card", cardId);
+    }
     const authMode: AuthMode =
       input.adapter === "claude" ? (getSetting(db, "claude_auth_mode") === "subscription" ? "subscription" : "api_key") : "none";
 
@@ -147,7 +151,7 @@ export class AgentRunner {
         type: "agent.started",
         payload: {
           runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub),
-          cardId: input.cardId ?? null, worktree: wt.relPath,
+          cardId, worktree: wt.relPath,
         },
       },
       result: () => getRun(db, runId)!,

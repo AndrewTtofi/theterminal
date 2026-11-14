@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -39,10 +39,11 @@ async function start(script?: FakeStep[] | null, opts: { shutdownTimeoutMs?: num
     process.env.THETERMINAL_FAKE_AGENT = "1";
     if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
   }
-  const s = await createServer({ dataDir: tmp(), port: 0, ...opts });
+  const dataDir = tmp();
+  const s = await createServer({ dataDir, port: 0, ...opts });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
-  return { s, projectId: project.id };
+  return { s, projectId: project.id, dataDir };
 }
 
 const base = (s: RunningServer) => `http://127.0.0.1:${s.port}`;
@@ -94,6 +95,35 @@ describe("agent API", { timeout: 15000 }, () => {
     expect((await get(s, "/api/projects/nope/pending-actions")).status).toBe(404);
     expect((await get(s, "/api/runs/nope")).status).toBe(404);
     expect((await post(s, "/api/actions/nope/decision", { decision: "allow" })).status).toBe(404);
+  });
+
+  it("an empty or oversized prompt is 400 invalid_input, before any project work", async () => {
+    const { s, projectId } = await start(script);
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_input" });
+    expect((await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "x".repeat(20001) })).status).toBe(400);
+    expect((await post(s, "/api/projects/nope/runs", { adapter: "fake", prompt: "" })).status).toBe(400);
+  });
+
+  it("a run's card must exist in the same project", async () => {
+    const { s, projectId, dataDir } = await start(script);
+    const other = await json<{ id: string }>(post(s, "/api/projects", { name: "Other", pitch: "y" }));
+    const foreign = await json<{ id: string }>(post(s, `/api/projects/${other.id}/cards`, { title: "F", stage: "plan" }));
+    const card = await json<{ id: string }>(post(s, `/api/projects/${projectId}/cards`, { title: "C", stage: "plan" }));
+    const before = await json<unknown[]>(get(s, "/api/ledger"));
+
+    const missing = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", cardId: "nope" });
+    expect(missing.status).toBe(404);
+    const cross = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", cardId: foreign.id });
+    expect(cross.status).toBe(404);
+    expect(await json<unknown[]>(get(s, "/api/ledger"))).toHaveLength(before.length);
+    expect(await json(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
+    expect(existsSync(join(dataDir, "projects", projectId))).toBe(false);
+
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", cardId: card.id });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ cardId: card.id });
   });
 
   it("starts, lists, inspects and approves a scripted run end to end", async () => {

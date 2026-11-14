@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -288,5 +288,19 @@ describe("AgentRunner with the FakeAdapter", () => {
     await expect(runner.start(owner, { projectId: "nope", adapter: "fake", prompt: "p" })).rejects.toThrow(NotFoundError);
     await expect(runner.start(owner, { projectId, adapter: "claude", prompt: "p" })).rejects.toThrow(AdapterUnavailableError);
     expect(agentEvents()).toEqual([]);
+  });
+
+  it("rejects a card that does not exist or belongs to another project, before creating a worktree", async () => {
+    const board = new BoardService(db, ledger);
+    const otherCard = board.addCard(owner, board.createProject(owner, { name: "Other" }).id, { title: "F", stage: "plan" });
+    const runner = fakeRunner([]);
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "nope" })).rejects.toThrow(NotFoundError);
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: otherCard.id })).rejects.toThrow(NotFoundError);
+    expect(agentEvents()).toEqual([]);
+    expect(existsSync(join(dataDir, "projects", projectId))).toBe(false);
+
+    const card = board.addCard(owner, projectId, { title: "C", stage: "plan" });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: card.id });
+    expect(run.cardId).toBe(card.id);
   });
 });

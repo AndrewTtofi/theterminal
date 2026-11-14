@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, type AdapterId } from "@theterminal/shared";
+import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, agentPayloadSchemas, type AdapterId } from "@theterminal/shared";
 import type { AgentRunner } from "../agents/runner.js";
 import type { ClaudeSettings } from "../agents/settings.js";
 import { NotFoundError } from "../board/board-service.js";
@@ -19,7 +19,7 @@ const actor = { kind: "human", id: "owner" } as const;
 
 const startBody = z.object({
   adapter: z.enum(ADAPTERS),
-  prompt: z.string(),
+  prompt: agentPayloadSchemas["agent.started"].shape.prompt, // same bounds as the recorded event
   cardId: z.string().min(1).max(200).nullable().optional(),
 });
 const decisionBody = z.object({ decision: z.enum(["allow", "deny"]), reason: z.string().optional() });
