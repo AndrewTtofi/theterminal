@@ -9,6 +9,7 @@ import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapt
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
+import { bundledGemini, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
 import { keyBlockAround, openKeyBlock, scanKeyBody, sealKeyBlocks } from "./key-blocks.js";
@@ -20,7 +21,7 @@ type Spawn = typeof nodeSpawn;
 type Rec = Record<string, unknown>;
 
 const NO_API_KEY = "No Gemini API key configured";
-const NO_CLI = "Gemini CLI is not installed or not on PATH";
+const NO_CLI = "Gemini CLI is unavailable: its bundled program is missing and none is on PATH";
 const CMD_SHIM = "Gemini CLI must be a native executable on Windows (found a .cmd shim)";
 const NOT_LOGGED_IN = "Gemini is not logged in; run 'gemini' once yourself";
 const COMMAND_PROMPT = "Gemini treats a prompt starting with / or $ as a command; rephrase it";
@@ -196,7 +197,7 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
 }
 
 /**
- * Drives the user's installed `gemini` CLI in ACP mode as its client. We advertise the `fs` and `terminal`
+ * Drives the `gemini` CLI (the bundled one by default) in ACP mode as its client. We advertise the `fs` and `terminal`
  * capabilities, so file reads, file writes and (should Gemini use them) commands come to us: each is gated
  * first and then performed by us inside the worktree. `session/request_permission` is gated too, and a tool
  * call that reaches execution without either is reported as ungated: the run fails and Gemini is killed.
@@ -209,6 +210,7 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
 export class GeminiAdapter implements AgentAdapter {
   readonly id = "gemini" as const;
   private readonly dataDir: string;
+  private readonly bundled: () => BundledCli | null;
   private readonly bin: () => string | null;
   private readonly apiKey: () => string | undefined;
   private readonly spawn: Spawn;
@@ -221,7 +223,9 @@ export class GeminiAdapter implements AgentAdapter {
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
     dataDir: string;
-    /** Locates the user's own Gemini CLI. Default: `gemini` on PATH. */
+    /** The Gemini CLI shipped with The Terminal. Default: `bundledGemini`. */
+    bundled?: () => BundledCli | null;
+    /** Locates a Gemini CLI on PATH, consulted only when there is no bundled one. Default: `gemini` on PATH. */
     bin?: () => string | null;
     apiKey?: () => string | undefined;
     spawn?: Spawn;
@@ -235,6 +239,7 @@ export class GeminiAdapter implements AgentAdapter {
   }) {
     this.dataDir = opts.dataDir;
     this.fakeEnv = opts.fakeEnv ?? {};
+    this.bundled = opts.bundled ?? (() => bundledGemini());
     this.bin = opts.bin ?? (() => which("gemini"));
     this.apiKey = opts.apiKey ?? (() => process.env.GEMINI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -253,9 +258,11 @@ export class GeminiAdapter implements AgentAdapter {
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
     let base: string[];
-    if (this.command) {
-      file = this.command.file;
-      base = this.command.args;
+    // A test command first, then the bundled CLI, and PATH only when the bundled one is missing.
+    const command = this.command ?? this.bundled();
+    if (command) {
+      file = command.file;
+      base = command.args;
     } else {
       const bin = this.bin();
       if (bin === null) return { status: "failed", error: NO_CLI };

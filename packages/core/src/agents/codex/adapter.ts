@@ -7,12 +7,13 @@ import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapt
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { redact } from "../redact.js";
+import { bundledCodex, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import * as P from "./protocol.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 
-const NO_CLI = "Codex CLI is not installed or not on PATH";
+const NO_CLI = "Codex CLI is unavailable: its bundled program is missing and none is on PATH";
 const CMD_SHIM = "Codex CLI must be a native executable on Windows (found a .cmd shim)";
 const NO_API_KEY = "No OpenAI API key configured";
 const NOT_LOGGED_IN = "Codex is not logged in; run 'codex login' yourself";
@@ -208,10 +209,11 @@ export function codexApprovalToAction(
 
 type CommandSpec = { file: string; args: string[] };
 
-/** Drives the user's installed `codex app-server`. Every command and file change waits for our gate. */
+/** Drives `codex app-server` (the bundled Codex CLI by default). Every command and file change waits for our gate. */
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex" as const;
   private readonly dataDir: string;
+  private readonly bundled: () => BundledCli | null;
   private readonly bin: () => string | null;
   private readonly apiKey: () => string | undefined;
   private readonly spawn: typeof nodeSpawn;
@@ -223,7 +225,9 @@ export class CodexAdapter implements AgentAdapter {
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
     dataDir: string;
-    /** Locates the user's own Codex CLI. Default: `codex` on PATH. */
+    /** The Codex CLI shipped with The Terminal. Default: `bundledCodex`. */
+    bundled?: () => BundledCli | null;
+    /** Locates a Codex CLI on PATH, consulted only when there is no bundled one. Default: `codex` on PATH. */
     bin?: () => string | null;
     apiKey?: () => string | undefined;
     spawn?: typeof nodeSpawn;
@@ -238,6 +242,7 @@ export class CodexAdapter implements AgentAdapter {
   }) {
     this.dataDir = opts.dataDir;
     this.fakeEnv = opts.fakeEnv ?? {};
+    this.bundled = opts.bundled ?? (() => bundledCodex());
     this.bin = opts.bin ?? (() => which("codex"));
     this.apiKey = opts.apiKey ?? (() => process.env.OPENAI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -256,7 +261,8 @@ export class CodexAdapter implements AgentAdapter {
       apiKey = this.apiKey();
       if (!apiKey) return { status: "failed", error: NO_API_KEY };
     }
-    let cmd = this.command;
+    // A test command first, then the bundled CLI, and PATH only when the bundled one is missing.
+    let cmd = this.command ?? this.bundled() ?? undefined;
     if (cmd === undefined) {
       const file = this.bin();
       if (file === null) return { status: "failed", error: NO_CLI };

@@ -318,18 +318,36 @@ describe("ClaudeAdapter", () => {
     expect(findClaude).not.toHaveBeenCalled();
   });
 
-  it("subscription mode runs the user's own Claude Code found on PATH", async () => {
+  it("subscription mode runs the Claude Code bundled with the Agent SDK and never looks on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const findClaude = vi.fn(() => CLAUDE_BIN);
+    const bundled = "node_modules/@anthropic-ai/claude-agent-sdk-x/claude";
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => bundled, findClaude }).start({ ...harness().opts, authMode: "subscription" });
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(bundled);
+    expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("subscription mode uses the SDK's own platform binary when none is injected", async () => {
+    const { bundledClaude } = await import("../../src/agents/bundled.js");
+    const q = fakeQuery([success(0)]);
+    const findClaude = vi.fn(() => CLAUDE_BIN);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude }).start({ ...harness().opts, authMode: "subscription" });
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(bundledClaude());
+    expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("subscription mode falls back to Claude Code on PATH only when the bundled one is missing", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => null, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
     expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(CLAUDE_BIN);
   });
 
-  it("subscription mode fails without starting Claude when Claude Code is not on PATH", async () => {
+  it("subscription mode fails without starting Claude when there is no bundled Claude Code and none on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
-    expect(r).toEqual({ status: "failed", error: "Claude Code is not installed or not on PATH" });
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => null, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
+    expect(r).toEqual({ status: "failed", error: "Claude Code is unavailable: its bundled program is missing and none is on PATH" });
     expect(q.calls).toHaveLength(0);
   });
 

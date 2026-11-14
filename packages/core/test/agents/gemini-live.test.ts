@@ -12,7 +12,7 @@ import { openDatabase } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 
-// Opt-in only: THETERMINAL_LIVE_GEMINI=1 runs the user's installed `gemini` in ACP mode (api_key mode, key from GEMINI_API_KEY).
+// Opt-in only: THETERMINAL_LIVE_GEMINI=1 runs the bundled `gemini` in ACP mode (api_key mode, key from GEMINI_API_KEY).
 describe.skipIf(process.env.THETERMINAL_LIVE_GEMINI !== "1")("GeminiAdapter live", () => {
   let dataDir: string;
   beforeEach(() => {

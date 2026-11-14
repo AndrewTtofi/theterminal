@@ -166,7 +166,7 @@ describe("ConnectionEditor", () => {
 
   it("names the environment variable in use when there is no connection", async () => {
     renderWithConnections(<ConnectionEditor id="connection:new:claude" />, {
-      agentsInfo: { ...AGENTS, providers: { ...AGENTS.providers, claude: { mode: "api_key", installed: true, apiKey: "environment" } } },
+      agentsInfo: { ...AGENTS, providers: { ...AGENTS.providers, claude: { mode: "api_key", available: true, apiKey: "environment" } } },
     });
     expect(
       await screen.findByText("Using the ANTHROPIC_API_KEY environment variable. Add a key here to manage it in your keychain."),

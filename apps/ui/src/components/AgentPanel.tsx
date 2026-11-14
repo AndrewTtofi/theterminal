@@ -15,8 +15,8 @@ export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", code
 
 type Props = {
   adapters: AdapterId[];
-  /** Per-provider install state; a missing entry means the adapter is always available. */
-  providers?: Partial<Record<Provider, { mode: AuthMode; installed: boolean }>>;
+  /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
+  providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
   runs: AgentRun[];
   selectedRunId: string | null;
   /** The selected run's actions; omit them when another panel (the Agent feed) shows them. */
@@ -34,10 +34,10 @@ export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, 
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
-  // The bundled Claude SDK runs without the CLI when signed in with an API key.
+  // Every provider's program ships with The Terminal, so an unavailable one means a broken install.
   const available = (a: AdapterId) => {
     const info = a === "fake" ? undefined : providers?.[a];
-    return !info || info.installed || (a === "claude" && info.mode === "api_key");
+    return !info || info.available;
   };
   const chosen = adapter || adapters.find(available) || "";
   const selected = runs.find((r) => r.id === selectedRunId);
@@ -64,7 +64,7 @@ export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, 
             {adapters.map((a) => (
               <option key={a} value={a} disabled={!available(a)}>
                 {ADAPTER_NAMES[a]}
-                {available(a) ? "" : " (not installed)"}
+                {available(a) ? "" : " (unavailable)"}
               </option>
             ))}
           </select>

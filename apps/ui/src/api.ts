@@ -63,7 +63,7 @@ async function request<T>(
 export type AgentsInfo = {
   adapters: AdapterId[];
   /** apiKey: where a run's API key comes from; "environment" is the server's own variable (development fallback). */
-  providers: Record<Provider, { mode: AuthMode; installed: boolean; apiKey?: "connection" | "environment" | "none" }>;
+  providers: Record<Provider, { mode: AuthMode; available: boolean; apiKey?: "connection" | "environment" | "none" }>;
   acks: Record<Provider, string>;
 };
 

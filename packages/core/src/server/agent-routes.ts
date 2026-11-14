@@ -21,8 +21,8 @@ export type AgentRouteDeps = {
   settings: ProviderSettings;
   /** The adapters registered in this server, in ADAPTERS order. */
   adapters: AdapterId[];
-  /** Whether a provider's CLI is on PATH. Asked on every listing, so installing a CLI shows without a restart. */
-  installed: (p: Provider) => boolean;
+  /** Whether a run can locate a provider's program (bundled, else on PATH). Asked on every listing. */
+  available: (p: Provider) => boolean;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -42,7 +42,7 @@ const providerAuthBody = z.object({
 
 /** Agent runs, decisions and the per-provider auth settings. Errors are mapped by the handler in routes.ts. */
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps): void {
-  const { db, runner, settings, adapters, installed } = deps;
+  const { db, runner, settings, adapters, available } = deps;
 
   const requireProject = (id: string) => {
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
@@ -50,9 +50,9 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.get("/api/agents", async () => ({
     adapters,
-    providers: Object.fromEntries(PROVIDERS.map((p) => [p, { mode: settings.getMode(p), installed: installed(p) }])) as Record<
+    providers: Object.fromEntries(PROVIDERS.map((p) => [p, { mode: settings.getMode(p), available: available(p) }])) as Record<
       Provider,
-      { mode: AuthMode; installed: boolean }
+      { mode: AuthMode; available: boolean }
     >,
     acks: PROVIDER_ACKS,
   }));

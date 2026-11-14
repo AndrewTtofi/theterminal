@@ -5,6 +5,9 @@ packages:
 allowBuilds:
   esbuild: true
   better-sqlite3: true
+  # Optional native helpers of the bundled Gemini CLI. Its ACP mode needs neither, so their build scripts never run.
+  "@github/keytar": false
+  node-pty: false
 
 # Pin the docking library and its transitive packages to one reviewed version.
 overrides:

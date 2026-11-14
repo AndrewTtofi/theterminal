@@ -22,6 +22,7 @@ import { GeminiAdapter } from "../agents/gemini/adapter.js";
 import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
+import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
 import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, type SharedGitconfigProblem } from "../agents/worktrees.js";
 
@@ -82,8 +83,16 @@ const DEFAULT_FAKE_SCRIPT: FakeStep[] = [
   },
 ];
 
-/** The CLI each provider runs, as looked up on PATH. */
+/** The CLI each provider runs, as looked up on PATH when its bundled program is missing. */
 const PROVIDER_CLI: Record<Provider, string> = { claude: "claude", codex: "codex", gemini: "gemini" };
+
+/** The agent programs shipped with The Terminal (see bundled.ts); each returns null when its package is missing. */
+export type BundledPrograms = {
+  claude: () => string | null;
+  codex: () => BundledCli | null;
+  gemini: () => BundledCli | null;
+};
+const BUNDLED: BundledPrograms = { claude: () => bundledClaude(), codex: () => bundledCodex(), gemini: () => bundledGemini() };
 
 /** Locates a CLI on PATH: an absolute path, or null. */
 export type Which = (cmd: string) => string | null;
@@ -93,7 +102,7 @@ type CliCommand = { file: string; args: string[] };
 /**
  * Tests only: when THETERMINAL_FAKE_AGENT=1, THETERMINAL_<PROVIDER>_BIN may name a fixture script that stands in
  * for that provider's CLI, run with this Node (the fixture reads its own THETERMINAL_FAKE_<PROVIDER>_SCRIPT).
- * Ignored otherwise, so a real workspace always uses the CLI found on PATH.
+ * Ignored otherwise, so a real workspace always uses the bundled CLI (or, if that is missing, the one on PATH).
  */
 function fakeCliCommand(p: Provider): CliCommand | undefined {
   const fixture = process.env[`THETERMINAL_${p.toUpperCase()}_BIN`];
@@ -102,12 +111,13 @@ function fakeCliCommand(p: Provider): CliCommand | undefined {
 }
 
 /**
- * Claude, Codex and Gemini always (their CLIs are looked up at run start, not here); the scripted fake adapter only
+ * Claude, Codex and Gemini always (their programs are located at run start, not here); the scripted fake adapter only
  * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
  */
 function buildAdapters(
   dataDir: string,
   which: Which,
+  bundled: BundledPrograms,
   fakeCli: Partial<Record<Provider, CliCommand>>,
 ): Partial<Record<AdapterId, AgentAdapter>> {
   const codexCommand = fakeCli.codex;
@@ -115,11 +125,11 @@ function buildAdapters(
   // Test-only fixture variables, decided once here (not at run time) while THETERMINAL_FAKE_AGENT is in force.
   const fakeEnv = fakeAgentEnv();
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
-    claude: new ClaudeAdapter({ dataDir }),
+    claude: new ClaudeAdapter({ dataDir, bundled: bundled.claude, findClaude: () => which("claude") }),
     // The API key is read from OPENAI_API_KEY when each run starts.
-    codex: new CodexAdapter({ dataDir, bin: () => which("codex"), fakeEnv, ...(codexCommand && { command: codexCommand }) }),
+    codex: new CodexAdapter({ dataDir, bundled: bundled.codex, bin: () => which("codex"), fakeEnv, ...(codexCommand && { command: codexCommand }) }),
     // The API key is read from GEMINI_API_KEY when each run starts.
-    gemini: new GeminiAdapter({ dataDir, bin: () => which("gemini"), fakeEnv, ...(geminiCommand && { command: geminiCommand }) }),
+    gemini: new GeminiAdapter({ dataDir, bundled: bundled.gemini, bin: () => which("gemini"), fakeEnv, ...(geminiCommand && { command: geminiCommand }) }),
   };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;
@@ -169,8 +179,11 @@ export async function createServer(opts: {
   shutdownTimeoutMs?: number;
   /** Tests only: the PATH lookup for provider CLIs. Default: the PATH of this process. */
   which?: Which;
+  /** Tests only: replaces the bundled program lookups. Default: the packages installed with this one. */
+  bundled?: Partial<BundledPrograms>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
+  const bundled: BundledPrograms = { ...BUNDLED, ...opts.bundled };
   // Read once, at startup: the adapters and the install state below must agree for the server's lifetime.
   const fakeCli: Partial<Record<Provider, CliCommand>> = Object.fromEntries(
     PROVIDERS.flatMap((p) => {
@@ -178,7 +191,7 @@ export async function createServer(opts: {
       return command ? [[p, command]] : [];
     }),
   );
-  const adapters = buildAdapters(opts.dataDir, which, fakeCli);
+  const adapters = buildAdapters(opts.dataDir, which, bundled, fakeCli);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
@@ -220,7 +233,8 @@ export async function createServer(opts: {
       runner,
       settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
-      installed: (p) => fakeCli[p] !== undefined || which(PROVIDER_CLI[p]) !== null,
+      // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
+      available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
     });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();

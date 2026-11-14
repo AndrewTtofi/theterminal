@@ -668,14 +668,74 @@ describe("CodexAdapter (fake app-server)", () => {
   });
 
   describe("locating the CLI", () => {
-    it("fails when codex is not on PATH", async () => {
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => null }));
-      expect(await result).toEqual({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+    const NO_CLI = "Codex CLI is unavailable: its bundled program is missing and none is on PATH";
+    const noBundled = () => null;
+    /** Runs the fake server whatever program the adapter chose, recording what it asked for. */
+    const recordingSpawn = async () => {
+      const real = (await import("node:child_process")).spawn;
+      return vi.fn((_file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args.slice(args.indexOf("app-server"))], opts));
+    };
+
+    it("runs the bundled Codex by default and never looks on PATH", async () => {
+      script([]);
+      const spawn = await recordingSpawn();
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const native = { file: join(dir, "node_modules", "@openai", "codex-x", "vendor", "bin", "codex"), args: [] };
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => native, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(native.file, ["app-server"], expect.objectContaining({ shell: false }));
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("runs a bundled JS entry with this Node", async () => {
+      script([]);
+      const spawn = await recordingSpawn();
+      const entry = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => ({ file: process.execPath, args: [entry] }), spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [entry, "app-server"], expect.objectContaining({ shell: false }));
+    });
+
+    it("uses the package's own bundled Codex when none is injected", async () => {
+      script([]);
+      const { bundledCodex } = await import("../../src/agents/bundled.js");
+      const expected = bundledCodex()!;
+      const spawn = await recordingSpawn();
+      const bin = vi.fn(() => null);
+      const { result } = run(new CodexAdapter({ dataDir: dir, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, "app-server"], expect.anything());
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("consults PATH only when the bundled lookup returns null", async () => {
+      script([]);
+      const spawn = await recordingSpawn();
+      const bundled = vi.fn(() => null);
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(bundled).toHaveBeenCalledOnce();
+      expect(bin).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
+    });
+
+    it("a test command wins over the bundled program", async () => {
+      script([]);
+      const bundled = vi.fn(() => null);
+      const { result } = run(make({ bundled }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(bundled).not.toHaveBeenCalled();
+    });
+
+    it("fails when there is no bundled Codex and none on PATH", async () => {
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => null }));
+      expect(await result).toEqual({ status: "failed", error: NO_CLI });
     });
 
     it("fails when the binary cannot be started", async () => {
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => join(dir, "missing", "codex") }));
-      expect(await result).toEqual({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => join(dir, "missing", "codex") }));
+      expect(await result).toEqual({ status: "failed", error: NO_CLI });
     });
 
     it("runs the script behind an npm .cmd shim with node instead of a shell", async () => {
@@ -685,14 +745,14 @@ describe("CodexAdapter (fake app-server)", () => {
       const real = (await import("node:child_process")).spawn;
       const spawn = vi.fn((_file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args.slice(1)], opts));
       const exists = vi.fn((p: string) => p === target);
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => shim, spawn: spawn as never, exists }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => shim, spawn: spawn as never, exists }));
       expect(await result).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(process.execPath, [target, "app-server"], expect.objectContaining({ shell: false }));
     });
 
     it("refuses a .cmd shim with no npm package script behind it", async () => {
       const spawn = vi.fn();
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => join(dir, "codex.cmd"), spawn: spawn as never, exists: () => false }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => join(dir, "codex.cmd"), spawn: spawn as never, exists: () => false }));
       expect(await result).toEqual({ status: "failed", error: "Codex CLI must be a native executable on Windows (found a .cmd shim)" });
       expect(spawn).not.toHaveBeenCalled();
     });
@@ -701,7 +761,7 @@ describe("CodexAdapter (fake app-server)", () => {
       script([]);
       const real = (await import("node:child_process")).spawn;
       const spawn = vi.fn((file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args], opts));
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => "/opt/codex/bin/codex", spawn: spawn as never }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => "/opt/codex/bin/codex", spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(
         "/opt/codex/bin/codex", ["app-server"], expect.objectContaining({ cwd: dir, stdio: ["pipe", "pipe", "pipe"], shell: false }),

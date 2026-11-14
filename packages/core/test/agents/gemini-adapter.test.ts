@@ -296,11 +296,59 @@ describe("GeminiAdapter", () => {
     expect(children).toEqual([]);
   });
 
-  it("fails without starting when the Gemini CLI is not on PATH", async () => {
+  it("fails without starting when there is no bundled Gemini CLI and none on PATH", async () => {
     const { spawn, children } = fakeSpawn();
-    const r = await new GeminiAdapter({ dataDir: outside, bin: () => null, apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
-    expect(r).toEqual({ status: "failed", error: "Gemini CLI is not installed or not on PATH" });
+    const r = await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: () => null, apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini CLI is unavailable: its bundled program is missing and none is on PATH" });
     expect(children).toEqual([]);
+  });
+
+  describe("bundled program", () => {
+    /** Runs the fake whatever program the adapter chose, recording what it asked for. */
+    const recordingSpawn = () =>
+      vi.fn((_file: string, args: string[], o: object) => nodeSpawn(process.execPath, [FAKE, ...args.slice(args.indexOf("--acp"))], o as never));
+
+    it("runs the bundled Gemini CLI with this Node by default and never looks on PATH", async () => {
+      script([]);
+      const spawn = recordingSpawn();
+      const bin = vi.fn(() => "/opt/gemini/bin/gemini");
+      const entry = join(outside, "node_modules", "@google", "gemini-cli", "bundle", "gemini.js");
+      const r = await new GeminiAdapter({ dataDir: outside, bundled: () => ({ file: process.execPath, args: [entry] }), bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [entry, ...RUN_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("uses the package's own bundled Gemini CLI when none is injected", async () => {
+      script([]);
+      const { bundledGemini } = await import("../../src/agents/bundled.js");
+      const expected = bundledGemini()!;
+      const spawn = recordingSpawn();
+      const bin = vi.fn(() => null);
+      const r = await new GeminiAdapter({ dataDir: outside, bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, ...RUN_ARGS], expect.anything());
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("consults PATH only when the bundled lookup returns null", async () => {
+      script([]);
+      const spawn = recordingSpawn();
+      const bundled = vi.fn(() => null);
+      const bin = vi.fn(() => "/opt/gemini/bin/gemini");
+      const r = await new GeminiAdapter({ dataDir: outside, bundled, bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(bundled).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/gemini/bin/gemini", RUN_ARGS, expect.anything());
+    });
+
+    it("a test command wins over the bundled program", async () => {
+      script([]);
+      const bundled = vi.fn(() => null);
+      const r = await new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, bundled, apiKey: () => FAKE_KEY }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(bundled).not.toHaveBeenCalled();
+    });
   });
 
   describe("npm .cmd shim", () => {
@@ -316,7 +364,7 @@ describe("GeminiAdapter", () => {
       script([]);
       const spawn = vi.fn((_file: string, args: string[], o: object) => nodeSpawn(process.execPath, [FAKE, ...args.slice(1)], o as never));
       const exists = vi.fn((p: string) => p === target());
-      const r = await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
+      const r = await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
       expect(r).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(process.execPath, [target(), ...RUN_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
       expect(spawn.mock.calls[0]![2]).not.toHaveProperty("shell");
@@ -326,11 +374,11 @@ describe("GeminiAdapter", () => {
       const spawn = vi.fn();
       const refused = { status: "failed", error: "Gemini CLI must be a native executable on Windows (found a .cmd shim)" };
       const withBin = (bin: string) => () => JSON.stringify({ bin: { gemini: bin } });
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin("../../../evil.js") }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin(join(outside, "evil.js")) }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin("../../../evil.js") }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin(join(outside, "evil.js")) }).start(harness().opts)).toEqual(refused);
       expect(spawn).not.toHaveBeenCalled();
     });
   });

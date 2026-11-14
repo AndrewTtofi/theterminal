@@ -59,9 +59,9 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     agentsInfo: {
       adapters: ["fake"],
       providers: {
-        claude: { mode: "api_key", installed: true },
-        codex: { mode: "api_key", installed: false },
-        gemini: { mode: "api_key", installed: false },
+        claude: { mode: "api_key", available: true },
+        codex: { mode: "api_key", available: false },
+        gemini: { mode: "api_key", available: false },
       },
       acks: { claude: "a", codex: "b", gemini: "c" },
     },

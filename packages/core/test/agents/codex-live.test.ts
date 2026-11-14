@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProposedAction } from "../../src/agents/adapter.js";
 import { CodexAdapter } from "../../src/agents/codex/adapter.js";
 
-// Opt-in only: THETERMINAL_LIVE_CODEX=1 runs the user's installed `codex app-server` with their own ChatGPT login.
+// Opt-in only: THETERMINAL_LIVE_CODEX=1 runs the bundled `codex app-server` with the user's own ChatGPT login.
 describe.skipIf(process.env.THETERMINAL_LIVE_CODEX !== "1")("CodexAdapter live", () => {
   let worktree: string;
   beforeEach(() => {

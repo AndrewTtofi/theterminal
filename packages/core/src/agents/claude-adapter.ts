@@ -5,12 +5,13 @@ import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
 import { redact } from "./redact.js";
 import { buildChildEnv } from "./child-env.js";
+import { bundledClaude } from "./bundled.js";
 import { which } from "./which.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 
 const NO_API_KEY = "No Anthropic API key configured";
-const NO_CLAUDE_CODE = "Claude Code is not installed or not on PATH";
+const NO_CLAUDE_CODE = "Claude Code is unavailable: its bundled program is missing and none is on PATH";
 const STOPPED = "run stopped";
 const REMOTE_AGENT = "remote agents are not supported";
 /** Hook timeout in seconds: a gate may wait on a human for a long time. A timeout blocks the tool. */
@@ -133,6 +134,7 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly id = "claude" as const;
   private readonly query: typeof sdkQuery;
   private readonly apiKey: () => string | undefined;
+  private readonly bundled: () => string | null;
   private readonly findClaude: () => string | null;
   private readonly dataDir: string;
 
@@ -142,13 +144,16 @@ export class ClaudeAdapter implements AgentAdapter {
       dataDir: string;
       query?: typeof sdkQuery;
       apiKey?: () => string | undefined;
-      /** Locates the user's own Claude Code for subscription mode. Default: `claude` on PATH. */
+      /** The Claude Code binary shipped with the Agent SDK, for subscription mode. Default: `bundledClaude`. */
+      bundled?: () => string | null;
+      /** Locates Claude Code on PATH, consulted only when there is no bundled one. Default: `claude` on PATH. */
       findClaude?: () => string | null;
     },
   ) {
     this.dataDir = opts.dataDir;
     this.query = opts.query ?? sdkQuery;
     this.apiKey = opts.apiKey ?? (() => process.env.ANTHROPIC_API_KEY);
+    this.bundled = opts.bundled ?? (() => bundledClaude());
     this.findClaude = opts.findClaude ?? (() => which("claude"));
   }
 
@@ -156,10 +161,11 @@ export class ClaudeAdapter implements AgentAdapter {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
     const env = this.env(o.authMode);
     if (typeof env === "string") return { status: "failed", error: env };
-    // Subscription mode runs the user's own installed Claude Code with its own login; api_key mode the bundled one.
+    // Subscription mode names the Claude Code bundled with the SDK (PATH only when it is missing); Claude Code reads
+    // the user's own login itself, never we. api_key mode leaves the choice to the SDK, which uses the same binary.
     let executable: string | null = null;
     if (o.authMode === "subscription") {
-      executable = this.findClaude();
+      executable = this.bundled() ?? this.findClaude();
       if (executable === null) return { status: "failed", error: NO_CLAUDE_CODE };
     }
 

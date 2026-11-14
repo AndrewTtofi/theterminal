@@ -11,9 +11,9 @@ import { useConnections } from "../src/use-connections";
 export const AGENTS: AgentsInfo = {
   adapters: ["fake"],
   providers: {
-    claude: { mode: "api_key", installed: true, apiKey: "none" },
-    codex: { mode: "api_key", installed: false, apiKey: "none" },
-    gemini: { mode: "api_key", installed: false, apiKey: "none" },
+    claude: { mode: "api_key", available: true, apiKey: "none" },
+    codex: { mode: "api_key", available: false, apiKey: "none" },
+    gemini: { mode: "api_key", available: false, apiKey: "none" },
   },
   acks: { claude: "Example claude warning.", codex: "Example codex warning.", gemini: "Example gemini warning." },
 };
