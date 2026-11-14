@@ -193,9 +193,10 @@ export class AgentRunner {
     const authMode: AuthMode =
       input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
     const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
+    // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
     const credentials: RunCredentials = {};
-    if (creds?.apiKey) credentials.apiKey = creds.apiKey;
-    if (creds?.cliHome) credentials.cliHome = creds.cliHome;
+    if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
+    if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
     // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
     const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;

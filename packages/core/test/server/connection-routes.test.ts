@@ -150,6 +150,34 @@ describe("connections API", { timeout: 15000 }, () => {
     expect((JSON.parse(text) as { issues: unknown[] }).issues.length).toBeGreaterThan(0);
   });
 
+  it("answers a malformed JSON body with 400 and never echoes its text", async () => {
+    const s = await start();
+    const res = await fetch(`${base(s)}/api/connections`, {
+      method: "POST",
+      headers: { ...auth(s), "content-type": "application/json" },
+      body: `{"secrets":{"apiKey":"${KEY}"`,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).not.toContain(KEY);
+  });
+
+  it("refuses a CLI home folder that is not absolute with 400 invalid_input", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "codex", name: "Codex", private: { cliHome: "codex-home" } });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect((JSON.parse(text) as { error: string }).error).toBe("invalid_input");
+    expect(text).not.toContain("codex-home");
+    expect(await json(get(s, "/api/connections"))).toEqual([]);
+  });
+
+  it("answers 401 without a token for the connection and status routes", async () => {
+    const s = await start();
+    for (const path of ["/api/connections", "/api/connections/catalog", "/api/status"]) {
+      expect((await fetch(base(s) + path)).status).toBe(401);
+    }
+  });
+
   it("tests a connection with a bare POST (no body, no content-type) through the fake HTTP stub", async () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_HTTP = "1";

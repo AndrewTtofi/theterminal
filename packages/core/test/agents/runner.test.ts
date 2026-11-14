@@ -542,7 +542,8 @@ describe("AgentRunner: live secrets and usage totals", () => {
 
 describe("AgentRunner: connection credentials", () => {
   const STORED_KEY = "sk-ant-TESTKEY-0000000000";
-  const CLI_HOME = "codex-home-for-tests";
+  const CLI_HOME = join(tmpdir(), "cli-home-for-tests");
+  const GEMINI_KEY = "AIzaTESTKEY000000000000000000000000000";
 
   async function connections() {
     const service = new ConnectionService({ db, ledger, secrets: new MemorySecretStore(), testers: {} });
@@ -629,8 +630,32 @@ describe("AgentRunner: connection credentials", () => {
     new ProviderSettings(db, ledger).setMode(owner, "codex", "chatgpt", PROVIDER_ACKS.codex);
     const second = await runner.start(owner, { projectId, adapter: "codex", prompt: "p" });
     await untilFinished(second.id);
-    expect(seen).toEqual([{ cliHome: CLI_HOME }, { cliHome: CLI_HOME }]);
+    expect(seen).toEqual([{}, { cliHome: CLI_HOME }]); // the CLI home only reaches a login-mode run
     const used = ledger.list().filter((e) => e.type === "connection.used");
     expect(used.map((e) => e.payload)).toEqual([{ connectionId: conn.id, name: "Codex", runId: second.id, purpose: "cli_home" }]);
+  });
+
+  it("passes only the key in api_key mode and only the CLI home in a login mode; the Google Cloud project in both", async () => {
+    const service = await connections();
+    await service.add(owner, {
+      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "test-project" },
+      secrets: { apiKey: GEMINI_KEY }, private: { cliHome: CLI_HOME },
+    });
+    const seen: RunCredentials[] = [];
+    const runner = credRunner({ gemini: recording("gemini", seen) }, service);
+
+    const keyRun = await runner.start(owner, { projectId, adapter: "gemini", prompt: "p" });
+    await untilFinished(keyRun.id);
+    new ProviderSettings(db, ledger).setMode(owner, "gemini", "google", PROVIDER_ACKS.gemini);
+    const loginRun = await runner.start(owner, { projectId, adapter: "gemini", prompt: "p" });
+    await untilFinished(loginRun.id);
+
+    expect(seen).toEqual([
+      { apiKey: GEMINI_KEY, googleCloudProject: "test-project" },
+      { cliHome: CLI_HOME, googleCloudProject: "test-project" },
+    ]);
+    expect(ledger.list().filter((e) => e.type === "connection.used").map((e) => (e.payload as { purpose: string }).purpose)).toEqual([
+      "api_key", "cli_home",
+    ]);
   });
 });

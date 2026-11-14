@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -157,7 +159,7 @@ describe("agent projections", () => {
     });
     const claude = await svc.add(human, { kind: "llm", provider: "claude", name: "Claude", config: {}, secrets: { apiKey: "sk-ant-TESTKEY-0000000000" } });
     const gemini = await svc.add(human, {
-      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "p" }, private: { cliHome: "home" },
+      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "p" }, private: { cliHome: join(tmpdir(), "home") },
     });
     const github = await svc.add(human, { kind: "github", provider: "github", name: "GitHub", config: {}, secrets: { token: "ghp_TESTKEY0000000000000000" } });
     await svc.update(human, gemini.id, { name: "G2", enabled: false, secrets: { apiKey: "AIzaTESTKEY" }, private: { cliHome: null } });

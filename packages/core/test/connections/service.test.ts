@@ -1,4 +1,7 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
@@ -15,6 +18,10 @@ import {
 const owner = { kind: "human", id: "owner" } as const;
 const KEY = "sk-ant-TESTKEY-0000000000";
 const KEY2 = "sk-ant-TESTKEY-1111111111";
+/** CLI home folders must be absolute; built at run time so no machine path is written into the repo. */
+const GEM_HOME = join(tmpdir(), "gemini-home");
+const CODEX_HOME = join(tmpdir(), "codex-home");
+const HOME2 = join(tmpdir(), "home2");
 
 let db: Db;
 let ledger: Ledger;
@@ -33,6 +40,26 @@ beforeEach(() => {
   ledger = new Ledger(db);
   store = new MemorySecretStore();
   ids = 0;
+});
+
+describe("CLI home folder", () => {
+  it("refuses a cliHome that is not an absolute path, on add and on update, without writing anything", async () => {
+    const svc = make();
+    for (const cliHome of ["gemini-home", "./gemini-home", "~/gemini-home"]) {
+      const err = await svc
+        .add(owner, { kind: "llm", provider: "gemini", name: "Gemini", private: { cliHome } })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      expect((err as ZodError).issues[0]!.path).toEqual(["private", "cliHome"]);
+      expect(JSON.stringify((err as ZodError).issues)).not.toContain(cliHome);
+    }
+    expect(ledger.list()).toEqual([]);
+    expect(store.size()).toBe(0);
+
+    const c = await svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", private: { cliHome: GEM_HOME } });
+    await expect(svc.update(owner, c.id, { private: { cliHome: "relative" } })).rejects.toBeInstanceOf(ZodError);
+    expect(svc.get(c.id).private).toEqual({ cliHome: GEM_HOME });
+  });
 });
 
 describe("add", () => {
@@ -60,13 +87,13 @@ describe("add", () => {
     const svc = make();
     const c = await svc.add(owner, {
       kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "demo-project" },
-      private: { cliHome: "gemini-home" },
+      private: { cliHome: GEM_HOME },
     });
-    expect(c.private).toEqual({ cliHome: "gemini-home" });
+    expect(c.private).toEqual({ cliHome: GEM_HOME });
     expect(c.config).toEqual({ googleCloudProject: "demo-project" });
-    expect(JSON.stringify(ledger.list())).not.toContain("gemini-home");
+    expect(JSON.stringify(ledger.list())).not.toContain(GEM_HOME);
     expect(ledger.list()[0]!.payload).toMatchObject({ privateFields: ["cliHome"], secretFields: [] });
-    expect(await store.get("connection/conn1/cliHome")).toBe("gemini-home");
+    expect(await store.get("connection/conn1/cliHome")).toBe(GEM_HOME);
     expect(svc.secretValues()).toEqual([]);
   });
 
@@ -136,7 +163,7 @@ describe("add", () => {
     };
     const svc = make({ secrets: flaky });
     await expect(
-      svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", config: {}, secrets: { apiKey: KEY }, private: { cliHome: "codex-home" } }),
+      svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", config: {}, secrets: { apiKey: KEY }, private: { cliHome: CODEX_HOME } }),
     ).rejects.toBeInstanceOf(SecretStoreUnavailableError);
     expect(store.size()).toBe(0);
     expect(ledger.list()).toHaveLength(0);
@@ -184,9 +211,9 @@ describe("update", () => {
     const svc = make();
     const c = await svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", config: {} });
     const u = await svc.update(owner, c.id, {
-      name: "Work Gemini", config: { googleCloudProject: "p2" }, enabled: false, private: { cliHome: "home2" },
+      name: "Work Gemini", config: { googleCloudProject: "p2" }, enabled: false, private: { cliHome: HOME2 },
     });
-    expect(u).toMatchObject({ name: "Work Gemini", config: { googleCloudProject: "p2" }, enabled: false, private: { cliHome: "home2" } });
+    expect(u).toMatchObject({ name: "Work Gemini", config: { googleCloudProject: "p2" }, enabled: false, private: { cliHome: HOME2 } });
     expect(ledger.list()[1]!.payload).toEqual({
       connectionId: c.id, name: "Work Gemini",
       changes: { name: "Work Gemini", config: { googleCloudProject: "p2" }, enabled: false, privateSet: ["cliHome"] },
@@ -257,10 +284,10 @@ describe("load and credentials", () => {
     const svc = make();
     const c = await svc.add(owner, {
       kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "demo-project" },
-      secrets: { apiKey: "AIzaTESTKEY" }, private: { cliHome: "gemini-home" },
+      secrets: { apiKey: "AIzaTESTKEY" }, private: { cliHome: GEM_HOME },
     });
     expect(svc.credentialsFor("gemini")).toEqual({
-      connectionId: c.id, name: "Gemini", apiKey: "AIzaTESTKEY", googleCloudProject: "demo-project", cliHome: "gemini-home",
+      connectionId: c.id, name: "Gemini", apiKey: "AIzaTESTKEY", googleCloudProject: "demo-project", cliHome: GEM_HOME,
     });
     expect(svc.credentialsFor("codex")).toBeNull();
     await svc.update(owner, c.id, { enabled: false });
@@ -424,10 +451,10 @@ describe("review fixes", () => {
     const c = await svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", config: {} });
     await Promise.all([
       svc.update(owner, c.id, { secrets: { apiKey: "AIzaTESTKEY" } }),
-      svc.update(owner, c.id, { private: { cliHome: "gemini-home" } }),
+      svc.update(owner, c.id, { private: { cliHome: GEM_HOME } }),
     ]);
-    expect(svc.credentialsFor("gemini")).toMatchObject({ apiKey: "AIzaTESTKEY", cliHome: "gemini-home" });
-    expect(svc.get(c.id)).toMatchObject({ secretFields: ["apiKey"], private: { cliHome: "gemini-home" } });
+    expect(svc.credentialsFor("gemini")).toMatchObject({ apiKey: "AIzaTESTKEY", cliHome: GEM_HOME });
+    expect(svc.get(c.id)).toMatchObject({ secretFields: ["apiKey"], private: { cliHome: GEM_HOME } });
   });
 
   it("rejects a name that looks like a secret on add and update", async () => {

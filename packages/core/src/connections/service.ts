@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
   CONNECTION_CATALOG,
@@ -502,6 +503,8 @@ export class ConnectionService {
       if (typeof value !== "string" || value.length === 0) invalid([...path, name], "must be a non-empty string");
       if (Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES) invalid([...path, name], `must be at most ${MAX_SECRET_BYTES} bytes`);
       if (field.input !== "multiline" && /[\r\n]/.test(value)) invalid([...path, name], "must be a single line");
+      // A relative folder would resolve against wherever the CLI happens to start (the run's worktree).
+      if (field.input === "path" && !isAbsolute(value)) invalid([...path, name], "must be an absolute path");
     }
   }
 
