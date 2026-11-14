@@ -48,12 +48,23 @@ const URL_USERINFO = /((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:@/]*:
 // Finds "key" + separator only (the key may sit inside escaped JSON, \"key\":). The value is
 // parsed by hand in redactPairs, so a non-secret pair never swallows a secret pair inside its
 // value, and every scan stays linear.
-const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(\\?["']?\s*[=:]\s*)/g;
-const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)[ \t]+/iy;
+const KEY_NAME = String.raw`(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)`;
+const KEY_QUOTE = String.raw`\\?["']?\s*`;
+const SEP = String.raw`[=:]\s*`;
+const KEY_SEP = new RegExp(`${KEY_NAME}(${KEY_QUOTE}${SEP})`, "g");
+const SCHEMES = "Bearer|Basic|Token|Digest";
+const AUTH_SCHEME = new RegExp(`(?:${SCHEMES})[ \\t]+`, "iy");
 const BARE_END = /[\s'",;&}]/;
 // YAML block header: indicator, optional chomping/indentation digit (either order), optional comment.
 // The comment runs to the line end, so a match never backtracks across a line.
-const BLOCK_SCALAR = /[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?(?=[\r\n]|$)/y;
+const BLOCK_SCALAR_SOURCE = String.raw`[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?(?=[\r\n]|$)`;
+const BLOCK_SCALAR = new RegExp(BLOCK_SCALAR_SOURCE, "y");
+// The end of a text that a cut would separate from the secret value after it: an auth-scheme word and its
+// whitespace, or a key (its separator and block-scalar header may not have arrived yet).
+const TRAILING_SCHEME = new RegExp(`(?<![A-Za-z0-9])(?:${SCHEMES})\\s+$`, "i");
+const TRAILING_KEY = new RegExp(`${KEY_NAME}${KEY_QUOTE}(?:${SEP}(?:${BLOCK_SCALAR_SOURCE}\\s*)?)?$`);
+/** How much of the end of a text `trailingSecretContext` looks at: longer than any key or header name it needs. */
+const TRAILING_WINDOW = 256;
 
 /**
  * End of a quoted value starting at `start` (a quote char): closing quote, else end of string.
@@ -251,6 +262,20 @@ function walk(value: unknown, extra: string[]): unknown {
  */
 export function redact<T>(value: T, extraSecrets: string[] = []): T {
   return walk(value, extraSecrets.filter((s) => s.length > 0)) as T;
+}
+
+/**
+ * Where the context that redaction needs to find a secret value starts, when `head` ends with it: a trailing
+ * auth-scheme word (`Bearer `) or a secret key with or without its separator (`api_key = `, `password:\n`).
+ * A text cut there would leave the value without its context in the next piece. Otherwise -1.
+ */
+export function trailingSecretContext(head: string): number {
+  const from = Math.max(0, head.length - TRAILING_WINDOW);
+  const tail = head.slice(from);
+  const scheme = TRAILING_SCHEME.exec(tail);
+  if (scheme) return from + scheme.index;
+  const key = TRAILING_KEY.exec(tail);
+  return key && isSecretKey(key[1]!) ? from + key.index : -1;
 }
 
 const MARKER = "…[truncated]";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redact, truncate } from "../../src/index.js";
-import { secretEnvValues } from "../../src/agents/redact.js";
+import { secretEnvValues, trailingSecretContext } from "../../src/agents/redact.js";
 
 describe("redact", () => {
   it("redacts bearer tokens and sk-ant keys", () => {
@@ -341,5 +341,26 @@ describe("secretEnvValues", () => {
 
   it("ignores values too short to redact safely", () => {
     expect(secretEnvValues({ SOME_TOKEN: "1", DEBUG_AUTH: "true", X_SECRET: "1234567" })).toEqual([]);
+  });
+});
+
+describe("trailingSecretContext", () => {
+  it("finds a trailing auth scheme or secret key, with or without its separator", () => {
+    for (const [head, context] of [
+      ["see Authorization: Bearer ", "Bearer "],
+      ["see Authorization: ", "Authorization: "],
+      ["curl -H x Basic ", "Basic "],
+      ["then api_key = ", "api_key = "],
+      ["then api_key ", "api_key "],
+      ['{"password": ', '"password": '.slice(1)],
+      ["db:\n  password: |\n", "password: |\n"],
+      ["token:\n", "token:\n"],
+    ] as const) {
+      expect(trailingSecretContext(head)).toBe(head.length - context.length);
+    }
+  });
+
+  it("finds nothing after ordinary text, a non-secret key or a counter", () => {
+    for (const head of ["hello world ", "name = ", "max_tokens: ", "Bearer token value "]) expect(trailingSecretContext(head)).toBe(-1);
   });
 });

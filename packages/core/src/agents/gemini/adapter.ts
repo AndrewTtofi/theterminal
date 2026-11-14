@@ -8,7 +8,7 @@ import type { ActionKind, AuthMode } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { redact } from "../redact.js";
+import { REDACTED, redact, trailingSecretContext } from "../redact.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
 import { Terminals, type ExitStatus } from "./terminals.js";
@@ -69,10 +69,19 @@ const MAX_MESSAGE_CHUNK = 4000;
 const MESSAGE_PAUSE_MS = 250;
 /**
  * When a long message is split by size, up to this much of its end is held back and joined with what streams
- * next, so redaction sees a secret whole instead of in two messages. The split falls after the last whitespace
- * in that window (secrets hold none); only a window with no whitespace at all is cut at its start.
+ * next, so redaction sees a secret whole instead of in two messages. The split falls after the last newline in
+ * that window, else after its last whitespace (secrets hold none), else at its start; see `safeCut` for how it
+ * then moves back so that no secret is parted from the context redaction finds it by.
  */
 const HELD_TAIL = 512;
+/** An unterminated PEM block is held whole up to this size; then it is emitted as REDACTED and the rest dropped. */
+const MAX_HELD_BLOCK = 16 * 1024;
+const PEM_BEGIN = /-----BEGIN [A-Z ]+-----/g;
+const PEM_END = /-----END [A-Z ]+-----/g;
+/** The start of a BEGIN line that has not fully arrived ("-----BEGIN RSA PRIV"). */
+const PARTIAL_BEGIN = /-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: [A-Z ]*-{0,4})?)?$/;
+/** Kept from a dropped block's text, so an END line split across chunks is still found. */
+const END_CARRY = 64;
 const INTERNAL_ERROR = "internal error";
 const STDERR_TAIL = 200;
 /** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
@@ -313,6 +322,9 @@ class GeminiRun {
   private failure: string | null = null;
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
+  /** Set once an unterminated PEM block outgrew MAX_HELD_BLOCK: its text is dropped until its END line. */
+  private droppingBlock = false;
+  private dropCarry = "";
   private stderrTail = "";
   /** The latest cumulative USD cost from an ACP usage_update, if any. */
   private costUsd: number | undefined;
@@ -357,7 +369,7 @@ class GeminiRun {
       result = { status: "failed", error: this.describe(e) };
     } finally {
       this.o.signal.removeEventListener("abort", stop);
-      this.flushText();
+      this.flushText("end");
       await this.shutdown();
     }
     if (this.o.signal.aborted) return { status: "failed", error: STOPPED };
@@ -515,22 +527,68 @@ class GeminiRun {
   }
 
   /**
-   * Streamed chunks are joined into one message: flushed whole before any tool activity, after a pause and when the
-   * run ends; when large, flushed with its tail held back (see HELD_TAIL).
+   * Streamed chunks are joined into one message: flushed before any tool activity, after a pause and when the run
+   * ends; when large, flushed with its tail held back (see HELD_TAIL). Until the run ends, a flush keeps back an
+   * unterminated PEM block and a trailing secret context (see `safeCut`).
    */
   private text(t: string): void {
+    if (this.droppingBlock) {
+      const rest = this.afterDroppedBlock(t);
+      if (rest === null) return;
+      t = rest;
+    }
     this.pendingText += t;
-    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText(true);
+    if (this.pendingText.length >= MAX_HELD_BLOCK) {
+      const open = pemBlockAround(this.pendingText, this.pendingText.length);
+      if (open >= 0) return this.dropOpenBlock(open);
+    }
+    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText("size");
     this.flushTimer ??= setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
   }
 
-  private flushText(split = false): void {
+  /**
+   * `size`: cut near the end (see HELD_TAIL) and flush the held tail after a pause. `pause`: flush all but what
+   * `safeCut` keeps back. `end`: flush everything, an unterminated PEM block as REDACTED.
+   */
+  private flushText(mode: "size" | "pause" | "end" = "pause"): void {
     clearTimeout(this.flushTimer);
     this.flushTimer = undefined;
     const all = this.pendingText;
-    const cut = split ? heldTailStart(all) : all.length;
+    if (mode === "end") {
+      this.pendingText = "";
+      const open = pemBlockAround(all, all.length);
+      const text = open < 0 ? all : all.slice(0, open) + REDACTED;
+      if (text !== "") this.o.emit({ type: "message", text });
+      return;
+    }
+    const cut = safeCut(all, mode === "size" ? sizeCut(all) : all.length);
     this.pendingText = all.slice(cut);
     if (cut > 0) this.o.emit({ type: "message", text: all.slice(0, cut) });
+    if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
+  }
+
+  /** Fails closed on a PEM block too long to hold: the text before it, then REDACTED; its own text never goes out. */
+  private dropOpenBlock(start: number): void {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    this.o.emit({ type: "message", text: this.pendingText.slice(0, start) + REDACTED });
+    this.dropCarry = this.pendingText.slice(-END_CARRY);
+    this.pendingText = "";
+    this.droppingBlock = true;
+  }
+
+  /** The text after the dropped block's END line, or null while it has not arrived. */
+  private afterDroppedBlock(t: string): string | null {
+    const s = this.dropCarry + t;
+    PEM_END.lastIndex = 0;
+    const end = PEM_END.exec(s);
+    if (end === null) {
+      this.dropCarry = s.slice(-END_CARRY);
+      return null;
+    }
+    this.droppingBlock = false;
+    this.dropCarry = "";
+    return s.slice(end.index + end[0].length);
   }
 
   // ---- requests from the agent ----
@@ -750,13 +808,52 @@ async function readCapped(real: string): Promise<string> {
   }
 }
 
-/** Where the held-back tail of a size-split message starts: after the last whitespace in the last HELD_TAIL characters. */
-function heldTailStart(text: string): number {
+/** Where a size-split message is cut: after the last newline in its last HELD_TAIL characters, else after the last whitespace, else at their start. */
+function sizeCut(text: string): number {
   const min = Math.max(0, text.length - HELD_TAIL);
+  const newline = text.lastIndexOf("\n");
+  if (newline >= min) return newline + 1;
   for (let i = text.length - 1; i >= min; i--) {
     if (/\s/.test(text[i]!)) return i + 1;
   }
   return min;
+}
+
+/**
+ * Moves `cut` back until the text before it is safe to emit on its own: never inside a PEM block (an unterminated
+ * one runs to the end), never after a partial BEGIN line, and never right after the context that redaction finds a
+ * secret value by (`Bearer `, `api_key = `): that context goes with its value into what is held. Stepping back over
+ * contexts stops 2 * HELD_TAIL from the end, so text built of nothing but keys is still emitted.
+ */
+function safeCut(text: string, cut: number): number {
+  const floor = text.length - 2 * HELD_TAIL;
+  for (;;) {
+    const block = pemBlockAround(text, cut);
+    if (block >= 0) {
+      cut = block;
+      continue;
+    }
+    const head = text.slice(0, cut);
+    const partial = PARTIAL_BEGIN.exec(head);
+    const back = partial !== null ? partial.index : cut > floor ? trailingSecretContext(head) : -1;
+    if (back < 0) return cut;
+    cut = back;
+  }
+}
+
+/** The start of the PEM block that `pos` falls strictly inside (an unterminated block never ends), else -1. */
+function pemBlockAround(text: string, pos: number): number {
+  let from = 0;
+  for (;;) {
+    PEM_BEGIN.lastIndex = from;
+    const begin = PEM_BEGIN.exec(text);
+    if (begin === null || begin.index >= pos) return -1;
+    PEM_END.lastIndex = begin.index + begin[0].length;
+    const end = PEM_END.exec(text);
+    if (end === null) return begin.index;
+    from = end.index + end[0].length;
+    if (from > pos) return begin.index;
+  }
 }
 
 /** `s`, or its first `max - 1` characters and an ellipsis. */

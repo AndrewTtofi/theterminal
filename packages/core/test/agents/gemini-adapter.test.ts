@@ -22,6 +22,27 @@ const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
 const SECRET = "sk-ant-TESTKEY0123456789abcdef";
 /** A stored secret no pattern matches: only the run's live secrets redact it. */
 const STORED = "stored-conn-value-0123456789";
+/** Opaque values no token pattern matches: only the context before them (an auth scheme, a secret key) redacts them. */
+const OPAQUE_TOKEN = "q7Rt2Lp9Xz4Kw8Vn3Bm6Hd1Fj5Gs0Ac2Ue7Yi4Oy";
+const OPAQUE_VALUE = "zq0RS6kd83JWnB2yT5pe7MaV4cUx9hLf1Gt";
+/** Private key body lines: each holds a run of "k" that no other text in these tests does. */
+const keyBody = (lines: number) => Array.from({ length: lines }, (_, i) => `${String(i).padStart(4, "0")}${"k".repeat(60)}`);
+const KEY_BEGIN = "-----BEGIN RSA PRIVATE KEY-----";
+const KEY_END = "-----END RSA PRIVATE KEY-----";
+const KEY_FRAGMENT = "kkkkkkkk";
+
+/** `line` cut at `cut`, after padding that makes the first chunk reach the 4000-character size split. */
+function straddle(line: string, cut: number): Step[] {
+  const pad = "w ".repeat(Math.ceil((4000 - cut) / 2));
+  return [{ type: "message", text: pad + line.slice(0, cut) }, { type: "message", text: `${line.slice(cut)} end` }];
+}
+/** `text` as message steps of `size` characters. */
+const chunked = (text: string, size: number): Step[] =>
+  Array.from({ length: Math.ceil(text.length / size) }, (_, i) => ({ type: "message", text: text.slice(i * size, (i + 1) * size) }));
+const streamed = (steps: Step[]) => steps.map((s) => s.text as string).join("");
+function expectNoFragment(text: string, secret: string): void {
+  for (let i = 0; i + 8 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 8));
+}
 const MiB = 1024 * 1024;
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
 /** The per-run arguments: the policy directory varies, the allowlist name matches no tool. */
@@ -517,7 +538,7 @@ describe("GeminiAdapter", () => {
     script([{ type: "terminal", command: "npm", args: ["run", "build"], cwd }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
-    const shown = `${cwd.slice(0, 59)}…`;
+    const shown = `${cwd.replace(/\\/g, "/").slice(0, 59)}…`; // the summary shows a path with / separators
     expect(h.proposed[0]!.summary).toBe(`Run: npm run build (in ${shown})`);
   });
 
@@ -559,6 +580,83 @@ describe("GeminiAdapter", () => {
     const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
     expect(texts.join("")).toBe(`${head}${STORED} end`);
     expect(texts.some((t) => t.includes(STORED))).toBe(true); // one message carries the whole secret, for the runner to redact
+  });
+
+  for (const [label, line, secret] of [
+    ["an Authorization: Bearer token", `Authorization: Bearer ${OPAQUE_TOKEN}`, OPAQUE_TOKEN],
+    ["an api_key = value pair", `api_key = ${OPAQUE_VALUE}`, OPAQUE_VALUE],
+  ] as const) {
+    it(`never separates ${label} from its context at a size split, wherever the split falls`, async () => {
+      const at = line.indexOf(secret);
+      const space = line.indexOf(" ");
+      for (const cut of new Set([at + 12, at, at - 1, at - 2, at - 3, space, space + 1])) {
+        const steps = straddle(line, cut);
+        script(steps);
+        const h = harness();
+        expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+        const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+        expect(texts.length).toBeGreaterThan(1);
+        expect(texts.join("")).toBe(streamed(steps)); // every character once, in order
+        const recorded = texts.map((t) => redact(t)).join(""); // each message redacted on its own, as the runner does
+        expect(recorded).toBe(redact(streamed(steps)));
+        expect(recorded).toContain("[REDACTED]");
+        expectNoFragment(recorded, secret);
+      }
+    });
+  }
+
+  it("holds a private key block whole across size splits, so no line of its body is left outside the redacted block", async () => {
+    const text = `${"intro line\n".repeat(330)}${KEY_BEGIN}\n${keyBody(30).join("\n")}\n${KEY_END}\nafter the key\n`;
+    script(chunked(text, 200));
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toContain("[REDACTED]");
+    expect(recorded).toContain("after the key");
+    expect(recorded).not.toContain(KEY_FRAGMENT);
+  });
+
+  for (const [label, after, expected] of [
+    ["ends later", [{ type: "message", text: `\n${KEY_END}\nstill here` }], "before\n[REDACTED]\nstill here"],
+    ["never ends", [], "before\n[REDACTED]"],
+  ] as const) {
+    it(`emits a 20 KiB key block that ${label} as [REDACTED] at 16 KiB, never its body, and the run goes on`, async () => {
+      const block = `${KEY_BEGIN}\n${keyBody(320).join("\n")}`;
+      expect(block.length).toBeGreaterThan(20 * 1024);
+      script([{ type: "message", text: "before\n" }, ...chunked(block, 1000), ...after]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.join("")).toBe(expected);
+      expect(texts.join("")).not.toContain(KEY_FRAGMENT);
+    });
+  }
+
+  for (const [label, first] of [
+    ["a key block", `intro\n${KEY_BEGIN}\n${keyBody(3).join("\n")}`],
+    ["a partial BEGIN line", "intro\n-----BEGIN RSA PRIV"],
+  ] as const) {
+    it(`keeps back ${label} at a pause flush until the block is complete`, async () => {
+      const full = `intro\n${KEY_BEGIN}\n${keyBody(3).join("\n")}\n${KEY_END}\nafter`;
+      script([{ type: "message", text: first }, { type: "sleep", ms: 600 }, { type: "message", text: full.slice(first.length) }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts).toEqual(["intro\n", full.slice("intro\n".length)]);
+      expect(texts.map((t) => redact(t)).join("")).toBe("intro\n[REDACTED]\nafter");
+    });
+  }
+
+  it("flushes the held tail of a size-split message after a pause, without waiting for more output", async () => {
+    const head = "w ".repeat(2000);
+    script([{ type: "message", text: `${head}held tail` }, { type: "sleep", ms: 1500 }, { type: "message", text: "later" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts).toEqual([`${head}held `, "tail", "later"]);
   });
 
   it("records the output of a truncated terminal without the partial word its cut left at the start", async () => {
@@ -920,13 +1018,22 @@ describe("GeminiAdapter through the runner", () => {
     }
   }, 30_000);
 
-  for (const [label, steps, field] of [
+  const keyText = `${"intro line\n".repeat(330)}${KEY_BEGIN}\n${keyBody(30).join("\n")}\n${KEY_END}\nafter the key\n`;
+  for (const [label, steps, field, fragments] of [
     [
       "a secret streamed across a message split",
       [{ type: "message", text: `${"w ".repeat(1995)}${STORED.slice(0, 12)}` }, { type: "message", text: `${STORED.slice(12)} end` }],
       "messages",
+      [STORED.slice(0, 6), STORED.slice(12)],
     ],
-    ["a secret across char 500 of a peer error", [{ type: "fail", message: `${"e".repeat(490)} ${STORED} rest` }], "error"],
+    ["a secret across char 500 of a peer error", [{ type: "fail", message: `${"e".repeat(490)} ${STORED} rest` }], "error", [STORED.slice(0, 6), STORED.slice(12)]],
+    [
+      "a Bearer token whose header straddles a message split",
+      straddle(`Authorization: Bearer ${OPAQUE_TOKEN}`, 34),
+      "messages",
+      [OPAQUE_TOKEN.slice(0, 8), OPAQUE_TOKEN.slice(12), OPAQUE_TOKEN.slice(-8)],
+    ],
+    ["a private key block streamed across message splits", chunked(keyText, 200), "messages", [KEY_FRAGMENT]],
   ] as const) {
     it(`leaves no fragment of ${label} in the record`, async () => {
       const owner = { kind: "human", id: "owner" } as const;
@@ -943,8 +1050,7 @@ describe("GeminiAdapter through the runner", () => {
         await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 20_000, interval: 50 });
         const record = JSON.stringify(ledger.list());
         expect(record).toContain("[REDACTED]");
-        expect(record).not.toContain(STORED.slice(0, 6));
-        expect(record).not.toContain(STORED.slice(12));
+        for (const f of fragments) expect(record).not.toContain(f);
         if (field === "error") expect(getRun(db, run.id)!.error).toContain("[REDACTED] rest");
       } finally {
         await runner.shutdown();
