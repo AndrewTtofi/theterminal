@@ -1,13 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { AgentAction, AgentRun, Board, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
+import { CONNECTION_CATALOG } from "@theterminal/shared";
+import type { AgentAction, AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
 
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { Workbench } from "../src/shell/Workbench";
 import type { WorkbenchModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
+import type { ConnectionsModel } from "../src/use-connections";
+
+function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
+  return {
+    catalog: [...CONNECTION_CATALOG],
+    list: [],
+    loaded: true,
+    refresh: vi.fn(),
+    add: vi.fn(),
+    update: vi.fn(),
+    remove: vi.fn(),
+    test: vi.fn(),
+    ...over,
+  };
+}
 
 const board: Board = {
   project: { id: "p1", name: "Local Model Hub", pitch: "", createdAt: "" },
@@ -15,7 +31,7 @@ const board: Board = {
 };
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
-  status: "running", worktree: "w/run1", costUsd: null, error: null, startedAt: "", finishedAt: null,
+  status: "running", worktree: "w/run1", costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
 };
 const action: AgentAction = {
   id: "a1", runId: "run1", kind: "file_read", tool: "Read", summary: "read README.md", input: {},
@@ -60,6 +76,7 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
     onProviderAuthChange: vi.fn(),
+    connections: connectionsModel(),
     ...over,
   };
 }
@@ -151,16 +168,36 @@ describe("Workbench", () => {
     expect(within(side).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
   });
 
-  it("lists the connection catalog read-only, with Plan 5B entries disabled", async () => {
-    render(<Workbench model={model()} />);
+  it("lists the connection catalog, with Plan 5B entries disabled, and opens an editor tab from a row", async () => {
+    const { container } = render(<Workbench model={model()} />);
     await userEvent.click(view("Connections"));
     const side = screen.getByRole("complementary", { name: "Side bar" });
     for (const label of ["Claude (Anthropic)", "Codex (OpenAI)", "Gemini (Google)", "GitHub"]) {
       expect(within(side).getByText(label)).toBeTruthy();
     }
-    const aws = within(side).getByText("Amazon Web Services").closest("li")!;
+    const aws = within(side).getByText("AWS").closest("li")!;
     expect(aws.getAttribute("aria-disabled")).toBe("true");
     expect(aws.textContent).toContain("Arrives with Plan 5B");
+
+    await userEvent.click(within(side).getByRole("button", { name: /GitHub/ }));
+    const tab = container.querySelector('[data-panel="connection:new:github"]')!;
+    expect(within(tab as HTMLElement).getByLabelText("Personal access token")).toBeTruthy();
+  });
+
+  it("closes restored tabs for connections that no longer exist, once the list is loaded", async () => {
+    const conn: Connection = {
+      id: "c1", kind: "llm", provider: "claude", name: "Claude", enabled: true, config: {}, private: {}, secretFields: [],
+      status: { state: "untested", message: "", testedAt: null }, createdAt: "", updatedAt: "",
+    };
+    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false }) })} />);
+    act(() => {
+      testDock.api!.open("connection:gone", "Claude (Anthropic)", "main");
+      testDock.api!.open("connection:c1", "Claude (Anthropic)", "main");
+    });
+    expect(container.querySelector('[data-panel="connection:gone"]')).toBeTruthy();
+    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, list: [conn] }) })} />);
+    expect(container.querySelector('[data-panel="connection:gone"]')).toBeNull();
+    expect(container.querySelector('[data-panel="connection:c1"]')).toBeTruthy();
   });
 
   it("shows the Plan 5B placeholder for GitHub and Capacity", async () => {

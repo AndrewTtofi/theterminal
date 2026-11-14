@@ -12,6 +12,7 @@ import type {
   Stage,
 } from "@theterminal/shared";
 import type { AgentsInfo } from "../api";
+import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 
 export type LedgerScope = "project" | "all";
@@ -45,6 +46,8 @@ export type WorkbenchModel = {
 
   /** Resolves true when the server accepted the change. */
   onProviderAuthChange: (provider: Provider, mode: AuthMode, acknowledgement?: string) => Promise<boolean>;
+
+  connections: ConnectionsModel;
 };
 
 export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null };

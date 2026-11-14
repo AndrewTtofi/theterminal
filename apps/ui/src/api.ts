@@ -1,4 +1,20 @@
-import type { AdapterId, AgentAction, AgentRun, AuthMode, Board, Card, LedgerEntry, PendingAgentAction, Project, Provider, Stage } from "@theterminal/shared";
+import type {
+  AdapterId,
+  AgentAction,
+  AgentRun,
+  AuthMode,
+  Board,
+  Card,
+  CatalogEntry,
+  Connection,
+  ConnectionKind,
+  ConnectionProvider,
+  LedgerEntry,
+  PendingAgentAction,
+  Project,
+  Provider,
+  Stage,
+} from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -19,11 +35,14 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: { method: "POST"; body: unknown }): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: { method: "POST" | "PATCH"; body: unknown } | { method: "DELETE" },
+): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
-    ...(init && {
-      method: init.method,
+    ...(init && { method: init.method }),
+    ...(init && "body" in init && {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(init.body),
     }),
@@ -37,13 +56,41 @@ async function request<T>(path: string, init?: { method: "POST"; body: unknown }
     }
     throw new ApiError(res.status, code);
   }
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
 export type AgentsInfo = {
   adapters: AdapterId[];
-  providers: Record<Provider, { mode: AuthMode; installed: boolean }>;
+  /** apiKey: where a run's API key comes from; "environment" is the server's own variable (development fallback). */
+  providers: Record<Provider, { mode: AuthMode; installed: boolean; apiKey?: "connection" | "environment" | "none" }>;
   acks: Record<Provider, string>;
+};
+
+export type NewConnection = {
+  kind: ConnectionKind;
+  provider: ConnectionProvider;
+  name: string;
+  config?: Record<string, string>;
+  secrets?: Record<string, string>;
+  private?: Record<string, string>;
+};
+
+/** `null` removes a secret or private value. */
+export type ConnectionPatch = {
+  name?: string;
+  config?: Record<string, string>;
+  enabled?: boolean;
+  secrets?: Record<string, string | null>;
+  private?: Record<string, string | null>;
+};
+
+export type Status = {
+  runningAgents: number;
+  pendingDecisions: number;
+  todayCostUsd: number;
+  connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
+  ci: null;
 };
 
 const enc = encodeURIComponent;
@@ -79,11 +126,23 @@ export const api = {
     request<LedgerEntry[]>(
       `/api/ledger?${projectId === null ? "" : `projectId=${encodeURIComponent(projectId)}&`}afterSeq=${afterSeq}&limit=${limit}`,
     ),
+  listConnections: () => request<Connection[]>("/api/connections"),
+  getConnectionCatalog: () => request<CatalogEntry[]>("/api/connections/catalog"),
+  addConnection: (i: NewConnection) => request<Connection>("/api/connections", { method: "POST", body: i }),
+  updateConnection: (id: string, patch: ConnectionPatch) =>
+    request<Connection>(`/api/connections/${enc(id)}`, { method: "PATCH", body: patch }),
+  removeConnection: (id: string) => request<void>(`/api/connections/${enc(id)}`, { method: "DELETE" }),
+  testConnection: (id: string) =>
+    request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST", body: {} }),
+  getStatus: () => request<Status>("/api/status"),
 };
 
 export function errorMessage(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    if (e.status === 409 && e.code === "conflict") return "Already connected";
+    if (e.code === "secret_in_config") return "That field must not contain a key or token";
+    if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";

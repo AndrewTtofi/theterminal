@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createDockview } from "dockview-react";
 import type { DockviewApi, SerializedDockview } from "dockview-react";
-import { buildDefault, restoreOrDefault } from "../src/shell/dock-layout";
+import { CONNECTION_CATALOG } from "@theterminal/shared";
+import { buildDefault, restoreOrDefault, staleConnectionPanels } from "../src/shell/dock-layout";
 
 const KNOWN = ["board", "agent_feed", "ledger"];
 const apis: DockviewApi[] = [];
@@ -107,5 +108,16 @@ describe("restoreOrDefault", () => {
     restoreOrDefault(api, saved, KNOWN);
     expect(api.groups.some((g) => g.api.location.type !== "grid")).toBe(false);
     expect(api.getPanel("board")).toBeTruthy();
+  });
+});
+
+describe("staleConnectionPanels", () => {
+  it("lists connection tabs whose connection is gone, and new tabs for unknown or unavailable providers", () => {
+    const ids = ["board", "ledger", "connection:c1", "connection:gone", "connection:new:github", "connection:new:aws", "connection:new:nope"];
+    expect(staleConnectionPanels(ids, [{ id: "c1" }], CONNECTION_CATALOG)).toEqual([
+      "connection:gone",
+      "connection:new:aws",
+      "connection:new:nope",
+    ]);
   });
 });

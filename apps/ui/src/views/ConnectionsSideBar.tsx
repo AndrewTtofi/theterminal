@@ -1,65 +1,105 @@
-import { ProviderAuthSettings } from "../components/ProviderAuthSettings";
+import { useState } from "react";
+import type { CatalogEntry, Connection, ConnectionKind } from "@theterminal/shared";
+import { errorMessage } from "../api";
 import { useShell } from "../shell/model";
 
-type Row = { label: string; description: string; available: boolean };
-
-// Read-only until the connections API lands; the live list comes from the catalog endpoint.
-const GROUPS: { title: string; rows: Row[] }[] = [
-  {
-    title: "AI models",
-    rows: [
-      { label: "Claude (Anthropic)", description: "API key or your own Claude subscription", available: true },
-      { label: "Codex (OpenAI)", description: "API key or your own ChatGPT plan", available: true },
-      { label: "Gemini (Google)", description: "API key or your own Google account", available: true },
-    ],
-  },
-  { title: "Code hosting", rows: [{ label: "GitHub", description: "Repositories, pull requests and CI", available: true }] },
-  {
-    title: "Cloud accounts",
-    rows: [
-      { label: "Amazon Web Services", description: "Scoped cloud credentials", available: false },
-      { label: "Google Cloud", description: "Scoped cloud credentials", available: false },
-      { label: "Microsoft Azure", description: "Scoped cloud credentials", available: false },
-    ],
-  },
-  {
-    title: "Tools (MCP)",
-    rows: [
-      { label: "MCP server (local)", description: "A tool server started on this machine", available: false },
-      { label: "MCP server (remote)", description: "A tool server reached over HTTP", available: false },
-    ],
-  },
-  { title: "Hardware", rows: [{ label: "This computer", description: "Local GPUs and capacity", available: false }] },
+const GROUPS: { kind: ConnectionKind; title: string }[] = [
+  { kind: "llm", title: "AI models" },
+  { kind: "github", title: "Code hosting" },
+  { kind: "cloud", title: "Cloud accounts" },
+  { kind: "mcp", title: "Tools (MCP)" },
+  { kind: "hardware", title: "Hardware" },
 ];
 
+const DOT_LABEL = { untested: "Not tested", ok: "Connected", failed: "Failed" } as const;
+
+/** The editor tab for a catalog entry: its connection's, or a new one. */
+export const editorPanelId = (entry: CatalogEntry, conn: Connection | undefined) =>
+  conn ? (`connection:${conn.id}` as const) : (`connection:new:${entry.provider}` as const);
+
+function matches(entry: CatalogEntry, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return q === "" || entry.label.toLowerCase().includes(q) || entry.description.toLowerCase().includes(q);
+}
+
+/** Extensions-style list of every connection the catalog offers, grouped by kind. */
 export function ConnectionsSideBar() {
-  const { model } = useShell();
-  const info = model.agentsInfo;
+  const { model, dock } = useShell();
+  const { catalog, list, update } = model.connections;
+  const [query, setQuery] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const groups = GROUPS.map((g) => ({ ...g, entries: catalog.filter((e) => e.kind === g.kind && matches(e, query)) })).filter(
+    (g) => g.entries.length > 0,
+  );
+
+  const toggle = (conn: Connection) => {
+    setError(null);
+    update(conn.id, { enabled: !conn.enabled }).catch((e: unknown) => setError(errorMessage(e)));
+  };
+
   return (
     <div className="connections-side">
-      {GROUPS.map((g) => (
-        <section key={g.title} className="side-group" aria-label={g.title}>
+      <input
+        type="search"
+        className="connections-search"
+        aria-label="Search connections"
+        placeholder="Search connections"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {groups.length === 0 && <p className="muted">No connections match.</p>}
+      {groups.map((g) => (
+        <section key={g.kind} className="side-group" aria-label={g.title}>
           <h3>{g.title}</h3>
           <ul>
-            {g.rows.map((r) => (
-              <li key={r.label} className={`connection-row${r.available ? "" : " unavailable"}`} aria-disabled={!r.available} title={r.description}>
-                <span className="status-dot not-connected" aria-hidden="true" />
-                <span className="connection-text">
-                  <span className="connection-label">{r.label}</span>
-                  <span className="connection-note">{r.available ? "Not connected" : "Arrives with Plan 5B"}</span>
-                </span>
-              </li>
-            ))}
+            {g.entries.map((entry) => {
+              const conn = entry.available ? list.find((c) => c.provider === entry.provider) : undefined;
+              const state = conn ? conn.status.state : "not-connected";
+              return (
+                <li
+                  key={entry.provider}
+                  className={`connection-row${entry.available ? "" : " unavailable"}`}
+                  aria-disabled={entry.available ? undefined : true}
+                >
+                  <button
+                    type="button"
+                    className="connection-open"
+                    disabled={!entry.available}
+                    title={entry.description}
+                    onClick={() => dock()?.open(editorPanelId(entry, conn), entry.label, "main")}
+                  >
+                    <span
+                      className={`status-dot ${state}`}
+                      role="img"
+                      aria-label={conn ? DOT_LABEL[conn.status.state] : "Not connected"}
+                    />
+                    <span className="connection-text">
+                      <span className="connection-label">{entry.label}</span>
+                      <span className="connection-note">{entry.available ? entry.description : "Arrives with Plan 5B"}</span>
+                    </span>
+                  </button>
+                  {conn && (
+                    <button
+                      type="button"
+                      role="switch"
+                      className="switch"
+                      aria-checked={conn.enabled}
+                      aria-label={`Enable ${entry.label}`}
+                      onClick={() => toggle(conn)}
+                    />
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ))}
-      {info && (
-        <ProviderAuthSettings
-          modes={{ claude: info.providers.claude.mode, codex: info.providers.codex.mode, gemini: info.providers.gemini.mode }}
-          acks={info.acks}
-          onChange={model.onProviderAuthChange}
-        />
-      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { CONNECTION_CATALOG } from "@theterminal/shared";
 import type { Board, LedgerEntry } from "@theterminal/shared";
 
 const h = vi.hoisted(() => {
@@ -30,6 +31,12 @@ vi.mock("../src/api", () => ({
     startRun: vi.fn(),
     stopRun: vi.fn(),
     setProviderAuth: vi.fn(),
+    listConnections: vi.fn(),
+    getConnectionCatalog: vi.fn(),
+    addConnection: vi.fn(),
+    updateConnection: vi.fn(),
+    removeConnection: vi.fn(),
+    testConnection: vi.fn(),
   },
   errorMessage: () => "err",
   subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
@@ -74,6 +81,8 @@ beforeEach(() => {
   m.listRuns.mockResolvedValue([]);
   m.listPendingActions.mockResolvedValue([]);
   m.listAllPendingActions.mockResolvedValue([]);
+  m.listConnections.mockResolvedValue([]);
+  m.getConnectionCatalog.mockResolvedValue([...CONNECTION_CATALOG]);
 });
 
 describe("App board refresh", () => {
@@ -185,12 +194,14 @@ describe("App needs-you strip", () => {
 });
 
 describe("App provider settings", () => {
-  const openConnections = () =>
-    userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+  const openCodex = async () => {
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+    await userEvent.click(screen.getByRole("button", { name: /Codex \(OpenAI\)/ }));
+  };
 
-  it("shows the provider sign-in settings in the Connections view with no project selected", async () => {
+  it("shows the provider sign-in settings in a connection's editor tab with no project selected", async () => {
     render(<App />);
-    await openConnections();
+    await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
     expect(screen.getByText("Select or create a project.")).toBeTruthy();
   });
@@ -198,7 +209,7 @@ describe("App provider settings", () => {
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
     m.setProviderAuth.mockRejectedValue(new Error("nope"));
     render(<App />);
-    await openConnections();
+    await openCodex();
     const codex = within(await screen.findByRole("group", { name: "Codex sign-in" }));
     await userEvent.click(codex.getByLabelText("My own ChatGPT plan"));
     await userEvent.click(codex.getByLabelText("I understand and accept this risk"));
@@ -208,6 +219,21 @@ describe("App provider settings", () => {
     await waitFor(() =>
       expect((codex.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(true),
     );
+  });
+});
+
+describe("App connections", () => {
+  it("rereads the connections when a connection entry arrives on the ledger", async () => {
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await waitFor(() => expect(m.listConnections).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      h.onEntry!({
+        seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "human", id: "owner" },
+        type: "connection.tested", payload: { connectionId: "c1", name: "Claude", ok: true, message: "ok" }, prevHash: "", hash: "",
+      } as unknown as LedgerEntry);
+    });
+    expect(m.listConnections).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -17,7 +17,8 @@ type Props = {
   onChange: (provider: Provider, mode: AuthMode, acknowledgement?: string) => Promise<boolean | void> | void;
 };
 
-function ProviderSection({
+/** One provider's sign-in mode: API key, or the Owner's own plan behind an explicit acknowledgement. */
+export function ProviderModeSection({
   provider,
   mode,
   ack,
@@ -79,7 +80,7 @@ export function ProviderAuthSettings({ modes, acks, onChange }: Props) {
   return (
     <div className="provider-auth-settings">
       {PROVIDERS.map((p) => (
-        <ProviderSection key={`${p}:${modes[p]}`} provider={p} mode={modes[p]} ack={acks[p]} onChange={onChange} />
+        <ProviderModeSection key={`${p}:${modes[p]}`} provider={p} mode={modes[p]} ack={acks[p]} onChange={onChange} />
       ))}
     </div>
   );

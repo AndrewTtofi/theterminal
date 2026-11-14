@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DecisionCard } from "../components/DecisionCard";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
 import { BoardView } from "../views/BoardView";
+import { ConnectionEditor } from "../views/ConnectionEditor";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { ActivityBar } from "./ActivityBar";
+import { staleConnectionPanels } from "./dock-layout";
 import { Dock } from "./Dock";
-import type { DockApi } from "./Dock";
+import type { DockApi, DockPanelId } from "./Dock";
 import { LAYOUT_KEY } from "./layout-store";
 import { ShellContext } from "./model";
 import type { WorkbenchModel } from "./model";
@@ -14,7 +16,7 @@ import { StatusBar } from "./StatusBar";
 import type { ViewId } from "./views";
 
 // Stable registry: dockview keys components by name, so this object must not change between renders.
-const PANELS = { board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel };
+const PANELS = { board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor };
 
 type Props = { model: WorkbenchModel };
 
@@ -53,9 +55,19 @@ export function Workbench({ model }: Props) {
     setSideOpen(true);
   };
 
+  const [dockReady, setDockReady] = useState(false);
   const onDockReady = useCallback((api: DockApi) => {
     dockRef.current = api;
+    setDockReady(true);
   }, []);
+
+  // A restored layout can hold tabs for connections removed since; close them once the list is known.
+  const { loaded, list, catalog } = model.connections;
+  useEffect(() => {
+    const dock = dockRef.current;
+    if (!dockReady || !loaded || !dock) return;
+    for (const id of staleConnectionPanels(dock.panelIds(), list, catalog)) dock.close(id as DockPanelId);
+  }, [dockReady, loaded, list, catalog]);
 
   // Ctrl/Cmd+J toggles the bottom panel, as in VS Code, except while the Owner is typing.
   useEffect(() => {

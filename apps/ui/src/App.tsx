@@ -4,6 +4,7 @@ import { api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health } from "./api";
 import { Workbench } from "./shell/Workbench";
 import type { LedgerScope, WorkbenchModel } from "./shell/model";
+import { useConnections } from "./use-connections";
 
 /** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
 function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
@@ -49,6 +50,9 @@ export function App() {
   const [pending, setPending] = useState<PendingAgentAction[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runActions, setRunActions] = useState<AgentAction[]>([]);
+  const connections = useConnections();
+  const refreshConnections = useRef(connections.refresh);
+  refreshConnections.current = connections.refresh;
 
   const run = useCallback(async (action: () => Promise<unknown>) => {
     try {
@@ -74,6 +78,8 @@ export function App() {
       setHealth(h);
       unsubscribe = subscribeLedger(h.headSeq, (e) => {
         if (e.type.startsWith("agent.")) refresh();
+        // Tests, enables and removals change a connection's status: reread the list from the server.
+        if (e.type.startsWith("connection.")) refreshConnections.current();
       });
       refresh();
       setProjects(await api.listProjects());
@@ -246,6 +252,7 @@ export function App() {
         return false;
       }
     },
+    connections,
   };
 
   return (

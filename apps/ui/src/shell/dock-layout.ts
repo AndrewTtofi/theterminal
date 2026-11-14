@@ -1,4 +1,5 @@
 import type { DockviewApi, SerializedDockview } from "dockview-react";
+import type { CatalogEntry } from "@theterminal/shared";
 
 /** Share of the dock's height the bottom panel takes in the default layout. */
 export const BOTTOM_SHARE = 0.3;
@@ -54,4 +55,25 @@ export function restoreOrDefault(api: DockviewApi, saved: unknown, components: r
   api.clear();
   buildDefault(api);
   return "default";
+}
+
+/**
+ * Connection tabs to close: `connection:<id>` whose connection no longer exists, and `connection:new:<provider>`
+ * whose provider is unknown or not available. Other panel ids are left alone.
+ */
+export function staleConnectionPanels(
+  panelIds: readonly string[],
+  connections: readonly { id: string }[],
+  catalog: readonly CatalogEntry[],
+): string[] {
+  const ids = new Set(connections.map((c) => c.id));
+  return panelIds.filter((id) => {
+    if (componentOf(id) !== "connection") return false;
+    const rest = id.slice("connection:".length);
+    if (rest.startsWith("new:")) {
+      const provider = rest.slice("new:".length);
+      return !catalog.some((e) => e.provider === provider && e.available);
+    }
+    return !ids.has(rest);
+  });
 }

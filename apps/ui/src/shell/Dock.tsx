@@ -13,6 +13,8 @@ export type DockApi = {
   close(id: DockPanelId): void;
   reset(): void;
   toggleBottom(): void;
+  /** Ids of every open panel. */
+  panelIds(): string[];
 };
 
 const BOTTOM_IDS: DockPanelId[] = ["agent_feed", "ledger"];
@@ -87,6 +89,7 @@ function makeDockApi(api: DockviewApi, layoutKey: string): DockApi {
       }
       ref.group.api.setVisible(!ref.group.api.isVisible);
     },
+    panelIds: () => api.panels.map((p) => p.id),
   };
 }
 

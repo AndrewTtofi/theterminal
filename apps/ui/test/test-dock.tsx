@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import type { DockApi, DockPanelId } from "../src/shell/Dock";
 
@@ -19,6 +19,8 @@ export function Dock(props: { panels: Record<string, ComponentType<{ id: string 
   const [open, setOpen] = useState(DEFAULT);
   const [bottomShown, setBottomShown] = useState(true);
   const [active, setActive] = useState<DockPanelId | null>(null);
+  const openRef = useRef(open);
+  openRef.current = open;
 
   useEffect(() => {
     const api: DockApi = {
@@ -38,6 +40,7 @@ export function Dock(props: { panels: Record<string, ComponentType<{ id: string 
         setBottomShown(true);
       },
       toggleBottom: () => setBottomShown((v) => !v),
+      panelIds: () => openRef.current.map((p) => p.id),
     };
     testDock.api = api;
     props.onReady(api);
