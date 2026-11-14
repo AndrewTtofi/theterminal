@@ -4,8 +4,10 @@
 // approval request.
 //
 // THETERMINAL_FAKE_SCRIPT: JSON, either an array of steps or { steps, loggedOut, threadStartPolicy,
-//   threadStartError, ignoreSigterm, ignoreEof, codexHome, mcpServers: ["name"], mcpIgnoresDisable }. Steps:
-//   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true}
+//   threadStartError, ignoreSigterm, ignoreEof, codexHome, mcpServers: ["name"], mcpIgnoresDisable,
+//   mcpAddedByThread: ["name"] (servers only the started thread sees, e.g. from a project layer) }. Steps:
+//   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true,
+//    "network"?:{"host":"…","protocol":"https"}} (network: once running, ask for network access for the same item)
 //   {"approve":"fileChange","itemId":"f1","changes":[{"path":"a.txt","kind":"add"|"update"|"delete","diff"?:"…"}]}
 //   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}
 //   {"ungated":"commandExecution"|"mcpToolCall"|…} (a command also streams output, as one that really ran would)
@@ -88,6 +90,13 @@ async function runSteps() {
       } else {
         const output = s.output ?? `ran ${s.command}`;
         notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: TURN, itemId: s.itemId, delta: output });
+        if (s.network) {
+          await serverRequest("item/commandExecution/requestApproval", {
+            kind: "command", threadId: THREAD, turnId: TURN, itemId: s.itemId, startedAtMs: now(), approvalId: "net-1",
+            environmentId: "local", reason: "network access", networkApprovalContext: s.network, command: null, cwd: null,
+            commandActions: null, proposedExecpolicyAmendment: null,
+          });
+        }
         const exitCode = s.exitCode ?? 0;
         completed(commandItem(s, exitCode === 0 ? "completed" : "failed", { aggregatedOutput: output, exitCode, durationMs: 5 }));
       }
@@ -142,10 +151,11 @@ function handleRequest(msg) {
   switch (msg.method) {
     case "initialize":
       return reply({
-        userAgent: "fake/0.169.0", codexHome: script.codexHome ?? "/fake/codex-home", platformFamily: "unix", platformOs: "macos",
+        userAgent: "fake/0.169.0", codexHome: script.codexHome ?? process.env.CODEX_HOME ?? "/fake/codex-home",
+        platformFamily: "unix", platformOs: "macos",
       });
     case "mcpServerStatus/list": {
-      const names = script.mcpServers ?? [];
+      const names = [...(script.mcpServers ?? []), ...(p.threadId ? (script.mcpAddedByThread ?? []) : [])];
       const disabled = (n) => !script.mcpIgnoresDisable && threadConfig[`mcp_servers.${n}.enabled`] === false;
       return reply({
         data: names.map((name) => ({

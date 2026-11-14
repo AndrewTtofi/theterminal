@@ -10,6 +10,8 @@ export type AdapterEvent =
 
 export interface AdapterStartOptions {
   cwd: string;
+  /** The project the run belongs to (adapters may keep per-project state under the data directory). */
+  projectId: string;
   prompt: string;
   authMode: AuthMode;
   signal: AbortSignal;

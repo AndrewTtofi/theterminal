@@ -177,7 +177,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
   let n = 0;
   const abort = new AbortController();
   const opts: AdapterStartOptions = {
-    cwd: CWD, prompt: "do it", authMode: "api_key", signal: abort.signal,
+    cwd: CWD, projectId: "p1", prompt: "do it", authMode: "api_key", signal: abort.signal,
     gate: async (a) => {
       proposed.push(a);
       return { ...(await decide(a)), actionId: `act-${++n}` };

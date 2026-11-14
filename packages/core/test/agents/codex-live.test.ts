@@ -18,6 +18,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CODEX !== "1")("CodexAdapter live",
     let n = 0;
     const r = await new CodexAdapter({ dataDir: worktree }).start({
       cwd: worktree,
+      projectId: "live",
       prompt: "Create a file named hello.txt containing the word hi. If that is declined, stop and reply done.",
       authMode: "chatgpt",
       signal: new AbortController().signal,

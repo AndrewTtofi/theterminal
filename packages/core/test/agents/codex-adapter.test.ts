@@ -72,6 +72,14 @@ describe("codexApprovalToAction", () => {
     expect(a.summary).toBe("Create src/a.ts");
   });
 
+  it("maps a network approval to a web action, never to the command it belongs to", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: null, cwd: null, networkApprovalContext: { host: "example.com", protocol: "https" } }, CWD);
+    expect(a).toEqual({
+      tool: "codex.network", kind: "web", summary: "Network access to example.com (https)",
+      input: { host: "example.com", protocol: "https" }, paths: [],
+    });
+  });
+
   it("maps any other request to an other action", () => {
     expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD)).toEqual({
       tool: "codex.item/tool/call", kind: "other", summary: "Unsupported Codex request: item/tool/call",
@@ -119,6 +127,7 @@ describe("CodexAdapter (fake app-server)", () => {
     let n = 0;
     const result = adapter.start({
       cwd: dir,
+      projectId: "p1",
       prompt: "do the thing",
       authMode: "chatgpt",
       signal: new AbortController().signal,
@@ -149,9 +158,12 @@ describe("CodexAdapter (fake app-server)", () => {
       { type: "action_result", actionId: "act-1", ok: true, output: "a.txt\n" },
       { type: "message", text: "All done." },
     ]);
-    // The handshake: initialize, initialized, a login check, the MCP inventory, the strict thread and the prompt.
+    // The handshake: initialize, initialized, a login check, the MCP inventory, the strict thread, its MCP
+    // re-check, and the prompt.
     const order = fakeLog().filter((e) => e.received).map((e) => e.received);
-    expect(order.slice(0, 6)).toEqual(["initialize", "initialized", "account/read", "mcpServerStatus/list", "thread/start", "turn/start"]);
+    expect(order.slice(0, 7)).toEqual([
+      "initialize", "initialized", "account/read", "mcpServerStatus/list", "thread/start", "mcpServerStatus/list", "turn/start",
+    ]);
     expect(received("initialize")[0].params.clientInfo).toMatchObject({ name: "theterminal" });
     expect(received("turn/start")[0].params).toMatchObject({
       threadId: "thread-1", input: [{ type: "text", text: "do the thing", text_elements: [] }],
@@ -236,6 +248,17 @@ describe("CodexAdapter (fake app-server)", () => {
       "features.multi_agent": false,
       "features.multi_agent_v2": false,
     });
+  });
+
+  it("asks separately for network access during an accepted command, without reusing its command", async () => {
+    script([{ approve: "command", command: "npm install", itemId: "i1", network: { host: "registry.example.com", protocol: "https" } }]);
+    const { result, proposed } = run(make(), (a) => ({ decision: a.kind === "web" ? "deny" : "allow", reason: "r" }));
+    expect(await result).toEqual({ status: "completed" });
+    expect(proposed.map((a) => [a.kind, a.summary])).toEqual([
+      ["shell", "Run: npm install"],
+      ["web", "Network access to registry.example.com (https)"],
+    ]);
+    expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
   });
 
   it("uses the command announced in item/started when the approval omits it", async () => {
@@ -395,6 +418,14 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
     });
 
+    it("re-lists MCP servers after the thread starts, and refuses one only the thread sees", async () => {
+      script({ mcpAddedByThread: ["project-server"], steps: [] });
+      const { result } = run(make());
+      expect(await result).toEqual({ status: "failed", error: "Codex MCP servers could not be disabled; remove them or use API-key mode" });
+      expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
+      expect(received("turn/start")).toEqual([]);
+    });
+
     it("chatgpt mode refuses to start the turn when an MCP server stays enabled", async () => {
       script({ mcpServers: ["docs"], mcpIgnoresDisable: true, steps: [] });
       const { result } = run(make());
@@ -415,11 +446,35 @@ describe("CodexAdapter (fake app-server)", () => {
       const { result } = run(make(), undefined, { authMode: "api_key" });
       expect(await result).toEqual({ status: "completed" });
       const start = fakeLog().find((e) => e.start);
-      expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY, CODEX_HOME: join(dir, "codex-home") });
-      expect(existsSync(join(dir, "codex-home"))).toBe(true);
-      expect(received("mcpServerStatus/list")).toEqual([]);
+      const home = join(dir, "projects", "p1", "codex-home");
+      expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY, CODEX_HOME: home });
+      expect(existsSync(home)).toBe(true);
+      expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
       expect(start.argv).toEqual(["app-server", "-c", "cli_auth_credentials_store=ephemeral"]);
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
+    });
+
+    it("api_key mode keeps a separate Codex home per project", async () => {
+      script([]);
+      await run(make(), undefined, { authMode: "api_key", projectId: "p2" }).result;
+      expect(fakeLog().find((e) => e.start).env.CODEX_HOME).toBe(join(dir, "projects", "p2", "codex-home"));
+    });
+
+    it("api_key mode refuses a project id that is not a plain name", async () => {
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "api_key", projectId: "../p1" });
+      expect(await result).toEqual({ status: "failed", error: "Codex home folder could not be created" });
+      expect(fakeLog()).toEqual([]);
+    });
+
+    it("api_key mode checks its own Codex home for rules too", async () => {
+      const rules = join(dir, "projects", "p1", "codex-home", "rules");
+      mkdirSync(rules, { recursive: true });
+      writeFileSync(join(rules, "default.rules"), "");
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "api_key" });
+      expect((await result).error).toMatch(/'always allow' rules/);
+      expect(received("thread/start")).toEqual([]);
     });
 
     it("api_key mode fails without a configured key", async () => {

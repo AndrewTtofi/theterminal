@@ -280,7 +280,7 @@ export class AgentRunner {
       let error: string | null = null;
       try {
         const r = await adapter.start({
-          cwd, prompt, authMode, signal: abort.signal,
+          cwd, projectId: run.projectId, prompt, authMode, signal: abort.signal,
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),

@@ -21,8 +21,10 @@ const HAS_RULES = "Codex has 'always allow' rules that would bypass approvals; r
 const RULES_UNCHECKED = "Codex rules could not be checked; use API-key mode";
 const MCP_ENABLED = "Codex MCP servers could not be disabled; remove them or use API-key mode";
 const NO_HOME = "Codex home folder could not be created";
-/** The adapter-owned, empty Codex home for api_key mode: no user rules, MCP servers, hooks or stored login. */
+/** The adapter-owned, empty Codex home for api_key mode (one per project): no user rules, MCP servers or login. */
 export const CODEX_HOME_DIR = "codex-home";
+/** Project ids are generated names; anything else could climb out of the data directory. */
+const PROJECT_ID = /^[A-Za-z0-9_-]+$/;
 const STOPPED = "run stopped";
 const CLIENT_VERSION = "0.0.0";
 const MAX_COMMAND = 150;
@@ -123,6 +125,16 @@ export function codexApprovalToAction(
 ): ProposedAction {
   const p = isRecord(params) ? params : {};
   const display = (path: string) => displayPath(cwd, path);
+
+  if (method === P.COMMAND_APPROVAL && isRecord(p.networkApprovalContext)) {
+    // Network access for a command that is already running: approving it grants egress, not the command.
+    const host = str(p.networkApprovalContext.host);
+    const protocol = str(p.networkApprovalContext.protocol);
+    return {
+      tool: "codex.network", kind: "web", summary: `Network access to ${host || "(unknown host)"} (${protocol || "unknown"})`,
+      input: { host, protocol }, paths: [],
+    };
+  }
 
   if (method === P.COMMAND_APPROVAL) {
     const command = str(p.command);
@@ -231,7 +243,8 @@ export class CodexAdapter implements AgentAdapter {
     const env = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir });
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
-      const home = join(this.dataDir, CODEX_HOME_DIR);
+      if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };
+      const home = join(this.dataDir, "projects", o.projectId, CODEX_HOME_DIR);
       try {
         mkdirSync(home, { recursive: true });
       } catch {
@@ -318,7 +331,6 @@ class CodexSession {
       clientInfo: { name: "theterminal", title: null, version: CLIENT_VERSION }, capabilities: null,
     } satisfies P.InitializeParams);
     this.peer.notify(P.INITIALIZED);
-    let mcpServers: string[] = [];
     if (this.apiKey !== undefined) {
       try {
         await this.peer.request(P.ACCOUNT_LOGIN_START, { type: "apiKey", apiKey: this.apiKey } satisfies P.LoginAccountParams);
@@ -328,18 +340,19 @@ class CodexSession {
     } else {
       const acct = await this.peer.request<P.GetAccountResponse>(P.ACCOUNT_READ, { refreshToken: false } satisfies P.GetAccountParams);
       if (!isRecord(acct) || !isRecord(acct.account)) return this.fail(NOT_LOGGED_IN);
-      // The user's own Codex home and the project may hold exec-policy allow rules, which skip approval.
-      const home = isRecord(init) ? str(init.codexHome) : "";
-      if (!isAbsolute(home)) return this.fail(RULES_UNCHECKED);
-      try {
-        if ((await hasRules(home)) || (await hasRules(join(this.o.cwd, ".codex")))) return this.fail(HAS_RULES);
-      } catch {
-        return this.fail(RULES_UNCHECKED);
-      }
-      // The user's MCP servers can run read-only tools without approval: switch every one off for this thread.
-      mcpServers = (await this.listMcpServers({})).map((s) => s.name);
-      if (!mcpServers.every((n) => MCP_NAME.test(n))) return this.fail(MCP_ENABLED);
     }
+    // The Codex home in use (the user's own, or our isolated one) and the project may hold exec-policy allow
+    // rules, which skip approval.
+    const home = isRecord(init) ? str(init.codexHome) : "";
+    if (!isAbsolute(home)) return this.fail(RULES_UNCHECKED);
+    try {
+      if ((await hasRules(home)) || (await hasRules(join(this.o.cwd, ".codex")))) return this.fail(HAS_RULES);
+    } catch {
+      return this.fail(RULES_UNCHECKED);
+    }
+    // MCP servers can run read-only tools without approval: switch every one off for this thread.
+    const mcpServers = (await this.listMcpServers({})).map((s) => s.name);
+    if (!mcpServers.every((n) => MCP_NAME.test(n))) return this.fail(MCP_ENABLED);
     if (this.stopping) return;
 
     let thread: P.ThreadStartResponse;
@@ -352,10 +365,9 @@ class CodexSession {
     }
     if (!isGated(thread) || typeof thread.thread?.id !== "string") return this.fail(CANNOT_GATE);
     this.threadId = thread.thread.id;
-    if (mcpServers.length > 0) {
-      const now = await this.listMcpServers({ threadId: this.threadId });
-      if (!now.every((s) => s.runtimeStatus === "disabled")) return this.fail(MCP_ENABLED);
-    }
+    // Always re-check: the thread may see servers the global list did not (e.g. a trusted project's config).
+    const now = await this.listMcpServers({ threadId: this.threadId });
+    if (!now.every((s) => s.runtimeStatus === "disabled")) return this.fail(MCP_ENABLED);
     if (this.stopping) return;
 
     const turn = await this.peer.request<P.TurnStartResponse>(P.TURN_START, {
@@ -398,7 +410,7 @@ class CodexSession {
     }
     // The command item was announced before this request; its command fills in one the request leaves out.
     const cached = this.commands.get(itemId);
-    const request = method === P.COMMAND_APPROVAL && cached !== undefined
+    const request = method === P.COMMAND_APPROVAL && cached !== undefined && !isRecord(p.networkApprovalContext)
       ? { ...p, command: p.command ?? cached.command, cwd: p.cwd ?? cached.cwd }
       : params;
     const action = codexApprovalToAction(method, request, this.o.cwd, this.fileChanges.get(itemId));

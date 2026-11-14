@@ -27,6 +27,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
     let n = 0;
     const r = await new ClaudeAdapter({ dataDir: worktree }).start({
       cwd: worktree,
+      projectId: "live",
       prompt: "Read README.md and reply with the magic word only. Do not modify anything.",
       authMode: "api_key",
       signal: new AbortController().signal,
