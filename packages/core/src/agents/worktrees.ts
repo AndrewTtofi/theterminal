@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { devNull } from "node:os";
+import { lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -9,22 +8,40 @@ const execFileAsync = promisify(execFile);
 type GitRunner = (args: string[], cwd: string) => Promise<string>;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
-const COMMIT_IDENTITY = ["-c", "user.name=The Terminal", "-c", "user.email=agent@theterminal.localhost", "-c", "commit.gpgsign=false"];
+/** Repo-local config: every commit in the project repo and its worktrees (ours or the agent's) uses it. */
+const REPO_CONFIG: [key: string, value: string][] = [
+  ["user.name", "The Terminal"],
+  ["user.email", "agent@theterminal.localhost"],
+  ["commit.gpgsign", "false"],
+];
+/**
+ * An always-empty file inside dataDir that stands in for the global git config. The null device does not
+ * work here: git on Windows cannot open `\\.\nul` as a config file.
+ */
+export const EMPTY_GITCONFIG = ".theterminal-empty-gitconfig";
 
 /** Drops every inherited GIT_* variable and ignores global/system git config. */
-function gitEnv(cwd: string): NodeJS.ProcessEnv {
+export function gitEnv(cwd: string, emptyGlobalConfig: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (!/^GIT_/i.test(k)) env[k] = v;
   }
   // Never let git discover a repository above the directory it runs in.
-  return { ...env, GIT_CEILING_DIRECTORIES: dirname(resolve(cwd)), GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+  return {
+    ...env,
+    GIT_CEILING_DIRECTORIES: dirname(resolve(cwd)),
+    GIT_CONFIG_GLOBAL: emptyGlobalConfig,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
 }
 
-const defaultGit: GitRunner = async (args, cwd) => {
-  const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv(cwd) });
-  return stdout;
-};
+const gitRunner =
+  (emptyGlobalConfig: string): GitRunner =>
+  async (args, cwd) => {
+    const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv(cwd, emptyGlobalConfig) });
+    return stdout;
+  };
 
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 
@@ -37,11 +54,16 @@ const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
 
 export class WorktreeManager {
   private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly emptyGlobalConfig: string;
+  private readonly git: GitRunner;
 
   constructor(
     private readonly dataDir: string,
-    private readonly git: GitRunner = defaultGit,
-  ) {}
+    git?: GitRunner,
+  ) {
+    this.emptyGlobalConfig = join(dataDir, EMPTY_GITCONFIG);
+    this.git = git ?? gitRunner(this.emptyGlobalConfig);
+  }
 
   /** Runs `fn` after all earlier work for the same project has settled. */
   private serialize<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
@@ -63,17 +85,19 @@ export class WorktreeManager {
   private async initRepo(projectId: string): Promise<string> {
     const repo = join(this.dataDir, "projects", projectId, "repo");
     mkdirSync(repo, { recursive: true });
+    writeFileSync(this.emptyGlobalConfig, ""); // (re)emptied before any git call
     await this.git(["init"], repo); // idempotent; also repairs an empty .git
     const gitDir = (await this.git(["rev-parse", "--absolute-git-dir"], repo)).trim();
     if (fold(normalize(gitDir)) !== fold(join(realpathSync.native(repo), ".git"))) {
       throw new Error("project repo is not its own git repository");
     }
+    for (const [key, value] of REPO_CONFIG) await this.git(["config", key, value], repo);
     const hasHead = await this.git(["rev-parse", "--verify", "HEAD"], repo).then(
       () => true,
       () => false,
     );
     if (!hasHead) {
-      await this.git([...COMMIT_IDENTITY, "commit", "--allow-empty", "--no-verify", "-m", "Initial commit"], repo);
+      await this.git(["commit", "--allow-empty", "--no-verify", "-m", "Initial commit"], repo);
     }
     return repo;
   }

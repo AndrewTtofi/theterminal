@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { EMPTY_GITCONFIG, WorktreeManager, gitEnv } from "../../src/agents/worktrees.js";
 
 const run = promisify(execFile);
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
@@ -77,6 +77,34 @@ describe("WorktreeManager", () => {
         if (saved[k] === undefined) delete process.env[k];
         else process.env[k] = saved[k];
       }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("points GIT_CONFIG_GLOBAL at an empty file inside dataDir, never the null device", async () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    const env = gitEnv(dataDir, cfg);
+    expect(env.GIT_CONFIG_GLOBAL).toBe(cfg);
+    expect(env.GIT_CONFIG_GLOBAL).not.toBe(devNull);
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
+    writeFileSync(cfg, "[user]\n\temail = someone@example.com\n"); // tampered: emptied again
+    await mgr.ensureProjectRepo("proj1");
+    expect(readFileSync(cfg, "utf8")).toBe("");
+  });
+
+  it("a plain git commit in a worktree uses the neutral identity, not the user's global one", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "wt-home-")));
+    try {
+      writeFileSync(
+        join(home, ".gitconfig"),
+        "[user]\n\tname = Someone\n\temail = someone@example.com\n[commit]\n\tgpgsign = true\n",
+      );
+      const { absPath } = await mgr.createRunWorktree("proj1", "run-a");
+      const env = { ...cleanEnv(), HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, ".config") };
+      await run("git", ["commit", "--allow-empty", "-m", "agent work"], { cwd: absPath, env });
+      const { stdout } = await run("git", ["log", "-1", "--format=%an|%ae|%cn|%ce"], { cwd: absPath, env });
+      expect(stdout.trim()).toBe("The Terminal|agent@theterminal.localhost|The Terminal|agent@theterminal.localhost");
+    } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
