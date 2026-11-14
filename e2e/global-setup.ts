@@ -5,10 +5,14 @@ import { createServer } from "../packages/core/dist/index.js";
 
 const fixture = (name: string) => join(import.meta.dirname, "..", "packages", "core", "test", "fixtures", name);
 
-// A read inside the worktree (auto-allowed), a shell command (asks), an edit outside it (auto-denied).
+// A read inside the worktree (auto-allowed), a shell command (asks; once allowed, its output holds the Claude test key
+// that connections.spec.ts stores), an edit outside it (auto-denied).
 const FAKE_SCRIPT = JSON.stringify([
   { propose: { tool: "Read", kind: "file_read", summary: "Read README.md", input: { path: "README.md" }, paths: ["README.md"] } },
-  { propose: { tool: "Bash", kind: "shell", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" }, paths: [] } },
+  {
+    propose: { tool: "Bash", kind: "shell", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" }, paths: [] },
+    result: { ok: true, output: "key=sk-ant-TESTKEY-e2e-00000000000000" },
+  },
   { propose: { tool: "Edit", kind: "file_edit", summary: "Edit /etc/hosts", input: { path: "/etc/hosts" }, paths: ["/etc/hosts"] } },
 ]);
 
