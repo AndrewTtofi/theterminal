@@ -23,9 +23,12 @@ export function secretEnvValues(env: NodeJS.ProcessEnv): string[] {
     .map(([, v]) => v!);
 }
 
+/** The label of a PEM/PGP private key's BEGIN and END lines (`RSA PRIVATE KEY`, `PGP PRIVATE KEY BLOCK`). */
+export const PRIVATE_KEY_LABEL = String.raw`[A-Z ]*PRIVATE KEY(?: BLOCK)?`;
+
 const TOKEN_PATTERNS: RegExp[] = [
   // PEM/PGP private keys; an unterminated block is redacted to the end of the string.
-  /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g,
+  new RegExp(`-----BEGIN ${PRIVATE_KEY_LABEL}-----[\\s\\S]*?(?:-----END ${PRIVATE_KEY_LABEL}-----|$)`, "g"),
   /sk-ant-[A-Za-z0-9_-]{10,}/g,
   /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
   /[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g,
@@ -63,8 +66,12 @@ const BLOCK_SCALAR = new RegExp(BLOCK_SCALAR_SOURCE, "y");
 // whitespace, or a key (its separator and block-scalar header may not have arrived yet).
 const TRAILING_SCHEME = new RegExp(`(?<![A-Za-z0-9])(?:${SCHEMES})\\s+$`, "i");
 const TRAILING_KEY = new RegExp(`${KEY_NAME}${KEY_QUOTE}(?:${SEP}(?:${BLOCK_SCALAR_SOURCE}\\s*)?)?$`);
-/** How much of the end of a text `trailingSecretContext` looks at: longer than any key or header name it needs. */
-const TRAILING_WINDOW = 256;
+// A key, its separator and a quoted value that has not closed yet (`"password":"abc`).
+const TRAILING_OPEN_VALUE = new RegExp(`${KEY_NAME}${KEY_QUOTE}${SEP}\\\\?["'][^"'\\\\\\r\\n]*$`);
+// A YAML block-scalar header line (`  password: |`): its indentation and key.
+const BLOCK_HEADER_LINE = new RegExp(`^([ \\t]*)(?:-[ \\t]+)?${KEY_NAME}${KEY_QUOTE}${SEP.replace(String.raw`\s*`, String.raw`[ \t]*`)}${BLOCK_SCALAR_SOURCE}`);
+/** How much of the end of a text `trailingSecretContext` looks at: longer than any key, header or open value it needs. */
+const TRAILING_WINDOW = 512;
 
 /**
  * End of a quoted value starting at `start` (a quote char): closing quote, else end of string.
@@ -274,8 +281,37 @@ export function trailingSecretContext(head: string): number {
   const tail = head.slice(from);
   const scheme = TRAILING_SCHEME.exec(tail);
   if (scheme) return from + scheme.index;
-  const key = TRAILING_KEY.exec(tail);
-  return key && isSecretKey(key[1]!) ? from + key.index : -1;
+  for (const re of [TRAILING_KEY, TRAILING_OPEN_VALUE]) {
+    const key = re.exec(tail);
+    if (key && isSecretKey(key[1]!)) return from + key.index;
+  }
+  const block = openBlockScalar(tail);
+  return block < 0 ? -1 : from + block;
+}
+
+/**
+ * The start of the line of a secret key's YAML block-scalar header whose body runs to the end of `text` (every
+ * non-blank line after it indented deeper), else -1. The first line of `text` may be partial and is not judged.
+ */
+function openBlockScalar(text: string): number {
+  let deepest = Infinity; // the least indentation of the non-blank lines after the candidate header
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf("\n", end - 1) + 1;
+    if (start === 0) return -1;
+    const line = text.slice(start, end).replace(/[\r\n]+$/, "");
+    const header = BLOCK_HEADER_LINE.exec(line);
+    if (header && isSecretKey(header[2]!) && header[1]!.length < deepest) return start;
+    if (line.trim() !== "") {
+      let indent = 0;
+      while (isBlank(line[indent])) indent++;
+      deepest = Math.min(deepest, indent);
+      if (deepest === 0) return -1;
+    }
+    end = start - 1 >= 0 ? start - 1 : 0;
+    if (end === 0) return -1;
+  }
+  return -1;
 }
 
 const MARKER = "…[truncated]";

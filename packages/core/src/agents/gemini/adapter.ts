@@ -11,6 +11,7 @@ import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
+import { keyBlockAround, openKeyBlock, scanKeyBody, sealKeyBlocks } from "./key-blocks.js";
 import { Terminals, type ExitStatus } from "./terminals.js";
 import { ToolCallTracker, type Diff, type ToolCallUpdate, type ToolStatus } from "./tool-calls.js";
 
@@ -77,14 +78,10 @@ const MESSAGE_MAX_WAIT_MS = 2000;
  * then moves back so that no secret is parted from the context redaction finds it by.
  */
 const HELD_TAIL = 512;
-/** An unterminated PEM block is held whole up to this size; then it is emitted as REDACTED and the rest dropped. */
+/** An open private key block (see key-blocks.ts) is held whole up to this size; then it is emitted as REDACTED and the rest of its body dropped. */
 const MAX_HELD_BLOCK = 16 * 1024;
-const PEM_BEGIN = /-----BEGIN [A-Z ]+-----/g;
-const PEM_END = /-----END [A-Z ]+-----/g;
 /** The start of a BEGIN line that has not fully arrived ("-----BEGIN RSA PRIV"). */
 const PARTIAL_BEGIN = /-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: [A-Z ]*-{0,4})?)?$/;
-/** Kept from a dropped block's text, so an END line split across chunks is still found. */
-const END_CARRY = 64;
 const INTERNAL_ERROR = "internal error";
 const STDERR_TAIL = 200;
 /** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
@@ -326,8 +323,10 @@ class GeminiRun {
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
   private capTimer: NodeJS.Timeout | undefined;
-  /** Set once an unterminated PEM block outgrew MAX_HELD_BLOCK: its text is dropped until its END line. */
+  /** Set once an open key block outgrew MAX_HELD_BLOCK: its body is dropped until its END line or a non-body line. */
   private droppingBlock = false;
+  private dropEscaped = false;
+  /** The dropped block's text still undecided (the line arriving, after the line break before it). */
   private dropCarry = "";
   private stderrTail = "";
   /** The latest cumulative USD cost from an ACP usage_update, if any. */
@@ -533,7 +532,7 @@ class GeminiRun {
   /**
    * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
    * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
-   * Only the end of the run flushes an unterminated PEM block, and then as REDACTED.
+   * Only the end of the run flushes an open private key block, and then as REDACTED.
    */
   private text(t: string): void {
     if (this.droppingBlock) {
@@ -543,8 +542,8 @@ class GeminiRun {
     }
     this.pendingText += t;
     if (this.pendingText.length >= MAX_HELD_BLOCK) {
-      const open = pemBlockAround(this.pendingText, this.pendingText.length);
-      if (open >= 0) return this.dropOpenBlock(open);
+      const open = openKeyBlock(this.pendingText);
+      if (open !== null) return this.dropOpenBlock(open.start, open.at, open.escaped);
     }
     if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText("size");
     clearTimeout(this.flushTimer);
@@ -555,33 +554,33 @@ class GeminiRun {
   /**
    * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
    * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
-   * `message` (before tool activity): flush all but an unterminated PEM block. `end`: flush everything, an
-   * unterminated PEM block as REDACTED.
+   * `message` (before tool activity): flush all but an open private key block. `end`: flush everything, an open
+   * block as REDACTED. Every flush emits a key block that ended without an END line (see key-blocks.ts) as REDACTED.
    */
   private flushText(mode: "size" | "stream" | "message" | "end"): void {
     this.clearFlushTimers();
     const all = this.pendingText;
-    if (mode === "end") {
-      this.pendingText = "";
-      const open = pemBlockAround(all, all.length);
-      const text = open < 0 ? all : all.slice(0, open) + REDACTED;
-      if (text !== "") this.o.emit({ type: "message", text });
-      return;
-    }
-    const open = mode === "message" ? pemBlockAround(all, all.length) : -1;
-    const cut = mode === "message" ? (open < 0 ? all.length : open) : safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
+    let cut = all.length;
+    if (mode === "message") cut = openKeyBlock(all)?.start ?? all.length;
+    else if (mode !== "end") cut = safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
     this.pendingText = all.slice(cut);
-    if (cut > 0) this.o.emit({ type: "message", text: all.slice(0, cut) });
+    if (cut > 0) this.o.emit({ type: "message", text: sealKeyBlocks(all, cut) });
     if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
   }
 
-  /** Fails closed on a PEM block too long to hold: the text before it, then REDACTED; its own text never goes out. */
-  private dropOpenBlock(start: number): void {
+  /** Fails closed on a key block too long to hold: the text before it, then REDACTED; its own text never goes out. */
+  private dropOpenBlock(start: number, at: number, escaped: boolean): void {
     this.clearFlushTimers();
-    this.o.emit({ type: "message", text: this.pendingText.slice(0, start) + REDACTED });
-    this.dropCarry = this.pendingText.slice(-END_CARRY);
+    this.o.emit({ type: "message", text: sealKeyBlocks(this.pendingText, start) + REDACTED });
+    this.dropCarry = this.carryFrom(this.pendingText, at, escaped);
+    this.dropEscaped = escaped;
     this.pendingText = "";
     this.droppingBlock = true;
+  }
+
+  /** The undecided text of a dropped block from `at`, with the line break before it, so released text keeps it. */
+  private carryFrom(s: string, at: number, escaped: boolean): string {
+    return !escaped && at > 0 && s[at - 1] === "\n" ? s.slice(at - 1) : s.slice(at);
   }
 
   private clearFlushTimers(): void {
@@ -591,18 +590,17 @@ class GeminiRun {
     this.capTimer = undefined;
   }
 
-  /** The text after the dropped block's END line, or null while it has not arrived. */
+  /** The text after the dropped block's END line or from its first non-body line, or null while neither has arrived. */
   private afterDroppedBlock(t: string): string | null {
     const s = this.dropCarry + t;
-    PEM_END.lastIndex = 0;
-    const end = PEM_END.exec(s);
-    if (end === null) {
-      this.dropCarry = s.slice(-END_CARRY);
+    const scan = scanKeyBody(s, !this.dropEscaped && s.startsWith("\n") ? 1 : 0, this.dropEscaped);
+    if (scan.state === "open") {
+      this.dropCarry = this.carryFrom(s, scan.at, this.dropEscaped);
       return null;
     }
     this.droppingBlock = false;
     this.dropCarry = "";
-    return s.slice(end.index + end[0].length);
+    return s.slice(scan.at);
   }
 
   // ---- requests from the agent ----
@@ -822,13 +820,18 @@ async function readCapped(real: string): Promise<string> {
   }
 }
 
-/** Where a size-split message is cut: after the last newline in its last HELD_TAIL characters, else after the last whitespace, else at their start. */
+/**
+ * Where a size-split message is cut: after the last newline in its last HELD_TAIL characters, else after the last
+ * whitespace, else after the last `,` `;` `&` or `}` (minified JSON, query strings), else at their start.
+ */
 function sizeCut(text: string): number {
   const min = Math.max(0, text.length - HELD_TAIL);
   const newline = text.lastIndexOf("\n");
   if (newline >= min) return newline + 1;
-  for (let i = text.length - 1; i >= min; i--) {
-    if (/\s/.test(text[i]!)) return i + 1;
+  for (const boundary of [/\s/, /[,;&}]/]) {
+    for (let i = text.length - 1; i >= min; i--) {
+      if (boundary.test(text[i]!)) return i + 1;
+    }
   }
   return min;
 }
@@ -847,15 +850,16 @@ function streamCut(text: string): number {
 }
 
 /**
- * Moves `cut` back until the text before it is safe to emit on its own: never inside a PEM block (an unterminated
+ * Moves `cut` back until the text before it is safe to emit on its own: never inside a private key block (an open
  * one runs to the end), never after a partial BEGIN line, and never right after the context that redaction finds a
- * secret value by (`Bearer `, `api_key = `): that context goes with its value into what is held. Stepping back over
- * contexts stops 2 * HELD_TAIL from the end, so text built of nothing but keys is still emitted.
+ * secret value by (`Bearer `, `api_key = `, `"password":"ab`, a `password: |` block still running): that context
+ * goes with its value into what is held. Stepping back over contexts stops 2 * HELD_TAIL from the end, so text
+ * built of nothing but keys is still emitted.
  */
 function safeCut(text: string, cut: number): number {
   const floor = text.length - 2 * HELD_TAIL;
   for (;;) {
-    const block = pemBlockAround(text, cut);
+    const block = keyBlockAround(text, cut);
     if (block >= 0) {
       cut = block;
       continue;
@@ -865,21 +869,6 @@ function safeCut(text: string, cut: number): number {
     const back = partial !== null ? partial.index : cut > floor ? trailingSecretContext(head) : -1;
     if (back < 0) return cut;
     cut = back;
-  }
-}
-
-/** The start of the PEM block that `pos` falls strictly inside (an unterminated block never ends), else -1. */
-function pemBlockAround(text: string, pos: number): number {
-  let from = 0;
-  for (;;) {
-    PEM_BEGIN.lastIndex = from;
-    const begin = PEM_BEGIN.exec(text);
-    if (begin === null || begin.index >= pos) return -1;
-    PEM_END.lastIndex = begin.index + begin[0].length;
-    const end = PEM_END.exec(text);
-    if (end === null) return begin.index;
-    from = end.index + end[0].length;
-    if (from > pos) return begin.index;
   }
 }
 

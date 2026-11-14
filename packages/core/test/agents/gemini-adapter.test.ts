@@ -650,6 +650,98 @@ describe("GeminiAdapter", () => {
     });
   }
 
+  it("delivers all prose after an inline mention of a certificate BEGIN line, across a tool call and past 16 KiB", async () => {
+    const prose = (n: number) => Array.from({ length: n }, (_, i) => `Sentence ${i} explains the next step of the setup.\n`).join("");
+    const steps: Step[] = [
+      { type: "message", text: "The file should start with `-----BEGIN CERTIFICATE-----` and hold the certificate.\n" },
+      ...chunked(prose(200), 500),
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      ...chunked(prose(200), 500),
+    ];
+    expect(streamed(steps.filter((s) => s.type === "message")).length).toBeGreaterThan(16 * 1024);
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps.filter((s) => s.type === "message")));
+    expect(h.events.findIndex((e) => e.type === "action_result")).toBeLessThan(h.events.length - 1); // prose went out before the run ended
+  });
+
+  for (const [label, mention, shown] of [
+    ["inline", "Start it with -----BEGIN RSA PRIVATE KEY----- and then paste the body.\n", "Start it with [REDACTED] and then paste the body.\n"],
+    ["on its own line", `Example:\n${KEY_BEGIN}\nThe body goes here, then the END line.\n`, "Example:\n[REDACTED]\nThe body goes here, then the END line.\n"],
+  ] as const) {
+    it(`releases the prose after a private key BEGIN line mentioned ${label}, from the first line that is not key body`, async () => {
+      const more = Array.from({ length: 40 }, (_, i) => `Line ${i} of the explanation.\n`).join("");
+      script([{ type: "message", text: mention }, { type: "sleep", ms: 400 }, ...chunked(more, 300), { type: "read", path: join(worktree, "README.md"), toolCall: true }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.join("")).toBe(shown + more);
+      expect(h.events.at(-1)!.type).toBe("action_result"); // nothing was held to the end of the run
+    });
+  }
+
+  it("redacts a private key whose body lines stream with pauses, and releases the prose after an inline-looking key line", async () => {
+    const body = keyBody(4);
+    const steps: Step[] = [
+      { type: "message", text: `Here:\n${KEY_BEGIN}\n${body[0]}\n` },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `${body[1]}\n${body[2]}` },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `\n${body[3]}\n${KEY_END}\nDone.\n` },
+    ];
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe("Here:\n[REDACTED]\nDone.\n");
+    expect(recorded).not.toContain(KEY_FRAGMENT);
+  });
+
+  it("cuts minified JSON with no whitespace at punctuation, or before a secret key whose quoted value is still open", async () => {
+    const pad = (n: number) => `{"pad":"${"p".repeat(n)}",`;
+    const longValue = Array.from({ length: 20 }, () => OPAQUE_VALUE).join("");
+    for (const [first, second, secret] of [
+      [`"password":"${OPAQUE_VALUE}","note":"${"n".repeat(500)}`, '"}', OPAQUE_VALUE],
+      [`"password":"${longValue.slice(0, 600)}`, `${longValue.slice(600)}"}`, longValue],
+    ] as const) {
+      const head = pad(4000 - first.length) + first;
+      const min = head.length - 512;
+      expect(head.indexOf(secret.slice(0, 20))).toBeLessThan(min); // without punctuation or step-back, the cut would fall inside the value
+      const steps: Step[] = [{ type: "message", text: head }, { type: "message", text: second }];
+      script(steps);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.length).toBeGreaterThan(1);
+      expect(texts.join("")).toBe(streamed(steps));
+      const recorded = texts.map((t) => redact(t)).join("");
+      expect(recorded).toBe(redact(streamed(steps)));
+      expectNoFragment(recorded, secret);
+    }
+  });
+
+  it("holds a secret YAML block scalar until it ends, even across pause flushes", async () => {
+    const steps: Step[] = [
+      { type: "message", text: "config:\n  password: |\n    line-one-of-the-body\n" },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: "    line-two-of-the-body\n" },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: "  other: x\ndone\n" },
+    ];
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps));
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(streamed(steps)));
+    expect(recorded).not.toContain("line-one");
+    expect(recorded).not.toContain("line-two");
+  });
+
   it("flushes the held tail of a size-split message after a pause, without waiting for more output", async () => {
     const head = "w ".repeat(2000);
     script([{ type: "message", text: `${head}held\ntail more` }, { type: "sleep", ms: 1500 }, { type: "message", text: "later" }]);

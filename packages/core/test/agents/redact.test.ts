@@ -355,12 +355,16 @@ describe("trailingSecretContext", () => {
       ['{"password": ', '"password": '.slice(1)],
       ["db:\n  password: |\n", "password: |\n"],
       ["token:\n", "token:\n"],
+      ['{"a":1,"password":"ab', 'password":"ab'],
+      ["db:\n  password: |\n    one\n\n    two\n", "  password: |\n    one\n\n    two\n"],
     ] as const) {
       expect(trailingSecretContext(head)).toBe(head.length - context.length);
     }
   });
 
   it("finds nothing after ordinary text, a non-secret key or a counter", () => {
-    for (const head of ["hello world ", "name = ", "max_tokens: ", "Bearer token value "]) expect(trailingSecretContext(head)).toBe(-1);
+    for (const head of ["hello world ", "name = ", "max_tokens: ", "Bearer token value ", '{"password":"ab","n":"x', "db:\n  password: |\n    one\n  other: x\n"]) {
+      expect(trailingSecretContext(head)).toBe(-1);
+    }
   });
 });
