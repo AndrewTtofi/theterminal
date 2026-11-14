@@ -86,10 +86,17 @@ describe("eventPayloadSchemas", () => {
 
   it("defines a schema for every event type", () => {
     expect(Object.keys(eventPayloadSchemas).sort()).toEqual([
+      "agent.action.completed",
+      "agent.action.decided",
+      "agent.action.requested",
+      "agent.finished",
+      "agent.message",
+      "agent.started",
       "card.created",
       "card.moved",
       "card.status_changed",
       "project.created",
+      "settings.claude_auth_changed",
     ]);
   });
 });

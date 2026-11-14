@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { STAGES } from "./domain.js";
+import { agentPayloadSchemas, type AgentEventType } from "./agents.js";
 
 export const stageSchema = z.enum(STAGES);
 
@@ -22,7 +23,12 @@ export const cardInputSchema = z.object({
 });
 export type CardInput = z.infer<typeof cardInputSchema>;
 
-export type EventType = "project.created" | "card.created" | "card.moved" | "card.status_changed";
+export type EventType =
+  | "project.created"
+  | "card.created"
+  | "card.moved"
+  | "card.status_changed"
+  | AgentEventType;
 
 const nonEmptyId = z.string().min(1);
 
@@ -33,4 +39,5 @@ export const eventPayloadSchemas: Record<EventType, z.ZodTypeAny> = {
   "card.status_changed": z
     .object({ cardId: nonEmptyId, from: cardStatusSchema, to: cardStatusSchema })
     .strict(),
+  ...agentPayloadSchemas,
 };

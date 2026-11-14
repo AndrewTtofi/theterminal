@@ -12,3 +12,4 @@ export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export type { RunningServer } from "./server/server.js";
 export { defaultDataDir } from "./paths.js";
+export { redact, truncate, REDACTED } from "./agents/redact.js";
