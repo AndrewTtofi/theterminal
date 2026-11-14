@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
-import { buildChildEnv } from "../child-env.js";
+import { buildChildEnv, fakeAgentEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { redact } from "../redact.js";
 import { which } from "../which.js";
@@ -268,7 +268,7 @@ export class CodexAdapter implements AgentAdapter {
     }
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
-    const env = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir });
+    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: undefined }), ...fakeAgentEnv() };
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };
@@ -279,8 +279,6 @@ export class CodexAdapter implements AgentAdapter {
         return { status: "failed", error: NO_HOME };
       }
       env.CODEX_HOME = home;
-    } else if (process.env.CODEX_HOME) {
-      env.CODEX_HOME = process.env.CODEX_HOME; // a path, not a credential: where the user's own login lives
     }
 
     let child: ChildProcessWithoutNullStreams;

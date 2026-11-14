@@ -349,7 +349,7 @@ describe("ClaudeAdapter", () => {
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     for (const k of STRIPPED) expect(env).not.toHaveProperty(k);
     expect(Object.keys(env).filter((k) => /^ANTHROPIC_/i.test(k))).toEqual([]);
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("fake-oauth-token-value"); // the user's own CLI login is left alone
+    expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN"); // not allowlisted: the CLI reads its own stored login
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(apiKey).not.toHaveBeenCalled();
   });
@@ -361,7 +361,7 @@ describe("ClaudeAdapter", () => {
     expect(env).not.toHaveProperty("GIT_AUTHOR_EMAIL");
     expect(env).not.toHaveProperty("GIT_COMMITTER_NAME");
     expect(env).not.toHaveProperty("GIT_DIR");
-    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toBe(join(DATA_DIR, EMPTY_GITCONFIG));
     expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
   });

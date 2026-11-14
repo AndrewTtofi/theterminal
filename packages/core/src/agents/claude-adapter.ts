@@ -267,7 +267,7 @@ export class ClaudeAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AdapterStartOptions["authMode"]): Record<string, string | undefined> | string {
     if (mode !== "subscription" && mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
-    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir }); // the user's own login, untouched
+    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: undefined }); // the user's own login, untouched
     const key = this.apiKey();
     if (!key) return NO_API_KEY;
     return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir });

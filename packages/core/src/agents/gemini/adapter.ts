@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
-import { buildChildEnv } from "../child-env.js";
+import { buildChildEnv, fakeAgentEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
 import { which } from "../which.js";
@@ -299,10 +299,10 @@ export class GeminiAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AuthMode): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    if (mode === "google") return buildChildEnv("gemini", mode, { dataDir: this.dataDir }); // the user's own login, untouched
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome: undefined, googleCloudProject: undefined }), ...fakeAgentEnv() }; // the user's own login, untouched
     const key = this.apiKey();
     if (!key) return NO_API_KEY;
-    return buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir });
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject: undefined }), ...fakeAgentEnv() };
   }
 }
 

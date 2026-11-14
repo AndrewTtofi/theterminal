@@ -86,9 +86,10 @@ beforeEach(() => {
   outside = realpathSync.native(mkdtempSync(join(tmpdir(), "gemini-outside-")));
   logFile = join(outside, "fake.log");
   writeFileSync(join(worktree, "README.md"), "hello from the worktree\n");
-  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
+  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG", "THETERMINAL_FAKE_AGENT"]) saved[k] = process.env[k];
   for (const [k, v] of Object.entries(FAKE_ENV)) process.env[k] = v;
   process.env.THETERMINAL_FAKE_LOG = logFile;
+  process.env.THETERMINAL_FAKE_AGENT = "1"; // lets the fixture CLI receive its THETERMINAL_FAKE_* script variables
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -204,7 +205,7 @@ describe("GeminiAdapter", () => {
     const env = readLog().find((e) => e.initialize)!.initialize.env as Record<string, string>;
     expect(env.GEMINI_API_KEY).toBe(FAKE_KEY);
     for (const k of ["GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT", "GEMINI_MODEL", "VERTEXAI_LOCATION", "GIT_DIR", "GIT_AUTHOR_EMAIL"]) expect(env).not.toHaveProperty(k);
-    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toBe(join(outside, EMPTY_GITCONFIG));
     expect(process.env.GEMINI_API_KEY).toBe(FAKE_ENV.GEMINI_API_KEY); // a copy, not the real env
   });

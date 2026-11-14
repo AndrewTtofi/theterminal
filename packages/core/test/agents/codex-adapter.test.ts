@@ -162,6 +162,7 @@ describe("CodexAdapter (fake app-server)", () => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "codex-adapter-")));
     logFile = join(dir, "fake.log");
     vi.stubEnv("THETERMINAL_FAKE_LOG", logFile);
+    vi.stubEnv("THETERMINAL_FAKE_AGENT", "1"); // lets the fixture CLI receive its THETERMINAL_FAKE_* script variables
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -518,13 +519,13 @@ describe("CodexAdapter (fake app-server)", () => {
       vi.stubEnv("CODEX_API_KEY", "sk-INHERITED-TESTKEY");
     });
 
-    it("chatgpt mode passes no API key, keeps the user's CODEX_HOME and relies on their own login", async () => {
+    it("chatgpt mode passes no API key and no CODEX_HOME (the CLI's default home holds the login)", async () => {
       vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
       script([]);
       const { result } = run(make(), undefined, { authMode: "chatgpt" });
       expect(await result).toEqual({ status: "completed" });
       const start = fakeLog().find((e) => e.start);
-      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: join(dir, "users-codex-home") });
+      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: null });
       expect(start.argv).not.toContain("cli_auth_credentials_store=ephemeral");
       expect(received("account/login/start")).toEqual([]);
     });

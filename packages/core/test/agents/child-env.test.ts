@@ -33,7 +33,7 @@ describe("buildChildEnv", () => {
     const snapshot = { ...base };
     const env = buildChildEnv(p, "api_key", { apiKey: "k", dataDir: DATA_DIR, base });
     expect(base).toEqual(snapshot);
-    expect(keys(env, /^git_/i).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(keys(env, /^git_/i).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toMatch(/theterminal[\\/].+/);
     expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
     expect(env.PATH).toBe("/usr/bin");
@@ -47,13 +47,13 @@ describe("buildChildEnv", () => {
     expect(keys(env, /^claude_code_use_/i)).toEqual([]);
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
-    expect(env.OPENAI_API_KEY).toBe("sk-OLD"); // other providers' variables are not this provider's business
+    expect(env.OPENAI_API_KEY).toBeUndefined(); // other providers' variables are dropped
   });
 
   it("claude subscription: no key, ANTHROPIC_* gone, oauth token left alone", () => {
     const env = buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base });
     expect(keys(env, /^anthropic_/i)).toEqual([]);
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-old");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined(); // not allowlisted: the CLI reads its own stored login
   });
 
   it("codex api_key: strips OPENAI_* and CODEX_*, sets exactly OPENAI_API_KEY and CODEX_API_KEY", () => {
@@ -61,7 +61,7 @@ describe("buildChildEnv", () => {
     expect(keys(env, /^(openai_|codex_)/i).sort()).toEqual(["CODEX_API_KEY", "OPENAI_API_KEY"]);
     expect(env.OPENAI_API_KEY).toBe("sk-NEW");
     expect(env.CODEX_API_KEY).toBe("sk-NEW");
-    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-OLD");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
   it("codex chatgpt: sets no key", () => {
@@ -83,6 +83,56 @@ describe("buildChildEnv", () => {
   it("api_key mode without a key sets none", () => {
     const env = buildChildEnv("codex", "api_key", { dataDir: DATA_DIR, base });
     expect(keys(env, /^(openai_|codex_)/i)).toEqual([]);
+  });
+});
+
+describe("buildChildEnv allowlist", () => {
+  const dirty = {
+    PATH: "/usr/bin",
+    HOME: "/home/user",
+    ANTHROPIC_API_KEY: "sk-ant-TESTKEY-0000000000",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    NPM_TOKEN: "npm-token",
+    GITHUB_TOKEN: "gh-token",
+    GIT_AUTHOR_EMAIL: "someone@example.invalid",
+    NODE_OPTIONS: "--require x",
+    LC_ALL: "C",
+    THETERMINAL_FAKE_AGENT: "1",
+  } as NodeJS.ProcessEnv;
+
+  it("keeps only allowlisted names plus what we set", () => {
+    const env = buildChildEnv("gemini", "api_key", { apiKey: "gem-KEY", dataDir: DATA_DIR, base: dirty });
+    expect(Object.keys(env).sort()).toEqual(
+      ["PATH", "HOME", "LC_ALL", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GEMINI_API_KEY"].sort(),
+    );
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+  });
+
+  it("keeps the Windows system variables on win32 and drops them elsewhere", () => {
+    const win = { SystemRoot: "C:\\Windows", ComSpec: "cmd.exe", PATHEXT: ".EXE", APPDATA: "C:\\a", "ProgramFiles(x86)": "C:\\p", NPM_TOKEN: "t" } as NodeJS.ProcessEnv;
+    const on = buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base: win, platform: "win32" });
+    for (const k of ["SystemRoot", "ComSpec", "PATHEXT", "APPDATA", "ProgramFiles(x86)"]) expect(on[k]).toBe(win[k]);
+    expect(on.NPM_TOKEN).toBeUndefined();
+    const off = buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base: win, platform: "linux" });
+    expect(off.SystemRoot).toBeUndefined();
+  });
+
+  it("cliHome sets CODEX_HOME / GEMINI_CLI_HOME in login modes only", () => {
+    expect(buildChildEnv("codex", "chatgpt", { dataDir: DATA_DIR, base: dirty, cliHome: "/h" }).CODEX_HOME).toBe("/h");
+    expect(buildChildEnv("gemini", "google", { dataDir: DATA_DIR, base: dirty, cliHome: "/h" }).GEMINI_CLI_HOME).toBe("/h");
+    const key = buildChildEnv("codex", "api_key", { apiKey: "k", dataDir: DATA_DIR, base: dirty, cliHome: "/h" });
+    expect(key.CODEX_HOME).toBeUndefined();
+    const claude = buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base: dirty, cliHome: "/h" });
+    expect(claude.CODEX_HOME).toBeUndefined();
+    expect(claude.GEMINI_CLI_HOME).toBeUndefined();
+  });
+
+  it("googleCloudProject sets GOOGLE_CLOUD_PROJECT for gemini only", () => {
+    for (const mode of ["google", "api_key"] as const) {
+      const env = buildChildEnv("gemini", mode, { dataDir: DATA_DIR, base: dirty, googleCloudProject: "proj-1" });
+      expect(env.GOOGLE_CLOUD_PROJECT).toBe("proj-1");
+    }
+    expect(buildChildEnv("codex", "chatgpt", { dataDir: DATA_DIR, base: dirty, googleCloudProject: "proj-1" }).GOOGLE_CLOUD_PROJECT).toBeUndefined();
   });
 });
 
