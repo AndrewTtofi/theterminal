@@ -815,6 +815,8 @@ describe("cloud, MCP and hardware connections", () => {
       "https://:TESTKEY-pass-0000000000@mcp.example.com/mcp",
       "https://mcp.example.com/mcp?token=TESTKEY-query-0000000000",
       "https://mcp.example.com/mcp?",
+      "https://mcp.example.com/mcp#token=TESTKEY-frag-0000000000",
+      "https://mcp.example.com/mcp#",
     ]) {
       const err = await mcp(url).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ZodError);

@@ -275,7 +275,7 @@ export const connectionPayloadSchemas = {
       purpose: z.enum(["api_key", "cli_home", "cloud_credentials", "mcp_server"]),
       /** Which kind of cloud credential the run was given; never its value. */
       credential: z.enum(["aws_session_token", "aws_static_keys", "gcp_access_token", "azure_client_secret"]).optional(),
-      expiresAt: z.string().datetime().nullable().optional(),
+      expiresAt: z.iso.datetime().nullable().optional(),
     })
     .strict(),
   /** A sign-in through the provider's own login command: never its output, account names or emails. */
