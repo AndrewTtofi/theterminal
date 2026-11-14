@@ -245,13 +245,17 @@ describe("JsonRpcPeer", () => {
     await assertion;
   });
 
-  it("truncates peer-controlled error text", async () => {
+  it("keeps peer error text whole up to a 64 KiB memory bound (the runner redacts, then caps)", async () => {
     const { input, peer, tick } = make();
     const p = peer.request("x");
+    const q = peer.request("y");
     await tick();
     input.write(line({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "e".repeat(5000) } }));
+    input.write(line({ jsonrpc: "2.0", id: 2, error: { code: 1, message: "f".repeat(200 * 1024) } }));
     const err = await p.catch((e) => e as Error);
-    expect(err.message.length).toBeLessThan(600);
+    expect(err.message).toBe(`rpc error: ${"e".repeat(5000)}`);
+    const big = await q.catch((e) => e as Error);
+    expect(big.message).toBe(`rpc error: ${"f".repeat(64 * 1024)}`);
     peer.close("done");
   });
 });

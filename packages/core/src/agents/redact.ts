@@ -23,9 +23,14 @@ export function secretEnvValues(env: NodeJS.ProcessEnv): string[] {
     .map(([, v]) => v!);
 }
 
+/** The label of a PEM/PGP private key's BEGIN and END lines (`RSA PRIVATE KEY`, `PGP PRIVATE KEY BLOCK`). */
+export const PRIVATE_KEY_LABEL = String.raw`[A-Z ]*PRIVATE KEY(?: BLOCK)?`;
+
 const TOKEN_PATTERNS: RegExp[] = [
-  // PEM/PGP private keys; an unterminated block is redacted to the end of the string.
-  /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g,
+  // PEM/PGP private keys, from BEGIN to END inclusive whatever lies between: body lines of any length, each with any
+  // prefix (`> `, `-`, `| `, `3: `, indentation), a key flattened onto one line with spaces or `\n` escapes, prose. An
+  // unterminated block is redacted to the end of the string. The lazy middle tries the END marker once per position.
+  new RegExp(`-----BEGIN ${PRIVATE_KEY_LABEL}-----[\\s\\S]*?(?:-----END ${PRIVATE_KEY_LABEL}-----|$)`, "g"),
   /sk-ant-[A-Za-z0-9_-]{10,}/g,
   /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
   /[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g,
@@ -48,12 +53,30 @@ const URL_USERINFO = /((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:@/]*:
 // Finds "key" + separator only (the key may sit inside escaped JSON, \"key\":). The value is
 // parsed by hand in redactPairs, so a non-secret pair never swallows a secret pair inside its
 // value, and every scan stays linear.
-const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(\\?["']?\s*[=:]\s*)/g;
-const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)[ \t]+/iy;
+const KEY_NAME = String.raw`(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)`;
+const KEY_QUOTE = String.raw`\\?["']?\s*`;
+const SEP = String.raw`[=:]\s*`;
+const KEY_SEP = new RegExp(`${KEY_NAME}(${KEY_QUOTE}${SEP})`, "g");
+const SCHEMES = "Bearer|Basic|Token|Digest";
+const AUTH_SCHEME = new RegExp(`(?:${SCHEMES})[ \\t]+`, "iy");
 const BARE_END = /[\s'",;&}]/;
 // YAML block header: indicator, optional chomping/indentation digit (either order), optional comment.
 // The comment runs to the line end, so a match never backtracks across a line.
-const BLOCK_SCALAR = /[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?(?=[\r\n]|$)/y;
+const BLOCK_SCALAR_SOURCE = String.raw`[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?(?=[\r\n]|$)`;
+const BLOCK_SCALAR = new RegExp(BLOCK_SCALAR_SOURCE, "y");
+// The end of a text that a cut would separate from the secret value after it: an auth-scheme word and its
+// whitespace, or a key (its separator and block-scalar header may not have arrived yet).
+const TRAILING_SCHEME = new RegExp(`(?<![A-Za-z0-9])(?:${SCHEMES})\\s+$`, "i");
+const TRAILING_KEY = new RegExp(`${KEY_NAME}${KEY_QUOTE}(?:${SEP}(?:${BLOCK_SCALAR_SOURCE}\\s*)?)?$`);
+// A key, its separator and a quoted value that has not closed yet (`"password":"abc`).
+const TRAILING_OPEN_VALUE = new RegExp(`${KEY_NAME}${KEY_QUOTE}${SEP}\\\\?["'][^"'\\\\\\r\\n]*$`);
+// A YAML block-scalar header ending a line (`  password: |`, `{"x":1}password: |`): the key and what follows it. Only
+// one can end a line, so the leftmost match is the one.
+const BLOCK_HEADER = new RegExp(`${KEY_NAME}${KEY_QUOTE}${SEP.replace(String.raw`\s*`, String.raw`[ \t]*`)}${BLOCK_SCALAR_SOURCE}`);
+/** What may precede a header that is its whole line: indentation and a list-item dash. */
+const HEADER_ONLY_PREFIX = /^[ \t]*(?:-[ \t]+)?$/;
+/** How much of the end of a text `trailingSecretContext` looks at: longer than any key, header or open value it needs. */
+const TRAILING_WINDOW = 512;
 
 /**
  * End of a quoted value starting at `start` (a quote char): closing quote, else end of string.
@@ -222,16 +245,26 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** `key`, or `key#2`, `key#3`, … when taken, so keys that redact to the same string never drop a value. */
+function uniqueKey(out: Record<string, unknown>, key: string): string {
+  if (!Object.hasOwn(out, key)) return key;
+  let n = 2;
+  while (Object.hasOwn(out, `${key}#${n}`)) n++;
+  return `${key}#${n}`;
+}
+
 function walk(value: unknown, extra: string[]): unknown {
   if (typeof value === "string") return redactString(value, extra);
   if (Array.isArray(value)) return value.map((v) => walk(v, extra));
   if (isPlainObject(value)) {
-    const out: Record<string, unknown> = {};
+    // Built without a prototype, so an own "__proto__" key stays data instead of setting the prototype; the spread
+    // copies it as an own property of an ordinary object.
+    const out: Record<string, unknown> = Object.create(null);
     for (const [k, v] of Object.entries(value)) {
       const sensitive = isSecretKey(k) && v !== null && v !== undefined && typeof v !== "boolean";
-      out[redactString(k, extra)] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
+      out[uniqueKey(out, redactString(k, extra))] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
     }
-    return out;
+    return { ...out };
   }
   return value;
 }
@@ -243,6 +276,81 @@ function walk(value: unknown, extra: string[]): unknown {
  */
 export function redact<T>(value: T, extraSecrets: string[] = []): T {
   return walk(value, extraSecrets.filter((s) => s.length > 0)) as T;
+}
+
+/**
+ * Where the context that redaction needs to find a secret value starts, when `head` ends with it: a trailing
+ * auth-scheme word (`Bearer `) or a secret key with or without its separator (`api_key = `, `password:\n`).
+ * A text cut there would leave the value without its context in the next piece. Otherwise -1.
+ * `atLineStart` says that `head` begins at a line boundary, so a block-scalar header on its first line counts;
+ * otherwise that line may be the tail of a longer one and is not judged.
+ */
+export function trailingSecretContext(head: string, atLineStart: boolean): number {
+  const from = Math.max(0, head.length - TRAILING_WINDOW);
+  const tail = head.slice(from);
+  const scheme = TRAILING_SCHEME.exec(tail);
+  if (scheme) return from + scheme.index;
+  for (const re of [TRAILING_KEY, TRAILING_OPEN_VALUE]) {
+    const key = re.exec(tail);
+    if (key && isSecretKey(key[1]!)) return from + key.index;
+  }
+  const block = openBlockScalar(tail, from === 0 && atLineStart);
+  return block < 0 ? -1 : from + block;
+}
+
+/**
+ * Where a secret key's YAML block-scalar header whose body runs to the end of `text` (every non-blank line after it
+ * indented deeper than its line) starts, else -1: the start of its line when the header is the whole line, otherwise
+ * the key itself (`{"x":1}password: |`). The first line of `text` is judged only when `firstLineWhole` says it
+ * starts at a line boundary.
+ */
+function openBlockScalar(text: string, firstLineWhole: boolean): number {
+  let deepest = Infinity; // the least indentation of the non-blank lines after the candidate header
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf("\n", end - 1) + 1;
+    if (start === 0 && !firstLineWhole) return -1;
+    const line = text.slice(start, end).replace(/[\r\n]+$/, "");
+    let indent = 0;
+    while (isBlank(line[indent])) indent++;
+    const header = BLOCK_HEADER.exec(line);
+    if (header && isSecretKey(header[1]!) && indent < deepest) {
+      return HEADER_ONLY_PREFIX.test(line.slice(0, header.index)) ? start : start + header.index;
+    }
+    if (indent < line.length) {
+      deepest = Math.min(deepest, indent);
+      if (deepest === 0) return -1;
+    }
+    if (start === 0) return -1;
+    end = start - 1;
+  }
+  return -1;
+}
+
+/** The most raw text `heldTailStart` holds back from a stream: an unfinished line (or key block) longer than this is cleaned whole. */
+export const HELD_TAIL_BYTES = 8 * 1024;
+const BEGIN_PRIVATE_KEY = new RegExp(`-----BEGIN ${PRIVATE_KEY_LABEL}-----`, "y");
+const END_PRIVATE_KEY = new RegExp(`-----END ${PRIVATE_KEY_LABEL}-----`);
+
+/**
+ * For text read from a stream that may go on: where the tail to keep raw until more arrives starts, so that what is
+ * cleaned before it never ends inside a secret whose rest (or whose context) is still to come. That is the unfinished
+ * last line, or earlier: a private key block not yet closed, or a secret key whose value may follow on the next lines
+ * (`password:` or a block-scalar header). `text.length` (hold nothing) when that tail is over HELD_TAIL_BYTES.
+ */
+export function heldTailStart(text: string): number {
+  let start = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r")) + 1;
+  const context = trailingSecretContext(text.slice(0, start), false);
+  if (context >= 0) start = Math.min(start, context);
+  const begin = text.lastIndexOf("-----BEGIN ");
+  if (begin >= 0 && begin < start) {
+    BEGIN_PRIVATE_KEY.lastIndex = begin;
+    if (BEGIN_PRIVATE_KEY.test(text) && !END_PRIVATE_KEY.test(text.slice(begin))) start = begin;
+  }
+  // A UTF-16 unit is at most 3 bytes, so the byte count is only measured when it could pass the cap.
+  const held = text.length - start;
+  if (held * 3 > HELD_TAIL_BYTES && Buffer.byteLength(text.slice(start), "utf8") > HELD_TAIL_BYTES) return text.length;
+  return start;
 }
 
 const MARKER = "…[truncated]";

@@ -1,6 +1,7 @@
 import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import { heldTailStart } from "../redact.js";
 
 export type ExitStatus = { exitCode: number | null; signal: string | null };
 export type TerminalOutput = { output: string; truncated: boolean; exitStatus: ExitStatus | null };
@@ -12,8 +13,16 @@ const KILL_GRACE_MS = 5000;
 type Terminal = {
   child: ChildProcess;
   limit: number;
+  /** The tail of the output, for the agent: its own command's output, as it was printed. */
   output: string;
   truncated: boolean;
+  /**
+   * The output for the record. Null while `output` is still whole (then they are the same). From the first cut on it
+   * is kept apart: cleaned before every cut, so a cut never parts a secret from the context redaction finds it by,
+   * or leaves a fragment of one at the start. Empty for good once `clean` has failed: the record is withheld.
+   */
+  record: string | null;
+  withheld: boolean;
   exit: ExitStatus | null;
   exited: Promise<ExitStatus>;
 };
@@ -21,21 +30,26 @@ type Terminal = {
 /**
  * The terminals we run for the agent after a gate allowed them: spawned without a shell, with the
  * output tail kept under a byte cap. Every terminal is ours alone; ids the agent did not get from us
- * are unknown. `onExit` reports each terminal's outcome once, so the gated action gets its result.
+ * are unknown. `onExit` reports each terminal's outcome once, with the output for the record, so the
+ * gated action gets its result.
  */
 export class Terminals {
   private readonly terminals = new Map<string, Terminal>();
 
   constructor(
     private readonly spawn: typeof nodeSpawn,
-    private readonly onExit: (terminalId: string, status: ExitStatus, output: string) => void,
+    /** The run's live redaction, applied to the record before each cut. */
+    private readonly clean: (s: string) => string,
+    private readonly onExit: (terminalId: string, status: ExitStatus, record: string) => void,
   ) {}
 
   create(command: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv; outputByteLimit?: number | null }): string {
     const terminalId = randomUUID();
     const limit = typeof o.outputByteLimit === "number" && o.outputByteLimit > 0 ? Math.min(o.outputByteLimit, MAX_TERMINAL_OUTPUT) : MAX_TERMINAL_OUTPUT;
     const child = this.spawn(command, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-    const t: Terminal = { child, limit, output: "", truncated: false, exit: null, exited: Promise.resolve({ exitCode: null, signal: null }) };
+    const t: Terminal = {
+      child, limit, output: "", truncated: false, record: null, withheld: false, exit: null, exited: Promise.resolve({ exitCode: null, signal: null }),
+    };
     t.exited = new Promise<ExitStatus>((resolve) => {
       let settled = false;
       const finish = (status: ExitStatus) => {
@@ -43,7 +57,7 @@ export class Terminals {
         settled = true;
         t.exit = status;
         resolve(status);
-        this.onExit(terminalId, status, t.output);
+        this.onExit(terminalId, status, this.record(t));
       };
       child.on("error", (e) => {
         this.append(t, `${e.message}\n`);
@@ -112,11 +126,55 @@ export class Terminals {
 
   private append(t: Terminal, text: string): void {
     if (text === "") return;
-    t.output += text;
-    if (Buffer.byteLength(t.output, "utf8") <= t.limit) return;
-    // Keep the tail, cut at a character boundary (a partial leading character decodes to U+FFFD and is dropped).
-    const buf = Buffer.from(t.output, "utf8");
-    t.output = buf.subarray(buf.length - t.limit).toString("utf8").replace(/^�/, "");
+    const whole = t.output + text;
+    if (t.record !== null && !t.withheld) t.record += text;
+    if (Buffer.byteLength(whole, "utf8") <= t.limit) {
+      t.output = whole;
+      return;
+    }
+    // The first cut: the record starts from the whole output, which is still here.
+    if (t.record === null) t.record = whole;
+    t.output = tail(whole, t.limit);
     t.truncated = true;
+    // Cleaned and cut once it holds twice the cap, so each byte is cleaned a bounded number of times however long
+    // the output runs, while the cleaned text before a cut always holds the whole of the kept tail's secrets.
+    if (!t.withheld && Buffer.byteLength(t.record, "utf8") > 2 * t.limit) this.cutRecord(t, false);
   }
+
+  /** The record at exit: the output itself while it was never cut, else the record cleaned and cut one last time. */
+  private record(t: Terminal): string {
+    if (t.record === null) return t.output;
+    this.cutRecord(t, true);
+    return t.record;
+  }
+
+  /**
+   * Cleans the record, then keeps its last `limit` bytes without the partial word a cut leaves at the start. While
+   * output may still come (`final` false), the tail that may go on (see `heldTailStart`) stays raw and whole: cleaned
+   * alone, a secret the output is still in the middle of could be redacted and its rest, still to come, left plain.
+   * Only the cleaned part is cut, so the record holds at most `limit` bytes plus that tail (at most 8 KiB). A clean
+   * that throws withholds the record for good: what it would have let through is unknown.
+   */
+  private cutRecord(t: Terminal, final: boolean): void {
+    if (t.withheld) return;
+    const all = t.record!;
+    const held = final ? all.length : heldTailStart(all);
+    const raw = all.slice(held);
+    try {
+      const cleaned = this.clean(all.slice(0, held));
+      const room = t.limit - Buffer.byteLength(raw, "utf8");
+      const kept = Buffer.byteLength(cleaned, "utf8") <= room ? cleaned : room <= 0 ? "" : tail(cleaned, room).replace(/^\S*/, "");
+      t.record = kept + raw;
+    } catch {
+      t.record = "";
+      t.withheld = true;
+    }
+  }
+}
+
+/** The last `limit` bytes of `s`, cut at a character boundary (a partial leading character decodes to U+FFFD and is dropped). */
+function tail(s: string, limit: number): string {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= limit) return s;
+  return buf.subarray(buf.length - limit).toString("utf8").replace(/^�/, "");
 }

@@ -8,6 +8,11 @@ type Id = number | string;
 const DEFAULT_MAX_LINE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INFLIGHT_REQUESTS = 64;
+/**
+ * A memory bound only, far above anything recorded: the runner redacts an error and then caps it, so cutting
+ * here (before redaction) at a small size could leave a fragment of a secret that no pattern matches.
+ */
+const MAX_ERROR_TEXT = 64 * 1024;
 const MAX_TIMED_OUT_IDS = 1024;
 
 interface Pending {
@@ -196,7 +201,7 @@ export class JsonRpcPeer {
     clearTimeout(p.timer);
     if (msg.error !== undefined) {
       const m = msg.error && typeof msg.error.message === "string" ? msg.error.message : "error";
-      p.reject(new Error(`rpc error: ${m.slice(0, 500)}`));
+      p.reject(new Error(`rpc error: ${m.slice(0, MAX_ERROR_TEXT)}`));
     } else {
       p.resolve(msg.result);
     }

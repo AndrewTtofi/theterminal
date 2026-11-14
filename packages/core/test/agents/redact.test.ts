@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redact, truncate } from "../../src/index.js";
-import { secretEnvValues } from "../../src/agents/redact.js";
+import { secretEnvValues, trailingSecretContext } from "../../src/agents/redact.js";
+import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 describe("redact", () => {
   it("redacts bearer tokens and sk-ant keys", () => {
@@ -86,6 +87,17 @@ describe("redact", () => {
       [REDACTED]: "x", nested: { [REDACTED]: 1 },
     });
   });
+  it("never merges object keys that redact to the same string", () => {
+    const secrets = ["fake-alpha-1111", "fake-bravo-2222", "fake-charlie-3333"];
+    expect(redact({ [secrets[0]!]: "a", [secrets[1]!]: "b" }, secrets)).toEqual({ [REDACTED]: "a", [`${REDACTED}#2`]: "b" });
+    expect(redact({ [secrets[0]!]: "a", [secrets[1]!]: "b", [secrets[2]!]: "c" }, secrets)).toEqual({
+      [REDACTED]: "a", [`${REDACTED}#2`]: "b", [`${REDACTED}#3`]: "c",
+    });
+    // A disambiguated name never overwrites a key that already has it.
+    expect(redact({ [`${REDACTED}#2`]: "x", [REDACTED]: "y", [secrets[0]!]: "z" }, secrets)).toEqual({
+      [`${REDACTED}#2`]: "x", [REDACTED]: "y", [`${REDACTED}#3`]: "z",
+    });
+  });
   it("leaves non-secret text and non-string values unchanged", () => {
     expect(redact("just some text, 42 files")).toBe("just some text, 42 files");
     expect(redact({ n: 1, b: true, z: null })).toEqual({ n: 1, b: true, z: null });
@@ -96,6 +108,15 @@ describe("redact", () => {
     const out = redact(input);
     expect(input).toEqual(copy);
     expect(out).not.toBe(input);
+  });
+  it("keeps an own __proto__ key as data, redacted underneath, and never touches the output's prototype", () => {
+    const input = JSON.parse('{"__proto__": {"x": "sk-ant-TESTKEY000000abcdef", "password": "hunter2abc"}, "a": 1}') as Record<string, unknown>;
+    const out = redact(input) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(JSON.stringify(out)).toBe('{"__proto__":{"x":"[REDACTED]","password":"[REDACTED]"},"a":1}');
+    expect("x" in out).toBe(false); // nothing landed on the prototype chain
+    expect(Object.hasOwn({}, "x")).toBe(false);
   });
 });
 
@@ -330,5 +351,100 @@ describe("secretEnvValues", () => {
 
   it("ignores values too short to redact safely", () => {
     expect(secretEnvValues({ SOME_TOKEN: "1", DEBUG_AUTH: "true", X_SECRET: "1234567" })).toEqual([]);
+  });
+});
+
+describe("trailingSecretContext", () => {
+  it("finds a trailing auth scheme or secret key, with or without its separator", () => {
+    for (const [head, context] of [
+      ["see Authorization: Bearer ", "Bearer "],
+      ["see Authorization: ", "Authorization: "],
+      ["curl -H x Basic ", "Basic "],
+      ["then api_key = ", "api_key = "],
+      ["then api_key ", "api_key "],
+      ['{"password": ', '"password": '.slice(1)],
+      ["db:\n  password: |\n", "password: |\n"],
+      ["token:\n", "token:\n"],
+      ['{"a":1,"password":"ab', 'password":"ab'],
+      ["db:\n  password: |\n    one\n\n    two\n", "  password: |\n    one\n\n    two\n"],
+    ] as const) {
+      expect(trailingSecretContext(head, false)).toBe(head.length - context.length);
+    }
+  });
+
+  it("finds nothing after ordinary text, a non-secret key or a counter", () => {
+    for (const head of ["hello world ", "name = ", "max_tokens: ", "Bearer token value ", '{"password":"ab","n":"x', "db:\n  password: |\n    one\n  other: x\n"]) {
+      expect(trailingSecretContext(head, false)).toBe(-1);
+    }
+  });
+
+  it("judges a block-scalar header on the first line only when the text is known to start at a line boundary", () => {
+    const head = "password: |\n  hunter2abc\n  more";
+    expect(trailingSecretContext(head, true)).toBe(0);
+    expect(trailingSecretContext(head, false)).toBe(-1); // the first line may be the tail of a longer one
+    expect(trailingSecretContext(`x: 1\n${head}`, true)).toBe(5);
+    expect(trailingSecretContext(`x: 1\n${head}`, false)).toBe(5);
+    expect(trailingSecretContext("password: |\n  one\nother: x\n", true)).toBe(-1); // the block has ended
+  });
+
+  it("finds a block-scalar header that is not at the start of its line, and steps back to the key itself", () => {
+    const head = '{"x":1}password: |\n  hunter2abc\n  more\n';
+    expect(trailingSecretContext(head, true)).toBe(7);
+    expect(trailingSecretContext(`a\n${head}`, false)).toBe(9);
+    expect(trailingSecretContext("a\n- item: 1\n  secret_key: |\n    one\n", false)).toBe(12); // after a list item, the key
+    expect(trailingSecretContext("a\n  - password: |\n      one\n", false)).toBe(2); // a header that is the whole item keeps its indentation
+    expect(trailingSecretContext('a\n{"x":1}name: |\n  one\n', false)).toBe(-1); // not a secret key
+    expect(trailingSecretContext('a\n{"x":1}password: |\n  one\nnext: 2\n', false)).toBe(-1); // the block has ended
+  });
+});
+
+describe("redact: decorated private keys", () => {
+  for (const key of [RSA_KEY, OPENSSH_KEY]) {
+    for (const [form, render] of Object.entries(KEY_FORMS)) {
+      it(`redacts a ${key.label} shown ${form} from BEGIN to END, with nothing of the body left`, () => {
+        const text = `before\n${render(key)}after\n`;
+        const out = redact(text);
+        expect(out).toContain(REDACTED);
+        expect(leakedKeyBody(out, key)).toBeNull();
+        expect(out).not.toContain("-----BEGIN");
+        expect(out).not.toContain("-----END");
+        expect(out.startsWith("before\n")).toBe(true);
+        expect(out.endsWith("after\n")).toBe(true);
+      });
+    }
+  }
+
+  it("redacts a key whose body lines are interleaved with prose, through its END line", () => {
+    const lines = keyLines(RSA_KEY);
+    lines.splice(4, 0, "An ordinary sentence placed inside the key on purpose.");
+    const out = redact(`${lines.join("\n")}\n`);
+    expect(out).toBe(`${REDACTED}\n`);
+  });
+
+  it("stays well under 10 ms on 16 KiB of adversarial key markers", () => {
+    const size = 16 * 1024;
+    const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const inputs = [
+      `-----BEGIN PRIVATE KEY-----\n${fill("A ")}`, // an open block that never ends
+      `-----BEGIN PRIVATE KEY-----\n${fill("-----END PRIVATE KE\n")}`, // near-miss END markers
+      `-----BEGIN PRIVATE KEY-----\n-----END ${fill("A")}`, // one END with a label that never completes
+      `-----BEGIN PRIVATE KEY-----\n${fill(`-----END ${"A".repeat(100)}\n`)}`, // many such labels
+      `-----BEGIN ${fill("A ")}`, // a BEGIN whose label never completes
+      fill("-----BEGIN PRIVATE KEY-----\n"), // nothing but BEGIN lines
+      fill("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n"), // many closed blocks
+      fill("-----END PRIVATE KEY-----\n"), // nothing but END lines
+      fill(`${RSA_KEY.body.slice(0, 64)}\n`), // a body with no markers at all
+    ];
+    for (const input of inputs) {
+      expect(input.length).toBeGreaterThanOrEqual(size);
+      redact(input); // warm up
+      let best = Infinity;
+      for (let n = 0; n < 3; n++) {
+        const t = performance.now();
+        redact(input);
+        best = Math.min(best, performance.now() - t);
+      }
+      expect(best).toBeLessThan(10);
+    }
   });
 });

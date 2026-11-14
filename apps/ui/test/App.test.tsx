@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { CONNECTION_CATALOG } from "@theterminal/shared";
 import type { Board, LedgerEntry } from "@theterminal/shared";
 
 const h = vi.hoisted(() => {
@@ -15,6 +16,7 @@ const h = vi.hoisted(() => {
 vi.mock("../src/api", () => ({
   api: {
     health: vi.fn(),
+    getStatus: vi.fn(),
     listProjects: vi.fn(),
     getBoard: vi.fn(),
     listLedger: vi.fn(),
@@ -30,6 +32,12 @@ vi.mock("../src/api", () => ({
     startRun: vi.fn(),
     stopRun: vi.fn(),
     setProviderAuth: vi.fn(),
+    listConnections: vi.fn(),
+    getConnectionCatalog: vi.fn(),
+    addConnection: vi.fn(),
+    updateConnection: vi.fn(),
+    removeConnection: vi.fn(),
+    testConnection: vi.fn(),
   },
   errorMessage: () => "err",
   subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
@@ -41,6 +49,8 @@ vi.mock("../src/api", () => ({
     return () => h.subs.delete(sub);
   },
 }));
+
+vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { api } from "../src/api";
 import type { AgentsInfo } from "../src/api";
@@ -54,9 +64,9 @@ const m = vi.mocked(api);
 const AGENTS: AgentsInfo = {
   adapters: ["claude", "fake"],
   providers: {
-    claude: { mode: "api_key", installed: true },
-    codex: { mode: "api_key", installed: false },
-    gemini: { mode: "api_key", installed: false },
+    claude: { mode: "api_key", available: true },
+    codex: { mode: "api_key", available: false },
+    gemini: { mode: "api_key", available: false },
   },
   acks: { claude: "claude ack", codex: "codex ack", gemini: "gemini ack" },
 };
@@ -65,6 +75,10 @@ beforeEach(() => {
   vi.resetAllMocks();
   h.onEntry = undefined;
   h.subs.clear();
+  m.getStatus.mockResolvedValue({
+    runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0,
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
+  });
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
   m.listProjects.mockResolvedValue([mk("A").project, mk("B").project]);
   m.listLedger.mockResolvedValue([]);
@@ -72,6 +86,39 @@ beforeEach(() => {
   m.listRuns.mockResolvedValue([]);
   m.listPendingActions.mockResolvedValue([]);
   m.listAllPendingActions.mockResolvedValue([]);
+  m.listConnections.mockResolvedValue([]);
+  m.getConnectionCatalog.mockResolvedValue([...CONNECTION_CATALOG]);
+});
+
+describe("App status polling", () => {
+  it("refetches status every 30 s and on a ledger entry, and stops after unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = render(<App />);
+      const flush = () => act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await flush();
+      expect(m.getStatus).toHaveBeenCalledTimes(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(m.getStatus).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        h.onEntry!({
+          seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: "A",
+          actor: { kind: "human", id: "owner" }, type: "card.moved",
+          payload: { from: "plan", to: "build" }, prevHash: "", hash: "",
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(m.getStatus).toHaveBeenCalledTimes(3);
+
+      unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+      expect(m.getStatus).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("App board refresh", () => {
@@ -183,8 +230,14 @@ describe("App needs-you strip", () => {
 });
 
 describe("App provider settings", () => {
-  it("shows the provider sign-in settings with no project selected", async () => {
+  const openCodex = async () => {
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+    await userEvent.click(screen.getByRole("button", { name: "Codex (OpenAI)" }));
+  };
+
+  it("shows the provider sign-in settings in a connection's editor tab with no project selected", async () => {
     render(<App />);
+    await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
     expect(screen.getByText("Select or create a project.")).toBeTruthy();
   });
@@ -192,6 +245,7 @@ describe("App provider settings", () => {
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
     m.setProviderAuth.mockRejectedValue(new Error("nope"));
     render(<App />);
+    await openCodex();
     const codex = within(await screen.findByRole("group", { name: "Codex sign-in" }));
     await userEvent.click(codex.getByLabelText("My own ChatGPT plan"));
     await userEvent.click(codex.getByLabelText("I understand and accept this risk"));
@@ -201,5 +255,78 @@ describe("App provider settings", () => {
     await waitFor(() =>
       expect((codex.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(true),
     );
+  });
+});
+
+describe("App connections", () => {
+  it("rereads the connections when a connection entry arrives on the ledger", async () => {
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await waitFor(() => expect(m.listConnections).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      h.onEntry!({
+        seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "human", id: "owner" },
+        type: "connection.tested", payload: { connectionId: "c1", name: "Claude", ok: true, message: "ok" }, prevHash: "", hash: "",
+      } as unknown as LedgerEntry);
+    });
+    expect(m.listConnections).toHaveBeenCalledTimes(2);
+  });
+
+  it("a stale list response that resolves after a new connection is saved leaves its tab open", async () => {
+    const saved = {
+      id: "c1", kind: "llm", provider: "claude", name: "Claude", enabled: true, config: {}, private: {}, secretFields: ["apiKey"],
+      status: { state: "untested", message: "", testedAt: null }, createdAt: "", updatedAt: "",
+    } as const;
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Connections" }));
+    const row = screen.getByRole("button", { name: "Claude (Anthropic)" }) as HTMLButtonElement;
+    await waitFor(() => expect(row.disabled).toBe(false));
+    await userEvent.click(row);
+
+    // A refresh is issued (a ledger entry) and answers only after the save.
+    let answerStale!: (l: never[]) => void;
+    m.listConnections.mockImplementationOnce(() => new Promise((r) => (answerStale = r)));
+    await act(async () => {
+      h.onEntry!({
+        seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "system", id: "runner" },
+        type: "connection.used", payload: {}, prevHash: "", hash: "",
+      } as unknown as LedgerEntry);
+    });
+    m.addConnection.mockResolvedValue({ ...saved, secretFields: [...saved.secretFields] });
+    await userEvent.type(screen.getByLabelText("API key"), "sk-ant-TESTKEY-0000000000");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.querySelector('[data-panel="connection:c1"]')).toBeTruthy());
+
+    await act(async () => answerStale([]));
+    const tab = document.querySelector('[data-panel="connection:c1"]') as HTMLElement;
+    expect(tab).toBeTruthy();
+    expect((within(tab).getByLabelText("API key") as HTMLInputElement).placeholder).toBe("Stored in your keychain");
+  });
+});
+
+describe("App ledger scope", () => {
+  const entry = (seq: number, projectId: string, name: string): LedgerEntry => ({
+    seq, id: `e${seq}`, ts: "2026-01-01T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type: "project.created", payload: { name }, prevHash: "", hash: "",
+  });
+
+  it("shows every project's entries when All projects is chosen, and the project's again after", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listLedger.mockImplementation((projectId) =>
+      Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
+    );
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    expect(m.listLedger).toHaveBeenCalledWith(null);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(2));
+
+    await userEvent.click(screen.getByRole("radio", { name: "This project" }));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
   });
 });

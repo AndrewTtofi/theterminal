@@ -6,7 +6,9 @@ import { join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 import WebSocket from "ws";
-import { createServer, type RunningServer } from "../../src/server/server.js";
+import { createServer, selectFetch, selectSecretStore, type RunningServer } from "../../src/server/server.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { ChunkedSecretStore } from "../../src/secrets/store.js";
 
 const running: RunningServer[] = [];
 afterEach(async () => {
@@ -302,5 +304,35 @@ describe("createServer", () => {
       const s = await start({ dataDir: tmp(), port: 0 });
       expect((await fetch(base(s) + "/")).status).toBe(401);
     });
+  });
+});
+
+describe("test doubles for connections", () => {
+  const FAKE = { THETERMINAL_FAKE_AGENT: "1" };
+
+  it("uses the memory secret store only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_SECRET_STORE=memory", () => {
+    expect(selectSecretStore({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    expect(selectSecretStore({ THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(selectSecretStore({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(selectSecretStore(FAKE)).toBeInstanceOf(ChunkedSecretStore);
+    const injected = new MemorySecretStore();
+    expect(selectSecretStore({}, injected)).toBe(injected);
+  });
+
+  it("uses the fake HTTP stub only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", async () => {
+    expect(selectFetch({ THETERMINAL_FAKE_HTTP: "1" })).toBe(globalThis.fetch);
+    expect(selectFetch(FAKE)).toBe(globalThis.fetch);
+    const injected = (async () => new Response()) as unknown as typeof fetch;
+    expect(selectFetch({ ...FAKE, THETERMINAL_FAKE_HTTP: "1" }, injected)).toBe(injected);
+
+    const stub = selectFetch({ ...FAKE, THETERMINAL_FAKE_HTTP: "1" });
+    expect(stub).not.toBe(globalThis.fetch);
+    const ok = await stub("https://example.invalid/v1/models", { headers: { "x-api-key": "sk-ant-TESTKEY-0000000000" } });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({});
+    const bearer = await stub("https://example.invalid/user", { headers: new Headers({ Authorization: "Bearer ghp_TESTKEY0000" }) });
+    expect(bearer.status).toBe(200);
+    expect((await stub("https://example.invalid/v1/models", { headers: { "x-api-key": "sk-ant-other" } })).status).toBe(401);
+    expect((await stub("https://example.invalid/v1/models")).status).toBe(401);
   });
 });

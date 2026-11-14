@@ -4,11 +4,27 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
+import { spawn as nodeSpawn } from "node:child_process";
+import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
+import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
+import { AgentRunner } from "../../src/agents/runner.js";
+import { BoardService } from "../../src/board/board-service.js";
+import { openDatabase } from "../../src/db.js";
+import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
+import { Ledger } from "../../src/ledger/ledger.js";
+import { redact } from "../../src/agents/redact.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { CodexAdapter as IndexCodexAdapter, codexApprovalToAction as indexCodexApprovalToAction } from "../../src/index.js";
 
+// A stored secret no pattern matches, and the clean() a runner would pass with it in its live secrets.
+const STORED = "stored-conn-value-0123456789";
+const liveClean = (t: string) => redact(t, [STORED]);
+/** Fails when any 6-character stretch of `secret` is in `text`. */
+function expectNoFragment(text: string, secret: string): void {
+  for (let i = 0; i + 6 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 6));
+}
 const FAKE = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_KEY = "sk-TESTKEY0123456789abcdef";
 const CMD = "item/commandExecution/requestApproval";
@@ -17,63 +33,75 @@ const CWD = join("tmp", "worktree");
 
 describe("codexApprovalToAction", () => {
   it("maps a command approval to a shell action", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "ls -la", cwd: "/w/sub" }, "/w");
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "ls -la", cwd: "/w/sub" }, "/w", redact);
     expect(a).toEqual({
       tool: "codex.command", kind: "shell", summary: "Run: ls -la", input: { command: "ls -la", cwd: "/w/sub" }, paths: ["/w/sub"],
     });
   });
 
-  it("caps the command in the summary at 150 characters and has no paths without a cwd", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "x".repeat(400) }, CWD);
-    expect(a.summary).toBe(`Run: ${"x".repeat(150)}`);
+  it("passes the whole command in the summary (the runner caps after redacting) and has no paths without a cwd", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "x".repeat(400) }, CWD, redact);
+    expect(a.summary).toBe(`Run: ${"x".repeat(400)}`);
     expect(a.input).toEqual({ command: "x".repeat(400) });
     expect(a.paths).toEqual([]);
   });
 
   it("maps a file change to file_write or file_edit by change kind, with every changed path", () => {
-    const add = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.txt", kind: { type: "add" }, diff: "+hi" }]);
+    const add = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.txt", kind: { type: "add" }, diff: "+hi" }]);
     expect(add).toMatchObject({ tool: "codex.fileChange", kind: "file_write", summary: "Create a.txt", paths: ["a.txt"] });
     expect(add.input).toEqual({ changes: [{ path: "a.txt", kind: "add", diff: "+hi" }] });
 
-    const edit = codexApprovalToAction(FILE, { itemId: "f2" }, CWD, [
+    const edit = codexApprovalToAction(FILE, { itemId: "f2" }, CWD, redact, [
       { path: "a.ts", kind: { type: "update", move_path: null }, diff: "" },
       { path: "b.ts", kind: { type: "update", move_path: null }, diff: "" },
       { path: "c.ts", kind: { type: "update", move_path: null }, diff: "" },
     ]);
     expect(edit).toMatchObject({ kind: "file_edit", summary: "Edit a.ts (+2 more)", paths: ["a.ts", "b.ts", "c.ts"] });
 
-    const del = codexApprovalToAction(FILE, { itemId: "f3" }, CWD, [{ path: "old.txt", kind: { type: "delete" }, diff: "" }]);
+    const del = codexApprovalToAction(FILE, { itemId: "f3" }, CWD, redact, [{ path: "old.txt", kind: { type: "delete" }, diff: "" }]);
     expect(del).toMatchObject({ kind: "file_write", summary: "Delete old.txt", paths: ["old.txt"] });
   });
 
   it("treats a move as a write to both paths", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "update", move_path: "../b.ts" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.ts", kind: { type: "update", move_path: "../b.ts" }, diff: "" }]);
     expect(a).toMatchObject({ kind: "file_write", paths: ["a.ts", "../b.ts"] });
   });
 
-  it("caps each diff preview at 4000 characters", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff: "d".repeat(9000) }]);
+  it("caps each diff preview at 4000 characters, cleaned before the cut", () => {
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.ts", kind: { type: "add" }, diff: "d".repeat(9000) }]);
     expect((a.input as { changes: { diff: string }[] }).changes[0]!.diff).toHaveLength(4000);
+    const diff = `${"d".repeat(3990)}${STORED}${"d".repeat(100)}`;
+    const b = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, liveClean, [{ path: "a.ts", kind: { type: "add" }, diff }]);
+    const shown = (b.input as { changes: { diff: string }[] }).changes[0]!.diff;
+    expect(shown).toBe(`${"d".repeat(3990)}[REDACTED]`);
+  });
+
+  it("cleans a stdin approval's command and input with the run's live secrets before capping them", () => {
+    const a = codexApprovalToAction(
+      CMD, { itemId: "s1", kind: "writeStdin", command: `${"c".repeat(55)}${STORED}`, reason: `${"b".repeat(75)}${STORED}` }, CWD, liveClean,
+    );
+    expect(a.summary).toBe(`Type into ${"c".repeat(55)}[REDA: ${"b".repeat(75)}[REDA`);
+    expect(a.summary).not.toContain(STORED.slice(0, 3));
   });
 
   it("adds a requested grant root to the paths so policy judges it", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1", grantRoot: "/elsewhere" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1", grantRoot: "/elsewhere" }, CWD, redact, [{ path: "a.ts", kind: { type: "add" }, diff: "" }]);
     expect(a.paths).toEqual(["a.ts", "/elsewhere"]);
   });
 
   it("asks a human when the changed files are unknown", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact);
     expect(a).toMatchObject({ kind: "file_write", summary: "Edit (unknown files)", paths: [] });
   });
 
   it("summarises absolute paths inside the worktree relative to it", () => {
     const root = join(process.cwd(), CWD);
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, root, [{ path: join(root, "src", "a.ts"), kind: { type: "add" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, root, redact, [{ path: join(root, "src", "a.ts"), kind: { type: "add" }, diff: "" }]);
     expect(a.summary).toBe("Create src/a.ts");
   });
 
   it("maps a network approval to a web action, never to the command it belongs to", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: null, cwd: null, networkApprovalContext: { host: "example.com", protocol: "https" } }, CWD);
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: null, cwd: null, networkApprovalContext: { host: "example.com", protocol: "https" } }, CWD, redact);
     expect(a).toEqual({
       tool: "codex.network", kind: "web", summary: "Network access to example.com (https)",
       input: { host: "example.com", protocol: "https" }, paths: [],
@@ -81,24 +109,37 @@ describe("codexApprovalToAction", () => {
   });
 
   it("records the request's reason for a plain command", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "command", command: "ls", reason: "list the files" }, CWD);
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "command", command: "ls", reason: "list the files" }, CWD, redact);
     expect(a.input).toEqual({ command: "ls", reason: "list the files" });
   });
 
   it("maps a stdin approval to sending input to the running command, never to running it", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w");
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w", redact);
     expect(a).toEqual({
-      tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+      tool: "codex.stdin", kind: "shell", summary: "Type into python3 repl.py: y\\n",
       input: { command: "python3 repl.py", cwd: "/w", kind: "writeStdin", reason: "y\n" }, paths: ["/w"],
     });
-    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q" }, CWD);
-    expect(long.summary).toBe(`Send input to running command: ${"x".repeat(150)}`);
+    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q".repeat(400) }, CWD, redact);
+    expect(long.summary).toBe(`Type into ${"x".repeat(60)}: ${"q".repeat(80)}`);
+  });
+
+  it("shows the typed input of a stdin approval with control characters made visible", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", cwd: "/w", reason: "rm -rf /\n" }, "/w", redact);
+    expect(a.summary).toBe("Type into bash: rm -rf /\\n");
+    const ctl = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: "\u0003\t\r" }, CWD, redact);
+    expect(ctl.summary).toBe("Type into bash: \\u0003\\t\\r");
+    // Redacted before it is cut: a token that straddles the cut leaves no fragment behind.
+    const key = "sk-ant-TESTKEY-0000000000";
+    const cut = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: `${"a".repeat(70)}${key}` }, CWD, redact);
+    expect(cut.summary).toBe(`Type into bash: ${"a".repeat(70)}[REDACTED]`);
+    const none = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", reason: "q" }, CWD, redact);
+    expect(none.summary).toBe("Type into (no command): q");
   });
 
   it.each([["a string", "registry.example.com"], ["an array", ["x"]], ["a number", 1]])(
     "treats a malformed network context (%s) as a network request",
     (_label, ctx) => {
-      const a = codexApprovalToAction(CMD, { itemId: "i1", command: "npm install", networkApprovalContext: ctx }, CWD);
+      const a = codexApprovalToAction(CMD, { itemId: "i1", command: "npm install", networkApprovalContext: ctx }, CWD, redact);
       expect(a).toEqual({
         tool: "codex.network", kind: "web", summary: "Network access to (unknown host) (unknown)", input: { host: "", protocol: "" }, paths: [],
       });
@@ -106,7 +147,7 @@ describe("codexApprovalToAction", () => {
   );
 
   it("maps any other request to an other action", () => {
-    expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD)).toEqual({
+    expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD, redact)).toEqual({
       tool: "codex.item/tool/call", kind: "other", summary: "Unsupported Codex request: item/tool/call",
       input: { method: "item/tool/call", params: { a: 1 } }, paths: [],
     });
@@ -127,19 +168,25 @@ describe("CodexAdapter (fake app-server)", () => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "codex-adapter-")));
     logFile = join(dir, "fake.log");
     vi.stubEnv("THETERMINAL_FAKE_LOG", logFile);
+    vi.stubEnv("THETERMINAL_FAKE_AGENT", "1"); // lets the fixture CLI receive its THETERMINAL_FAKE_* script variables
   });
   afterEach(() => {
     vi.unstubAllEnvs();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const script = (s: unknown) => vi.stubEnv("THETERMINAL_FAKE_CODEX_SCRIPT", JSON.stringify(s));
+  /** For tests that build the adapter before script(): filled in by script(), still a fixed object per adapter. */
+  const lateFake: NodeJS.ProcessEnv = {};
+  const script = (s: unknown) => {
+    vi.stubEnv("THETERMINAL_FAKE_CODEX_SCRIPT", JSON.stringify(s));
+    Object.assign(lateFake, fakeAgentEnv());
+  };
   const fakeLog = (): LogEntry[] =>
     existsSync(logFile) ? readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
   const received = (method: string) => fakeLog().filter((e) => e.received === method);
   const answers = (method: string) => fakeLog().filter((e) => e.answered === method);
   const make = (opts: Partial<ConstructorParameters<typeof CodexAdapter>[0]> = {}) =>
-    new CodexAdapter({ dataDir: dir, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, ...opts });
+    new CodexAdapter({ dataDir: dir, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: fakeAgentEnv(), ...opts });
 
   function run(
     adapter: CodexAdapter,
@@ -149,6 +196,7 @@ describe("CodexAdapter (fake app-server)", () => {
     const proposed: ProposedAction[] = [];
     const denied: [ProposedAction, string][] = [];
     const events: AdapterEvent[] = [];
+    const usage: AdapterEvent[] = []; // kept apart: the fake reports token totals at the end of every turn
     let n = 0;
     const result = adapter.start({
       cwd: dir,
@@ -161,13 +209,15 @@ describe("CodexAdapter (fake app-server)", () => {
         const id = `act-${++n}`;
         return { ...(await decide(a)), actionId: id };
       },
-      emit: (e) => events.push(e),
+      emit: (e) => (e.type === "usage" ? usage : events).push(e),
       recordDenied: async (a, reason) => {
         denied.push([a, reason]);
       },
+      clean: (t) => t,
+      credentials: {},
       ...o,
     });
-    return { result, proposed, denied, events };
+    return { result, proposed, denied, events, usage };
   }
 
   it("runs a command the gate allows (announced before its approval), answers accept and reports its result", async () => {
@@ -204,11 +254,11 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: "boom" }]);
   });
 
-  it("caps a result's output at 4000 characters", async () => {
+  it("passes a result's whole output on (the runner caps it after redacting)", async () => {
     script([{ approve: "command", command: "yes", itemId: "i1", output: "y".repeat(10_000) }]);
     const { result, events } = run(make());
     await result;
-    expect((events[0] as { output: string }).output).toHaveLength(4000);
+    expect((events[0] as { output: string }).output).toHaveLength(10_000);
   });
 
   it("answers decline for a denied command and reports no result", async () => {
@@ -300,7 +350,7 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(proposed).toEqual([
       { tool: "codex.command", kind: "shell", summary: "Run: python3 repl.py", input: { command: "python3 repl.py", cwd: dir }, paths: [dir] },
       {
-        tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+        tool: "codex.stdin", kind: "shell", summary: "Type into python3 repl.py: y\\n",
         input: { command: "python3 repl.py", cwd: dir, kind: "writeStdin", reason: "y\n" }, paths: [dir],
       },
     ]);
@@ -310,8 +360,9 @@ describe("CodexAdapter (fake app-server)", () => {
 
   it("declines denied input to a running command without failing the run", async () => {
     script([{ approve: "command", command: "python3 repl.py", itemId: "i1", output: "done", stdin: "rm -rf /\n" }]);
-    const { result, events } = run(make(), (a) => ({ decision: a.tool === "codex.stdin" ? "deny" : "allow", reason: "r" }));
+    const { result, proposed, events } = run(make(), (a) => ({ decision: a.tool === "codex.stdin" ? "deny" : "allow", reason: "r" }));
     expect(await result).toEqual({ status: "completed" });
+    expect(proposed[1]).toMatchObject({ tool: "codex.stdin", summary: "Type into python3 repl.py: rm -rf /\\n" });
     expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
     expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "done" }]);
   });
@@ -387,11 +438,107 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(r.error!.length).toBeLessThanOrEqual(300);
   });
 
-  it("emits no usage when only token counts are reported", async () => {
+  it("cleans stderr before its window is cut, so a stored key straddling the window leaves no fragment in the error", async () => {
+    // The key straddles the 4096 characters the adapter keeps. What follows it cleans down to a few characters, so the
+    // short tail the error shows would otherwise start with the key's second half.
+    const after = `\nAuthorization: Bearer ${"t".repeat(4058)}`;
+    script([{ exit: 3, stderr: `${"x".repeat(4086)}${STORED}${after}` }]);
+    const { result } = run(make(), undefined, { clean: liveClean });
+    const r = await result;
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/^Codex exited before the turn completed: .*Bearer \[REDACTED\]$/s);
+    expectNoFragment(r.error!, STORED);
+  });
+
+  // A stored key, and keys only a built-in pattern finds (a fragment of which, cleaned on its own, matches too).
+  const SPLIT_SECRETS = [STORED, "sk-ant-api03-TESTKEYabcdefghijklmnop", "ghp_TESTKEY0123456789abcdefghij"];
+  const splitStderr = (secret: string, at: number) => [`warn: retry\nerror: token ${secret.slice(0, at)}`, `${secret.slice(at)} rejected\n`];
+
+  it("holds an unfinished stderr line raw until it ends, so a key split across two chunks at any position leaves no fragment", async () => {
+    const cases = SPLIT_SECRETS.flatMap((secret) => Array.from({ length: secret.length - 1 }, (_, i) => [secret, i + 1] as const));
+    for (let i = 0; i < cases.length; i += 12) {
+      await Promise.all(
+        cases.slice(i, i + 12).map(async ([secret, at]) => {
+          // Each run reads its own script: the adapter's fake env is fixed when it is made.
+          const env = { ...fakeAgentEnv(), THETERMINAL_FAKE_CODEX_SCRIPT: JSON.stringify([{ exit: 3, stderr: splitStderr(secret, at) }]) };
+          const { result } = run(make({ fakeEnv: env }), undefined, { clean: liveClean });
+          const r = await result;
+          expect(r.status).toBe("failed");
+          expect(r.error, `${secret.slice(0, 4)} split at ${at}`).toMatch(/error: token \[REDACTED\] rejected$/);
+          expectNoFragment(r.error!, secret);
+        }),
+      );
+    }
+  }, 60_000);
+
+  it("through the runner: a key split across two stderr chunks leaves no fragment in agent.finished or anywhere in the ledger", async () => {
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Codex" }).id;
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make({ fakeEnv: lateFake }) },
+      extraSecrets: () => [STORED], dataDir: dir,
+    });
+    try {
+      for (const secret of SPLIT_SECRETS) {
+        for (const at of [1, 6, Math.floor(secret.length / 2), secret.length - 1]) {
+          script([{ exit: 3, stderr: splitStderr(secret, at) }]);
+          const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "go" });
+          await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 10_000, interval: 50 });
+          const finished = ledger.list().filter((e) => e.type === "agent.finished").at(-1)!;
+          expect(JSON.stringify(finished.payload)).toContain("error: token [REDACTED] rejected");
+          const all = JSON.stringify(ledger.list());
+          for (let i = 0; i + 6 <= secret.length; i++) expect(all).not.toContain(secret.slice(i, i + 6));
+        }
+      }
+    } finally {
+      await runner.shutdown();
+    }
+  }, 60_000);
+
+  it("through the runner: a stored secret across the old command and stdin caps leaves no fragment in the record", async () => {
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Codex" }).id;
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make({ fakeEnv: lateFake }) },
+      extraSecrets: () => [STORED], dataDir: dir,
+    });
+    script([
+      // Cut at 150 before: "echo " + 136 + " " leaves 8 characters of the secret. Denied by policy (it holds a secret).
+      { approve: "command", command: `echo ${"a".repeat(136)} ${STORED}`, itemId: "i1" },
+      // Cut at 80 before: 72 typed characters leave 8 of the secret. The command itself is clean, so a human allows it.
+      { approve: "command", command: "cat", itemId: "i2", stdin: `${"b".repeat(72)}${STORED}` },
+    ]);
+    try {
+      const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "go" });
+      await vi.waitFor(
+        () => {
+          for (const a of listPendingActions(db, projectId)) runner.decide(owner, a.id, "allow", "fine");
+          expect(getRun(db, run.id)!.status).not.toBe("running");
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      const summaries = listActions(db, run.id).map((a) => a.summary);
+      expect(summaries).toEqual([
+        `Run: echo ${"a".repeat(136)} [REDACTED]`,
+        "Run: cat",
+        `Type into cat: ${"b".repeat(72)}[REDACTE`,
+      ]);
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
+    } finally {
+      await runner.shutdown();
+    }
+  });
+
+  it("emits the thread's token totals once, at turn completion", async () => {
     script([{ message: "hi" }]);
-    const { result, events } = run(make());
+    const { result, events, usage } = run(make());
     await result;
-    expect(events.some((e) => e.type === "usage")).toBe(false);
+    expect(usage).toEqual([{ type: "usage", inputTokens: 6, outputTokens: 4 }]);
+    expect(events).toEqual([{ type: "message", text: "hi" }]);
   });
 
   it.each([
@@ -437,19 +584,45 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(fakeLog()).toEqual([]);
   });
 
+  it("the child env is exactly the allowlist plus what we set; the fake flag is read at construction", async () => {
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "aws-TESTSECRET");
+    vi.stubEnv("NPM_TOKEN", "npm-TESTTOKEN");
+    vi.stubEnv("NODE_OPTIONS", "--no-warnings");
+    vi.stubEnv("GITHUB_TOKEN", "gh-TESTTOKEN");
+    script([]);
+    const adapter = make({
+      spawn: ((f: string, a: string[], o: { env: NodeJS.ProcessEnv }) => {
+        seen.push(o.env);
+        return nodeSpawn(f, a, o as never);
+      }) as typeof nodeSpawn,
+    });
+    vi.stubEnv("THETERMINAL_FAKE_AGENT", ""); // unset after construction: the snapshot still carries the script
+    const seen: NodeJS.ProcessEnv[] = [];
+    const { result } = run(adapter, undefined, { authMode: "chatgpt" });
+    expect(await result).toEqual({ status: "completed" });
+    const keys = Object.keys(seen[0]!);
+    for (const k of ["AWS_SECRET_ACCESS_KEY", "NPM_TOKEN", "NODE_OPTIONS", "GITHUB_TOKEN", "THETERMINAL_FAKE_AGENT"]) expect(keys).not.toContain(k);
+    const allowed = new Set([
+...CHILD_ENV_ALLOWLIST, ...(process.platform === "win32" ? WIN32_ALLOWLIST : []), "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_FAKE_LOG"]);
+    const fold = (k: string) => (process.platform === "win32" ? k.toUpperCase() : k);
+    const allowedFolded = new Set([...allowed].map(fold));
+    expect(keys.filter((k) => !allowedFolded.has(fold(k)) && !fold(k).startsWith("LC_"))).toEqual([]);
+    expect(keys).toContain("THETERMINAL_FAKE_CODEX_SCRIPT");
+  });
+
   describe("auth modes", () => {
     beforeEach(() => {
       vi.stubEnv("OPENAI_API_KEY", "sk-INHERITED-TESTKEY");
       vi.stubEnv("CODEX_API_KEY", "sk-INHERITED-TESTKEY");
     });
 
-    it("chatgpt mode passes no API key, keeps the user's CODEX_HOME and relies on their own login", async () => {
+    it("chatgpt mode passes no API key and no CODEX_HOME (the CLI's default home holds the login)", async () => {
       vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
       script([]);
       const { result } = run(make(), undefined, { authMode: "chatgpt" });
       expect(await result).toEqual({ status: "completed" });
       const start = fakeLog().find((e) => e.start);
-      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: join(dir, "users-codex-home") });
+      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: null });
       expect(start.argv).not.toContain("cli_auth_credentials_store=ephemeral");
       expect(received("account/login/start")).toEqual([]);
     });
@@ -525,6 +698,25 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
     });
 
+    it("api_key mode prefers the key the runner resolved from a connection over its own fallback", async () => {
+      script([]);
+      const connectionKey = "sk-TESTKEY-connection-0000000000";
+      const fallback = vi.fn(() => FAKE_KEY);
+      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey } });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).env).toMatchObject({ OPENAI_API_KEY: connectionKey, CODEX_API_KEY: connectionKey });
+      expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: connectionKey });
+      expect(fallback).not.toHaveBeenCalled();
+    });
+
+    it("chatgpt mode points CODEX_HOME at the connection's CLI home folder", async () => {
+      const cliHome = join(dir, "connection-codex-home");
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome } });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: cliHome });
+    });
+
     it("api_key mode keeps a separate Codex home per project", async () => {
       script([]);
       await run(make(), undefined, { authMode: "api_key", projectId: "p2" }).result;
@@ -562,14 +754,84 @@ describe("CodexAdapter (fake app-server)", () => {
   });
 
   describe("locating the CLI", () => {
-    it("fails when codex is not on PATH", async () => {
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => null }));
-      expect(await result).toEqual({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+    const NO_CLI = "Codex CLI is unavailable: its bundled program is missing and none is on PATH";
+    const noBundled = () => null;
+    /** Runs the fake server whatever program the adapter chose, recording what it asked for. */
+    const recordingSpawn = async () => {
+      const real = (await import("node:child_process")).spawn;
+      return vi.fn((_file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args.slice(args.indexOf("app-server"))], opts));
+    };
+
+    it("runs the bundled Codex by default and never looks on PATH", async () => {
+      script([]);
+      const spawn = await recordingSpawn();
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const native = { file: join(dir, "node_modules", "@openai", "codex-x", "vendor", "bin", "codex"), args: [] };
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => native, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(native.file, ["app-server"], expect.objectContaining({ shell: false }));
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["win32", "x64"],
+      ["linux", "x64"],
+    ] as const)("on %s-%s with @openai/codex but no native package, falls back to PATH, never the JS launcher", async (platform, arch) => {
+      script([]);
+      const { bundledCodex } = await import("../../src/agents/bundled.js");
+      const coreDir = join(dir, "core");
+      const pkg = join(coreDir, "node_modules", "@openai", "codex");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@openai/codex", bin: { codex: "bin/codex.js" } }));
+      writeFileSync(join(pkg, "bin", "codex.js"), "");
+      const spawn = await recordingSpawn();
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => bundledCodex({ coreDir, platform, arch }), bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(bin).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
+    });
+
+    it("uses the package's own bundled Codex when none is injected", async () => {
+      script([]);
+      const { bundledCodex } = await import("../../src/agents/bundled.js");
+      const expected = bundledCodex()!;
+      const spawn = await recordingSpawn();
+      const bin = vi.fn(() => null);
+      const { result } = run(new CodexAdapter({ dataDir: dir, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, "app-server"], expect.anything());
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("consults PATH only when the bundled lookup returns null", async () => {
+      script([]);
+      const spawn = await recordingSpawn();
+      const bundled = vi.fn(() => null);
+      const bin = vi.fn(() => "/opt/codex/bin/codex");
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled, bin, spawn: spawn as never }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(bundled).toHaveBeenCalledOnce();
+      expect(bin).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
+    });
+
+    it("a test command wins over the bundled program", async () => {
+      script([]);
+      const bundled = vi.fn(() => null);
+      const { result } = run(make({ bundled }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(bundled).not.toHaveBeenCalled();
+    });
+
+    it("fails when there is no bundled Codex and none on PATH", async () => {
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => null }));
+      expect(await result).toEqual({ status: "failed", error: NO_CLI });
     });
 
     it("fails when the binary cannot be started", async () => {
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => join(dir, "missing", "codex") }));
-      expect(await result).toEqual({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => join(dir, "missing", "codex") }));
+      expect(await result).toEqual({ status: "failed", error: NO_CLI });
     });
 
     it("runs the script behind an npm .cmd shim with node instead of a shell", async () => {
@@ -579,14 +841,14 @@ describe("CodexAdapter (fake app-server)", () => {
       const real = (await import("node:child_process")).spawn;
       const spawn = vi.fn((_file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args.slice(1)], opts));
       const exists = vi.fn((p: string) => p === target);
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => shim, spawn: spawn as never, exists }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => shim, spawn: spawn as never, exists }));
       expect(await result).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(process.execPath, [target, "app-server"], expect.objectContaining({ shell: false }));
     });
 
     it("refuses a .cmd shim with no npm package script behind it", async () => {
       const spawn = vi.fn();
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => join(dir, "codex.cmd"), spawn: spawn as never, exists: () => false }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => join(dir, "codex.cmd"), spawn: spawn as never, exists: () => false }));
       expect(await result).toEqual({ status: "failed", error: "Codex CLI must be a native executable on Windows (found a .cmd shim)" });
       expect(spawn).not.toHaveBeenCalled();
     });
@@ -595,7 +857,7 @@ describe("CodexAdapter (fake app-server)", () => {
       script([]);
       const real = (await import("node:child_process")).spawn;
       const spawn = vi.fn((file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args], opts));
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => "/opt/codex/bin/codex", spawn: spawn as never }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => "/opt/codex/bin/codex", spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(
         "/opt/codex/bin/codex", ["app-server"], expect.objectContaining({ cwd: dir, stdio: ["pipe", "pipe", "pipe"], shell: false }),

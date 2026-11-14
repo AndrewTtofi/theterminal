@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { GeminiAdapter } from "../../src/agents/gemini/adapter.js";
 import { classify } from "../../src/agents/policy.js";
+import { redact } from "../../src/agents/redact.js";
 import { AgentRunner } from "../../src/agents/runner.js";
 import { WorktreeManager, EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -15,10 +17,37 @@ import { openDatabase } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
+import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyBodyWindows, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
 const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
 const SECRET = "sk-ant-TESTKEY0123456789abcdef";
+/** A stored secret no pattern matches: only the run's live secrets redact it. */
+const STORED = "stored-conn-value-0123456789";
+/** Opaque values no token pattern matches: only the context before them (an auth scheme, a secret key) redacts them. */
+const OPAQUE_TOKEN = "q7Rt2Lp9Xz4Kw8Vn3Bm6Hd1Fj5Gs0Ac2Ue7Yi4Oy";
+const OPAQUE_VALUE = "zq0RS6kd83JWnB2yT5pe7MaV4cUx9hLf1Gt";
+/** Private key body lines: each holds a run of "k" that no other text in these tests does. */
+const keyBody = (lines: number) => Array.from({ length: lines }, (_, i) => `${String(i).padStart(4, "0")}${"k".repeat(60)}`);
+const KEY_BEGIN = "-----BEGIN RSA PRIVATE KEY-----";
+const KEY_END = "-----END RSA PRIVATE KEY-----";
+const KEY_FRAGMENT = "kkkkkkkk";
+
+/** `line` cut at `cut`, after padding that makes the first chunk reach the 4000-character size split. */
+function straddle(line: string, cut: number): Step[] {
+  const pad = "w ".repeat(Math.ceil((4000 - cut) / 2));
+  return [{ type: "message", text: pad + line.slice(0, cut) }, { type: "message", text: `${line.slice(cut)} end` }];
+}
+/** `text` as message steps of `size` characters. */
+const chunked = (text: string, size: number): Step[] =>
+  Array.from({ length: Math.ceil(text.length / size) }, (_, i) => ({ type: "message", text: text.slice(i * size, (i + 1) * size) }));
+const streamed = (steps: Step[]) => steps.map((s) => s.text as string).join("");
+/** Fails when any 6-character stretch of `secret` is in `text`. */
+function expectNoFragment(text: string, secret: string): void {
+  for (let i = 0; i + 6 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 6));
+}
+/** A command that prints the file named by its first argument. */
+const PRINT_FILE = 'process.stdout.write(require("fs").readFileSync(process.argv[1], "utf8"))';
 const MiB = 1024 * 1024;
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
 /** The per-run arguments: the policy directory varies, the allowlist name matches no tool. */
@@ -62,9 +91,10 @@ beforeEach(() => {
   outside = realpathSync.native(mkdtempSync(join(tmpdir(), "gemini-outside-")));
   logFile = join(outside, "fake.log");
   writeFileSync(join(worktree, "README.md"), "hello from the worktree\n");
-  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
+  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG", "THETERMINAL_FAKE_AGENT"]) saved[k] = process.env[k];
   for (const [k, v] of Object.entries(FAKE_ENV)) process.env[k] = v;
   process.env.THETERMINAL_FAKE_LOG = logFile;
+  process.env.THETERMINAL_FAKE_AGENT = "1"; // lets the fixture CLI receive its THETERMINAL_FAKE_* script variables
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -75,8 +105,11 @@ afterEach(() => {
   rmSync(outside, { recursive: true, force: true });
 });
 
+/** For tests that build the adapter before calling script(): filled in by script(), still a fixed object per adapter. */
+const lateFake: NodeJS.ProcessEnv = {};
 function script(s: Script): void {
   process.env.THETERMINAL_FAKE_GEMINI_SCRIPT = JSON.stringify(s);
+  Object.assign(lateFake, fakeAgentEnv());
 }
 function readLog(): LogEntry[] {
   if (!existsSync(logFile)) return [];
@@ -115,6 +148,8 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     recordDenied: async (a, reason) => {
       denied.push([a, reason]);
     },
+    clean: (t) => t,
+    credentials: {},
   };
   return { opts, proposed, decisions, denied, events, abort };
 }
@@ -131,7 +166,7 @@ function fakeSpawn() {
 }
 
 function adapter(extra: { spawn?: typeof nodeSpawn; apiKey?: () => string | undefined; bin?: () => string | null } = {}) {
-  return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, ...extra });
+  return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: fakeAgentEnv(), ...extra });
 }
 
 const exited = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
@@ -179,9 +214,62 @@ describe("GeminiAdapter", () => {
     const env = readLog().find((e) => e.initialize)!.initialize.env as Record<string, string>;
     expect(env.GEMINI_API_KEY).toBe(FAKE_KEY);
     for (const k of ["GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT", "GEMINI_MODEL", "VERTEXAI_LOCATION", "GIT_DIR", "GIT_AUTHOR_EMAIL"]) expect(env).not.toHaveProperty(k);
-    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toBe(join(outside, EMPTY_GITCONFIG));
     expect(process.env.GEMINI_API_KEY).toBe(FAKE_ENV.GEMINI_API_KEY); // a copy, not the real env
+  });
+
+  it("the child env is exactly the allowlist plus what we set; the fake flag is read at construction", async () => {
+    process.env.AWS_SECRET_ACCESS_KEY = "aws-TESTSECRET";
+    process.env.NPM_TOKEN = "npm-TESTTOKEN";
+    process.env.NODE_OPTIONS = "--no-warnings";
+    saved.AWS_SECRET_ACCESS_KEY = saved.NPM_TOKEN = saved.NODE_OPTIONS = undefined;
+    script([]);
+    const seen: NodeJS.ProcessEnv[] = [];
+    const a = adapter({
+      spawn: ((f: string, args: string[], o: { env: NodeJS.ProcessEnv }) => {
+        seen.push(o.env);
+        return nodeSpawn(f, args, o as never);
+      }) as typeof nodeSpawn,
+    });
+    delete process.env.THETERMINAL_FAKE_AGENT; // unset after construction: the snapshot still carries the script
+    expect(await a.start(harness().opts)).toEqual({ status: "completed" });
+    const keys = Object.keys(seen[0]!);
+    for (const k of ["AWS_SECRET_ACCESS_KEY", "NPM_TOKEN", "NODE_OPTIONS", "THETERMINAL_FAKE_AGENT", "GIT_DIR", "OPENAI_API_KEY"]) expect(keys).not.toContain(k);
+    const allowed = new Set([
+      ...CHILD_ENV_ALLOWLIST, ...(process.platform === "win32" ? WIN32_ALLOWLIST : []), "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GEMINI_API_KEY", "GEMINI_CLI_HOME",
+      "GEMINI_CLI_TRUST_WORKSPACE", "GEMINI_CLI_NO_RELAUNCH", "NO_BROWSER", "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG",
+    ]);
+    const fold = (k: string) => (process.platform === "win32" ? k.toUpperCase() : k);
+    const allowedFolded = new Set([...allowed].map(fold));
+    expect(keys.filter((k) => !allowedFolded.has(fold(k)) && !fold(k).startsWith("LC_"))).toEqual([]);
+    expect(keys).toContain("THETERMINAL_FAKE_GEMINI_SCRIPT");
+  });
+
+  it("api_key mode prefers the connection's key over its own fallback and sets the connection's Google Cloud project", async () => {
+    script([]);
+    const connectionKey = "AIzaTESTKEYconnection000000000000000000";
+    const apiKey = vi.fn(() => FAKE_KEY);
+    const h = harness();
+    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project" } });
+    expect(r).toEqual({ status: "completed" });
+    expect(apiKey).not.toHaveBeenCalled();
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env.GEMINI_API_KEY).toBe(connectionKey);
+    expect(snap.env.GOOGLE_CLOUD_PROJECT).toBe("test-project");
+    expect(snap.env.GEMINI_CLI_HOME).toBe(join(outside, "projects", "p1", "gemini-home")); // still our isolated home
+  });
+
+  it("google mode points GEMINI_CLI_HOME at the connection's CLI home folder", async () => {
+    script([]);
+    const cliHome = join(outside, "connection-gemini-home");
+    const h = harness(policyGate(), "google");
+    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project" } });
+    expect(r).toEqual({ status: "completed" });
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env.GEMINI_CLI_HOME).toBe(cliHome);
+    expect(snap.env.GOOGLE_CLOUD_PROJECT).toBe("test-project");
+    expect(snap.env).not.toHaveProperty("GEMINI_API_KEY");
   });
 
   it("google mode passes no API key, selects the Google login, and never calls authenticate", async () => {
@@ -241,11 +329,59 @@ describe("GeminiAdapter", () => {
     expect(children).toEqual([]);
   });
 
-  it("fails without starting when the Gemini CLI is not on PATH", async () => {
+  it("fails without starting when there is no bundled Gemini CLI and none on PATH", async () => {
     const { spawn, children } = fakeSpawn();
-    const r = await new GeminiAdapter({ dataDir: outside, bin: () => null, apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
-    expect(r).toEqual({ status: "failed", error: "Gemini CLI is not installed or not on PATH" });
+    const r = await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: () => null, apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini CLI is unavailable: its bundled program is missing and none is on PATH" });
     expect(children).toEqual([]);
+  });
+
+  describe("bundled program", () => {
+    /** Runs the fake whatever program the adapter chose, recording what it asked for. */
+    const recordingSpawn = () =>
+      vi.fn((_file: string, args: string[], o: object) => nodeSpawn(process.execPath, [FAKE, ...args.slice(args.indexOf("--acp"))], o as never));
+
+    it("runs the bundled Gemini CLI with this Node by default and never looks on PATH", async () => {
+      script([]);
+      const spawn = recordingSpawn();
+      const bin = vi.fn(() => "/opt/gemini/bin/gemini");
+      const entry = join(outside, "node_modules", "@google", "gemini-cli", "bundle", "gemini.js");
+      const r = await new GeminiAdapter({ dataDir: outside, bundled: () => ({ file: process.execPath, args: [entry] }), bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [entry, ...RUN_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("uses the package's own bundled Gemini CLI when none is injected", async () => {
+      script([]);
+      const { bundledGemini } = await import("../../src/agents/bundled.js");
+      const expected = bundledGemini()!;
+      const spawn = recordingSpawn();
+      const bin = vi.fn(() => null);
+      const r = await new GeminiAdapter({ dataDir: outside, bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, ...RUN_ARGS], expect.anything());
+      expect(bin).not.toHaveBeenCalled();
+    });
+
+    it("consults PATH only when the bundled lookup returns null", async () => {
+      script([]);
+      const spawn = recordingSpawn();
+      const bundled = vi.fn(() => null);
+      const bin = vi.fn(() => "/opt/gemini/bin/gemini");
+      const r = await new GeminiAdapter({ dataDir: outside, bundled, bin, apiKey: () => FAKE_KEY, spawn: spawn as never }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(bundled).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith("/opt/gemini/bin/gemini", RUN_ARGS, expect.anything());
+    });
+
+    it("a test command wins over the bundled program", async () => {
+      script([]);
+      const bundled = vi.fn(() => null);
+      const r = await new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, bundled, apiKey: () => FAKE_KEY }).start(harness().opts);
+      expect(r).toEqual({ status: "completed" });
+      expect(bundled).not.toHaveBeenCalled();
+    });
   });
 
   describe("npm .cmd shim", () => {
@@ -261,7 +397,7 @@ describe("GeminiAdapter", () => {
       script([]);
       const spawn = vi.fn((_file: string, args: string[], o: object) => nodeSpawn(process.execPath, [FAKE, ...args.slice(1)], o as never));
       const exists = vi.fn((p: string) => p === target());
-      const r = await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
+      const r = await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
       expect(r).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(process.execPath, [target(), ...RUN_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
       expect(spawn.mock.calls[0]![2]).not.toHaveProperty("shell");
@@ -271,11 +407,11 @@ describe("GeminiAdapter", () => {
       const spawn = vi.fn();
       const refused = { status: "failed", error: "Gemini CLI must be a native executable on Windows (found a .cmd shim)" };
       const withBin = (bin: string) => () => JSON.stringify({ bin: { gemini: bin } });
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin("../../../evil.js") }).start(harness().opts)).toEqual(refused);
-      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin(join(outside, "evil.js")) }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin("../../../evil.js") }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bundled: () => null, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin(join(outside, "evil.js")) }).start(harness().opts)).toEqual(refused);
       expect(spawn).not.toHaveBeenCalled();
     });
   });
@@ -433,6 +569,19 @@ describe("GeminiAdapter", () => {
     if (process.platform !== "win32") expect(statSync(path).mode & 0o7777).toBe(0o755);
   });
 
+  it("overwriting a setuid file keeps only its permission bits", async () => {
+    if (process.platform === "win32") return;
+    const path = join(worktree, "tool.sh");
+    writeFileSync(path, "#!/bin/sh\necho old\n");
+    chmodSync(path, 0o4755);
+    expect(statSync(path).mode & 0o7777).toBe(0o4755);
+    script([{ type: "write", path, content: "#!/bin/sh\necho new\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(readFileSync(path, "utf8")).toBe("#!/bin/sh\necho new\n");
+    expect(statSync(path).mode & 0o7777).toBe(0o755);
+  });
+
   it("Deny on the write leaves no file and returns an error to the agent", async () => {
     const path = join(worktree, "notes.md");
     script([{ type: "write", path, content: "x" }]);
@@ -480,7 +629,7 @@ describe("GeminiAdapter", () => {
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
     expect(h.proposed[0]).toMatchObject({ kind: "shell", paths: [outside] });
     expect(h.decisions[0]).toMatchObject({ decision: "deny", reason: "outside worktree" });
-    expect(logged("terminal/create")[0]!.error).toBeDefined();
+    expect(logged("terminal/output")).toEqual([]); // no terminal was ever created
     expect(existsSync(marker)).toBe(false);
     expect(h.events).toEqual([]);
   });
@@ -495,8 +644,509 @@ describe("GeminiAdapter", () => {
     expect(logged("terminal/output")[0]!.result.output).toBe(join(worktree, "pkg"));
   });
 
+  it("caps a long terminal cwd in the summary so the command stays visible", async () => {
+    const cwd = join(outside, "d".repeat(200));
+    script([{ type: "terminal", command: "npm", args: ["run", "build"], cwd }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const shown = `${cwd.replace(/\\/g, "/").slice(0, 59)}…`; // the summary shows a path with / separators
+    expect(h.proposed[0]!.summary).toBe(`Run: npm run build (in ${shown})`);
+  });
+
+  it("cleans a terminal's cwd and command with the run's live secrets before capping them for the summary", async () => {
+    script([
+      { type: "terminal", command: "npm", args: ["run", "build"], cwd: join(worktree, `${"d".repeat(52)}${STORED}`) },
+      { type: "terminal", command: "echo", args: ["a".repeat(134), STORED] },
+    ]);
+    const h = harness(() => ({ decision: "deny", reason: "no" }));
+    h.opts.clean = (t) => redact(t, [STORED]);
+    await adapter().start(h.opts);
+    expect(h.proposed.map((a) => a.summary)).toEqual([
+      `Run: npm run build (in ${"d".repeat(52)}[REDACT…)`,
+      `Run: echo ${"a".repeat(134)} [REDACTED]`,
+    ]);
+  });
+
+  it("a clean() that throws while building a terminal summary records the request as denied and fails the run", async () => {
+    script([{ type: "terminal", command: "npm", args: ["run", "build"] }, { type: "message", text: "after" }]);
+    const h = harness();
+    h.opts.clean = () => {
+      throw new Error("secret store unavailable");
+    };
+    expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "internal error" });
+    expect(h.proposed).toEqual([]);
+    expect(h.denied.map(([a, reason]) => [a.tool, a.kind, reason])).toEqual([["terminal/create", "shell", "internal error"]]);
+    expect(logged("terminal/output")).toEqual([]); // no terminal was ever created
+  });
+
+  it("holds back the tail of a size-split message, so a secret streamed across two chunks is redacted whole", async () => {
+    const head = "w ".repeat(1995); // 3990 characters, then the secret begins
+    script([
+      { type: "message", text: `${head}${STORED.slice(0, 12)}` },
+      { type: "message", text: `${STORED.slice(12)} end` },
+    ]);
+    const h = harness();
+    h.opts.clean = (t) => redact(t, [STORED]);
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`${head}${STORED} end`);
+    expect(texts.some((t) => t.includes(STORED))).toBe(true); // one message carries the whole secret, for the runner to redact
+  });
+
+  for (const [label, line, secret] of [
+    ["an Authorization: Bearer token", `Authorization: Bearer ${OPAQUE_TOKEN}`, OPAQUE_TOKEN],
+    ["an api_key = value pair", `api_key = ${OPAQUE_VALUE}`, OPAQUE_VALUE],
+  ] as const) {
+    it(`never separates ${label} from its context at a size split, wherever the split falls`, async () => {
+      const at = line.indexOf(secret);
+      const space = line.indexOf(" ");
+      for (const cut of new Set([at + 12, at, at - 1, at - 2, at - 3, space, space + 1])) {
+        const steps = straddle(line, cut);
+        script(steps);
+        const h = harness();
+        expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+        const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+        expect(texts.length).toBeGreaterThan(1);
+        expect(texts.join("")).toBe(streamed(steps)); // every character once, in order
+        const recorded = texts.map((t) => redact(t)).join(""); // each message redacted on its own, as the runner does
+        expect(recorded).toBe(redact(streamed(steps)));
+        expect(recorded).toContain("[REDACTED]");
+        expectNoFragment(recorded, secret);
+      }
+    });
+  }
+
+  it("holds a private key block whole across size splits, so no line of its body is left outside the redacted block", async () => {
+    const text = `${"intro line\n".repeat(330)}${KEY_BEGIN}\n${keyBody(30).join("\n")}\n${KEY_END}\nafter the key\n`;
+    script(chunked(text, 200));
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toContain("[REDACTED]");
+    expect(recorded).toContain("after the key");
+    expect(recorded).not.toContain(KEY_FRAGMENT);
+  });
+
+  for (const [label, after] of [
+    ["never ends", ""],
+    ["ends later", `${KEY_END}\nstill here\n`],
+  ] as const) {
+    it(`emits a key block that reaches 16 KiB as one [REDACTED] and then streams on (a BEGIN line and 20 KiB of prose that ${label})`, async () => {
+      const prose = Array.from({ length: 460 }, (_, i) => `Prose line ${String(i).padStart(3, "0")} follows the marker and goes on.\n`).join("");
+      const block = `${KEY_BEGIN}\n${prose}`;
+      expect(block.length).toBeGreaterThan(20 * 1024);
+      script([{ type: "message", text: "before\n" }, ...chunked(block, 1000), ...(after === "" ? [] : [{ type: "message", text: after }])]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      const joined = texts.join("");
+      expect(joined).toBe(`before\n[REDACTED]${block.slice(16 * 1024)}${after}`); // the held 16 KiB, and nothing else, is replaced
+      expect(joined.split("[REDACTED]")).toHaveLength(2);
+      expect(texts.length).toBeGreaterThan(2); // the text after the overflow streamed as usual, not in one piece at the end
+    });
+  }
+
+  for (const [label, first] of [
+    ["a key block", `intro\n${KEY_BEGIN}\n${keyBody(3).join("\n")}`],
+    ["a partial BEGIN line", "intro\n-----BEGIN RSA PRIV"],
+  ] as const) {
+    it(`keeps back ${label} at a pause flush until the block is complete`, async () => {
+      const full = `intro\n${KEY_BEGIN}\n${keyBody(3).join("\n")}\n${KEY_END}\nafter`;
+      script([{ type: "message", text: first }, { type: "sleep", ms: 600 }, { type: "message", text: full.slice(first.length) }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts).toEqual(["intro\n", full.slice("intro\n".length)]);
+      expect(texts.map((t) => redact(t)).join("")).toBe("intro\n[REDACTED]\nafter");
+    });
+  }
+
+  it("delivers all prose after an inline mention of a certificate BEGIN line, across a tool call and past 16 KiB", async () => {
+    const prose = (n: number) => Array.from({ length: n }, (_, i) => `Sentence ${i} explains the next step of the setup.\n`).join("");
+    const steps: Step[] = [
+      { type: "message", text: "The file should start with `-----BEGIN CERTIFICATE-----` and hold the certificate.\n" },
+      ...chunked(prose(200), 500),
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      ...chunked(prose(200), 500),
+    ];
+    expect(streamed(steps.filter((s) => s.type === "message")).length).toBeGreaterThan(16 * 1024);
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps.filter((s) => s.type === "message")));
+    expect(h.events.findIndex((e) => e.type === "action_result")).toBeLessThan(h.events.length - 1); // prose went out before the run ended
+  });
+
+  it("holds a partial BEGIN marker across a tool call, so the key that follows is redacted whole", async () => {
+    const key = KEY_FORMS.plain!(RSA_KEY);
+    const split = key.indexOf("PRIVATE");
+    script([
+      { type: "message", text: `Key:\n${key.slice(0, split)}` },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      { type: "message", text: `${key.slice(split)}after\n` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`Key:\n${key}after\n`);
+    for (const t of texts) expect(leakedKeyBody(redact(t), RSA_KEY)).toBeNull();
+    expect(texts.map((t) => redact(t)).join("")).toBe("Key:\n[REDACTED]\nafter\n");
+  });
+
+  it("holds a trailing auth scheme across a tool call, so the token that follows is redacted", async () => {
+    script([
+      { type: "message", text: "Authorization: Bearer " },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      { type: "message", text: `${OPAQUE_TOKEN}\n` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const text = `Authorization: Bearer ${OPAQUE_TOKEN}\n`;
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expectNoFragment(recorded, OPAQUE_TOKEN);
+  });
+
+  for (const [label, header] of [
+    ["at the start of its line", "password: |\n"],
+    ["after other text on its line", '{"x":1}password: |\n'],
+  ] as const) {
+    it(`holds a secret YAML block scalar whose header is ${label} across a tool call after every body line`, async () => {
+      const body = ["  hunter2abc-one", "  hunter2abc-two", "  hunter2abc-three"];
+      const steps: Step[] = [{ type: "message", text: header }, { type: "read", path: join(worktree, "README.md"), toolCall: true }];
+      for (const line of body) steps.push({ type: "message", text: `${line}\n` }, { type: "read", path: join(worktree, "README.md"), toolCall: true });
+      steps.push({ type: "message", text: "done\n" });
+      script(steps);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      const text = streamed(steps.filter((s) => s.type === "message"));
+      expect(texts.join("")).toBe(text);
+      const recorded = texts.map((t) => redact(t)).join("");
+      expect(recorded).toBe(redact(text));
+      expect(recorded).toBe(`${header.slice(0, header.indexOf("|"))}[REDACTED]\ndone\n`);
+    });
+  }
+
+  for (const [label, text] of [
+    ["a run of dashes", `x ${"-".repeat(40_000)}`],
+    ["----B over and over", "----B".repeat(8000)],
+    ["-----BEGIN over and over", "-----BEGIN".repeat(4000)],
+  ] as const) {
+    it(`streams ${label} out in pieces as it arrives, in bounded time`, async () => {
+      script(chunked(text, 100));
+      const h = harness();
+      const at: number[] = [];
+      h.opts.emit = (e) => {
+        h.events.push(e);
+        if (e.type === "message") at.push(performance.now());
+      };
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.join("")).toBe(text);
+      expect(texts.length).toBeGreaterThanOrEqual(5); // never held whole
+      expect(texts[0]!.length).toBeGreaterThan(3000); // the first size split went out nearly whole
+      expect(at.at(-1)! - at[0]!).toBeLessThan(200); // from the first message to the last
+    });
+  }
+
+  it("releases a partial BEGIN marker once it is longer than any marker can be: capitals and spaces after it stream out normally", async () => {
+    const caps = "AB CD EFG ".repeat(1024); // 10 KiB of what a label is made of, never ending in dashes
+    const text = `See -----BEGIN ${caps}\ndone\n`;
+    script([...chunked(text.slice(0, -5), 500), { type: "sleep", ms: 400 }, { type: "message", text: "done\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(text);
+    expect(texts.length).toBeGreaterThan(3); // size splits went out as the text arrived
+    expect(texts[0]!.length).toBeGreaterThan(3000); // the first split was not moved back to the marker
+    expect(texts[0]).toContain("-----BEGIN AB CD");
+  });
+
+  for (const [label, mention, shown] of [
+    ["inline", "Start it with -----BEGIN RSA PRIVATE KEY----- and then paste the body.\n", "[REDACTED]"],
+    ["on its own line", `Example:\n${KEY_BEGIN}\nThe body goes here, then the END line.\n`, "Example:\n[REDACTED]"],
+  ] as const) {
+    it(`holds everything from a private key BEGIN line mentioned ${label} until the run ends, and emits it as [REDACTED]`, async () => {
+      const more = Array.from({ length: 40 }, (_, i) => `Line ${i} of the explanation.\n`).join("");
+      script([{ type: "message", text: mention }, { type: "sleep", ms: 400 }, ...chunked(more, 300), { type: "read", path: join(worktree, "README.md"), toolCall: true }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.join("")).toBe(shown); // fail closed: without an END line, the span is never released
+      expect(h.events.at(-1)!.type).toBe("message"); // held across the tool call to the end of the run
+    });
+  }
+
+  it("redacts a private key whose body lines stream with pauses, and releases the prose after an inline-looking key line", async () => {
+    const body = keyBody(4);
+    const steps: Step[] = [
+      { type: "message", text: `Here:\n${KEY_BEGIN}\n${body[0]}\n` },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `${body[1]}\n${body[2]}` },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `\n${body[3]}\n${KEY_END}\nDone.\n` },
+    ];
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe("Here:\n[REDACTED]\nDone.\n");
+    expect(recorded).not.toContain(KEY_FRAGMENT);
+  });
+
+  /** `text` in 37-character chunks, with pauses at a quarter and three quarters of the way and a tool call in the middle. */
+  function streamedWithPausesAndToolCall(text: string): Step[] {
+    const pieces = chunked(text, 37);
+    const steps: Step[] = [];
+    pieces.forEach((p, i) => {
+      steps.push(p);
+      if (i === Math.floor(pieces.length / 4) || i === Math.floor((3 * pieces.length) / 4)) steps.push({ type: "sleep", ms: 400 });
+      if (i === Math.floor(pieces.length / 2)) steps.push({ type: "read", path: join(worktree, "README.md"), toolCall: true });
+    });
+    return steps;
+  }
+
+  /** Every message redacted on its own, as the runner records it, equals the whole text redacted, and no body of either key is in it. */
+  function expectKeysRedactedWhole(texts: string[], text: string): void {
+    expect(texts.join("")).toBe(text);
+    for (const t of texts) {
+      expect(leakedKeyBody(redact(t), RSA_KEY)).toBeNull();
+      expect(leakedKeyBody(redact(t), OPENSSH_KEY)).toBeNull();
+    }
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toContain("[REDACTED]");
+  }
+
+  for (const [form, render] of Object.entries(KEY_FORMS)) {
+    it(`keeps an RSA and an OpenSSH private key shown ${form} whole across chunks, pauses and a tool call`, async () => {
+      const text = `Here is the key:\n${render(RSA_KEY)}And another:\n${render(OPENSSH_KEY)}Done.\n`;
+      script(streamedWithPausesAndToolCall(text));
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.length).toBeGreaterThan(1);
+      expectKeysRedactedWhole(texts, text);
+    });
+  }
+
+  it("keeps a private key whole when prose lines are placed between its body lines, with a pause after each of them", async () => {
+    const lines = keyLines(RSA_KEY);
+    lines.splice(5, 0, "This line is ordinary prose, placed inside the key on purpose.");
+    lines.splice(12, 0, "Another sentence here, with punctuation and no base64 at all!");
+    const text = `Intro.\n${lines.join("\n")}\nOutro.\n`;
+    const firstProse = text.indexOf("\n", text.indexOf("This line")) + 1;
+    const secondProse = text.indexOf("\n", text.indexOf("Another sentence")) + 1;
+    script([
+      ...chunked(text.slice(0, firstProse), 37),
+      { type: "sleep", ms: 400 },
+      ...chunked(text.slice(firstProse, secondProse), 37),
+      { type: "sleep", ms: 400 },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      ...chunked(text.slice(secondProse), 37),
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expectKeysRedactedWhole(texts, text);
+    expect(texts.map((t) => redact(t)).join("")).toBe("Intro.\n[REDACTED]\nOutro.\n");
+  });
+
+  it("holds a secret YAML block scalar whose header is the first line, with a pause after every body line", async () => {
+    const body = ["  hunter2abc-one", "  hunter2abc-two", "  hunter2abc-three", "  hunter2abc-four"]; // nothing here looks like a key name itself
+    const steps: Step[] = [{ type: "message", text: "password: |\n" }, { type: "sleep", ms: 400 }];
+    for (const line of body) steps.push({ type: "message", text: `${line}\n` }, { type: "sleep", ms: 400 });
+    steps.push({ type: "message", text: "done\n" });
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const text = streamed(steps.filter((s) => s.type === "message"));
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toBe("password: [REDACTED]\ndone\n");
+    for (const line of body) expect(recorded).not.toContain(line.trim());
+  });
+
+  it("cuts minified JSON with no whitespace at punctuation, or before a secret key whose quoted value is still open", async () => {
+    const pad = (n: number) => `{"pad":"${"p".repeat(n)}",`;
+    const longValue = Array.from({ length: 20 }, () => OPAQUE_VALUE).join("");
+    for (const [first, second, secret] of [
+      [`"password":"${OPAQUE_VALUE}","note":"${"n".repeat(500)}`, '"}', OPAQUE_VALUE],
+      [`"password":"${longValue.slice(0, 600)}`, `${longValue.slice(600)}"}`, longValue],
+    ] as const) {
+      const head = pad(4000 - first.length) + first;
+      const min = head.length - 512;
+      expect(head.indexOf(secret.slice(0, 20))).toBeLessThan(min); // without punctuation or step-back, the cut would fall inside the value
+      const steps: Step[] = [{ type: "message", text: head }, { type: "message", text: second }];
+      script(steps);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.length).toBeGreaterThan(1);
+      expect(texts.join("")).toBe(streamed(steps));
+      const recorded = texts.map((t) => redact(t)).join("");
+      expect(recorded).toBe(redact(streamed(steps)));
+      expectNoFragment(recorded, secret);
+    }
+  });
+
+  it("holds a secret YAML block scalar until it ends, even across pause flushes", async () => {
+    const steps: Step[] = [
+      { type: "message", text: "config:\n  password: |\n    line-one-of-the-body\n" },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: "    line-two-of-the-body\n" },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: "  other: x\ndone\n" },
+    ];
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps));
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(streamed(steps)));
+    expect(recorded).not.toContain("line-one");
+    expect(recorded).not.toContain("line-two");
+  });
+
+  it("flushes the held tail of a size-split message after a pause, without waiting for more output", async () => {
+    const head = "w ".repeat(2000);
+    script([{ type: "message", text: `${head}held\ntail more` }, { type: "sleep", ms: 1500 }, { type: "message", text: "later" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    // The pause flush keeps back the trailing word, which may still be growing; the end of the turn flushes it.
+    expect(texts).toEqual([`${head}held\n`, "tail ", "morelater"]);
+  });
+
+  it("never emits part of a secret streamed with pauses longer than the flush delay between its chunks", async () => {
+    script([
+      { type: "message", text: "intro text " },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: STORED.slice(0, 10) },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: STORED.slice(10, 20) },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `${STORED.slice(20)} done` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`intro text ${STORED} done`);
+    expect(texts[0]).toBe("intro text "); // the pause flushed what was safe
+    for (const t of texts) if (t.includes(STORED.slice(0, 6)) || t.includes(STORED.slice(-6))) expect(t).toContain(STORED);
+  });
+
+  it("debounces the pause flush, but never holds streaming text back longer than 2 s", async () => {
+    const steps: Step[] = [];
+    for (let i = 0; i < 50; i++) steps.push({ type: "message", text: `w${i} ` }, { type: "sleep", ms: 50 });
+    script(steps);
+    const h = harness();
+    const at: number[] = [];
+    const t0 = Date.now();
+    h.opts.emit = (e) => {
+      h.events.push(e);
+      if (e.type === "message") at.push(Date.now() - t0);
+    };
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps.filter((s) => s.type === "message")));
+    expect(texts.length).toBeGreaterThanOrEqual(2); // flushed at the cap while still streaming
+    expect(texts.length).toBeLessThanOrEqual(4); // not every 250 ms
+    expect(at.at(-1)! - at[0]!).toBeGreaterThan(200); // the first flush came at the cap, well before the end
+    for (const t of texts.slice(0, -1)) expect(t).toMatch(/\s$/); // never cut inside a word
+  });
+
+  it("records the output of a truncated terminal without the partial word its cut left at the start", async () => {
+    script([{ type: "terminal", command: process.execPath, args: ["-e", `process.stdout.write("${STORED} tail")`], outputByteLimit: 12 }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(logged("terminal/output")[0]!.result).toMatchObject({ output: "3456789 tail", truncated: true });
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: " tail" }]);
+  });
+
+  for (const [label, text, cut, secret, cleaned] of [
+    [
+      "a private key", `before\n${KEY_FORMS.plain!(RSA_KEY)}after\n`, keyLines(RSA_KEY)[10]!, RSA_KEY.body, "before\n[REDACTED]\nafter\n",
+    ],
+    [
+      "a JSON secret", `{\n  "apiKey": "${OPAQUE_VALUE}",\n  "n": 1\n}\n`, ' "', OPAQUE_VALUE, `{\n  "apiKey": "[REDACTED]",\n  "n": 1\n}\n`,
+    ],
+  ] as const) {
+    it(`cleans a truncated terminal's output before the cut, so ${label} the cut lands in leaves no fragment in the record`, async () => {
+      const file = join(worktree, "out.txt");
+      writeFileSync(file, text);
+      const cutAt = text.indexOf(cut);
+      expect(cutAt).toBeGreaterThan(0);
+      script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file], outputByteLimit: text.length - cutAt }]);
+      const h = harness();
+      h.opts.clean = (t) => redact(t);
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      // The agent gets the tail of its own command's output; the record gets the whole output cleaned, which fits.
+      expect(logged("terminal/output")[0]!.result).toMatchObject({ output: text.slice(cutAt), truncated: true });
+      expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: cleaned }]);
+      for (let i = 0; i + 6 <= secret.length; i += 3) expect(cleaned).not.toContain(secret.slice(i, i + 6));
+    });
+  }
+
+  it("the record of a truncated terminal is cleaned before every cut while output keeps coming, and is withheld when clean() throws", async () => {
+    // Twenty secrets spread through 3 MiB of output, with a 1 MiB cap: every cut the record goes through has been cleaned first.
+    const file = join(worktree, "big.txt");
+    const line = `${"y".repeat(99)}\n`;
+    const chunk = line.repeat(1500); // 150 000 bytes
+    writeFileSync(file, Array.from({ length: 20 }, () => `${chunk}token=${OPAQUE_TOKEN}\n`).join("") + "END\n");
+    script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file] }]);
+    const h = harness();
+    h.opts.clean = (t) => redact(t);
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const [result] = h.events as { type: string; output: string }[];
+    expect(result!.type).toBe("action_result");
+    expect(result!.output.endsWith("token=[REDACTED]\nEND\n")).toBe(true);
+    expect(Buffer.byteLength(result!.output, "utf8")).toBeLessThanOrEqual(MiB);
+    expectNoFragment(result!.output, OPAQUE_TOKEN);
+
+    script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file] }]);
+    const broken = harness();
+    broken.opts.clean = (t) => {
+      if (t.length > 10_000) throw new Error("scrubber failed"); // the record; summaries still clean
+      return t;
+    };
+    expect(await adapter().start(broken.opts)).toEqual({ status: "completed" });
+    expect(broken.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "" }]);
+  });
+
+  it("emits a reported cumulative USD cost once, at the end of the turn; context-size usage alone is not reported", async () => {
+    script([
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1200, size: 1000000 } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1500, size: 1000000, cost: { amount: 0.01, currency: "USD" } } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1800, size: 1000000, cost: { amount: 0.03, currency: "USD" } } },
+      { type: "message", text: "done" },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.events.filter((e) => e.type === "usage")).toEqual([{ type: "usage", costUsd: 0.03 }]);
+
+    script([
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1200, size: 1000000 } },
+      { type: "update", update: { sessionUpdate: "usage_update", used: 1300, size: 1000000, cost: { amount: 5, currency: "EUR" } } },
+    ]);
+    const h2 = harness();
+    expect(await adapter().start(h2.opts)).toEqual({ status: "completed" });
+    expect(h2.events.filter((e) => e.type === "usage")).toEqual([]);
+  });
+
   it("caps terminal output at 1 MiB keeping the tail, and reports a non-zero exit", async () => {
-    const code = "process.stdout.write('x'.repeat(1536 * 1024) + 'TAIL'); process.exitCode = 3";
+    const code = "process.stdout.write('xxxxxxx\\n'.repeat(192 * 1024) + 'TAIL'); process.exitCode = 3";
     script([{ type: "terminal", command: process.execPath, args: ["-e", code] }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
@@ -505,7 +1155,7 @@ describe("GeminiAdapter", () => {
     expect(out.output.length).toBeLessThanOrEqual(MiB);
     expect(out.output.endsWith("TAIL")).toBe(true);
     expect(out.exitStatus).toEqual({ exitCode: 3, signal: null });
-    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: out.output }]);
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: out.output.replace(/^\S*/, "") }]);
   });
 
   it("honours a smaller outputByteLimit and refuses terminals it did not create", async () => {
@@ -619,7 +1269,8 @@ describe("GeminiAdapter", () => {
     expect(h.denied).toEqual([
       [{ tool: "gemini", kind: "other", summary: "Ungated tool: rm -rf /", input: expect.objectContaining({ toolCallId: "tc-x", kind: "execute" }), paths: [] }, "agent executed an ungated tool"],
     ]);
-    expect(h.events).toEqual([{ type: "message", text: "about to run" }]);
+    // The trailing word was held for the tool call and goes out when the run ends.
+    expect(h.events).toEqual([{ type: "message", text: "about to " }, { type: "message", text: "run" }]);
     expect(existsSync(later)).toBe(false);
     expect(logged("write")).toEqual([]);
   });
@@ -639,7 +1290,7 @@ describe("GeminiAdapter", () => {
     ]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
-    expect(h.events).toEqual([{ type: "message", text: "still here" }]);
+    expect(h.events).toEqual([{ type: "message", text: "still " }, { type: "message", text: "here" }]);
     expect(h.denied).toHaveLength(1);
     expect(h.denied[0]![0]).toMatchObject({ summary: "Ungated tool: unknown tool", input: expect.objectContaining({ toolCallId: "ghost" }) });
   });
@@ -709,7 +1360,7 @@ describe("GeminiAdapter", () => {
   });
 
   it("aborting kills gemini and returns run stopped", async () => {
-    script([{ type: "message", text: "working" }, { type: "hang" }]);
+    script([{ type: "message", text: "working " }, { type: "hang" }]); // a trailing word would be held until the end
     const { spawn, children } = fakeSpawn();
     const h = harness();
     const done = adapter({ spawn }).start(h.opts);
@@ -734,21 +1385,50 @@ describe("GeminiAdapter", () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  it("messages are flushed before tool results so the ledger keeps their order", async () => {
+  it("messages are flushed before tool results so the ledger keeps their order; a trailing word is held until after", async () => {
     script([
       { type: "message", text: "Reading " },
       { type: "message", text: "the file" },
       { type: "read", path: join(worktree, "README.md") },
-      { type: "message", text: "done" },
+      { type: "message", text: " done" },
     ]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    // "file" may still be the start of a longer token (a secret's first characters), so it waits for what follows.
     expect(h.events).toEqual([
-      { type: "message", text: "Reading the file" },
+      { type: "message", text: "Reading the " },
       { type: "action_result", actionId: "act-1", ok: true, output: "hello from the worktree\n" },
-      { type: "message", text: "done" },
+      { type: "message", text: "file done" },
     ]);
   });
+
+  for (const [label, text, secret] of [
+    ["an auth header", `Authorization: Bearer ${OPAQUE_TOKEN}\n`, OPAQUE_TOKEN],
+    ["a YAML block scalar", `password: |\n  ${OPAQUE_VALUE}\n`, OPAQUE_VALUE],
+  ] as const) {
+    it(`a tool call at every character position of ${label} leaves no fragment of the value in any message`, { timeout: 120_000 }, async () => {
+      const positions = Array.from({ length: text.length }, (_, i) => i + 1);
+      for (let b = 0; b < positions.length; b += 12) {
+        const runs = positions.slice(b, b + 12).map((i) => {
+          script([
+            { type: "message", text: text.slice(0, i) },
+            { type: "read", path: join(worktree, "README.md"), toolCall: true },
+            { type: "message", text: text.slice(i) },
+          ]);
+          const h = harness();
+          return adapter().start(h.opts).then((r) => ({ i, r, h }));
+        });
+        for (const { i, r, h } of await Promise.all(runs)) {
+          expect(r, `split at ${i}`).toEqual({ status: "completed" });
+          const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+          expect(texts.join(""), `split at ${i}`).toBe(text);
+          const recorded = texts.map((t) => redact(t)).join("");
+          expect(recorded, `split at ${i}`).toBe(redact(text));
+          for (const t of texts) expectNoFragment(redact(t), secret);
+        }
+      }
+    });
+  }
 });
 
 describe("GeminiAdapter through the runner", () => {
@@ -758,8 +1438,8 @@ describe("GeminiAdapter through the runner", () => {
     const ledger = new Ledger(db);
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
     const worktrees = new WorktreeManager(outside);
-    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
-    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: [], dataDir: outside });
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [], dataDir: outside });
     try {
       // The fake does not know the worktree the runner creates: it resolves relative paths against its cwd.
       script([
@@ -793,4 +1473,91 @@ describe("GeminiAdapter through the runner", () => {
       db.close();
     }
   }, 30_000);
+
+  it("leaves no fragment of a stored secret across the cwd and command caps in the recorded summaries", async () => {
+    const owner = { kind: "human", id: "owner" } as const;
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
+    const worktrees = new WorktreeManager(outside);
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside });
+    try {
+      script([
+        { type: "terminal", command: "npm", args: ["run", "build"], cwd: `${"d".repeat(52)}${STORED}` },
+        { type: "terminal", command: "echo", args: ["a".repeat(136), STORED] },
+      ]);
+      const run = await runner.start(owner, { projectId, adapter: "gemini", prompt: "build" });
+      await vi.waitFor(
+        () => {
+          for (const a of listPendingActions(db, projectId)) runner.decide(owner, a.id, "deny", "no");
+          expect(getRun(db, run.id)!.status).not.toBe("running");
+        },
+        { timeout: 20_000, interval: 50 },
+      );
+      expect(listActions(db, run.id).map((a) => a.summary)).toEqual([
+        `Run: npm run build (in ${"d".repeat(52)}[REDACT…)`,
+        `Run: echo ${"a".repeat(136)} [REDACTE`,
+      ]);
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
+    } finally {
+      await runner.shutdown();
+      db.close();
+    }
+  }, 30_000);
+
+  const keyText = `${"intro line\n".repeat(330)}${KEY_BEGIN}\n${keyBody(30).join("\n")}\n${KEY_END}\nafter the key\n`;
+  /** Both keys in every form, one form after another, each in 200-character chunks and followed by a pause, with a tool call halfway. */
+  function decoratedKeySteps(): Step[] {
+    const forms = Object.values(KEY_FORMS);
+    const steps: Step[] = [];
+    forms.forEach((render, i) => {
+      steps.push(...chunked(`Form ${i}:\n${render(RSA_KEY)}${render(OPENSSH_KEY)}`, 200), { type: "sleep", ms: 300 });
+      if (i === Math.floor(forms.length / 2)) steps.push({ type: "read", path: "README.md", toolCall: true });
+    });
+    const attacked = keyLines(RSA_KEY);
+    attacked.splice(5, 0, "This line is ordinary prose, placed inside the key on purpose.");
+    steps.push(...chunked(`${attacked.join("\n")}\nDone.\n`, 200));
+    return steps;
+  }
+  for (const [label, steps, field, fragments] of [
+    [
+      "a secret streamed across a message split",
+      [{ type: "message", text: `${"w ".repeat(1995)}${STORED.slice(0, 12)}` }, { type: "message", text: `${STORED.slice(12)} end` }],
+      "messages",
+      [STORED.slice(0, 6), STORED.slice(12)],
+    ],
+    ["a secret across char 500 of a peer error", [{ type: "fail", message: `${"e".repeat(490)} ${STORED} rest` }], "error", [STORED.slice(0, 6), STORED.slice(12)]],
+    [
+      "a Bearer token whose header straddles a message split",
+      straddle(`Authorization: Bearer ${OPAQUE_TOKEN}`, 34),
+      "messages",
+      [OPAQUE_TOKEN.slice(0, 8), OPAQUE_TOKEN.slice(12), OPAQUE_TOKEN.slice(-8)],
+    ],
+    ["a private key block streamed across message splits", chunked(keyText, 200), "messages", [KEY_FRAGMENT]],
+    ["private keys in every decorated form, streamed with pauses and a tool call", decoratedKeySteps(), "messages", [...keyBodyWindows(RSA_KEY), ...keyBodyWindows(OPENSSH_KEY)]],
+  ] as const) {
+    it(`leaves no fragment of ${label} in the record`, async () => {
+      const owner = { kind: "human", id: "owner" } as const;
+      const db = openDatabase(":memory:");
+      const ledger = new Ledger(db);
+      const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
+      const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
+      const runner = new AgentRunner({
+        db, ledger, worktrees: new WorktreeManager(outside), broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside,
+      });
+      try {
+        script([...steps]);
+        const run = await runner.start(owner, { projectId, adapter: "gemini", prompt: "go" });
+        await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 20_000, interval: 50 });
+        const record = JSON.stringify(ledger.list());
+        expect(record).toContain("[REDACTED]");
+        for (const f of fragments) expect(record).not.toContain(f);
+        if (field === "error") expect(getRun(db, run.id)!.error).toContain("[REDACTED] rest");
+      } finally {
+        await runner.shutdown();
+        db.close();
+      }
+    }, 30_000);
+  }
 });

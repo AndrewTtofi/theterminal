@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,16 +11,17 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { registerAgentRoutes } from "../../src/server/agent-routes.js";
 import { registerRoutes } from "../../src/server/routes.js";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { EMPTY_GITCONFIG, WorktreeManager, ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { openDatabase } from "../../src/db.js";
 import { listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
-import { createServer, type RunningServer } from "../../src/server/server.js";
+import { createServer, repairSharedGitconfig, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
   "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
+  "ANTHROPIC_API_KEY",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
@@ -28,6 +29,8 @@ const FAKE_OPENAI_KEY = "sk-TESTKEY-openai-0000000000000000";
 const FAKE_GEMINI_KEY = "AIza-TESTKEY-gemini-000000000000000";
 /** A PATH lookup that finds nothing, so tests never depend on which CLIs this machine has. */
 const noCli = () => null;
+/** No bundled programs either, so a run that is not a fake can never start a real CLI. */
+const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const running: RunningServer[] = [];
 const dirs: string[] = [];
@@ -50,14 +53,14 @@ const tmp = () => {
 /** Starts a server with the fake adapter enabled (when `script` is given) and one project. */
 async function start(
   script?: FakeStep[] | null,
-  opts: { shutdownTimeoutMs?: number; which?: (cmd: string) => string | null } = {},
+  opts: { shutdownTimeoutMs?: number; which?: (cmd: string) => string | null; bundled?: Parameters<typeof createServer>[0]["bundled"] } = {},
 ) {
   if (script !== null) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
   }
   const dataDir = tmp();
-  const s = await createServer({ dataDir, port: 0, which: noCli, ...opts });
+  const s = await createServer({ dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, ...opts });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
   return { s, projectId: project.id, dataDir };
@@ -85,35 +88,66 @@ const script: FakeStep[] = [
 ];
 
 describe("agent API", { timeout: 15000 }, () => {
-  it("GET /api/agents lists registered adapters, each provider's mode and install state, and the acknowledgements", async () => {
+  it("GET /api/agents lists registered adapters, each provider's mode, availability and key source, and the acknowledgements", async () => {
+    for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const) delete process.env[k];
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
     const { s } = await start(script, { which: (cmd) => (cmd === "codex" ? "/fake/bin/codex" : null) });
     expect(await json(get(s, "/api/agents"))).toEqual({
       adapters: ["claude", "codex", "gemini", "fake"],
       providers: {
-        claude: { mode: "api_key", installed: false },
-        codex: { mode: "api_key", installed: true },
-        gemini: { mode: "api_key", installed: false },
+        claude: { mode: "api_key", available: false, apiKey: "none" },
+        codex: { mode: "api_key", available: true, apiKey: "none" },
+        gemini: { mode: "api_key", available: false, apiKey: "environment" },
       },
       acks: PROVIDER_ACKS,
     });
   });
 
-  it("a provider with a test binary override reports installed only under the fake env", async () => {
+  const availability = async (s: RunningServer) =>
+    Object.fromEntries(
+      Object.entries((await json<{ providers: Record<string, { available: boolean }> }>(get(s, "/api/agents"))).providers)
+        .map(([p, v]) => [p, v.available]),
+    );
+
+  it("reports every provider available from its bundled program alone, with nothing on PATH", async () => {
+    delete process.env.THETERMINAL_FAKE_AGENT;
+    const s = await createServer({ dataDir: tmp(), port: 0, which: noCli });
+    running.push(s);
+    expect(await availability(s)).toEqual({ claude: true, codex: true, gemini: true });
+  });
+
+  it("consults PATH for a provider only when its bundled program is missing", async () => {
+    const which = vi.fn((cmd: string) => (cmd === "gemini" ? "/fake/bin/gemini" : null));
+    const { s } = await start(null, { which, bundled: { ...NO_BUNDLED, claude: () => "/bundled/claude" } });
+    expect(await availability(s)).toEqual({ claude: true, codex: false, gemini: true });
+    expect([...new Set(which.mock.calls.map(([cmd]) => cmd))].sort()).toEqual(["codex", "gemini"]);
+  });
+
+  it("locates the bundled programs once at startup, not on every listing or run start", async () => {
+    const lookups = { claude: vi.fn(() => null), codex: vi.fn(() => null), gemini: vi.fn(() => null) };
+    process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
+    const { s, projectId } = await start(null, { bundled: lookups });
+    await availability(s);
+    await availability(s);
+    for (const adapter of ["codex", "gemini"]) {
+      const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter, prompt: "go" }));
+      await untilFinished(s, run.id);
+    }
+    for (const fn of Object.values(lookups)) expect(fn).toHaveBeenCalledOnce();
+  });
+
+  it("a provider with a test binary override reports available only under the fake env", async () => {
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
     process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
-    const installed = async (s: RunningServer) =>
-      Object.fromEntries(
-        Object.entries((await json<{ providers: Record<string, { installed: boolean }> }>(get(s, "/api/agents"))).providers)
-          .map(([p, v]) => [p, v.installed]),
-      );
     const { s: withFake } = await start(script);
-    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: true });
+    expect(await availability(withFake)).toEqual({ claude: false, codex: true, gemini: true });
 
     // Decided when the server starts, like the adapters' commands: later changes to the env do not apply.
     delete process.env.THETERMINAL_FAKE_AGENT;
-    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: true });
+    expect(await availability(withFake)).toEqual({ claude: false, codex: true, gemini: true });
     const { s: real } = await start(null);
-    expect(await installed(real)).toEqual({ claude: false, codex: false, gemini: false });
+    expect(await availability(real)).toEqual({ claude: false, codex: false, gemini: false });
   });
 
   it("provider-auth rejects unknown body fields", async () => {
@@ -173,14 +207,14 @@ describe("agent API", { timeout: 15000 }, () => {
     expect(ledger).not.toContain(FAKE_OPENAI_KEY);
   });
 
-  it("ignores THETERMINAL_CODEX_BIN without the fake env: the run fails because Codex is not on PATH", async () => {
+  it("ignores THETERMINAL_CODEX_BIN without the fake env: the run fails because there is no bundled Codex and none on PATH", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
     process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
     const { s, projectId } = await start(null);
     const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" }));
     await untilFinished(s, run.id);
-    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Codex CLI is unavailable: its bundled program is missing and none is on PATH" });
   });
 
   it("with the fake env and THETERMINAL_GEMINI_BIN, a Gemini run goes start, ask, allow, completed", async () => {
@@ -209,14 +243,14 @@ describe("agent API", { timeout: 15000 }, () => {
     expect(ledger).not.toContain(FAKE_GEMINI_KEY);
   });
 
-  it("ignores THETERMINAL_GEMINI_BIN without the fake env: the run fails because Gemini is not on PATH", async () => {
+  it("ignores THETERMINAL_GEMINI_BIN without the fake env: the run fails because there is no bundled Gemini CLI and none on PATH", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
     process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
     process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
     const { s, projectId } = await start(null);
     const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "go" }));
     await untilFinished(s, run.id);
-    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Gemini CLI is not installed or not on PATH" });
+    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Gemini CLI is unavailable: its bundled program is missing and none is on PATH" });
   });
 
   it("registers claude, codex and gemini when the fake env var is unset, and rejects a fake run with 400", async () => {
@@ -384,6 +418,72 @@ describe("agent API", { timeout: 15000 }, () => {
     await expect(createServer({ dataDir: tmp(), port: 0 })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
   });
 
+  it("repairs a modified shared git config at startup: emptied and read-only", async () => {
+    const dataDir = tmp();
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    writeFileSync(cfg, "[user]\n\temail = someone@example.com\n");
+    const s = await createServer({ dataDir, port: 0, which: noCli });
+    running.push(s);
+    expect(readFileSync(cfg, "utf8")).toBe("");
+    if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
+  });
+
+  describe("a shared git config that cannot be repaired at startup", () => {
+    /** Starts with console.warn captured; returns what was warned. */
+    async function startWarned(dataDir: string): Promise<string[]> {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        running.push(await createServer({ dataDir, port: 0, which: noCli }));
+        return warn.mock.calls.map((c) => c.map(String).join(" "));
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it.skipIf(process.platform === "win32")("a symlink: starts and warns with a fixed message holding no path", async () => {
+      const dataDir = tmp();
+      const target = join(tmp(), "target");
+      writeFileSync(target, "x");
+      symlinkSync(target, join(dataDir, EMPTY_GITCONFIG));
+      const warned = await startWarned(dataDir);
+      expect(warned).toEqual(["The Terminal: the shared git config is not a regular file; agent runs will fail until it is removed"]);
+      expect(readFileSync(target, "utf8")).toBe("x");
+    });
+
+    it("a hard link: starts, leaves the linked file alone and warns with a fixed message holding no path", async () => {
+      const dataDir = tmp();
+      const other = join(tmp(), "other-config");
+      writeFileSync(other, "[user]\n\tname = x\n");
+      linkSync(other, join(dataDir, EMPTY_GITCONFIG));
+      const warned = await startWarned(dataDir);
+      expect(warned).toEqual(["The Terminal: the shared git config has another hard link; agent runs will fail until it is removed"]);
+      expect(readFileSync(other, "utf8")).toBe("[user]\n\tname = x\n");
+    });
+
+    it("any other repair error: never thrown, warned with a fixed message holding no path or error text", () => {
+      const dataDir = tmp();
+      const warned: string[] = [];
+      const failing = () => {
+        throw Object.assign(new Error(`EPERM: operation not permitted, open '${join(dataDir, EMPTY_GITCONFIG)}'`), { code: "EPERM" });
+      };
+      expect(() => repairSharedGitconfig(dataDir, failing, (m) => warned.push(m))).not.toThrow();
+      expect(warned).toEqual(["The Terminal: the shared git config could not be repaired; agent runs will fail until this is fixed"]);
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a config that cannot be checked: warned as such, not as a non-file", () => {
+      const dataDir = tmp();
+      ensureEmptyGitconfig(dataDir);
+      const warned: string[] = [];
+      chmodSync(dataDir, 0o600); // no search permission: lstat fails with EACCES
+      try {
+        repairSharedGitconfig(dataDir, ensureEmptyGitconfig, (m) => warned.push(m));
+      } finally {
+        chmodSync(dataDir, 0o700);
+      }
+      expect(warned).toEqual(["The Terminal: the shared git config could not be checked; agent runs will fail until this is fixed"]);
+    });
+  });
+
   it("close() with a pending action does not hang, and records the run as stopped", async () => {
     const dataDir = tmp();
     process.env.THETERMINAL_FAKE_AGENT = "1";
@@ -428,12 +528,12 @@ describe("agent API", { timeout: 15000 }, () => {
     const projectId = board.createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
     const runner = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
-      adapters: { fake: new FakeAdapter(script) }, extraSecrets: [], dataDir,
+      adapters: { fake: new FakeAdapter(script) }, extraSecrets: () => [], dataDir,
     });
     const app = Fastify();
     try {
       registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
-      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], installed: () => false });
+      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false, apiKey: () => "none" });
       await runner.shutdown();
       const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });
       expect(res.statusCode).toBe(503);
@@ -462,7 +562,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const projectId = new BoardService(db, ledger).createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
     const crashed = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
-      adapters: { fake: new FakeAdapter(script) }, extraSecrets: [], dataDir,
+      adapters: { fake: new FakeAdapter(script) }, extraSecrets: () => [], dataDir,
     });
     const run = await crashed.start({ kind: "human", id: "owner" }, { projectId, adapter: "fake", prompt: "go" });
     await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: 5000, interval: 25 });

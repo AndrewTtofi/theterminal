@@ -14,8 +14,12 @@ export { createServer } from "./server/server.js";
 export type { RunningServer } from "./server/server.js";
 export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
-export { WorktreeManager } from "./agents/worktrees.js";
-export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction } from "./agents/adapter.js";
+export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
+export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
+export { registerConnectionRoutes } from "./server/connection-routes.js";
+export type { ConnectionRouteDeps } from "./server/connection-routes.js";
+export { workspaceCounts } from "./events/projections.js";
+export type { WorkspaceCounts } from "./events/projections.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
 export { FakeAdapter } from "./agents/fake-adapter.js";
@@ -31,3 +35,13 @@ export { buildChildEnv } from "./agents/child-env.js";
 export { JsonRpcPeer } from "./agents/jsonrpc.js";
 export type { RpcHandler } from "./agents/jsonrpc.js";
 export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";
+export { SecretStoreUnavailableError, SECRET_SERVICE, MAX_SECRET_BYTES, ChunkedSecretStore } from "./secrets/store.js";
+export type { SecretStore } from "./secrets/store.js";
+export { MemorySecretStore } from "./secrets/memory-store.js";
+export { KeychainSecretStore } from "./secrets/keychain-store.js";
+export type { KeyringEntryLike, KeyringEntryFactory } from "./secrets/keychain-store.js";
+export { ConnectionService, ConflictError, SecretInConfigError, UnknownFieldError } from "./connections/service.js";
+export type {
+  AddConnectionInput, ConnectionServiceDeps, ConnectionTester, Credentials, UpdateConnectionPatch,
+} from "./connections/service.js";
+export { CONNECTION_TESTERS } from "./connections/testers.js";

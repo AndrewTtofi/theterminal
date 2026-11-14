@@ -9,7 +9,8 @@ test("fake agent run: policy auto-allow/deny, human allow and deny", async ({ pa
   const needsYou = page.getByRole("region", { name: "Needs you" });
   const card = page.getByRole("article", { name: "Decision: Run: nvidia-smi" });
 
-  // Run 1: human Allow
+  // Run 1: human Allow (the start form lives in the Agents view's side bar)
+  await page.getByRole("navigation", { name: "Views" }).getByRole("button", { name: "Agents" }).click();
   await page.getByRole("combobox", { name: "Agent" }).selectOption("fake");
   await page.getByLabel("Prompt").fill("Detect GPU");
   await page.getByRole("button", { name: "Start agent" }).click();

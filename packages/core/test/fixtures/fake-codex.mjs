@@ -10,11 +10,11 @@
 //   with this other id) }. Steps:
 //   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true,
 //    "network"?:{"host":"…","protocol":"https"},"stdin"?:"y\n"} (once running: network asks for network access for
-//    the same item; stdin asks to write that input to the running command, as a writeStdin approval)
+//    the same item; stdin asks to write that input to the running command, as a writeStdin approval with its own item id)
 //   {"approve":"fileChange","itemId":"f1","changes":[{"path":"a.txt","kind":"add"|"update"|"delete","diff"?:"…"}]}
 //   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}
 //   {"ungated":"commandExecution"|"mcpToolCall"|…} (a command also streams output, as one that really ran would)
-//   {"exit":1,"stderr"?:"…"}  {"hang":true}
+//   {"exit":1,"stderr"?:"…"|["chunk",…]} (an array is written chunk by chunk, each flushed before the next)  {"hang":true}
 // THETERMINAL_FAKE_LOG: a file that receives one JSON line per event (start, requests, notifications, and the
 //   answers to the fake's own server-requests), for test assertions.
 import { appendFileSync } from "node:fs";
@@ -101,10 +101,13 @@ async function runSteps() {
           });
         }
         if (typeof s.stdin === "string") {
-          // Stdin approvals carry no command; the typed input is the reason (unified_exec process manager).
+          // Codex 0.169.0: the write_stdin tool call asks under its own call id (unified_exec process manager), with
+          // the running command and its cwd like every non-network approval (bespoke_event_handling.rs); the typed
+          // input is the reason.
           await serverRequest("item/commandExecution/requestApproval", {
-            kind: "writeStdin", threadId: THREAD, turnId: TURN, itemId: s.itemId, startedAtMs: now(), approvalId: "stdin-1",
-            environmentId: "local", reason: s.stdin, command: null, cwd: null, commandActions: null, proposedExecpolicyAmendment: null,
+            kind: "writeStdin", threadId: THREAD, turnId: TURN, itemId: `${s.itemId}-stdin`, startedAtMs: now(), approvalId: "stdin-1",
+            environmentId: "local", reason: s.stdin, command: s.command, cwd: s.cwd ?? process.cwd(), commandActions: [],
+            proposedExecpolicyAmendment: null,
           });
         }
         const exitCode = s.exitCode ?? 0;
@@ -141,7 +144,10 @@ async function runSteps() {
       notify("turn/completed", { threadId: THREAD, turn: turn("failed", error) });
       return;
     } else if (typeof s.exit === "number") {
-      if (s.stderr) process.stderr.write(s.stderr);
+      for (const chunk of Array.isArray(s.stderr) ? s.stderr : s.stderr ? [s.stderr] : []) {
+        await new Promise((r) => process.stderr.write(chunk, r));
+        await new Promise((r) => setTimeout(r, 25));
+      }
       process.exit(s.exit);
     } else if (s.hang) {
       return;
