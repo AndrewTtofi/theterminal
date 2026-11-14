@@ -27,7 +27,7 @@
 2. **Tampered database file**: someone edits `ledger.db` directly. Expected: on startup the server detects the broken chain, starts **read-only**, and reports `integrity: "broken"` with the seq. It does not crash and does not keep writing. (Tests in Tasks 3 and 7.)
 3. **A random website calling the local API** (CSRF / DNS rebinding). Expected: rejected without the token cookie/header, and rejected when the `Host` header isn't `127.0.0.1:<port>` or `localhost:<port>`. (Test in Task 6.)
 4. **Port already in use**: expected to fall back to the next free port and print the real URL. (Test in Task 7.)
-5. **Data directory with spaces or non-ASCII characters** (e.g. `C:\Users\Ανδρέας\AppData\…`). Expected: works normally. (Test in Task 7.)
+5. **Data directory with spaces or non-ASCII characters** (e.g. `C:\Users\Χρήστης\AppData\…`). Expected: works normally. (Test in Task 7.)
 
 ---
 
@@ -314,7 +314,7 @@ export function createServer(opts: { dataDir: string; port?: number /* default 4
   - start in a temp dir, create a project via fetch with Bearer, close, start again on the same dir: the project is still listed and the token is unchanged
   - **(Review Focus 2)** after closing, open the db, drop the triggers, alter seq 1's payload, then restart: `integrity.ok === false`, `/api/health` reports `integrity:"broken"`, and POST `/api/projects` → 423
   - **(Review Focus 4)** occupy port P with a plain `net` server, start with `port: P`: `running.port === P+1` and the url contains it
-  - **(Review Focus 5)** a dataDir under a temp folder named `Ανδρέας test dir` starts and persists
+  - **(Review Focus 5)** a dataDir under a temp folder named `Δοκιμή ünïcödé dir` starts and persists
 - [ ] **Step 2:** Run `pnpm --filter @theterminal/core test server paths`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run the same command. Expected: PASS. Then run `pnpm --filter @theterminal/core build && node packages/core/dist/cli.js start --data-dir ./.tmp-data`. Expected: it prints `The Terminal is running at http://127.0.0.1:4317/?token=…`.

@@ -68,6 +68,7 @@ Anyone who wants to build something and is willing to engage seriously: solo fou
 - **Local (default):** a downloadable installer for macOS, Windows and Linux. It installs prerequisites silently (e.g. Git, runtimes) *(my call)*. It runs a local server with a web-based interface, wrapped in a desktop app. Private and free.
 - **Own cloud:** one click deploys the same workspace into the **builder's own** cloud account (AWS/GCP/Azure). Agents then run 24/7 and collaborators can log in. Credentials still never touch a third party. Deploying the workspace to your cloud can double as the first guided lesson in infrastructure.
 - **Optional hosted version later**, not required and not designed around.
+- **Own local address** *(author's decision, 14 Nov 2026)*: the local workspace is served at a dedicated hostname (e.g. `http://theterminal.localhost:<port>`), and its session cookie is scoped to that hostname. Browser cookies don't separate ports, so a cookie on `127.0.0.1` would also be sent to any other local web server, including apps agents build and run. A dedicated hostname keeps the workspace key away from them.
 
 ### 4.2 Subscriptions and models
 - Connects to subscriptions **through each provider's official tools and APIs** (e.g. Claude Code / Claude Agent SDK, Codex CLI, Gemini CLI, API keys), never by scraping or working around terms. *(My call, aligned with the anti-goal.)*

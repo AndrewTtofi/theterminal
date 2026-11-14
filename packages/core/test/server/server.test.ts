@@ -213,7 +213,7 @@ describe("createServer", () => {
   });
 
   it("starts under a non-ASCII data dir", async () => {
-    const dataDir = join(tmp(), "Ανδρέας test dir");
+    const dataDir = join(tmp(), "Δοκιμή ünïcödé dir");
     const a = await start({ dataDir, port: 0 });
     await post(a, "/api/projects", { name: "P", pitch: "x" });
     await stop(a);
