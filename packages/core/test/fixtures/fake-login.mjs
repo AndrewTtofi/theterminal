@@ -7,8 +7,9 @@
 //   Any other run prints `lines` (default: a device URL and code on the provider's domain), then exits with `exit`,
 //   or never exits when `hang` is set. `pidFile` receives the process id, so a test can check it was killed;
 //   `envFile` receives the names of its environment variables; `countFile` gets one line per run.
-//   `grandchildPidFile`: also starts a child process that never exits (as a native helper would) and writes its pid
-//   there. `ignoreTerm`: ignore SIGTERM, so only SIGKILL ends this process.
+//   `grandchildPidFile`: also starts a child process that never exits on its own (as a browser or a native helper
+//   would) and writes its pid there; with `grandchildIgnoreTerm` it ignores SIGTERM too. `ignoreTerm`: ignore
+//   SIGTERM, so only SIGKILL ends this process.
 import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -24,8 +25,9 @@ if (args.includes("status")) {
   setTimeout(() => process.exit(script.status ?? 0), script.statusDelayMs ?? 0);
 } else {
   if (script.grandchildPidFile) {
-    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], { stdio: "ignore" });
-    writeFileSync(script.grandchildPidFile, String(child.pid));
+    // The grandchild writes its own pid once its handlers are in place, so a test that waits for the file sees it ready.
+    const code = `${script.grandchildIgnoreTerm ? "process.on('SIGTERM',()=>{}); " : ""}require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(()=>{},1000)`;
+    spawn(process.execPath, ["-e", code, script.grandchildPidFile], { stdio: "ignore" });
   }
 
   const lines = script.lines ?? [

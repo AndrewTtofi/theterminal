@@ -231,7 +231,8 @@ export class SignInManager {
     if (program === null) throw new CliNotInstalledError();
     const env = this.env(p); // throws for a relative CLI home or a modified shared git config: nothing starts
 
-    for (const [id, s] of this.sessions) if (s.provider === p) this.sessions.delete(id);
+    // A succeeded sign-in stays readable (a panel may still be polling it) until this one has finished.
+    for (const [id, s] of this.sessions) if (s.provider === p && s.state !== "succeeded") this.sessions.delete(id);
     const id = (this.deps.newId ?? randomUUID)();
     let resolveExited!: () => void;
     const session: Session = {
@@ -261,6 +262,7 @@ export class SignInManager {
       take("err", "", true);
       if (session.state === "running") session.state = ok ? "succeeded" : "failed";
       session.child = null;
+      this.dropOthers(session);
       resolveExited();
       if (this.shuttingDown || session.cancelled) return;
       try {
@@ -296,7 +298,13 @@ export class SignInManager {
   private stop(s: Session): void {
     if (s.state !== "running") return;
     s.state = "failed";
+    this.dropOthers(s);
     kill(s.child);
+  }
+
+  /** `finished` has its result; the provider's earlier sessions (a succeeded one kept for polling) are replaced by it. */
+  private dropOthers(finished: Session): void {
+    for (const [id, s] of this.sessions) if (s.provider === finished.provider && s !== finished) this.sessions.delete(id);
   }
 
   /** Each provider's sign-in state, from its CLI's status command (exit code only; its output is never read). */
@@ -363,7 +371,7 @@ export class SignInManager {
   }
 }
 
-/** On POSIX each login runs in its own process group (detached), so its helpers are killed with it. */
+/** On POSIX each login runs in its own process group (detached), so its helpers get the SIGTERM with it. */
 const GROUPS = process.platform !== "win32";
 
 /**
@@ -412,15 +420,21 @@ function signal(child: ChildProcess, sig: NodeJS.Signals): boolean {
 }
 
 /**
- * SIGTERM, then SIGKILL after a grace period. On POSIX the SIGKILL goes to the process group even when the login
- * itself has exited, so a helper that ignored SIGTERM is not left behind.
+ * SIGTERM to the login's whole process group (on POSIX), then, after a grace period, SIGKILL to the login itself if
+ * it is still running. Only the login is ever killed outright: a browser the login opened (through xdg-open) is in
+ * the same group, and it is the Owner's to close.
  */
 function kill(child: ChildProcess | null): void {
   if (!child) return;
-  const groupGone = !GROUPS && (child.exitCode !== null || child.signalCode !== null);
-  if (groupGone || !signal(child, "SIGTERM")) return;
+  const running = () => child.exitCode === null && child.signalCode === null;
+  if (!running() || !signal(child, "SIGTERM")) return;
   const force = setTimeout(() => {
-    if (GROUPS || (child.exitCode === null && child.signalCode === null)) signal(child, "SIGKILL");
+    if (!running()) return;
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
   }, KILL_GRACE_MS);
   force.unref();
 }

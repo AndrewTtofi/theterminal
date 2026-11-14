@@ -226,6 +226,47 @@ describe("SignInManager", { timeout: 15000 }, () => {
     expect(pids.map(alive)).toEqual([false, false]);
   });
 
+  it.skipIf(process.platform === "win32")("SIGKILLs only the login itself: a helper that ignored the group's SIGTERM (a browser) is left alone", async () => {
+    const dir = tempDir();
+    const pidFile = join(dir, "pid");
+    const grandchildPidFile = join(dir, "grandchild");
+    const { m } = manager({ hang: true, ignoreTerm: true, pidFile, grandchildPidFile, grandchildIgnoreTerm: true });
+    const { id } = m.start("codex");
+    await waitForFile(grandchildPidFile);
+    await waitForFile(pidFile);
+    const [pid, grandchild] = [pidFile, grandchildPidFile].map((f) => Number(readFileSync(f, "utf8")));
+    try {
+      m.cancel(id);
+      await settle(m, id, 8000);
+      const until = Date.now() + 5000;
+      while (alive(pid!) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+      expect(alive(pid!)).toBe(false);
+      expect(alive(grandchild!)).toBe(true);
+    } finally {
+      try {
+        process.kill(grandchild!, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  it("keeps a succeeded sign-in readable while a new one runs, until that one finishes", async () => {
+    // The fixture script is read at each start, so the second login can be made to hang.
+    const extraEnv: Record<string, string> = { THETERMINAL_FAKE_LOGIN: JSON.stringify({ exit: 0 }) };
+    const { m } = manager({}, { extraEnv });
+    const { id: first } = m.start("codex");
+    expect((await settle(m, first)).state).toBe("succeeded");
+    extraEnv.THETERMINAL_FAKE_LOGIN = JSON.stringify({ hang: true });
+    const { id: second } = m.start("codex");
+    expect(m.get(first)?.state).toBe("succeeded"); // a panel may still be polling it
+    expect(m.get(second)?.state).toBe("running");
+    m.cancel(second);
+    await settle(m, second);
+    expect(m.get(first)).toBeNull(); // replaced by the finished one
+    expect(m.get(second)?.state).toBe("failed");
+  });
+
   it("concurrent status requests share one check per provider", async () => {
     const countFile = join(tempDir(), "count");
     const { m } = manager({ status: 0, statusDelayMs: 200, countFile });
