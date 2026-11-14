@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Board as BoardData, LedgerEntry, Project, Stage } from "@theterminal/shared";
 import { api, errorMessage, subscribeLedger } from "./api";
 import type { Health } from "./api";
@@ -13,6 +13,7 @@ export function App() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const refreshRef = useRef<() => void>(() => {});
 
   const run = useCallback(async (action: () => Promise<unknown>) => {
     try {
@@ -34,6 +35,30 @@ export function App() {
     if (!selectedId) return;
     let cancelled = false;
     let unsubscribe = () => {};
+    // Coalesced refresh: at most one getBoard in flight plus one trailing; stale results are dropped.
+    let inFlight = false;
+    let trailing = false;
+    const refresh = async () => {
+      if (cancelled) return;
+      if (inFlight) {
+        trailing = true;
+        return;
+      }
+      inFlight = true;
+      try {
+        const b = await api.getBoard(selectedId);
+        if (!cancelled) setBoard(b);
+      } catch {
+        // keep the current board; the next refresh retries
+      } finally {
+        inFlight = false;
+        if (trailing && !cancelled) {
+          trailing = false;
+          void refresh();
+        }
+      }
+    };
+    refreshRef.current = () => void refresh();
     setBoard(null);
     setEntries([]);
     void run(async () => {
@@ -45,16 +70,15 @@ export function App() {
       unsubscribe = subscribeLedger(lastSeq, (e) => {
         if (e.projectId !== selectedId) return;
         setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
-        void api.getBoard(selectedId).then((b) => !cancelled && setBoard(b), () => {});
+        void refresh();
       });
     });
     return () => {
       cancelled = true;
+      refreshRef.current = () => {};
       unsubscribe();
     };
   }, [selectedId, run]);
-
-  const refreshBoard = async (id: string) => setBoard(await api.getBoard(id));
 
   return (
     <div className="app">
@@ -90,13 +114,13 @@ export function App() {
                 onAddCard={(stage: Stage, title) =>
                   void run(async () => {
                     await api.addCard(selectedId, { title, stage });
-                    await refreshBoard(selectedId);
+                    refreshRef.current();
                   })
                 }
                 onMoveCard={(cardId, to) =>
                   void run(async () => {
                     await api.moveCard(cardId, to);
-                    await refreshBoard(selectedId);
+                    refreshRef.current();
                   })
                 }
               />
