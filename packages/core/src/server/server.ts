@@ -9,6 +9,7 @@ import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
 import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
+import { acquireDataDirLock } from "./data-dir-lock.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
@@ -255,6 +256,11 @@ export async function createServer(opts: {
   shutdownTimeoutMs?: number;
   /** Tests only: the PATH lookup for provider CLIs. Default: the PATH of this process. */
   which?: Which;
+  /**
+   * The directory of the `@theterminal/core` install whose bundled agent programs are used (a host passes it as
+   * `--core-dir`). Default: this package's own directory.
+   */
+  coreDir?: string;
   /** Tests only: replaces the bundled program lookups. Default: the packages installed with this one. */
   bundled?: Partial<BundledPrograms>;
   /** Where connection secrets live. Default: the OS keychain (see selectSecretStore). */
@@ -264,7 +270,12 @@ export async function createServer(opts: {
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
-  const lookups: BundledPrograms = { ...BUNDLED, ...opts.bundled };
+  const coreDir = opts.coreDir;
+  const defaults: BundledPrograms =
+    coreDir === undefined
+      ? BUNDLED
+      : { claude: () => bundledClaude({ coreDir }), codex: () => bundledCodex({ coreDir }), gemini: () => bundledGemini({ coreDir }) };
+  const lookups: BundledPrograms = { ...defaults, ...opts.bundled };
   const located = { claude: lookups.claude(), codex: lookups.codex(), gemini: lookups.gemini() };
   const bundled: BundledPrograms = { claude: () => located.claude, codex: () => located.codex, gemini: () => located.gemini };
   // Read once, at startup: the adapters and the install state below must agree for the server's lifetime.
@@ -277,114 +288,122 @@ export async function createServer(opts: {
   const adapters = buildAdapters(opts.dataDir, which, bundled, fakeCli);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
-  const db = openDatabase(join(opts.dataDir, "ledger.db"));
-  const ledger = new Ledger(db);
-  const board = new BoardService(db, ledger);
-  const token = loadToken(opts.dataDir, opts.token);
-
-  // Projections are derived state: rebuild them from the verified ledger so out-of-band edits are undone.
-  const integrity = ledger.verify();
-  if (integrity.ok) {
-    board.rebuildProjections();
-  } else {
-    board.rebuildProjections({ beforeSeq: integrity.brokenAtSeq });
-    ledger.readOnly = true;
-  }
-
-  repairSharedGitconfig(opts.dataDir);
-
-  const connections = new ConnectionService({
-    db,
-    ledger,
-    secrets: selectSecretStore(process.env, opts.secrets),
-    testers: CONNECTION_TESTERS,
-    fetch: selectFetch(process.env, opts.fetch),
-  });
-  await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
-
-  const signin = new SignInManager({
-    dataDir: opts.dataDir,
-    program: (p) => signinProgram(p, fakeCli, bundled, which),
-    cliHome: (p) => connections.credentialsFor(p)?.cliHome,
-    extraEnv: fakeLoginEnv(),
-    secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
-    record: (provider, ok) =>
-      commitEvent(db, ledger, () => ({
-        event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
-        result: () => undefined,
-      })),
-  });
-
-  const runner = new AgentRunner({
-    db,
-    ledger,
-    worktrees: new WorktreeManager(opts.dataDir),
-    broker: new ApprovalBroker(),
-    adapters,
-    // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
-    // connection's values stay in secretValues() until the process exits.
-    extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
-    credentials: (p) => connections.credentialsFor(p),
-    dataDir: opts.dataDir,
-    ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
-  });
-
-  const app = Fastify();
-  let boundPort = 0;
+  // Before the ledger opens: the CLI and the desktop app share one data folder, and only one server may use it.
+  const lock = acquireDataDirLock(opts.dataDir);
   try {
-    if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
-    registerAuth(app, { token, port: () => boundPort });
-    registerLedgerStream(app, ledger);
-    registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
-    registerAgentRoutes(app, {
-      db,
-      runner,
-      settings: new ProviderSettings(db, ledger),
-      adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
-      // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
-      available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
-      apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
-    });
-    registerConnectionRoutes(app, { db, connections, signin, ledger });
-    if (opts.uiDir) registerStaticUi(app, opts.uiDir);
-    await app.ready();
+    const db = openDatabase(join(opts.dataDir, "ledger.db"));
+    const ledger = new Ledger(db);
+    const board = new BoardService(db, ledger);
+    const token = loadToken(opts.dataDir, opts.token);
 
-    const first = opts.port ?? DEFAULT_PORT;
-    let lastError: unknown;
-    for (let i = 0; i < PORT_ATTEMPTS; i++) {
-      const candidate = first === 0 ? 0 : first + i;
-      try {
-        await app.listen({ host: "127.0.0.1", port: candidate });
-        boundPort = (app.server.address() as AddressInfo).port;
-        lastError = undefined;
-        break;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
-        lastError = err;
+    // Projections are derived state: rebuild them from the verified ledger so out-of-band edits are undone.
+    const integrity = ledger.verify();
+    if (integrity.ok) {
+      board.rebuildProjections();
+    } else {
+      board.rebuildProjections({ beforeSeq: integrity.brokenAtSeq });
+      ledger.readOnly = true;
+    }
+
+    repairSharedGitconfig(opts.dataDir);
+
+    const connections = new ConnectionService({
+      db,
+      ledger,
+      secrets: selectSecretStore(process.env, opts.secrets),
+      testers: CONNECTION_TESTERS,
+      fetch: selectFetch(process.env, opts.fetch),
+    });
+    await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+
+    const signin = new SignInManager({
+      dataDir: opts.dataDir,
+      program: (p) => signinProgram(p, fakeCli, bundled, which),
+      cliHome: (p) => connections.credentialsFor(p)?.cliHome,
+      extraEnv: fakeLoginEnv(),
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+      record: (provider, ok) =>
+        commitEvent(db, ledger, () => ({
+          event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
+          result: () => undefined,
+        })),
+    });
+
+    const runner = new AgentRunner({
+      db,
+      ledger,
+      worktrees: new WorktreeManager(opts.dataDir),
+      broker: new ApprovalBroker(),
+      adapters,
+      // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
+      // connection's values stay in secretValues() until the process exits.
+      extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+      credentials: (p) => connections.credentialsFor(p),
+      dataDir: opts.dataDir,
+      ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
+    });
+
+    const app = Fastify();
+    let boundPort = 0;
+    try {
+      if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
+      registerAuth(app, { token, port: () => boundPort });
+      registerLedgerStream(app, ledger);
+      registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+      registerAgentRoutes(app, {
+        db,
+        runner,
+        settings: new ProviderSettings(db, ledger),
+        adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
+        // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
+        available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
+        apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
+      });
+      registerConnectionRoutes(app, { db, connections, signin, ledger });
+      if (opts.uiDir) registerStaticUi(app, opts.uiDir);
+      await app.ready();
+
+      const first = opts.port ?? DEFAULT_PORT;
+      let lastError: unknown;
+      for (let i = 0; i < PORT_ATTEMPTS; i++) {
+        const candidate = first === 0 ? 0 : first + i;
+        try {
+          await app.listen({ host: "127.0.0.1", port: candidate });
+          boundPort = (app.server.address() as AddressInfo).port;
+          lastError = undefined;
+          break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
+          lastError = err;
+        }
       }
+      if (lastError) {
+        throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
+      }
+    } catch (err) {
+      await signin.shutdown();
+      await app.close().catch(() => undefined);
+      db.close();
+      throw err;
     }
-    if (lastError) {
-      throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
-    }
+
+    return {
+      url: `http://${APP_HOST}:${boundPort}/?token=${token}`,
+      loopbackUrl: `http://127.0.0.1:${boundPort}/`,
+      port: boundPort,
+      token,
+      integrity,
+      async close() {
+        await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+        await signin.shutdown(); // kills every login and status check before the db closes
+        for (const client of app.websocketServer.clients) client.terminate();
+        await app.close();
+        db.close();
+        lock.release();
+      },
+    };
   } catch (err) {
-    await signin.shutdown();
-    await app.close().catch(() => undefined);
-    db.close();
+    lock.release();
     throw err;
   }
-
-  return {
-    url: `http://${APP_HOST}:${boundPort}/?token=${token}`,
-    loopbackUrl: `http://127.0.0.1:${boundPort}/`,
-    port: boundPort,
-    token,
-    integrity,
-    async close() {
-      await runner.shutdown(); // stops runs and denies pending actions while the db is still open
-      await signin.shutdown(); // kills every login and status check before the db closes
-      for (const client of app.websocketServer.clients) client.terminate();
-      await app.close();
-      db.close();
-    },
-  };
 }
