@@ -97,6 +97,7 @@ describe("eventPayloadSchemas", () => {
       "card.status_changed",
       "connection.added",
       "connection.removed",
+      "connection.signin",
       "connection.tested",
       "connection.updated",
       "connection.used",

@@ -1,8 +1,10 @@
 import { useId, useState } from "react";
+import { PROVIDER_MODES } from "@theterminal/shared";
 import type { CatalogEntry, Connection, ConnectionField, Provider } from "@theterminal/shared";
 import { errorMessage } from "../api";
 import type { ConnectionPatch, NewConnection } from "../api";
-import { ProviderModeSection } from "../components/ProviderAuthSettings";
+import { OWN_LABEL, PROVIDER_NAMES, ProviderModeSection } from "../components/ProviderAuthSettings";
+import { SignInPanel } from "./SignInPanel";
 import { useShell } from "../shell/model";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
@@ -55,6 +57,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
   const fieldsOf = (storage: ConnectionField["storage"]) => entry.fields.filter((f) => f.storage === storage);
   const provider = isProvider(entry.provider) ? entry.provider : null;
@@ -195,6 +198,18 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           ack={info.acks[provider]}
           onChange={model.onProviderAuthChange}
         />
+      )}
+      {provider && info && (
+        <div className="connection-field signin">
+          {signingIn ? (
+            <SignInPanel provider={provider} onClose={() => setSigningIn(false)} />
+          ) : (
+            <button type="button" onClick={() => setSigningIn(true)}>
+              Sign in
+            </button>
+          )}
+          <p className="field-help">For "{OWN_LABEL[PROVIDER_MODES[provider][1]]}": sign in with {PROVIDER_NAMES[provider]}'s own login.</p>
+        </div>
       )}
       {entry.fields.map(field)}
       {error && (

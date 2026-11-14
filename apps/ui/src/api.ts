@@ -93,6 +93,10 @@ export type Status = {
   ci: null;
 };
 
+/** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
+export type SignInView = { state: "running" | "succeeded" | "failed"; lines: string[] };
+export type SignInStatus = "signed_in" | "signed_out" | "unknown" | "not_installed";
+
 const enc = encodeURIComponent;
 
 export const api = {
@@ -135,6 +139,11 @@ export const api = {
   testConnection: (id: string) =>
     request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST" }),
   getStatus: () => request<Status>("/api/status"),
+  startSignIn: (provider: Provider) =>
+    request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
+  getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
+  cancelSignIn: (id: string) => request<void>(`/api/connections/signin/${enc(id)}`, { method: "DELETE" }),
+  getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
 };
 
 export function errorMessage(e: unknown): string {

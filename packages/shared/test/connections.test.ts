@@ -122,6 +122,17 @@ describe("connection.updated", () => {
   });
 });
 
+describe("connection.signin", () => {
+  it("carries only the provider and whether it worked", () => {
+    ok("connection.signin", { provider: "codex", ok: true });
+    ok("connection.signin", { provider: "claude", ok: false });
+    bad("connection.signin", { provider: "github", ok: true });
+    bad("connection.signin", { provider: "codex", ok: true, lines: ["x"] });
+    bad("connection.signin", { provider: "codex", ok: true, account: "someone@example.com" });
+    bad("connection.signin", { provider: "codex" });
+  });
+});
+
 describe("connection.removed, connection.tested, connection.used", () => {
   it("accepts valid payloads", () => {
     ok("connection.removed", { connectionId: "c1", name: "n" });

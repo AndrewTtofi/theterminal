@@ -4,7 +4,7 @@ import type { AuthMode, Provider } from "@theterminal/shared";
 
 export const PROVIDER_NAMES: Record<Provider, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 
-const OWN_LABEL: Record<string, string> = {
+export const OWN_LABEL: Record<string, string> = {
   subscription: "My own Claude subscription",
   chatgpt: "My own ChatGPT plan",
   google: "My own Google account",

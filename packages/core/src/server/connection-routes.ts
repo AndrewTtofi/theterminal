@@ -1,13 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS } from "@theterminal/shared";
+import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, PROVIDERS } from "@theterminal/shared";
 import type { ConnectionService } from "../connections/service.js";
+import { CliNotInstalledError, SignInRunningError, TerminalRequiredError, type SignInManager } from "../connections/signin.js";
 import type { Db } from "../db.js";
+import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
   connections: ConnectionService;
+  signin: SignInManager;
+  ledger: Ledger;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -36,7 +40,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections } = deps;
+  const { db, connections, signin, ledger } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -73,6 +77,32 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
 
   // The UI sends this with no body and no content-type.
   app.post<{ Params: { id: string } }>("/api/connections/:id/test", async (req) => connections.test(actor, req.params.id));
+
+  // Sign-in to the Owner's own subscriptions: the provider's official login command, never its credentials.
+  app.get("/api/connections/signin-status", async () => signin.status());
+
+  // The UI sends this with no body and no content-type.
+  app.post<{ Params: { provider: string } }>("/api/connections/signin/:provider", async (req, reply) => {
+    const provider = z.enum(PROVIDERS).parse(req.params.provider);
+    if (ledger.readOnly) return reply.code(423).send({ error: "ledger_read_only" });
+    try {
+      return reply.code(202).send(signin.start(provider));
+    } catch (e) {
+      if (e instanceof SignInRunningError) return reply.code(409).send({ error: "signin_running" });
+      if (e instanceof CliNotInstalledError) return reply.code(422).send({ error: "not_installed" });
+      if (e instanceof TerminalRequiredError) return reply.code(422).send({ error: "terminal_required" });
+      throw e;
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/connections/signin/:id", async (req, reply) => {
+    const view = signin.get(req.params.id);
+    return view ?? reply.code(404).send({ error: "not_found" });
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/connections/signin/:id", async (req, reply) =>
+    signin.cancel(req.params.id) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" }),
+  );
 
   app.get("/api/status", async () => {
     const counts = workspaceCounts(db);

@@ -70,3 +70,20 @@ describe("errorMessage", () => {
     expect(errorMessage(new ApiError(400, "invalid_input"))).toBe("That input was not accepted");
   });
 });
+
+describe("sign-in api", () => {
+  it("starts, reads and cancels a sign-in, and reads the sign-in status", async () => {
+    const f = respond(200, {});
+    await api.startSignIn("codex");
+    expect(call(f, 0)[0]).toBe("/api/connections/signin/codex");
+    expect(call(f, 0)[1]).toMatchObject({ method: "POST" });
+    expect(call(f, 0)[1].body).toBeUndefined();
+    await api.getSignIn("s 1");
+    expect(call(f, 1)[0]).toBe("/api/connections/signin/s%201");
+    await api.cancelSignIn("s1");
+    expect(call(f, 2)[0]).toBe("/api/connections/signin/s1");
+    expect(call(f, 2)[1]).toMatchObject({ method: "DELETE" });
+    await api.getSignInStatus();
+    expect(call(f, 3)[0]).toBe("/api/connections/signin-status");
+  });
+});

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import Fastify from "fastify";
 import { openDatabase } from "../db.js";
@@ -13,6 +13,8 @@ import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { ConnectionService } from "../connections/service.js";
+import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
+import { commitEvent } from "../events/commit.js";
 import { CONNECTION_TESTERS } from "../connections/testers.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
@@ -104,6 +106,34 @@ const BUNDLED: BundledPrograms = { claude: () => bundledClaude(), codex: () => b
 export type Which = (cmd: string) => string | null;
 
 type CliCommand = { file: string; args: string[] };
+
+/**
+ * Where a provider's login and status commands run from, as a run would locate the CLI: a test fixture, else the
+ * bundled program, else PATH. On Windows a PATH `.cmd` cannot run without a shell: Codex's npm shim is run as its
+ * script with this Node, as the Codex adapter does; any other `.cmd` is not used (Gemini's is never run to sign in).
+ */
+export function signinProgram(
+  p: Provider,
+  fakeCli: Partial<Record<Provider, CliCommand>>,
+  bundled: BundledPrograms,
+  which: Which,
+): CliCommand | null {
+  const fake = fakeCli[p];
+  if (fake) return fake;
+  if (p === "claude") {
+    const file = bundled.claude();
+    if (file !== null) return { file, args: [] };
+  } else {
+    const cli = bundled[p]();
+    if (cli !== null) return cli;
+  }
+  const file = which(PROVIDER_CLI[p]);
+  if (file === null) return null;
+  if (!/\.cmd$/i.test(file) || p === "gemini") return { file, args: [] };
+  if (p !== "codex") return null;
+  const script = join(dirname(file), "node_modules", "@openai", "codex", "bin", "codex.js");
+  return existsSync(script) ? { file: process.execPath, args: [script] } : null;
+}
 
 /**
  * Tests only: when THETERMINAL_FAKE_AGENT=1, THETERMINAL_<PROVIDER>_BIN may name a fixture script that stands in
@@ -272,6 +302,19 @@ export async function createServer(opts: {
   });
   await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
 
+  const signin = new SignInManager({
+    dataDir: opts.dataDir,
+    program: (p) => signinProgram(p, fakeCli, bundled, which),
+    cliHome: (p) => connections.credentialsFor(p)?.cliHome,
+    extraEnv: fakeLoginEnv(),
+    secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+    record: (provider, ok) =>
+      commitEvent(db, ledger, () => ({
+        event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
+        result: () => undefined,
+      })),
+  });
+
   const runner = new AgentRunner({
     db,
     ledger,
@@ -302,7 +345,7 @@ export async function createServer(opts: {
       available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
       apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
     });
-    registerConnectionRoutes(app, { db, connections });
+    registerConnectionRoutes(app, { db, connections, signin, ledger });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 
@@ -324,6 +367,7 @@ export async function createServer(opts: {
       throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
     }
   } catch (err) {
+    await signin.shutdown();
     await app.close().catch(() => undefined);
     db.close();
     throw err;
@@ -337,6 +381,7 @@ export async function createServer(opts: {
     integrity,
     async close() {
       await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+      await signin.shutdown(); // kills every login and status check before the db closes
       for (const client of app.websocketServer.clients) client.terminate();
       await app.close();
       db.close();

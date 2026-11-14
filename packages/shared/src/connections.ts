@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDERS } from "./agents.js";
 
 export const CONNECTION_KINDS = ["llm", "cloud", "github", "mcp", "hardware"] as const;
 export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
@@ -169,6 +170,8 @@ export const connectionPayloadSchemas = {
       purpose: z.enum(["api_key", "cli_home", "cloud_credentials"]),
     })
     .strict(),
+  /** A sign-in through the provider's own login command: never its output, account names or emails. */
+  "connection.signin": z.object({ provider: z.enum(PROVIDERS), ok: z.boolean() }).strict(),
 } satisfies Record<string, z.ZodTypeAny>;
 
 export type ConnectionEventType = keyof typeof connectionPayloadSchemas;
