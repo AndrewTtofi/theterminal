@@ -299,7 +299,8 @@ describe("AgentRunner with the FakeAdapter", () => {
     await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
     await untilPending();
     const [a] = listPendingActions(db, projectId);
-    const full = JSON.stringify({ command: input.command, cwd: "<data>/x" }); // normalised, scrubbed and redacted
+    // Only the directory becomes the placeholder; the rest keeps this platform's separator.
+    const full = JSON.stringify({ command: input.command, cwd: `<data>${sep}x` }); // normalised, scrubbed and redacted
     expect(a!.input).toEqual({
       truncated: true,
       sha256: createHash("sha256").update(full).digest("hex"),

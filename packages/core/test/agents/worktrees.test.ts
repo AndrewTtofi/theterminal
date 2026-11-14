@@ -176,10 +176,10 @@ describe("WorktreeManager", () => {
     });
 
     it("accepts existing and not-yet-existing files inside", () => {
-      expect(mgr.resolveInside(wt, "src/a.ts")).toBe(join(realpathSync(wt), "src", "a.ts"));
-      expect(mgr.resolveInside(wt, "src/new/deep/b.ts")).toBe(join(realpathSync(wt), "src", "new", "deep", "b.ts"));
-      expect(mgr.resolveInside(wt, join(wt, "src", "a.ts"))).toBe(join(realpathSync(wt), "src", "a.ts"));
-      expect(mgr.resolveInside(wt, ".")).toBe(realpathSync(wt));
+      expect(mgr.resolveInside(wt, "src/a.ts")).toBe(join(realpathSync.native(wt), "src", "a.ts"));
+      expect(mgr.resolveInside(wt, "src/new/deep/b.ts")).toBe(join(realpathSync.native(wt), "src", "new", "deep", "b.ts"));
+      expect(mgr.resolveInside(wt, join(wt, "src", "a.ts"))).toBe(join(realpathSync.native(wt), "src", "a.ts"));
+      expect(mgr.resolveInside(wt, ".")).toBe(realpathSync.native(wt));
     });
 
     it("rejects parent traversal", () => {
