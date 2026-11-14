@@ -31,6 +31,7 @@ export class JsonRpcPeer {
   private readonly opts: {
     onRequest: RpcHandler;
     onNotification: (method: string, params: unknown) => void;
+    allowMissingVersion?: boolean;
   };
   private readonly maxLineBytes: number;
   private readonly requestTimeoutMs: number;
@@ -54,6 +55,8 @@ export class JsonRpcPeer {
       requestTimeoutMs?: number;
       /** Close ("output error") once more than this many bytes are queued unwritten. Default 4 * maxLineBytes. */
       maxOutputBufferBytes?: number;
+      /** Accept incoming messages with no `jsonrpc` field (`codex app-server` omits it). A wrong value still closes. */
+      allowMissingVersion?: boolean;
     },
   ) {
     this.io = io;
@@ -160,7 +163,8 @@ export class JsonRpcPeer {
     } catch {
       return this.close("protocol error");
     }
-    if (msg === null || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0") {
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) return this.close("protocol error");
+    if (msg.jsonrpc !== "2.0" && !(this.opts.allowMissingVersion && !("jsonrpc" in msg))) {
       return this.close("protocol error");
     }
     const hasId = msg.id !== undefined && msg.id !== null;

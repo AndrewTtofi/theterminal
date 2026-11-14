@@ -105,6 +105,24 @@ describe("JsonRpcPeer", () => {
     await expect(peer.closed).resolves.toBe("protocol error");
   });
 
+  it("closes on a missing jsonrpc version by default", async () => {
+    const { input, peer } = make();
+    input.write(line({ method: "n" }));
+    await expect(peer.closed).resolves.toBe("protocol error");
+  });
+
+  it("accepts messages without a jsonrpc version when allowed, but still rejects a wrong one", async () => {
+    const { input, notes, peer, tick } = make({ allowMissingVersion: true });
+    const p = peer.request("ping");
+    input.write(line({ id: 1, result: "pong" }));
+    await expect(p).resolves.toBe("pong");
+    input.write(line({ method: "n", params: 1 }));
+    await tick();
+    expect(notes).toEqual([["n", 1]]);
+    input.write(line({ jsonrpc: "1.0", method: "n" }));
+    await expect(peer.closed).resolves.toBe("protocol error");
+  });
+
   it("closes on a response to an unknown id", async () => {
     const { input, peer } = make();
     input.write(line({ jsonrpc: "2.0", id: 99, result: 1 }));

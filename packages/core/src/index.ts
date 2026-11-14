@@ -29,3 +29,4 @@ export type { WhichOptions } from "./agents/which.js";
 export { buildChildEnv } from "./agents/child-env.js";
 export { JsonRpcPeer } from "./agents/jsonrpc.js";
 export type { RpcHandler } from "./agents/jsonrpc.js";
+export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";
