@@ -27,3 +27,5 @@ export { ProviderSettings } from "./agents/settings.js";
 export { which } from "./agents/which.js";
 export type { WhichOptions } from "./agents/which.js";
 export { buildChildEnv } from "./agents/child-env.js";
+export { JsonRpcPeer } from "./agents/jsonrpc.js";
+export type { RpcHandler } from "./agents/jsonrpc.js";
