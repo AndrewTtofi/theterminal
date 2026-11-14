@@ -117,6 +117,12 @@ function blockScalarEnd(s: string, keyIndex: number, from: number): number {
   return end;
 }
 
+/**
+ * A value that is exactly one environment-variable reference ($VAR, ${VAR}, %VAR%, $env:VAR), optionally
+ * quoted, is a name and not a secret. Nothing may be attached to it, so `$VAR-x` or `a$VAR` is still redacted.
+ */
+const ENV_REFERENCE = /^\\?["']?(?:\$\{[A-Za-z_]\w*\}|\$env:[A-Za-z_]\w*|\$[A-Za-z_]\w*|%[A-Za-z_]\w*%)\\?["']?(?![\w$.\-/:@%{])/i;
+
 function redactPairs(s: string): string {
   let out = "";
   let last = 0;
@@ -136,6 +142,7 @@ function redactPairs(s: string): string {
       const scheme = AUTH_SCHEME.exec(s);
       if (scheme) pos += scheme[0].length;
     }
+    if (ENV_REFERENCE.test(s.slice(pos, pos + 128))) continue;
     const escaped = s[pos] === "\\" && (s[pos + 1] === '"' || s[pos + 1] === "'");
     const q = escaped ? s[pos + 1]! : s[pos];
     let end: number;

@@ -74,3 +74,15 @@ describe("classify truncated input", () => {
     expect(classify({ ...action("shell", []), input: { command: "ls" } }, wt, mgr).verdict).toBe("ask");
   });
 });
+
+describe("classify redacted shell input", () => {
+  const REASON = "command contains a secret and cannot be fully reviewed";
+  const shell = (command: string): ProposedAction => ({ ...action("shell", []), input: { command } });
+  it("auto-denies a shell action whose recorded input contains [REDACTED]", () => {
+    expect(classify(shell("curl -H 'Authorization: [REDACTED]"), wt, mgr)).toEqual({ verdict: "auto_deny", reason: REASON });
+    expect(classify(shell('export API_KEY="[REDACTED]"'), wt, mgr)).toEqual({ verdict: "auto_deny", reason: REASON });
+  });
+  it("does not apply to other kinds", () => {
+    expect(classify({ ...action("file_write", ["a.txt"]), input: { text: "[REDACTED]" } }, wt, mgr).verdict).toBe("ask");
+  });
+});

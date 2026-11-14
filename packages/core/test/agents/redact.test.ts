@@ -40,6 +40,21 @@ describe("redact", () => {
   it("applies extraSecrets longest first, so a shorter one never leaves a tail", () => {
     expect(redact("x abcdef y", ["abc", "abcdef"])).toBe(`x ${REDACTED} y`);
   });
+  it("keeps a value that is only an environment-variable reference", () => {
+    for (const ref of ["$FOO", "${FOO}", '"$FOO"', "'$FOO'", "%FOO%", "$env:FOO"]) {
+      expect(redact(`export API_KEY=${ref}`)).toBe(`export API_KEY=${ref}`);
+    }
+    const cmd = 'curl -H "Authorization: Bearer $GITHUB_TOKEN" https://x.example';
+    expect(redact(cmd)).toBe(cmd);
+    expect(redact({ command: cmd })).toEqual({ command: cmd });
+  });
+
+  it("still redacts literal values and references with more attached", () => {
+    expect(redact("API_KEY=sk-ant-TESTKEY0123456789abcdef")).toBe(`API_KEY=${REDACTED}`);
+    expect(redact("API_KEY=$FOO-literal")).toBe(`API_KEY=${REDACTED}`);
+    expect(redact("API_KEY=prefix$FOO")).toBe(`API_KEY=${REDACTED}`);
+  });
+
   it("honours extraSecrets", () => {
     expect(redact("hello workspace-tok-123 bye", ["workspace-tok-123"])).toBe(`hello ${REDACTED} bye`);
   });
