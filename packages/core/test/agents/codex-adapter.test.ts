@@ -80,6 +80,31 @@ describe("codexApprovalToAction", () => {
     });
   });
 
+  it("records the request's reason for a plain command", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "command", command: "ls", reason: "list the files" }, CWD);
+    expect(a.input).toEqual({ command: "ls", reason: "list the files" });
+  });
+
+  it("maps a stdin approval to sending input to the running command, never to running it", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w");
+    expect(a).toEqual({
+      tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+      input: { command: "python3 repl.py", cwd: "/w", kind: "writeStdin", reason: "y\n" }, paths: ["/w"],
+    });
+    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q" }, CWD);
+    expect(long.summary).toBe(`Send input to running command: ${"x".repeat(150)}`);
+  });
+
+  it.each([["a string", "registry.example.com"], ["an array", ["x"]], ["a number", 1]])(
+    "treats a malformed network context (%s) as a network request",
+    (_label, ctx) => {
+      const a = codexApprovalToAction(CMD, { itemId: "i1", command: "npm install", networkApprovalContext: ctx }, CWD);
+      expect(a).toEqual({
+        tool: "codex.network", kind: "web", summary: "Network access to (unknown host) (unknown)", input: { host: "", protocol: "" }, paths: [],
+      });
+    },
+  );
+
   it("maps any other request to an other action", () => {
     expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD)).toEqual({
       tool: "codex.item/tool/call", kind: "other", summary: "Unsupported Codex request: item/tool/call",
@@ -266,6 +291,45 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
     // The command's result still belongs to the command's action.
     expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "installed" }]);
+  });
+
+  it("asks before sending input to a running command, labelled as input, and keeps the command's result on the command", async () => {
+    script([{ approve: "command", command: "python3 repl.py", itemId: "i1", output: "done", stdin: "y\n" }]);
+    const { result, proposed, events } = run(make());
+    expect(await result).toEqual({ status: "completed" });
+    expect(proposed).toEqual([
+      { tool: "codex.command", kind: "shell", summary: "Run: python3 repl.py", input: { command: "python3 repl.py", cwd: dir }, paths: [dir] },
+      {
+        tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+        input: { command: "python3 repl.py", cwd: dir, kind: "writeStdin", reason: "y\n" }, paths: [dir],
+      },
+    ]);
+    expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "accept" }]);
+    expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "done" }]);
+  });
+
+  it("declines denied input to a running command without failing the run", async () => {
+    script([{ approve: "command", command: "python3 repl.py", itemId: "i1", output: "done", stdin: "rm -rf /\n" }]);
+    const { result, events } = run(make(), (a) => ({ decision: a.tool === "codex.stdin" ? "deny" : "allow", reason: "r" }));
+    expect(await result).toEqual({ status: "completed" });
+    expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
+    expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "done" }]);
+  });
+
+  it("always declines a malformed network context without asking anyone", async () => {
+    script([{ approve: "command", command: "npm install", itemId: "i1", output: "installed", network: "registry.example.com" }]);
+    const { result, proposed, denied } = run(make());
+    expect(await result).toEqual({ status: "completed" });
+    expect(proposed.map((a) => a.tool)).toEqual(["codex.command"]);
+    expect(denied).toMatchObject([[{ tool: "codex.network", kind: "web" }, "network access is not supported in Codex runs"]]);
+    expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
+  });
+
+  it("ignores a completed turn other than the one announced by turn/started", async () => {
+    script({ strayTurnCompleted: "turn-0", steps: [{ message: "All done." }] });
+    const { result, events } = run(make());
+    expect(await result).toEqual({ status: "completed" });
+    expect(events).toEqual([{ type: "message", text: "All done." }]);
   });
 
   it("uses the command announced in item/started when the approval omits it", async () => {

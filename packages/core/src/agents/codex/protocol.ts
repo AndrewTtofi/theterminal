@@ -27,6 +27,7 @@ export const ITEM_COMPLETED = "item/completed";
 export const AGENT_MESSAGE_DELTA = "item/agentMessage/delta";
 export const COMMAND_OUTPUT_DELTA = "item/commandExecution/outputDelta";
 export const COMMAND_TERMINAL_INTERACTION = "item/commandExecution/terminalInteraction";
+export const TURN_STARTED = "turn/started";
 export const TURN_COMPLETED = "turn/completed";
 export const ERROR = "error";
 
@@ -92,6 +93,10 @@ export type CommandExecutionRequestApprovalParams = {
   turnId: string;
   itemId: string;
   approvalId?: string | null;
+  /** Why it asks; for `writeStdin`, the input to be written to the running command. */
+  reason?: string | null;
+  /** Set only when the command asks for network access. */
+  networkApprovalContext?: { host: string; protocol: string } | null;
   command?: string | null;
   cwd?: string | null;
 };
@@ -125,5 +130,6 @@ export type CommandOutputDeltaNotification = { threadId: string; turnId: string;
 export type TerminalInteractionNotification = { threadId: string; turnId: string; itemId: string; processId: string; stdin: string };
 export type ItemNotification = { item: ThreadItem; threadId: string; turnId: string };
 export type AgentMessageDeltaNotification = { threadId: string; turnId: string; itemId: string; delta: string };
+export type TurnStartedNotification = { threadId: string; turn: Turn };
 export type TurnCompletedNotification = { threadId: string; turn: Turn };
 export type ErrorNotification = { error: TurnError; willRetry: boolean; threadId: string; turnId: string };

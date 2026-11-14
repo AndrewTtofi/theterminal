@@ -99,6 +99,8 @@ async function hasRules(dir: string): Promise<boolean> {
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** Any non-null network context marks a network request, even a malformed one: fail closed. */
+const isNetworkRequest = (p: Record<string, unknown>): boolean => p.networkApprovalContext != null;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref());
@@ -127,24 +129,40 @@ export function codexApprovalToAction(
   const p = isRecord(params) ? params : {};
   const display = (path: string) => displayPath(cwd, path);
 
-  if (method === P.COMMAND_APPROVAL && isRecord(p.networkApprovalContext)) {
+  if (method === P.COMMAND_APPROVAL && isNetworkRequest(p)) {
     // Network access for a command that is already running: a separate web action, never the command itself.
-    const host = str(p.networkApprovalContext.host);
-    const protocol = str(p.networkApprovalContext.protocol);
+    // A malformed context still counts as a network request.
+    const ctx = isRecord(p.networkApprovalContext) ? p.networkApprovalContext : {};
+    const host = str(ctx.host);
+    const protocol = str(ctx.protocol);
     return {
       tool: "codex.network", kind: "web", summary: `Network access to ${host || "(unknown host)"} (${protocol || "unknown"})`,
       input: { host, protocol }, paths: [],
     };
   }
 
+  if (method === P.COMMAND_APPROVAL && p.kind === "writeStdin") {
+    // Input typed into a command that is already running (the input is the reason): never the command itself.
+    const command = str(p.command);
+    const dir = str(p.cwd);
+    return {
+      tool: "codex.stdin",
+      kind: "shell",
+      summary: `Send input to running command: ${(command || "(no command)").slice(0, MAX_COMMAND)}`,
+      input: { command, cwd: dir, kind: p.kind, reason: str(p.reason) },
+      paths: dir ? [dir] : [],
+    };
+  }
+
   if (method === P.COMMAND_APPROVAL) {
     const command = str(p.command);
     const dir = str(p.cwd);
+    const reason = str(p.reason);
     return {
       tool: "codex.command",
       kind: "shell",
       summary: `Run: ${(command || "(no command)").slice(0, MAX_COMMAND)}`,
-      input: dir ? { command, cwd: dir } : { command },
+      input: { command, ...(dir ? { cwd: dir } : {}), ...(reason ? { reason } : {}) },
       paths: dir ? [dir] : [],
     };
   }
@@ -409,7 +427,7 @@ class CodexSession {
       });
       throw new Error(reason);
     }
-    if (method === P.COMMAND_APPROVAL && isRecord(p.networkApprovalContext)) {
+    if (method === P.COMMAND_APPROVAL && isNetworkRequest(p)) {
       // Never asked: accepting may re-run the command outside the sandbox (orchestrator.rs). Recorded and declined.
       this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd), NETWORK_DENIED).catch((e: unknown) => {
         this.fail(`gate error: ${redact(errorMessage(e))}`);
@@ -431,7 +449,8 @@ class CodexSession {
       return decline;
     }
     if (g.decision !== "allow" || this.stopping || itemId === "") return decline;
-    this.allowed.set(itemId, g.actionId);
+    // Input to a running command shares the command's item id; the item's result stays the command's.
+    if (p.kind !== "writeStdin") this.allowed.set(itemId, g.actionId);
     return { decision: "accept" };
   }
 
@@ -452,6 +471,13 @@ class CodexSession {
         const id = str(params.itemId);
         const text = (this.messages.get(id) ?? "") + str(params.delta);
         this.messages.set(id, text.slice(0, MAX_MESSAGE));
+        return;
+      }
+      case P.TURN_STARTED: {
+        // May arrive before the turn/start response: from here on only this turn's completion ends the run.
+        const turn = isRecord(params.turn) ? params.turn : undefined;
+        if (this.threadId !== undefined && str(params.threadId) !== this.threadId) return;
+        this.turnId ??= str(turn?.id) || undefined;
         return;
       }
       case P.TURN_COMPLETED: {

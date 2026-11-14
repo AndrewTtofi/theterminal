@@ -5,9 +5,12 @@
 //
 // THETERMINAL_FAKE_CODEX_SCRIPT: JSON, either an array of steps or { steps, loggedOut, threadStartPolicy,
 //   threadStartError, ignoreSigterm, ignoreEof, codexHome, mcpServers: ["name"], mcpIgnoresDisable,
-//   mcpAddedByThread: ["name"] (servers only the started thread sees, e.g. from a project layer) }. Steps:
+//   mcpAddedByThread: ["name"] (servers only the started thread sees, e.g. from a project layer),
+//   strayTurnCompleted: "turn-id" (before answering turn/start: announce turn/started, then a completed turn
+//   with this other id) }. Steps:
 //   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true,
-//    "network"?:{"host":"…","protocol":"https"}} (network: once running, ask for network access for the same item)
+//    "network"?:{"host":"…","protocol":"https"},"stdin"?:"y\n"} (once running: network asks for network access for
+//    the same item; stdin asks to write that input to the running command, as a writeStdin approval)
 //   {"approve":"fileChange","itemId":"f1","changes":[{"path":"a.txt","kind":"add"|"update"|"delete","diff"?:"…"}]}
 //   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}
 //   {"ungated":"commandExecution"|"mcpToolCall"|…} (a command also streams output, as one that really ran would)
@@ -95,6 +98,13 @@ async function runSteps() {
             kind: "command", threadId: THREAD, turnId: TURN, itemId: s.itemId, startedAtMs: now(), approvalId: "net-1",
             environmentId: "local", reason: "network access", networkApprovalContext: s.network, command: null, cwd: null,
             commandActions: null, proposedExecpolicyAmendment: null,
+          });
+        }
+        if (typeof s.stdin === "string") {
+          // Stdin approvals carry no command; the typed input is the reason (unified_exec process manager).
+          await serverRequest("item/commandExecution/requestApproval", {
+            kind: "writeStdin", threadId: THREAD, turnId: TURN, itemId: s.itemId, startedAtMs: now(), approvalId: "stdin-1",
+            environmentId: "local", reason: s.stdin, command: null, cwd: null, commandActions: null, proposedExecpolicyAmendment: null,
           });
         }
         const exitCode = s.exitCode ?? 0;
@@ -193,6 +203,10 @@ function handleRequest(msg) {
       });
     }
     case "turn/start":
+      if (script.strayTurnCompleted) {
+        notify("turn/started", { threadId: THREAD, turn: turn("inProgress") });
+        notify("turn/completed", { threadId: THREAD, turn: { ...turn("completed"), id: script.strayTurnCompleted } });
+      }
       reply({ turn: turn("inProgress") });
       setImmediate(() => void runSteps());
       return;
