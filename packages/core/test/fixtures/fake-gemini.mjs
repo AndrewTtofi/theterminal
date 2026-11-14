@@ -6,10 +6,10 @@
 //   (the adapter disables that relaunch with GEMINI_CLI_NO_RELAUNCH).
 // - A read_file whose client read was denied is still reported as a `completed` tool call, never `failed`.
 // - Edits ask through session/request_permission (with the diff) and then write through fs/write_text_file; with
-//   the stock CLI that depends on the adapter's policy file, which makes every tool call ask.
+//   the stock CLI that depends on the adapter's `--policy` file, which makes every kept tool call ask.
 // - The real CLI never calls terminal/*; the terminal steps here exercise the adapter's implementation.
 //
-// THETERMINAL_FAKE_SCRIPT: JSON, either an array of steps or { config, steps }.
+// THETERMINAL_FAKE_GEMINI_SCRIPT: JSON, either an array of steps or { config, steps }.
 //   config: { protocolVersion?, modes?: SessionModeState | null, exitAt?: <method>, failAt?: <method> }
 //   steps (run in order when the prompt arrives):
 //     { type: "message", text }
@@ -32,7 +32,7 @@ import { appendFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-const raw = JSON.parse(process.env.THETERMINAL_FAKE_SCRIPT ?? "[]");
+const raw = JSON.parse(process.env.THETERMINAL_FAKE_GEMINI_SCRIPT ?? "[]");
 const config = Array.isArray(raw) ? {} : (raw.config ?? {});
 const steps = Array.isArray(raw) ? raw : (raw.steps ?? []);
 const logPath = process.env.THETERMINAL_FAKE_LOG;
@@ -73,20 +73,23 @@ function envSnapshot() {
   for (const [k, v] of Object.entries(process.env)) {
     if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$)/i.test(k)) picked[k] = v;
   }
+  // What the real CLI would read: user-scope settings from GEMINI_CLI_HOME, policies from the --policy argument.
   let settings = null;
-  const policies = {};
-  const p = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
-  if (p) {
+  const home = process.env.GEMINI_CLI_HOME;
+  if (home) {
     try {
-      settings = JSON.parse(readFileSync(p, "utf8"));
-      for (const dir of settings.policyPaths ?? []) {
-        for (const f of readdirSync(dir)) policies[f] = readFileSync(join(dir, f), "utf8");
-      }
+      settings = JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8"));
     } catch (e) {
       settings = { error: String(e) };
     }
   }
-  return { env: picked, settings, policies, argv: process.argv.slice(2), cwd: process.cwd() };
+  const policies = {};
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf("--policy");
+  if (at >= 0 && argv[at + 1]) {
+    for (const f of readdirSync(argv[at + 1])) policies[f] = readFileSync(join(argv[at + 1], f), "utf8");
+  }
+  return { env: picked, settings, policies, argv, cwd: process.cwd() };
 }
 
 async function runStep(step) {

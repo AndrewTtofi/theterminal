@@ -42,16 +42,23 @@ const DEFAULT_MODE = "default";
  */
 const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
 /**
- * Gemini's policy engine turns each `tools.core` entry into an allow rule (user tier, priority 4.25) and
- * auto-allows "safe" shell commands, so the allowlist alone would let these tools run without asking. A
- * user-tier policy file (priority 999 -> 4.999) outranks both, and a rule with `argsPattern` skips the shell
- * heuristics: every call of these tools reaches `session/request_permission`, where our gate decides.
+ * The policy file passed with `--policy`. Gemini's policy engine turns each `tools.core` entry into an allow
+ * rule (user tier, priority 4.25) and auto-allows "safe" shell commands, so an allowlist alone lets tools run
+ * without asking. A `--policy` directory is loaded at the user tier in place of the user's own policy
+ * directories (priority p becomes 4 + p/1000): the ask rules land at 4.999 and outrank every settings-derived
+ * allow, their `argsPattern` skips the shell heuristics, and the wildcard deny at 4.998 covers every other
+ * tool the registry can expose (glob, grep_search, list_directory, read_many_files, web_fetch,
+ * google_web_search, save_memory, write_todos, skills, subagents, MCP tools...). Only admin-tier policies
+ * (/etc/gemini-cli, remote admin settings) rank higher.
  */
-const POLICY_TOML = ["run_shell_command", "read_file", "write_file", "replace"]
-  .map((tool) => `[[rule]]\ntoolName = "${tool}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`)
-  .join("\n");
+const POLICY_TOML =
+  CORE_TOOLS.map((tool) => `[[rule]]\ntoolName = "${tool}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`).join("\n") +
+  `\n[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 998\n`;
 /** `--extensions none` loads no extension; the MCP allowlist names a server that does not exist, so none connects. */
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
+/** Per run: our policy directory replaces the user's, and `--allowed-tools` replaces `tools.allowed` with a name matching no tool. */
+const runArgs = (policies: string): string[] => [...ACP_ARGS, "--policy", policies, "--allowed-tools", "theterminal-none"];
+const PROJECT_ID = /^[A-Za-z0-9_-]{1,100}$/;
 /** Variables of every provider's key family: a terminal command run for the agent never sees them. */
 const PROVIDER_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i;
 const MAX_COMMAND = 150;
@@ -133,26 +140,24 @@ function selectLines(text: string, line: number | null | undefined, limit: numbe
 }
 
 /**
- * System-scope settings for one run (system is merged last, so these beat the user's and the workspace's):
- * the auth type of the chosen mode, the tool allowlist with nothing pre-approved, no hooks, no tool
- * discovery or call commands, no MCP server command, no legacy sandbox, no repo `.env` (one could point
- * the API key at another host), and our policy directory in place of the user's.
+ * User-scope settings for the isolated home used in api_key mode (a system settings file would be ignored:
+ * Gemini only honours one owned by root). The API-key auth type, the tool allowlist (nothing else is even
+ * registered), folder trust on so a repo-planted `.gemini/settings.json` is ignored (the worktree is never
+ * trusted in that home), no hooks, no tool discovery or call commands, no MCP server command, no legacy
+ * sandbox, and no repo `.env` (one could point the API key at another host).
  */
-function geminiSettings(mode: AuthMode, policiesDir: string): Rec {
-  return {
-    security: { auth: { selectedType: mode === "google" ? "oauth-personal" : "gemini-api-key" }, disableAlwaysAllow: true },
-    tools: { core: CORE_TOOLS, allowed: [], discoveryCommand: "", callCommand: "", sandbox: false },
-    mcp: { serverCommand: "" },
-    hooksConfig: { enabled: false },
-    advanced: { ignoreLocalEnv: true },
-    policyPaths: [policiesDir],
-  };
-}
+const HOME_SETTINGS: Rec = {
+  security: { auth: { selectedType: "gemini-api-key" }, disableAlwaysAllow: true, folderTrust: { enabled: true } },
+  tools: { core: CORE_TOOLS, discoveryCommand: "", callCommand: "", sandbox: false },
+  mcp: { serverCommand: "" },
+  hooksConfig: { enabled: false },
+  advanced: { ignoreLocalEnv: true },
+};
 
 /**
- * The script behind an npm `.cmd` shim: `<dir>/node_modules/@google/gemini-cli/package.json`'s `bin.gemini`.
- * Node cannot run a `.cmd` without a shell, and a shell would re-parse our arguments, so the script is run
- * with node directly. Null when the package or the script is not there.
+ * The script behind an npm `.cmd` shim: `<dir>/node_modules/@google/gemini-cli/package.json`'s `bin.gemini`,
+ * which must stay inside that package. Node cannot run a `.cmd` without a shell, and a shell would re-parse
+ * our arguments, so the script is run with node directly. Null when anything is off.
  */
 function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: string) => boolean): string | null {
   const dir = join(dirname(shim), "node_modules", "@google", "gemini-cli");
@@ -164,7 +169,9 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
   }
   const bin = isRecord(pkg) && isRecord(pkg.bin) ? pkg.bin.gemini : undefined;
   if (typeof bin !== "string" || bin === "") return null;
-  const target = join(dir, bin);
+  const target = resolve(dir, bin);
+  const rel = relative(dir, target);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
   return exists(target) ? target : null;
 }
 
@@ -215,13 +222,14 @@ export class GeminiAdapter implements AgentAdapter {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
     // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
     if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
+    if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: "invalid projectId" };
     const env = this.env(o.authMode);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
-    let args: string[];
+    let base: string[];
     if (this.command) {
       file = this.command.file;
-      args = [...this.command.args, ...ACP_ARGS];
+      base = this.command.args;
     } else {
       const bin = this.bin();
       if (bin === null) return { status: "failed", error: NO_CLI };
@@ -229,25 +237,34 @@ export class GeminiAdapter implements AgentAdapter {
         const target = shimTarget(bin, this.readFile, this.exists);
         if (target === null) return { status: "failed", error: CMD_SHIM };
         file = process.execPath;
-        args = [target, ...ACP_ARGS];
+        base = [target];
       } else {
         file = bin;
-        args = ACP_ARGS;
+        base = [];
       }
     }
-    const settingsDir = mkdtempSync(join(tmpdir(), "theterminal-gemini-"));
+    const runDir = mkdtempSync(join(tmpdir(), "theterminal-gemini-"));
     try {
-      const settings = join(settingsDir, "settings.json");
-      const policies = join(settingsDir, "policies");
+      const policies = join(runDir, "policies");
       mkdirSync(policies);
       writeFileSync(join(policies, "theterminal.toml"), POLICY_TOML);
-      writeFileSync(settings, JSON.stringify(geminiSettings(o.authMode, policies)));
-      env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = settings; // system settings win the merge over the user's and the workspace's
+      if (o.authMode === "api_key") {
+        // An isolated home of our own: our settings apply, and nothing of the user's ~/.gemini (settings,
+        // policies, hooks, trusted folders, credentials) is read or copied.
+        const home = join(this.dataDir, "projects", o.projectId, "gemini-home");
+        mkdirSync(join(home, ".gemini"), { recursive: true });
+        writeFileSync(join(home, ".gemini", "settings.json"), JSON.stringify(HOME_SETTINGS));
+        env.GEMINI_CLI_HOME = home;
+      }
+      // Google-login mode runs in the user's own home (the login lives there and is never read or copied), so the
+      // user's own settings stay in force: their hooks, tool discovery/call commands and MCP server command run as
+      // the user configured them. Those are the user's commands, not agent actions; the policy file, the argv
+      // overrides and the ungated-tool detector still gate everything the agent itself does.
       env.GEMINI_CLI_NO_RELAUNCH = "1"; // the npm entry point would otherwise relaunch the CLI as a child our signals never reach
       env.NO_BROWSER = "true"; // a missing Google login fails instead of opening a browser from a background run
-      return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, args);
+      return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, [...base, ...runArgs(policies)]);
     } finally {
-      rmSync(settingsDir, { recursive: true, force: true });
+      rmSync(runDir, { recursive: true, force: true });
     }
   }
 

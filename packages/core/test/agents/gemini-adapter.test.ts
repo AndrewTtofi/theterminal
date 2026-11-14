@@ -21,18 +21,20 @@ const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
 const SECRET = "sk-ant-TESTKEY0123456789abcdef";
 const MiB = 1024 * 1024;
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
+/** The per-run arguments: the policy directory varies, the allowlist name matches no tool. */
+const RUN_ARGS = [...ACP_ARGS, "--policy", expect.stringMatching(/policies$/), "--allowed-tools", "theterminal-none"];
 const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
-const POLICY_TOML = ["run_shell_command", "read_file", "write_file", "replace"]
-  .map((t) => `[[rule]]\ntoolName = "${t}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`)
-  .join("\n");
-const settingsFor = (selectedType: string) => ({
-  security: { auth: { selectedType }, disableAlwaysAllow: true },
-  tools: { core: CORE_TOOLS, allowed: [], discoveryCommand: "", callCommand: "", sandbox: false },
+const POLICY_TOML =
+  CORE_TOOLS.map((t) => `[[rule]]\ntoolName = "${t}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`).join("\n") +
+  `\n[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 998\n`;
+/** The user-scope settings written into the isolated GEMINI_CLI_HOME in api_key mode. */
+const HOME_SETTINGS = {
+  security: { auth: { selectedType: "gemini-api-key" }, disableAlwaysAllow: true, folderTrust: { enabled: true } },
+  tools: { core: CORE_TOOLS, discoveryCommand: "", callCommand: "", sandbox: false },
   mcp: { serverCommand: "" },
   hooksConfig: { enabled: false },
   advanced: { ignoreLocalEnv: true },
-  policyPaths: [expect.stringMatching(/policies$/)],
-});
+};
 
 type Step = Record<string, unknown>;
 type Script = Step[] | { config?: Record<string, unknown>; steps: Step[] };
@@ -59,7 +61,7 @@ beforeEach(() => {
   outside = realpathSync(mkdtempSync(join(tmpdir(), "gemini-outside-")));
   logFile = join(outside, "fake.log");
   writeFileSync(join(worktree, "README.md"), "hello from the worktree\n");
-  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
+  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
   for (const [k, v] of Object.entries(FAKE_ENV)) process.env[k] = v;
   process.env.THETERMINAL_FAKE_LOG = logFile;
 });
@@ -73,7 +75,7 @@ afterEach(() => {
 });
 
 function script(s: Script): void {
-  process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(s);
+  process.env.THETERMINAL_FAKE_GEMINI_SCRIPT = JSON.stringify(s);
 }
 function readLog(): LogEntry[] {
   if (!existsSync(logFile)) return [];
@@ -153,11 +155,16 @@ describe("GeminiAdapter", () => {
     expect(init.params.clientCapabilities).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true });
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.cwd).toBe(worktree);
-    expect(snap.argv).toEqual(ACP_ARGS);
-    expect(snap.settings).toEqual(settingsFor("gemini-api-key"));
+    expect(snap.argv).toEqual(RUN_ARGS);
     expect(snap.policies).toEqual({ "theterminal.toml": POLICY_TOML });
     expect(snap.env.NO_BROWSER).toBe("true");
     expect(snap.env.GEMINI_CLI_NO_RELAUNCH).toBe("1");
+    expect(snap.env).not.toHaveProperty("GEMINI_CLI_SYSTEM_SETTINGS_PATH");
+    // api_key mode: an isolated, per-project home holds our user-scope settings; nothing of the user's ~/.gemini is read.
+    const home = join(outside, "projects", "p1", "gemini-home");
+    expect(snap.env.GEMINI_CLI_HOME).toBe(home);
+    expect(snap.settings).toEqual(HOME_SETTINGS);
+    expect(JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8"))).toEqual(HOME_SETTINGS);
     const session = readLog().find((e) => e.method === "session/new")!;
     expect(session.params).toEqual({ cwd: worktree, mcpServers: [] });
     const prompt = readLog().find((e) => e.method === "session/prompt")!;
@@ -184,8 +191,22 @@ describe("GeminiAdapter", () => {
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.env).not.toHaveProperty("GEMINI_API_KEY");
     expect(snap.env).not.toHaveProperty("GOOGLE_API_KEY");
-    expect(snap.settings).toEqual(settingsFor("oauth-personal"));
+    // The user's own home must stay in place for the login, so no isolated home and no settings of ours.
+    expect(snap.env).not.toHaveProperty("GEMINI_CLI_HOME");
+    expect(snap.env).not.toHaveProperty("GEMINI_CLI_SYSTEM_SETTINGS_PATH");
+    expect(snap.settings).toBeNull();
+    expect(existsSync(join(outside, "projects"))).toBe(false);
+    expect(snap.argv).toEqual(RUN_ARGS);
+    expect(snap.policies).toEqual({ "theterminal.toml": POLICY_TOML });
     expect(methodsCalled()).not.toContain("authenticate");
+  });
+
+  it("refuses a project id that is not a plain path segment before starting gemini", async () => {
+    const { spawn, children } = fakeSpawn();
+    for (const projectId of ["../p1", "a/b", "", "x".repeat(101)]) {
+      expect(await adapter({ spawn }).start({ ...harness().opts, projectId })).toEqual({ status: "failed", error: "invalid projectId" });
+    }
+    expect(children).toEqual([]);
   });
 
   it("google mode reports a missing login when session/new fails", async () => {
@@ -239,16 +260,19 @@ describe("GeminiAdapter", () => {
       const exists = vi.fn((p: string) => p === target());
       const r = await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists, readFile }).start(harness().opts);
       expect(r).toEqual({ status: "completed" });
-      expect(spawn).toHaveBeenCalledWith(process.execPath, [target(), ...ACP_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [target(), ...RUN_ARGS], expect.objectContaining({ env: expect.objectContaining({ GEMINI_CLI_NO_RELAUNCH: "1" }) }));
       expect(spawn.mock.calls[0]![2]).not.toHaveProperty("shell");
     });
 
-    it("refuses the shim when the package or its bin script is missing", async () => {
+    it("refuses the shim when the package or its bin script is missing, or the script points outside the package", async () => {
       const spawn = vi.fn();
       const refused = { status: "failed", error: "Gemini CLI must be a native executable on Windows (found a .cmd shim)" };
+      const withBin = (bin: string) => () => JSON.stringify({ bin: { gemini: bin } });
       expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => { throw new Error("ENOENT"); } }).start(harness().opts)).toEqual(refused);
       expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => false, readFile }).start(harness().opts)).toEqual(refused);
       expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: () => "{}" }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin("../../../evil.js") }).start(harness().opts)).toEqual(refused);
+      expect(await new GeminiAdapter({ dataDir: outside, bin: shim, apiKey: () => FAKE_KEY, spawn: spawn as never, exists: () => true, readFile: withBin(join(outside, "evil.js")) }).start(harness().opts)).toEqual(refused);
       expect(spawn).not.toHaveBeenCalled();
     });
   });
