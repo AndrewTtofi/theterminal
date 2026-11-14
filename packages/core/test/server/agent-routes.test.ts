@@ -95,9 +95,6 @@ describe("agent API", { timeout: 15000 }, () => {
         gemini: { mode: "api_key", installed: false },
       },
       acks: PROVIDER_ACKS,
-      // Legacy fields, kept until the UI reads `providers`.
-      claudeAuthMode: "api_key",
-      subscriptionAck: CLAUDE_SUBSCRIPTION_ACK,
     });
   });
 
@@ -342,9 +339,8 @@ describe("agent API", { timeout: 15000 }, () => {
     const ok = await post(s, "/api/settings/claude-auth", { mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ mode: "subscription" });
-    const listing = await json<{ claudeAuthMode: string; providers: Record<string, { mode: string }> }>(get(s, "/api/agents"));
+    const listing = await json<{ providers: Record<string, { mode: string }> }>(get(s, "/api/agents"));
     expect(listing.providers.claude!.mode).toBe("subscription");
-    expect(listing.claudeAuthMode).toBe("subscription");
 
     expect(await json(post(s, "/api/settings/claude-auth", { mode: "api_key" }))).toEqual({ mode: "api_key" });
   });

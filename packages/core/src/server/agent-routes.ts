@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   ADAPTERS,
-  CLAUDE_SUBSCRIPTION_ACK,
   PROVIDER_ACKS,
   PROVIDERS,
   agentPayloadSchemas,
@@ -56,9 +55,6 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
       { mode: AuthMode; installed: boolean }
     >,
     acks: PROVIDER_ACKS,
-    // Legacy fields: the UI on this branch still reads them. Drop them once the UI reads `providers` and `acks`.
-    claudeAuthMode: settings.getMode("claude"),
-    subscriptionAck: CLAUDE_SUBSCRIPTION_ACK,
   }));
 
   app.post("/api/settings/provider-auth", async (req) => {
