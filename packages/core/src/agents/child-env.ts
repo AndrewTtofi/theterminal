@@ -23,6 +23,8 @@ export type ChildEnvOptions = {
 export const CHILD_ENV_ALLOWLIST: readonly string[] = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TMPDIR", "TEMP", "TMP", "TZ",
   "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+  // Proxy settings are kept although they may carry credentials (user:pass@host): the plan requires them, and
+  // redaction covers URL userinfo in everything the agent reports.
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 ];
@@ -42,7 +44,7 @@ export function fakeAgentEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
   const out: NodeJS.ProcessEnv = {};
   if (base.THETERMINAL_FAKE_AGENT !== "1") return out;
   for (const [k, v] of Object.entries(base)) {
-    if (k.startsWith("THETERMINAL_FAKE_") && k !== "THETERMINAL_FAKE_AGENT" && v !== undefined) out[k] = v;
+    if (v !== undefined && /^THETERMINAL_FAKE_(?:CODEX_SCRIPT|GEMINI_SCRIPT|LOG)$/.test(k)) out[k] = v;
   }
   return out;
 }
@@ -56,12 +58,22 @@ export function fakeAgentEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
  */
 export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
   const base = opts.base ?? process.env;
-  const names = new Set(CHILD_ENV_ALLOWLIST);
-  if ((opts.platform ?? process.platform) === "win32") for (const n of WIN32_ALLOWLIST) names.add(n);
+  const win = (opts.platform ?? process.platform) === "win32";
+  // Windows environment names are case-insensitive (`Path`, MSYS's `SYSTEMROOT`): compare upper-cased, keep the
+  // original spelling, and keep only the first spelling of a name.
+  const fold = (k: string) => (win ? k.toUpperCase() : k);
+  const names = new Set([...CHILD_ENV_ALLOWLIST, ...(win ? WIN32_ALLOWLIST : [])].map(fold));
+  const prefixes = CHILD_ENV_ALLOWLIST_PREFIXES.map(fold);
   const env: NodeJS.ProcessEnv = {};
+  const seen = new Set<string>();
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
-    if (names.has(k) || CHILD_ENV_ALLOWLIST_PREFIXES.some((p) => k.startsWith(p))) env[k] = v;
+    const f = fold(k);
+    if (seen.has(f)) continue;
+    if (names.has(f) || prefixes.some((p) => f.startsWith(p))) {
+      env[k] = v;
+      seen.add(f);
+    }
   }
   env.GIT_CONFIG_GLOBAL = join(opts.dataDir, EMPTY_GITCONFIG);
   env.GIT_CONFIG_NOSYSTEM = "1";

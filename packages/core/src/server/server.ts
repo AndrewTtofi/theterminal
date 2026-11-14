@@ -15,6 +15,7 @@ import { ADAPTERS, PROVIDERS, type AdapterId, type Provider } from "@theterminal
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
+import { fakeAgentEnv } from "../agents/child-env.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
@@ -111,12 +112,14 @@ function buildAdapters(
 ): Partial<Record<AdapterId, AgentAdapter>> {
   const codexCommand = fakeCli.codex;
   const geminiCommand = fakeCli.gemini;
+  // Test-only fixture variables, decided once here (not at run time) while THETERMINAL_FAKE_AGENT is in force.
+  const fakeEnv = fakeAgentEnv();
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
     claude: new ClaudeAdapter({ dataDir }),
     // The API key is read from OPENAI_API_KEY when each run starts.
-    codex: new CodexAdapter({ dataDir, bin: () => which("codex"), ...(codexCommand && { command: codexCommand }) }),
+    codex: new CodexAdapter({ dataDir, bin: () => which("codex"), fakeEnv, ...(codexCommand && { command: codexCommand }) }),
     // The API key is read from GEMINI_API_KEY when each run starts.
-    gemini: new GeminiAdapter({ dataDir, bin: () => which("gemini"), ...(geminiCommand && { command: geminiCommand }) }),
+    gemini: new GeminiAdapter({ dataDir, bin: () => which("gemini"), fakeEnv, ...(geminiCommand && { command: geminiCommand }) }),
   };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;

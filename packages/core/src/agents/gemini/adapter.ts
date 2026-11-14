@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
-import { buildChildEnv, fakeAgentEnv } from "../child-env.js";
+import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
 import { which } from "../which.js";
@@ -216,6 +216,7 @@ export class GeminiAdapter implements AgentAdapter {
   private readonly readFile: (p: string) => string;
   private readonly command: { file: string; args: string[] } | undefined;
   private readonly worktrees: WorktreeManager;
+  private readonly fakeEnv: NodeJS.ProcessEnv;
 
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
@@ -229,8 +230,11 @@ export class GeminiAdapter implements AgentAdapter {
     readFile?: (p: string) => string;
     /** Test override: spawn this program (with these arguments before the ACP flags) instead of the CLI. */
     command?: { file: string; args: string[] };
+    /** Tests only: the fixture CLI's script variables, snapshotted once at construction (see fakeAgentEnv). */
+    fakeEnv?: NodeJS.ProcessEnv;
   }) {
     this.dataDir = opts.dataDir;
+    this.fakeEnv = opts.fakeEnv ?? {};
     this.bin = opts.bin ?? (() => which("gemini"));
     this.apiKey = opts.apiKey ?? (() => process.env.GEMINI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -299,10 +303,10 @@ export class GeminiAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AuthMode): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome: undefined, googleCloudProject: undefined }), ...fakeAgentEnv() }; // the user's own login, untouched
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome: undefined, googleCloudProject: undefined }), ...this.fakeEnv }; // the user's own login, untouched
     const key = this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject: undefined }), ...fakeAgentEnv() };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject: undefined }), ...this.fakeEnv };
   }
 }
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { CHILD_ENV_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { GeminiAdapter } from "../../src/agents/gemini/adapter.js";
 import { classify } from "../../src/agents/policy.js";
 import { redact } from "../../src/agents/redact.js";
@@ -100,8 +101,11 @@ afterEach(() => {
   rmSync(outside, { recursive: true, force: true });
 });
 
+/** For tests that build the adapter before calling script(): filled in by script(), still a fixed object per adapter. */
+const lateFake: NodeJS.ProcessEnv = {};
 function script(s: Script): void {
   process.env.THETERMINAL_FAKE_GEMINI_SCRIPT = JSON.stringify(s);
+  Object.assign(lateFake, fakeAgentEnv());
 }
 function readLog(): LogEntry[] {
   if (!existsSync(logFile)) return [];
@@ -157,7 +161,7 @@ function fakeSpawn() {
 }
 
 function adapter(extra: { spawn?: typeof nodeSpawn; apiKey?: () => string | undefined; bin?: () => string | null } = {}) {
-  return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, ...extra });
+  return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: fakeAgentEnv(), ...extra });
 }
 
 const exited = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
@@ -208,6 +212,31 @@ describe("GeminiAdapter", () => {
     expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toBe(join(outside, EMPTY_GITCONFIG));
     expect(process.env.GEMINI_API_KEY).toBe(FAKE_ENV.GEMINI_API_KEY); // a copy, not the real env
+  });
+
+  it("the child env is exactly the allowlist plus what we set; the fake flag is read at construction", async () => {
+    process.env.AWS_SECRET_ACCESS_KEY = "aws-TESTSECRET";
+    process.env.NPM_TOKEN = "npm-TESTTOKEN";
+    process.env.NODE_OPTIONS = "--no-warnings";
+    saved.AWS_SECRET_ACCESS_KEY = saved.NPM_TOKEN = saved.NODE_OPTIONS = undefined;
+    script([]);
+    const seen: NodeJS.ProcessEnv[] = [];
+    const a = adapter({
+      spawn: ((f: string, args: string[], o: { env: NodeJS.ProcessEnv }) => {
+        seen.push(o.env);
+        return nodeSpawn(f, args, o as never);
+      }) as typeof nodeSpawn,
+    });
+    delete process.env.THETERMINAL_FAKE_AGENT; // unset after construction: the snapshot still carries the script
+    expect(await a.start(harness().opts)).toEqual({ status: "completed" });
+    const keys = Object.keys(seen[0]!);
+    for (const k of ["AWS_SECRET_ACCESS_KEY", "NPM_TOKEN", "NODE_OPTIONS", "THETERMINAL_FAKE_AGENT", "GIT_DIR", "OPENAI_API_KEY"]) expect(keys).not.toContain(k);
+    const allowed = new Set([
+      ...CHILD_ENV_ALLOWLIST, "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GEMINI_API_KEY", "GEMINI_CLI_HOME",
+      "GEMINI_CLI_TRUST_WORKSPACE", "GEMINI_CLI_NO_RELAUNCH", "NO_BROWSER", "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG",
+    ]);
+    expect(keys.filter((k) => !allowed.has(k) && !k.startsWith("LC_"))).toEqual([]);
+    expect(keys).toContain("THETERMINAL_FAKE_GEMINI_SCRIPT");
   });
 
   it("google mode passes no API key, selects the Google login, and never calls authenticate", async () => {
@@ -1082,7 +1111,7 @@ describe("GeminiAdapter through the runner", () => {
     const ledger = new Ledger(db);
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
     const worktrees = new WorktreeManager(outside);
-    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
     const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [], dataDir: outside });
     try {
       // The fake does not know the worktree the runner creates: it resolves relative paths against its cwd.
@@ -1124,7 +1153,7 @@ describe("GeminiAdapter through the runner", () => {
     const ledger = new Ledger(db);
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
     const worktrees = new WorktreeManager(outside);
-    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
     const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside });
     try {
       script([
@@ -1172,7 +1201,7 @@ describe("GeminiAdapter through the runner", () => {
       const db = openDatabase(":memory:");
       const ledger = new Ledger(db);
       const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
-      const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+      const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: lateFake });
       const runner = new AgentRunner({
         db, ledger, worktrees: new WorktreeManager(outside), broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside,
       });

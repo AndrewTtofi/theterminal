@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
-import { buildChildEnv, fakeAgentEnv } from "../child-env.js";
+import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { redact } from "../redact.js";
 import { which } from "../which.js";
@@ -218,6 +218,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly command: CommandSpec | undefined;
   private readonly exists: (p: string) => boolean;
   private readonly killGraceMs: number;
+  private readonly fakeEnv: NodeJS.ProcessEnv;
 
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
@@ -232,8 +233,11 @@ export class CodexAdapter implements AgentAdapter {
     exists?: (p: string) => boolean;
     /** How long to wait after SIGTERM before SIGKILL. Default 5000. */
     killGraceMs?: number;
+    /** Tests only: the fixture CLI's script variables, snapshotted once at construction (see fakeAgentEnv). */
+    fakeEnv?: NodeJS.ProcessEnv;
   }) {
     this.dataDir = opts.dataDir;
+    this.fakeEnv = opts.fakeEnv ?? {};
     this.bin = opts.bin ?? (() => which("codex"));
     this.apiKey = opts.apiKey ?? (() => process.env.OPENAI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -268,7 +272,7 @@ export class CodexAdapter implements AgentAdapter {
     }
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
-    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: undefined }), ...fakeAgentEnv() };
+    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: undefined }), ...this.fakeEnv };
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };

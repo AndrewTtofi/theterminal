@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertEmptyGitconfig, buildChildEnv } from "../../src/agents/child-env.js";
+import { assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
@@ -115,6 +115,23 @@ describe("buildChildEnv allowlist", () => {
     expect(on.NPM_TOKEN).toBeUndefined();
     const off = buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base: win, platform: "linux" });
     expect(off.SystemRoot).toBeUndefined();
+  });
+
+  it("on win32 matches names case-insensitively, keeps the original spelling, never duplicates, drops git_* in any case", () => {
+    const win = { Path: "C:\\bin", SYSTEMROOT: "C:\\Windows", COMSPEC: "cmd.exe", Git_Dir: "x", NPM_TOKEN: "t" } as NodeJS.ProcessEnv;
+    const env = buildChildEnv("codex", "chatgpt", { dataDir: DATA_DIR, base: win, platform: "win32" });
+    expect(env.Path).toBe("C:\\bin");
+    expect(env.SYSTEMROOT).toBe("C:\\Windows");
+    expect(env.COMSPEC).toBe("cmd.exe");
+    expect(Object.keys(env).filter((k) => k.toUpperCase() === "PATH")).toEqual(["Path"]);
+    expect(Object.keys(env).filter((k) => /^git_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
+    expect(env.NPM_TOKEN).toBeUndefined();
+  });
+
+  it("fakeAgentEnv forwards only the fixture script and log variables, and only under THETERMINAL_FAKE_AGENT=1", () => {
+    const b = { THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_CODEX_SCRIPT: "[]", THETERMINAL_FAKE_GEMINI_SCRIPT: "[]", THETERMINAL_FAKE_LOG: "/l", THETERMINAL_FAKE_SCRIPT: "[]", THETERMINAL_CODEX_BIN: "x", NPM_TOKEN: "t" } as NodeJS.ProcessEnv;
+    expect(Object.keys(fakeAgentEnv(b)).sort()).toEqual(["THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG"]);
+    expect(fakeAgentEnv({ ...b, THETERMINAL_FAKE_AGENT: undefined })).toEqual({});
   });
 
   it("cliHome sets CODEX_HOME / GEMINI_CLI_HOME in login modes only", () => {

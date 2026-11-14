@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
+import { spawn as nodeSpawn } from "node:child_process";
+import { CHILD_ENV_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
@@ -169,13 +171,18 @@ describe("CodexAdapter (fake app-server)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const script = (s: unknown) => vi.stubEnv("THETERMINAL_FAKE_CODEX_SCRIPT", JSON.stringify(s));
+  /** For tests that build the adapter before script(): filled in by script(), still a fixed object per adapter. */
+  const lateFake: NodeJS.ProcessEnv = {};
+  const script = (s: unknown) => {
+    vi.stubEnv("THETERMINAL_FAKE_CODEX_SCRIPT", JSON.stringify(s));
+    Object.assign(lateFake, fakeAgentEnv());
+  };
   const fakeLog = (): LogEntry[] =>
     existsSync(logFile) ? readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
   const received = (method: string) => fakeLog().filter((e) => e.received === method);
   const answers = (method: string) => fakeLog().filter((e) => e.answered === method);
   const make = (opts: Partial<ConstructorParameters<typeof CodexAdapter>[0]> = {}) =>
-    new CodexAdapter({ dataDir: dir, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, ...opts });
+    new CodexAdapter({ dataDir: dir, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: fakeAgentEnv(), ...opts });
 
   function run(
     adapter: CodexAdapter,
@@ -432,7 +439,7 @@ describe("CodexAdapter (fake app-server)", () => {
     const owner = { kind: "human", id: "owner" } as const;
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Codex" }).id;
     const runner = new AgentRunner({
-      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make() },
+      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make({ fakeEnv: lateFake }) },
       extraSecrets: () => [STORED], dataDir: dir,
     });
     script([
@@ -511,6 +518,29 @@ describe("CodexAdapter (fake app-server)", () => {
     const { result } = run(make(), undefined, { signal: ac.signal });
     expect(await result).toEqual({ status: "failed", error: "run stopped" });
     expect(fakeLog()).toEqual([]);
+  });
+
+  it("the child env is exactly the allowlist plus what we set; the fake flag is read at construction", async () => {
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "aws-TESTSECRET");
+    vi.stubEnv("NPM_TOKEN", "npm-TESTTOKEN");
+    vi.stubEnv("NODE_OPTIONS", "--no-warnings");
+    vi.stubEnv("GITHUB_TOKEN", "gh-TESTTOKEN");
+    script([]);
+    const adapter = make({
+      spawn: ((f: string, a: string[], o: { env: NodeJS.ProcessEnv }) => {
+        seen.push(o.env);
+        return nodeSpawn(f, a, o as never);
+      }) as typeof nodeSpawn,
+    });
+    vi.stubEnv("THETERMINAL_FAKE_AGENT", ""); // unset after construction: the snapshot still carries the script
+    const seen: NodeJS.ProcessEnv[] = [];
+    const { result } = run(adapter, undefined, { authMode: "chatgpt" });
+    expect(await result).toEqual({ status: "completed" });
+    const keys = Object.keys(seen[0]!);
+    for (const k of ["AWS_SECRET_ACCESS_KEY", "NPM_TOKEN", "NODE_OPTIONS", "GITHUB_TOKEN", "THETERMINAL_FAKE_AGENT"]) expect(keys).not.toContain(k);
+    const allowed = new Set([...CHILD_ENV_ALLOWLIST, "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_FAKE_LOG"]);
+    expect(keys.filter((k) => !allowed.has(k) && !k.startsWith("LC_"))).toEqual([]);
+    expect(keys).toContain("THETERMINAL_FAKE_CODEX_SCRIPT");
   });
 
   describe("auth modes", () => {
