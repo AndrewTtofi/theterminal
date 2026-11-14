@@ -749,6 +749,19 @@ describe("GeminiAdapter", () => {
     expect(h.events.findIndex((e) => e.type === "action_result")).toBeLessThan(h.events.length - 1); // prose went out before the run ended
   });
 
+  it("releases a partial BEGIN marker once it is longer than any marker can be: capitals and spaces after it stream out normally", async () => {
+    const caps = "AB CD EFG ".repeat(1024); // 10 KiB of what a label is made of, never ending in dashes
+    const text = `See -----BEGIN ${caps}\ndone\n`;
+    script([...chunked(text.slice(0, -5), 500), { type: "sleep", ms: 400 }, { type: "message", text: "done\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(text);
+    expect(texts.length).toBeGreaterThan(3); // size splits went out as the text arrived
+    expect(texts[0]!.length).toBeGreaterThan(3000); // the first split was not moved back to the marker
+    expect(texts[0]).toContain("-----BEGIN AB CD");
+  });
+
   for (const [label, mention, shown] of [
     ["inline", "Start it with -----BEGIN RSA PRIVATE KEY----- and then paste the body.\n", "[REDACTED]"],
     ["on its own line", `Example:\n${KEY_BEGIN}\nThe body goes here, then the END line.\n`, "Example:\n[REDACTED]"],

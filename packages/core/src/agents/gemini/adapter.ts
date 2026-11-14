@@ -84,8 +84,17 @@ const HELD_TAIL = 512;
  * reaches it is emitted as REDACTED and streaming goes on as usual from there.
  */
 const MAX_HELD_BLOCK = 16 * 1024;
-/** The start of a BEGIN line that has not fully arrived ("-----BEGIN RSA PRIV"). */
-const PARTIAL_BEGIN = /-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: [A-Z ]*-{0,4})?)?$/;
+/** Longer than any `-----BEGIN <label>-----` of a private key: a partial marker is held only up to this length. */
+const MAX_BEGIN_MARKER = 64;
+/**
+ * The start of a private key BEGIN marker that has not fully arrived ("-----BEGIN RSA PRIV"): a proper prefix of
+ * `-----BEGIN <label>-----`, where the label is capitals and spaces and the closing dashes may follow only a complete
+ * private key label. The label part is bounded so the whole match stays under MAX_BEGIN_MARKER: text that can no
+ * longer become such a marker is released as ordinary text.
+ */
+const PARTIAL_BEGIN = new RegExp(
+  `-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: (?:[A-Z ]{0,${MAX_BEGIN_MARKER - "-----BEGIN -----".length}}|[A-Z ]{0,${MAX_BEGIN_MARKER - "-----BEGIN PRIVATE KEY BLOCK-----".length}}PRIVATE KEY(?: BLOCK)?-{1,4}))?)?$`,
+);
 const INTERNAL_ERROR = "internal error";
 const STDERR_TAIL = 200;
 /** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
@@ -865,8 +874,9 @@ function safeCut(text: string, cut: number): number {
       continue;
     }
     const head = text.slice(0, cut);
-    const partial = PARTIAL_BEGIN.exec(head);
-    const back = partial !== null ? partial.index : cut > floor ? trailingSecretContext(head, true) : -1;
+    const window = Math.max(0, cut - MAX_BEGIN_MARKER); // a partial marker is at most that long, so nothing before it matters
+    const partial = PARTIAL_BEGIN.exec(head.slice(window));
+    const back = partial !== null ? window + partial.index : cut > floor ? trailingSecretContext(head, true) : -1;
     if (back < 0) return cut;
     cut = back;
   }
