@@ -151,6 +151,31 @@ describe("connections API", { timeout: 15000 }, () => {
     expect((JSON.parse(text) as { issues: unknown[] }).issues.length).toBeGreaterThan(0);
   });
 
+  it("rebuilds enum and unknown-key messages from the schema, never from zod's input-quoting defaults", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "nope", provider: "claude", name: "C", extraField: "x" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "invalid_input",
+      issues: [
+        { path: ["kind"], code: "invalid_value", message: "Invalid option: expected one of 'llm' | 'cloud' | 'github' | 'mcp' | 'hardware'" },
+        { path: [], code: "unrecognized_keys", message: "Unrecognized key(s) in object" },
+      ],
+    });
+  });
+
+  it("masks a config key that is not a plain field name and keeps the refinement's fixed message", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "gemini", name: "G", config: { [KEY]: "x" } });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text).not.toContain(KEY);
+    expect(JSON.parse(text)).toEqual({
+      error: "invalid_input",
+      issues: [{ path: ["*"], code: "invalid_key", message: "looks like a credential name; store it as a secret" }],
+    });
+  });
+
   it("answers a malformed JSON body with 400 and never echoes its text", async () => {
     const s = await start();
     const res = await fetch(`${base(s)}/api/connections`, {

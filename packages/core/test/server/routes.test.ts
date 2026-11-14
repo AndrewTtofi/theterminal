@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { z } from "zod";
 import { openDatabase } from "../../src/db.js";
 import { Ledger, type VerifyResult } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -66,6 +67,22 @@ describe("routes", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("invalid_input");
     expect(res.json().issues).toBeDefined();
+  });
+
+  it("answers any issue code it does not list with a fixed message, never one that quotes the input", async () => {
+    const secret = "sk-ant-TESTKEY-2222222222";
+    // A union whose error function quotes the input: an unlisted code (invalid_union) must not pass it through.
+    const schema = z.object({
+      value: z.union([z.literal("a"), z.number()], { error: (iss) => `got ${String(iss.input)}` }),
+    });
+    app.post("/test/union", async (req) => schema.parse(req.body));
+    const res = await app.inject({ method: "POST", url: "/test/union", payload: { value: secret } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).not.toContain(secret);
+    expect(res.json()).toEqual({
+      error: "invalid_input",
+      issues: [{ path: ["value"], code: "invalid_union", message: "Invalid input" }],
+    });
   });
 
   it("GET board, 404 for unknown project", async () => {

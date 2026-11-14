@@ -17,7 +17,7 @@ export type ConnectionRouteDeps = {
 const actor = { kind: "human", id: "owner" } as const;
 
 // Shapes only: the service checks fields, values and config against the catalog.
-const values = z.record(z.string());
+const values = z.record(z.string(), z.string());
 const addBody = z
   .object({
     kind: z.enum(CONNECTION_KINDS),
@@ -33,8 +33,8 @@ const patchBody = z
     name: z.string().optional(),
     config: values.optional(),
     enabled: z.boolean().optional(),
-    secrets: z.record(z.string().nullable()).optional(),
-    private: z.record(z.string().nullable()).optional(),
+    secrets: z.record(z.string(), z.string().nullable()).optional(),
+    private: z.record(z.string(), z.string().nullable()).optional(),
   })
   .strict();
 

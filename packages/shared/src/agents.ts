@@ -119,7 +119,7 @@ export const agentPayloadSchemas = {
     .object({
       runId: id,
       status: z.enum(["completed", "failed", "stopped"]),
-      costUsd: z.number().finite().nullable(),
+      costUsd: z.number().nullable(),
       // Absent in entries written before token totals were recorded.
       inputTokens: z.number().int().nonnegative().nullable().optional(),
       outputTokens: z.number().int().nonnegative().nullable().optional(),
@@ -130,7 +130,7 @@ export const agentPayloadSchemas = {
     .object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().max(1000) })
     .strict()
     .refine((p) => p.mode !== "subscription" || p.acknowledgement === CLAUDE_SUBSCRIPTION_ACK, {
-      message: "subscription mode requires the exact acknowledgement",
+      error: "subscription mode requires the exact acknowledgement",
       path: ["acknowledgement"],
     }),
   "settings.provider_auth_changed": z
@@ -147,6 +147,6 @@ export const agentPayloadSchemas = {
         ctx.addIssue({ code: "custom", message: "this mode requires the exact acknowledgement", path: ["acknowledgement"] });
       }
     }),
-} satisfies Record<string, z.ZodTypeAny>;
+} satisfies Record<string, z.ZodType>;
 
 export type AgentEventType = keyof typeof agentPayloadSchemas;

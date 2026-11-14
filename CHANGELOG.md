@@ -17,6 +17,9 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
 - Streamed agent text is held back just enough to redact secrets that arrive split across chunks, including private key blocks, YAML secret blocks and partial markers around tool calls.
 
+### Security
+- Upgraded zod to 4.6.6 (memory exhaustion on oversized constrained collections) and Vitest to 4.1.12 (code injection and path traversal in Vitest and `@vitest/mocker`; Vitest no longer depends on the vulnerable tinypool). Existing ledger entries still parse, and API validation errors still never echo the request.
+
 ### Added (project)
 - Contributor guide, agent contribution guidelines, security policy, code of conduct, pull request and issue templates, and a code owners file.
 

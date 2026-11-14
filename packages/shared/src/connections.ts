@@ -137,7 +137,7 @@ export const connectionPayloadSchemas = {
     })
     .strict()
     .refine((p) => catalogEntry(p.provider).kind === p.kind, {
-      message: "provider does not belong to this kind",
+      error: "provider does not belong to this kind",
       path: ["provider"],
     }),
   "connection.updated": z
@@ -172,6 +172,6 @@ export const connectionPayloadSchemas = {
     .strict(),
   /** A sign-in through the provider's own login command: never its output, account names or emails. */
   "connection.signin": z.object({ provider: z.enum(PROVIDERS), ok: z.boolean() }).strict(),
-} satisfies Record<string, z.ZodTypeAny>;
+} satisfies Record<string, z.ZodType>;
 
 export type ConnectionEventType = keyof typeof connectionPayloadSchemas;
