@@ -82,6 +82,8 @@ export function SignInPanel({ provider, onClose, pollMs = 1000 }: { provider: Pr
             await new Promise((r) => setTimeout(r, pollMs));
           }
         } catch (e) {
+          // A failed poll must not leave the login running on the server.
+          if (s.running && s.id !== null) void api.cancelSignIn(s.id).catch(() => undefined);
           s.running = false;
           if (s.closed) return;
           setPhase("idle");
@@ -157,8 +159,9 @@ export function SignInPanel({ provider, onClose, pollMs = 1000 }: { provider: Pr
           <span className="spinner" aria-hidden="true" /> Waiting for you to sign in…
         </p>
       )}
-      {signedIn && <p className="signin-result ok">Signed in</p>}
-      {!signedIn && phase === "failed" && <p className="signin-result failed">Sign-in failed</p>}
+      <p className={`signin-result${signedIn ? " ok" : phase === "failed" ? " failed" : ""}`} aria-live="polite">
+        {signedIn ? "Signed in" : phase === "failed" ? "Sign-in failed" : ""}
+      </p>
       {!signedIn && check !== null && <p className="signin-check">{statusText(provider, check)}</p>}
       {error && (
         <p className="error" role="alert">

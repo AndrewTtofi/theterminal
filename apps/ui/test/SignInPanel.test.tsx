@@ -85,6 +85,27 @@ describe("SignInPanel", () => {
     unmount();
   });
 
+  it("cancels the sign-in on the server when polling fails, so no login is left running", async () => {
+    m.startSignIn.mockResolvedValue({ id: "s1" });
+    m.getSignIn.mockRejectedValue(new ApiError(500, "internal"));
+    render(<SignInPanel provider="codex" onClose={() => undefined} pollMs={5} />);
+    expect((await screen.findByRole("alert")).textContent).toBe("Something went wrong");
+    expect(m.cancelSignIn).toHaveBeenCalledWith("s1");
+  });
+
+  it("announces the outcome in a polite live region that is there from the start", async () => {
+    m.startSignIn.mockResolvedValue({ id: "s1" });
+    let finish = false;
+    m.getSignIn.mockImplementation(async () => (finish ? { state: "succeeded", lines: [] } : { state: "running", lines: [] }));
+    const { container } = render(<SignInPanel provider="codex" onClose={() => undefined} pollMs={5} />);
+    const live = container.querySelector('[aria-live="polite"]');
+    expect(live).not.toBeNull();
+    expect(live!.textContent).toBe("");
+    finish = true;
+    await waitFor(() => expect(live!.textContent).toBe("Signed in"));
+    expect(container.querySelector('[aria-live="polite"]')).toBe(live);
+  });
+
   it("says when a sign-in for the provider is already running", async () => {
     m.startSignIn.mockRejectedValue(new ApiError(409, "signin_running"));
     render(<SignInPanel provider="codex" onClose={() => undefined} />);

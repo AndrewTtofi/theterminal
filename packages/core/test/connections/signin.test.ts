@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { LedgerEntry, Provider } from "@theterminal/shared";
-import { SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
+import { InvalidCliHomeError, SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
 import { ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
@@ -198,6 +198,44 @@ describe("SignInManager", { timeout: 15000 }, () => {
     expect(() => m.start("gemini")).toThrow(/terminal/);
     const missing = manager({}, { program: () => null });
     expect(() => missing.m.start("codex")).toThrow(/not installed/);
+  });
+
+  it("refuses a relative CLI home folder with a fixed message, before anything starts", async () => {
+    const pidFile = join(tempDir(), "pid");
+    const { m } = manager({ pidFile }, { cliHome: () => "relative/codex-home" });
+    expect(() => m.start("codex")).toThrow(new InvalidCliHomeError());
+    expect(new InvalidCliHomeError().message).toBe("The CLI home folder must be an absolute path");
+    expect((await m.status()).codex).toBe("unknown");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("kills the whole process group, so no helper process is left behind", async () => {
+    const dir = tempDir();
+    const pidFile = join(dir, "pid");
+    const grandchildPidFile = join(dir, "grandchild");
+    const { m } = manager({ hang: true, ignoreTerm: true, pidFile, grandchildPidFile });
+    const { id } = m.start("codex");
+    await waitForFile(grandchildPidFile);
+    await waitForFile(pidFile);
+    m.cancel(id);
+    await settle(m, id, 8000);
+    const until = Date.now() + 5000;
+    const pids = [pidFile, grandchildPidFile].map((f) => Number(readFileSync(f, "utf8")));
+    while (pids.some(alive) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+    expect(pids.map(alive)).toEqual([false, false]);
+  });
+
+  it("concurrent status requests share one check per provider", async () => {
+    const countFile = join(tempDir(), "count");
+    const { m } = manager({ status: 0, statusDelayMs: 200, countFile });
+    const [a, b] = await Promise.all([m.status(), m.status()]);
+    expect(a).toEqual(b);
+    expect(a.codex).toBe("signed_in");
+    // One run each for Claude and Codex (Gemini has no status command).
+    expect(readFileSync(countFile, "utf8").trim().split("\n")).toHaveLength(2);
+    await m.status();
+    expect(readFileSync(countFile, "utf8").trim().split("\n")).toHaveLength(4); // a finished check is not reused
   });
 
   it("status: signed_in on exit 0, signed_out on exit 1, not_installed without the CLI, unknown for Gemini", async () => {

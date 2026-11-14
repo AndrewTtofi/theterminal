@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, PROVIDERS } from "@theterminal/shared";
 import type { ConnectionService } from "../connections/service.js";
-import { CliNotInstalledError, SignInRunningError, TerminalRequiredError, type SignInManager } from "../connections/signin.js";
+import { CliNotInstalledError, InvalidCliHomeError, SignInRunningError, TerminalRequiredError, type SignInManager } from "../connections/signin.js";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
@@ -91,6 +91,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       if (e instanceof SignInRunningError) return reply.code(409).send({ error: "signin_running" });
       if (e instanceof CliNotInstalledError) return reply.code(422).send({ error: "not_installed" });
       if (e instanceof TerminalRequiredError) return reply.code(422).send({ error: "terminal_required" });
+      if (e instanceof InvalidCliHomeError) return reply.code(422).send({ error: "invalid_cli_home" });
       throw e;
     }
   });

@@ -37,6 +37,11 @@ describe("describeEntry connections", () => {
       describeEntry(entry(9, "connection.used", { ...c, runId: "abcdef1234567890", purpose: "api_key" }, { kind: "system", id: "runner" })),
     ).toBe('Agent abcdef12 was given access to "Work key"');
   });
+
+  it("describes a sign-in with only the provider and the outcome", () => {
+    expect(describeEntry(entry(11, "connection.signin", { provider: "codex", ok: true }))).toBe("Owner signed in to Codex");
+    expect(describeEntry(entry(12, "connection.signin", { provider: "claude", ok: false }))).toBe("Sign-in to Claude failed");
+  });
 });
 
 describe("describeEntry", () => {

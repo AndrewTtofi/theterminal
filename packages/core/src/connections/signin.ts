@@ -1,6 +1,7 @@
-import { execFile, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
+import { isAbsolute } from "node:path";
 import { PROVIDERS, type AuthMode, type Provider } from "@theterminal/shared";
 import { buildChildEnv } from "../agents/child-env.js";
 import { redact } from "../agents/redact.js";
@@ -33,6 +34,14 @@ export class TerminalRequiredError extends Error {
   constructor() {
     super("this provider signs in only in a terminal");
     this.name = "TerminalRequiredError";
+  }
+}
+
+/** The connection's CLI home folder is not an absolute path (the service refuses one too; this is a second check). */
+export class InvalidCliHomeError extends Error {
+  constructor() {
+    super("The CLI home folder must be an absolute path");
+    this.name = "InvalidCliHomeError";
   }
 }
 
@@ -183,6 +192,8 @@ type Session = {
 export class SignInManager {
   private readonly sessions = new Map<string, Session>();
   private readonly statusChildren = new Set<ChildProcess>();
+  /** The status check under way per provider, shared by concurrent requests. */
+  private readonly statusChecks = new Map<Provider, Promise<SignInStatus>>();
   private readonly clean: Scrub;
   private shuttingDown = false;
 
@@ -200,6 +211,8 @@ export class SignInManager {
 
   private env(p: Provider): NodeJS.ProcessEnv {
     const cliHome = this.deps.cliHome?.(p);
+    // A relative folder would resolve against our working directory: refuse it rather than guess.
+    if (cliHome !== undefined && cliHome !== "" && !isAbsolute(cliHome)) throw new InvalidCliHomeError();
     return {
       ...buildChildEnv(p, SPECS[p].mode, { dataDir: this.deps.dataDir, ...(cliHome && { cliHome }) }),
       ...this.deps.extraEnv,
@@ -216,7 +229,7 @@ export class SignInManager {
     }
     const program = this.deps.program(p);
     if (program === null) throw new CliNotInstalledError();
-    const env = this.env(p); // throws when the shared git config was modified: nothing starts
+    const env = this.env(p); // throws for a relative CLI home or a modified shared git config: nothing starts
 
     for (const [id, s] of this.sessions) if (s.provider === p) this.sessions.delete(id);
     const id = (this.deps.newId ?? randomUUID)();
@@ -257,20 +270,9 @@ export class SignInManager {
       }
     };
 
-    let child: ChildProcess;
-    try {
-      child = execFile(
-        program.file,
-        [...program.args, ...spec.login],
-        { cwd: this.deps.dataDir, env, encoding: "utf8", maxBuffer: MAX_OUTPUT, windowsHide: true, shell: false },
-        (err) => finish(err === null),
-      );
-    } catch {
-      finish(false);
-      return { id };
-    }
+    const child = run(program, spec.login, this.deps.dataDir, env, (code) => finish(code === 0));
+    if (child === null) return { id };
     session.child = child;
-    child.stdin?.end(); // nothing is ever sent to the login
     child.stdout?.setEncoding("utf8").on("data", (c: string) => take("out", c));
     child.stderr?.setEncoding("utf8").on("data", (c: string) => take("err", c));
     session.timer = setTimeout(() => this.stop(session), this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -304,6 +306,14 @@ export class SignInManager {
   }
 
   private statusOf(p: Provider): Promise<SignInStatus> {
+    const running = this.statusChecks.get(p);
+    if (running) return running;
+    const check = this.checkStatus(p).finally(() => this.statusChecks.delete(p));
+    this.statusChecks.set(p, check);
+    return check;
+  }
+
+  private checkStatus(p: Provider): Promise<SignInStatus> {
     const program = this.deps.program(p);
     if (program === null) return Promise.resolve("not_installed");
     const args = SPECS[p].status;
@@ -315,25 +325,23 @@ export class SignInManager {
       return Promise.resolve("unknown");
     }
     return new Promise((resolve) => {
-      let child: ChildProcess;
-      try {
-        child = execFile(
-          program.file,
-          [...program.args, ...args],
-          { cwd: this.deps.dataDir, env, maxBuffer: MAX_OUTPUT, timeout: STATUS_TIMEOUT_MS, windowsHide: true, shell: false },
-          (err) => {
-            this.statusChildren.delete(child);
-            if (err === null) return resolve("signed_in");
-            const code = (err as NodeJS.ErrnoException).code as unknown;
-            if (code === "ENOENT") return resolve("not_installed");
-            resolve(code === 1 && !err.killed ? "signed_out" : "unknown");
-          },
-        );
-      } catch {
-        return resolve("unknown");
-      }
-      child.stdin?.end();
+      let timedOut = false;
+      let timer: NodeJS.Timeout | undefined;
+      const child = run(program, args, this.deps.dataDir, env, (code) => {
+        clearTimeout(timer);
+        if (child) this.statusChildren.delete(child);
+        if (code === "ENOENT") return resolve("not_installed");
+        resolve(timedOut ? "unknown" : code === 0 ? "signed_in" : code === 1 ? "signed_out" : "unknown");
+      });
+      if (child === null) return;
+      // Its output is never read: drained and dropped.
+      child.stdout?.resume();
+      child.stderr?.resume();
       this.statusChildren.add(child);
+      timer = setTimeout(() => {
+        timedOut = true;
+        kill(child);
+      }, STATUS_TIMEOUT_MS);
     });
   }
 
@@ -343,8 +351,8 @@ export class SignInManager {
     const waits: Promise<void>[] = [];
     for (const s of this.sessions.values()) {
       if (s.state === "running" || s.child) {
-        this.stop(s);
-        kill(s.child);
+        if (s.state === "running") this.stop(s);
+        else kill(s.child); // stopped already but not yet exited
         waits.push(s.exited);
       }
     }
@@ -355,13 +363,64 @@ export class SignInManager {
   }
 }
 
-/** SIGTERM, then SIGKILL if the process is still there after a grace period. */
+/** On POSIX each login runs in its own process group (detached), so its helpers are killed with it. */
+const GROUPS = process.platform !== "win32";
+
+/**
+ * Starts `program` with `args`: no shell, stdin closed (nothing is ever sent), and on POSIX in its own process group.
+ * `done` gets the exit code, null for a signal, "ENOENT" when the program is missing, or "error" for another spawn
+ * failure. Returns null when the spawn threw (then `done` has already been called).
+ */
+function run(
+  program: CliCommand,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  done: (code: number | null | "ENOENT" | "error") => void,
+): ChildProcess | null {
+  let settled = false;
+  const once = (code: number | null | "ENOENT" | "error") => {
+    if (settled) return;
+    settled = true;
+    done(code);
+  };
+  let child: ChildProcess;
+  try {
+    child = spawn(program.file, [...program.args, ...args], {
+      cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, windowsHide: true, detached: GROUPS,
+    });
+  } catch {
+    once("error");
+    return null;
+  }
+  child.once("error", (e: NodeJS.ErrnoException) => once(e.code === "ENOENT" ? "ENOENT" : "error"));
+  child.once("close", (code) => once(code));
+  return child;
+}
+
+/** Signals the child's whole process group on POSIX, else the child itself. False when nothing was there. */
+function signal(child: ChildProcess, sig: NodeJS.Signals): boolean {
+  try {
+    if (GROUPS && child.pid !== undefined) {
+      process.kill(-child.pid, sig);
+      return true;
+    }
+    return child.kill(sig);
+  } catch {
+    return false; // the group is already gone
+  }
+}
+
+/**
+ * SIGTERM, then SIGKILL after a grace period. On POSIX the SIGKILL goes to the process group even when the login
+ * itself has exited, so a helper that ignored SIGTERM is not left behind.
+ */
 function kill(child: ChildProcess | null): void {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
+  if (!child) return;
+  const groupGone = !GROUPS && (child.exitCode !== null || child.signalCode !== null);
+  if (groupGone || !signal(child, "SIGTERM")) return;
   const force = setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (GROUPS || (child.exitCode === null && child.signalCode === null)) signal(child, "SIGKILL");
   }, KILL_GRACE_MS);
   force.unref();
-  child.once("exit", () => clearTimeout(force));
 }
