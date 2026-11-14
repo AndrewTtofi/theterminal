@@ -1,4 +1,4 @@
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { JsonRpcPeer } from "../../src/agents/jsonrpc.js";
 
@@ -177,6 +177,63 @@ describe("JsonRpcPeer", () => {
     await tick();
     input.write(line({ jsonrpc: "2.0", id: 2, result: "fine" }));
     await expect(p).resolves.toBe("fine");
+    peer.close("done");
+  });
+  it("closes when the output never drains and buffered bytes pass the cap", async () => {
+    const input = new PassThrough();
+    const output = new Writable({ highWaterMark: 1024, write() {} }); // never calls back
+    const peer = new JsonRpcPeer(
+      { input, output },
+      {
+        onRequest: async () => "x".repeat(100 * 1024),
+        onNotification: () => {},
+        maxOutputBufferBytes: 1024 * 1024,
+      },
+    );
+    for (let i = 0; i < 2000 && !input.destroyed; i++) {
+      input.write(JSON.stringify({ jsonrpc: "2.0", id: i, method: "m" }) + "\n");
+      await new Promise((r) => setImmediate(r));
+    }
+    await expect(peer.closed).resolves.toBe("output error");
+    expect(output.writableLength).toBeLessThan(2 * 1024 * 1024);
+  });
+
+  it("closes with protocol error when onNotification throws", async () => {
+    const { input, peer } = make({
+      onNotification: () => {
+        throw new Error("boom");
+      },
+    });
+    input.write(line({ jsonrpc: "2.0", method: "n" }));
+    await expect(peer.closed).resolves.toBe("protocol error");
+  });
+
+  it("builds a line to the cap in small chunks quickly", async () => {
+    const { input, peer } = make({ maxLineBytes: 4 * 1024 * 1024 });
+    const chunk = "a".repeat(256);
+    const t = Date.now();
+    for (let i = 0; i < 16385 && !input.destroyed; i++) input.write(chunk);
+    await expect(peer.closed).resolves.toBe("protocol error");
+    expect(Date.now() - t).toBeLessThan(1000);
+  });
+
+  it("closes and rejects pending when the output is destroyed without an error", async () => {
+    const { output, peer, tick } = make();
+    const p = peer.request("x");
+    const assertion = expect(p).rejects.toThrow("rpc closed: output error");
+    await tick();
+    output.destroy();
+    await expect(peer.closed).resolves.toBe("output error");
+    await assertion;
+  });
+
+  it("truncates peer-controlled error text", async () => {
+    const { input, peer, tick } = make();
+    const p = peer.request("x");
+    await tick();
+    input.write(line({ jsonrpc: "2.0", id: 1, error: { code: 1, message: "e".repeat(5000) } }));
+    const err = await p.catch((e) => e as Error);
+    expect(err.message.length).toBeLessThan(600);
     peer.close("done");
   });
 });

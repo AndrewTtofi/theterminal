@@ -37,7 +37,9 @@ export class JsonRpcPeer {
   private readonly decoder = new StringDecoder("utf8");
   private readonly pending = new Map<Id, Pending>();
   private readonly timedOut = new Set<Id>();
-  private partial = "";
+  private partialChunks: string[] = [];
+  private partialBytes = 0;
+  private readonly maxOutputBufferBytes: number;
   private nextId = 1;
   private inflight = 0;
   private closeReason: string | undefined;
@@ -50,17 +52,21 @@ export class JsonRpcPeer {
       onNotification: (method: string, params: unknown) => void;
       maxLineBytes?: number;
       requestTimeoutMs?: number;
+      /** Close ("output error") once more than this many bytes are queued unwritten. Default 4 * maxLineBytes. */
+      maxOutputBufferBytes?: number;
     },
   ) {
     this.io = io;
     this.opts = opts;
     this.maxLineBytes = opts.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
+    this.maxOutputBufferBytes = opts.maxOutputBufferBytes ?? 4 * this.maxLineBytes;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.closed = new Promise((r) => (this.resolveClosed = r));
     io.input.on("data", this.onData);
     io.input.on("end", this.onEnd);
     io.input.on("error", this.onInputError);
     io.output.on("error", this.onOutputError);
+    io.output.on("close", this.onOutputError);
   }
 
   request<T = unknown>(method: string, params?: unknown): Promise<T> {
@@ -92,7 +98,8 @@ export class JsonRpcPeer {
     this.io.input.off("data", this.onData);
     this.io.input.off("end", this.onEnd);
     this.io.input.pause();
-    this.partial = "";
+    this.partialChunks = [];
+    this.partialBytes = 0;
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
       p.reject(new Error(`rpc closed: ${reason}`));
@@ -106,6 +113,8 @@ export class JsonRpcPeer {
     if (this.closeReason !== undefined) return;
     try {
       this.io.output.write(JSON.stringify(msg) + "\n");
+      const queued = (this.io.output as { writableLength?: number }).writableLength ?? 0;
+      if (queued > this.maxOutputBufferBytes) this.close("output error");
     } catch {
       this.close("output error");
     }
@@ -121,17 +130,25 @@ export class JsonRpcPeer {
     for (;;) {
       const nl = text.indexOf("\n");
       if (nl < 0) break;
+      const head = text.slice(0, nl);
       const rest = text.slice(nl + 1);
-      const lineText = this.partial + text.slice(0, nl);
-      this.partial = "";
-      if (Buffer.byteLength(lineText, "utf8") > this.maxLineBytes) return this.close("protocol error");
+      if (this.partialBytes + Buffer.byteLength(head, "utf8") > this.maxLineBytes) {
+        return this.close("protocol error");
+      }
+      this.partialChunks.push(head);
+      const lineText = this.partialChunks.join("");
+      this.partialChunks = [];
+      this.partialBytes = 0;
       this.handleLine(lineText);
       if (this.closeReason !== undefined) return;
       text = rest;
     }
-    this.partial += text;
-    // Bound memory: do not wait for a newline once the partial line is already too long.
-    if (Buffer.byteLength(this.partial, "utf8") > this.maxLineBytes) this.close("protocol error");
+    if (text.length > 0) {
+      this.partialChunks.push(text);
+      this.partialBytes += Buffer.byteLength(text, "utf8");
+      // Bound memory: do not wait for a newline once the partial line is already too long.
+      if (this.partialBytes > this.maxLineBytes) this.close("protocol error");
+    }
   };
 
   private handleLine(raw: string): void {
@@ -152,7 +169,13 @@ export class JsonRpcPeer {
     }
     if (typeof msg.method === "string") {
       if (hasId) this.handleRequest(msg.id, msg.method, msg.params);
-      else this.opts.onNotification(msg.method, msg.params);
+      else {
+        try {
+          this.opts.onNotification(msg.method, msg.params);
+        } catch {
+          this.close("protocol error");
+        }
+      }
       return;
     }
     if (hasId && ("result" in msg || "error" in msg)) return this.handleResponse(msg);
@@ -169,7 +192,7 @@ export class JsonRpcPeer {
     clearTimeout(p.timer);
     if (msg.error !== undefined) {
       const m = msg.error && typeof msg.error.message === "string" ? msg.error.message : "error";
-      p.reject(new Error(`rpc error: ${m}`));
+      p.reject(new Error(`rpc error: ${m.slice(0, 500)}`));
     } else {
       p.resolve(msg.result);
     }
