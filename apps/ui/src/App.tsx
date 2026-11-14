@@ -1,10 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Board as BoardData, LedgerEntry, Project, Stage } from "@theterminal/shared";
+import type { AdapterId, AgentAction, AgentRun, Board as BoardData, LedgerEntry, Project, Stage } from "@theterminal/shared";
 import { api, errorMessage, subscribeLedger } from "./api";
-import type { Health } from "./api";
+import type { AgentsInfo, Health } from "./api";
+import { AgentPanel } from "./components/AgentPanel";
+import { ClaudeAuthSetting } from "./components/ClaudeAuthSetting";
+import { DecisionCard } from "./components/DecisionCard";
 import { Board } from "./components/Board";
 import { LedgerPanel } from "./components/LedgerPanel";
 import { ProjectList } from "./components/ProjectList";
+
+/** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
+function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
+  let inFlight = false;
+  let trailing = false;
+  const run = async (): Promise<void> => {
+    if (isCancelled()) return;
+    if (inFlight) {
+      trailing = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      await task();
+    } catch {
+      // keep the current data; the next refresh retries
+    } finally {
+      inFlight = false;
+      if (trailing && !isCancelled()) {
+        trailing = false;
+        void run();
+      }
+    }
+  };
+  return () => void run();
+}
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -14,6 +43,13 @@ export function App() {
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
+  const refreshAgents = useRef<() => void>(() => {});
+  const selectedRunRef = useRef<string | null>(null);
+  const [agentsInfo, setAgentsInfo] = useState<AgentsInfo | null>(null);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [pending, setPending] = useState<AgentAction[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [runActions, setRunActions] = useState<AgentAction[]>([]);
 
   const run = useCallback(async (action: () => Promise<unknown>) => {
     try {
@@ -29,36 +65,51 @@ export function App() {
       setHealth(await api.health());
       setProjects(await api.listProjects());
     });
+    void api.getAgents().then(setAgentsInfo, () => {});
   }, [run]);
+
+  useEffect(() => {
+    selectedRunRef.current = selectedRunId;
+    refreshAgents.current();
+  }, [selectedRunId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let cancelled = false;
+    setRuns([]);
+    setPending([]);
+    setRunActions([]);
+    setSelectedRunId(null);
+    selectedRunRef.current = null;
+    const refresh = coalesced(async () => {
+      const runId = selectedRunRef.current;
+      const [r, p, detail] = await Promise.all([
+        api.listRuns(selectedId),
+        api.listPendingActions(selectedId),
+        runId ? api.getRun(runId) : Promise.resolve(null),
+      ]);
+      if (cancelled) return;
+      setRuns(r);
+      setPending(p);
+      setRunActions(detail ? detail.actions : []);
+    }, () => cancelled);
+    refreshAgents.current = refresh;
+    refresh();
+    return () => {
+      cancelled = true;
+      refreshAgents.current = () => {};
+    };
+  }, [selectedId]);
 
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
     let unsubscribe = () => {};
-    // Coalesced refresh: at most one getBoard in flight plus one trailing; stale results are dropped.
-    let inFlight = false;
-    let trailing = false;
-    const refresh = async () => {
-      if (cancelled) return;
-      if (inFlight) {
-        trailing = true;
-        return;
-      }
-      inFlight = true;
-      try {
-        const b = await api.getBoard(selectedId);
-        if (!cancelled) setBoard(b);
-      } catch {
-        // keep the current board; the next refresh retries
-      } finally {
-        inFlight = false;
-        if (trailing && !cancelled) {
-          trailing = false;
-          void refresh();
-        }
-      }
-    };
-    refreshRef.current = () => void refresh();
+    const refresh = coalesced(async () => {
+      const b = await api.getBoard(selectedId);
+      if (!cancelled) setBoard(b);
+    }, () => cancelled);
+    refreshRef.current = refresh;
     setBoard(null);
     setEntries([]);
     // Board and ledger load independently, so one failing does not hide the other.
@@ -74,7 +125,8 @@ export function App() {
       unsubscribe = subscribeLedger(lastSeq, (e) => {
         if (e.projectId !== selectedId) return;
         setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
-        void refresh();
+        refresh();
+        if (e.type.startsWith("agent.")) refreshAgents.current();
       });
     });
     return () => {
@@ -110,6 +162,24 @@ export function App() {
           }
         />
         <main>
+          {selectedId && pending.length > 0 && (
+            <section className="needs-you" aria-label="Needs you">
+              <h2>Needs you</h2>
+              {pending.map((a) => (
+                <DecisionCard
+                  key={a.id}
+                  action={a}
+                  onDecide={async (id, decision, reason) => {
+                    try {
+                      await api.decideAction(id, decision, reason);
+                    } finally {
+                      refreshAgents.current();
+                    }
+                  }}
+                />
+              ))}
+            </section>
+          )}
           {board && selectedId ? (
             <>
               <h1>{board.project.name}</h1>
@@ -128,12 +198,53 @@ export function App() {
                   })
                 }
               />
+              {agentsInfo && (
+                <AgentPanel
+                  adapters={agentsInfo.adapters}
+                  runs={runs}
+                  selectedRunId={selectedRunId}
+                  actions={runActions}
+                  onStart={(adapter: AdapterId, prompt) =>
+                    run(async () => {
+                      const started = await api.startRun(selectedId, { adapter, prompt });
+                      setSelectedRunId(started.id);
+                      refreshAgents.current();
+                    })
+                  }
+                  onSelectRun={setSelectedRunId}
+                  onStop={(runId) =>
+                    void run(async () => {
+                      await api.stopRun(runId);
+                      refreshAgents.current();
+                    })
+                  }
+                />
+              )}
             </>
           ) : (
             <p className="empty">Select or create a project.</p>
           )}
         </main>
-        {selectedId && <LedgerPanel entries={entries} />}
+        {selectedId && (
+          <div>
+            {agentsInfo && (
+              <ClaudeAuthSetting
+                key={agentsInfo.claudeAuthMode}
+                mode={agentsInfo.claudeAuthMode}
+                subscriptionAck={agentsInfo.subscriptionAck}
+                onChange={(mode, acknowledgement) =>
+                  run(async () => {
+                    const res = await api.setClaudeAuth(
+                      acknowledgement ? { mode, acknowledgement } : { mode },
+                    );
+                    setAgentsInfo((prev) => (prev ? { ...prev, claudeAuthMode: res.mode } : prev));
+                  })
+                }
+              />
+            )}
+            <LedgerPanel entries={entries} />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import type { Board, Card, LedgerEntry, Project, Stage } from "@theterminal/shared";
+import type { AdapterId, AgentAction, AgentRun, Board, Card, LedgerEntry, Project, Stage } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -38,6 +38,14 @@ async function request<T>(path: string, init?: { method: "POST"; body: unknown }
   return (await res.json()) as T;
 }
 
+export type AgentsInfo = {
+  adapters: AdapterId[];
+  claudeAuthMode: "api_key" | "subscription";
+  subscriptionAck: string;
+};
+
+const enc = encodeURIComponent;
+
 export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (i: { name: string; pitch?: string }) =>
@@ -47,6 +55,21 @@ export const api = {
     request<Card>(`/api/projects/${encodeURIComponent(projectId)}/cards`, { method: "POST", body: i }),
   moveCard: (cardId: string, to: Stage) =>
     request<Card>(`/api/cards/${encodeURIComponent(cardId)}/move`, { method: "POST", body: { to } }),
+  getAgents: () => request<AgentsInfo>("/api/agents"),
+  setClaudeAuth: (i: { mode: "api_key" | "subscription"; acknowledgement?: string }) =>
+    request<{ mode: "api_key" | "subscription" }>("/api/settings/claude-auth", { method: "POST", body: i }),
+  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string }) =>
+    request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
+  listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
+  getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
+  stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
+  listPendingActions: (projectId: string) =>
+    request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),
+  decideAction: (actionId: string, decision: "allow" | "deny", reason?: string) =>
+    request<AgentAction>(`/api/actions/${enc(actionId)}/decision`, {
+      method: "POST",
+      body: reason ? { decision, reason } : { decision },
+    }),
   health: () => request<Health>("/api/health"),
   listLedger: (projectId: string, afterSeq = 0, limit = 500) =>
     request<LedgerEntry[]>(

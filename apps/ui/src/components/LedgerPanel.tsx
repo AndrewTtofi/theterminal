@@ -6,10 +6,15 @@ const cap = (s: unknown) => {
 };
 
 function actorName(a: Actor): string {
-  if (a.kind === "system") return "System";
-  if (a.kind === "agent") return `Agent ${a.id}`;
+  if (a.kind === "system") return a.id === "policy" ? "Policy" : "System";
+  if (a.kind === "agent") return `Agent ${a.id.slice(0, 8)}`;
   return a.id === "owner" ? "Owner" : a.id;
 }
+
+const clip = (s: unknown, max: number) => {
+  const t = String(s ?? "");
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+};
 
 export function describeEntry(e: LedgerEntry): string {
   const who = actorName(e.actor);
@@ -23,6 +28,25 @@ export function describeEntry(e: LedgerEntry): string {
       return `${who} moved a card from ${cap(p.from)} to ${cap(p.to)}`;
     case "card.status_changed":
       return `${who} marked a card ${p.to}`;
+    case "agent.started":
+      return `${who} started a ${cap(p.adapter)} agent: "${clip(p.prompt, 60)}"`;
+    case "agent.action.requested":
+      return `${who} wants to: ${p.summary}`;
+    case "agent.action.decided": {
+      const allowed = p.decision === "allow";
+      const reason = typeof p.reason === "string" && p.reason ? p.reason : allowed ? "approved" : "rejected";
+      return `${who} ${allowed ? "allowed" : "denied"}: ${reason}`;
+    }
+    case "agent.action.completed":
+      return p.ok ? `${who} finished an action` : `${who} action failed`;
+    case "agent.message":
+      return `${who} said: "${clip(p.text, 80)}"`;
+    case "agent.finished":
+      return `Agent run ${p.status}`;
+    case "settings.claude_auth_changed":
+      return `${who} set Claude to use ${p.mode === "subscription" ? "own subscription" : "API key"}`;
+    default:
+      return `${who} recorded ${e.type}`;
   }
 }
 

@@ -20,3 +20,13 @@ input, select { font: inherit; background: var(--bg); color: inherit; border: 1p
 .banner { background: #c0392b; color: #fff; padding: 8px 16px; font-weight: 600; }
 .error { background: #f8d7da; color: #721c24; padding: 6px 16px; }
 @media (prefers-color-scheme: dark) { .error { background: #4a1d22; color: #f5c6cb; } }
+.needs-you { border: 2px solid #d98e04; background: var(--panel); border-radius: 6px; padding: 8px; margin-bottom: 12px; }
+.decision-card { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin-bottom: 6px; }
+.decision-card pre { overflow: auto; max-height: 160px; background: var(--panel); padding: 6px; }
+.decision-actions { display: flex; gap: 6px; align-items: center; }
+.agent-panel { margin-top: 16px; } .agent-panel label { display: block; margin-bottom: 6px; }
+.agent-panel textarea { display: block; width: 100%; font: inherit; background: var(--bg); color: inherit; border: 1px solid var(--line); border-radius: 4px; }
+.runs li { display: flex; gap: 6px; padding: 2px 0; } .runs button.selected { font-weight: 600; }
+.claude-auth { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; } .claude-auth label { display: block; }
+.warning { background: #fff3cd; color: #664d03; border: 1px solid #e0b84a; border-radius: 4px; padding: 6px; margin-top: 6px; }
+@media (prefers-color-scheme: dark) { .warning { background: #3d3112; color: #f1deb0; border-color: #7a6320; } }

@@ -16,6 +16,14 @@ vi.mock("../src/api", () => ({
     addCard: vi.fn(),
     moveCard: vi.fn(),
     createProject: vi.fn(),
+    getAgents: vi.fn(),
+    listRuns: vi.fn(),
+    getRun: vi.fn(),
+    listPendingActions: vi.fn(),
+    decideAction: vi.fn(),
+    startRun: vi.fn(),
+    stopRun: vi.fn(),
+    setClaudeAuth: vi.fn(),
   },
   errorMessage: () => "err",
   subscribeLedger: (_after: number, cb: (e: LedgerEntry) => void) => {
@@ -39,6 +47,9 @@ beforeEach(() => {
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false });
   m.listProjects.mockResolvedValue([mk("A").project, mk("B").project]);
   m.listLedger.mockResolvedValue([]);
+  m.getAgents.mockResolvedValue({ adapters: ["fake"], claudeAuthMode: "api_key", subscriptionAck: "ack" });
+  m.listRuns.mockResolvedValue([]);
+  m.listPendingActions.mockResolvedValue([]);
 });
 
 describe("App board refresh", () => {
@@ -90,5 +101,28 @@ describe("App initial load", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     expect(await screen.findByRole("heading", { name: "Project A" })).toBeTruthy();
     expect(await screen.findByRole("status")).toBeTruthy();
+  });
+});
+
+describe("App needs-you strip", () => {
+  it("shows pending actions above the board and refreshes on agent ledger entries", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const pendingAction = {
+      id: "act1", runId: "r1", kind: "shell", tool: "Bash", summary: "run ls", input: {},
+      status: "pending", decidedBy: null, reason: "", output: null, requestedAt: "", decidedAt: null,
+    } as const;
+    m.listPendingActions.mockResolvedValueOnce([]).mockResolvedValue([pendingAction]);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    expect(screen.queryByText("Needs you")).toBeNull();
+    act(() => {
+      h.onEntry?.({
+        id: "e", seq: 1, ts: "", projectId: "A", type: "agent.action.requested",
+        actor: { kind: "agent", id: "r1" }, payload: {}, prevHash: "", hash: "",
+      } as LedgerEntry);
+    });
+    expect(await screen.findByText("Agent wants to: run ls")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
   });
 });
