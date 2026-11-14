@@ -16,6 +16,11 @@ export interface AdapterStartOptions {
   /** Records the action, then resolves once it is allowed or denied. Never rejects. */
   gate: (a: ProposedAction) => Promise<GateResult & { actionId: string }>;
   emit: (e: AdapterEvent) => void;
+  /**
+   * Records an action the adapter refuses outright (e.g. a request it cannot serve) as requested and denied by
+   * policy, without asking anyone. Resolves once recorded.
+   */
+  recordDenied: (a: ProposedAction, reason: string) => Promise<void>;
 }
 
 export interface AgentAdapter {

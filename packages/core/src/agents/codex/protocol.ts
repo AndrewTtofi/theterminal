@@ -15,6 +15,7 @@ export const ACCOUNT_LOGIN_START = "account/login/start";
 export const THREAD_START = "thread/start";
 export const TURN_START = "turn/start";
 export const TURN_INTERRUPT = "turn/interrupt";
+export const MCP_SERVER_STATUS_LIST = "mcpServerStatus/list";
 
 // Server -> client requests that ask for an approval.
 export const COMMAND_APPROVAL = "item/commandExecution/requestApproval";
@@ -24,11 +25,22 @@ export const FILE_CHANGE_APPROVAL = "item/fileChange/requestApproval";
 export const ITEM_STARTED = "item/started";
 export const ITEM_COMPLETED = "item/completed";
 export const AGENT_MESSAGE_DELTA = "item/agentMessage/delta";
+export const COMMAND_OUTPUT_DELTA = "item/commandExecution/outputDelta";
+export const COMMAND_TERMINAL_INTERACTION = "item/commandExecution/terminalInteraction";
 export const TURN_COMPLETED = "turn/completed";
 export const ERROR = "error";
 
 export type ClientInfo = { name: string; title: string | null; version: string };
 export type InitializeParams = { clientInfo: ClientInfo; capabilities: null };
+/** `codexHome` is the absolute path of the server's $CODEX_HOME. */
+export type InitializeResponse = { userAgent: string; codexHome: string; platformFamily: string; platformOs: string };
+
+export type McpServerConnectionStatus =
+  | "notStarted" | "starting" | "connected" | "authenticationRequired" | "failed" | "cancelled" | "disabled";
+/** `threadId` reports that thread's connection state in `runtimeStatus`. */
+export type ListMcpServerStatusParams = { threadId?: string; cursor?: string };
+export type McpServerStatus = { name: string; runtimeStatus: McpServerConnectionStatus | null };
+export type ListMcpServerStatusResponse = { data: McpServerStatus[]; nextCursor: string | null };
 
 export type Account = { type: "apiKey" } | { type: "chatgpt" } | { type: string };
 export type GetAccountParams = { refreshToken?: boolean };
@@ -108,6 +120,9 @@ export type ThreadItem =
   | { type: "fileChange"; id: string; changes: FileUpdateChange[]; status: ItemStatus }
   | { type: string; id: string };
 
+/** Item-scoped notifications; a command's output and terminal input arrive only while it executes. */
+export type CommandOutputDeltaNotification = { threadId: string; turnId: string; itemId: string; delta: string };
+export type TerminalInteractionNotification = { threadId: string; turnId: string; itemId: string; processId: string; stdin: string };
 export type ItemNotification = { item: ThreadItem; threadId: string; turnId: string };
 export type AgentMessageDeltaNotification = { threadId: string; turnId: string; itemId: string; delta: string };
 export type TurnCompletedNotification = { threadId: string; turn: Turn };

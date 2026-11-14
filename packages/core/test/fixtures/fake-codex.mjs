@@ -1,12 +1,14 @@
 // A script-driven stand-in for `codex app-server` (the subset the Codex adapter uses), for tests only.
 // It speaks the same newline-delimited JSON-RPC shapes as @openai/codex 0.169.0: messages it sends carry no
-// "jsonrpc" field, item ids link approvals to items, and a file change's item/started precedes its approval.
+// "jsonrpc" field, item ids link approvals to items, and a command's or file change's item/started precedes its
+// approval request.
 //
 // THETERMINAL_FAKE_SCRIPT: JSON, either an array of steps or { steps, loggedOut, threadStartPolicy,
-//   threadStartError, ignoreSigterm, ignoreEof }. Steps:
-//   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0}
+//   threadStartError, ignoreSigterm, ignoreEof, codexHome, mcpServers: ["name"], mcpIgnoresDisable }. Steps:
+//   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true}
 //   {"approve":"fileChange","itemId":"f1","changes":[{"path":"a.txt","kind":"add"|"update"|"delete","diff"?:"…"}]}
-//   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}  {"ungated":"commandExecution"|"mcpToolCall"|…}
+//   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}
+//   {"ungated":"commandExecution"|"mcpToolCall"|…} (a command also streams output, as one that really ran would)
 //   {"exit":1,"stderr"?:"…"}  {"hang":true}
 // THETERMINAL_FAKE_LOG: a file that receives one JSON line per event (start, requests, notifications, and the
 //   answers to the fake's own server-requests), for test assertions.
@@ -27,7 +29,11 @@ log({
   pid: process.pid,
   argv: process.argv.slice(2),
   cwd: process.cwd(),
-  env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null, CODEX_API_KEY: process.env.CODEX_API_KEY ?? null },
+  env: {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? null,
+    CODEX_API_KEY: process.env.CODEX_API_KEY ?? null,
+    CODEX_HOME: process.env.CODEX_HOME ?? null,
+  },
 });
 
 const THREAD = "thread-1";
@@ -63,19 +69,23 @@ const fileItem = (s, status) => ({
   })),
 });
 let interrupted = false;
+let threadConfig = {};
 
 async function runSteps() {
   notify("turn/started", { threadId: THREAD, turn: turn("inProgress") });
   for (const s of steps) {
     if (interrupted) return;
     if (s.approve === "command") {
+      // The real server announces the command item before asking (bespoke_event_handling.rs).
+      started(commandItem(s, "inProgress"));
       const r = await serverRequest("item/commandExecution/requestApproval", {
         kind: "command", threadId: THREAD, turnId: TURN, itemId: s.itemId, startedAtMs: now(), approvalId: null,
-        environmentId: "local", reason: null, command: s.command, cwd: s.cwd ?? null, commandActions: [],
-        proposedExecpolicyAmendment: { command: [s.command] },
+        environmentId: "local", reason: null, command: s.nullCommand ? null : s.command, cwd: s.nullCommand ? null : (s.cwd ?? null),
+        commandActions: [], proposedExecpolicyAmendment: { command: [s.command] },
       });
-      if (r.result?.decision === "accept") {
-        started(commandItem(s, "inProgress"));
+      if (r.result?.decision !== "accept") {
+        completed(commandItem(s, "declined"));
+      } else {
         const output = s.output ?? `ran ${s.command}`;
         notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: TURN, itemId: s.itemId, delta: output });
         const exitCode = s.exitCode ?? 0;
@@ -99,10 +109,13 @@ async function runSteps() {
     } else if (typeof s.unknownRequest === "string") {
       await serverRequest(s.unknownRequest, { threadId: THREAD, turnId: TURN, itemId: "u1" });
     } else if (typeof s.ungated === "string") {
-      const item = s.ungated === "commandExecution"
-        ? commandItem({ itemId: s.itemId ?? "ungated-1", command: s.command ?? "cat notes.txt" }, "inProgress")
-        : { type: s.ungated, id: s.itemId ?? "ungated-1", status: "inProgress" };
-      started(item);
+      const id = s.itemId ?? "ungated-1";
+      if (s.ungated === "commandExecution") {
+        started(commandItem({ itemId: id, command: s.command ?? "cat notes.txt" }, "inProgress"));
+        notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: TURN, itemId: id, delta: "secret notes" });
+      } else {
+        started({ type: s.ungated, id, status: "inProgress" });
+      }
     } else if (typeof s.fail === "string") {
       const error = { message: s.fail, codexErrorInfo: null, additionalDetails: null, misalignment: null };
       notify("error", { error, willRetry: false, threadId: THREAD, turnId: TURN });
@@ -128,7 +141,21 @@ function handleRequest(msg) {
   const p = msg.params ?? {};
   switch (msg.method) {
     case "initialize":
-      return reply({ userAgent: "fake/0.169.0", codexHome: "/fake/codex-home", platformFamily: "unix", platformOs: "macos" });
+      return reply({
+        userAgent: "fake/0.169.0", codexHome: script.codexHome ?? "/fake/codex-home", platformFamily: "unix", platformOs: "macos",
+      });
+    case "mcpServerStatus/list": {
+      const names = script.mcpServers ?? [];
+      const disabled = (n) => !script.mcpIgnoresDisable && threadConfig[`mcp_servers.${n}.enabled`] === false;
+      return reply({
+        data: names.map((name) => ({
+          name, runtimeStatus: p.threadId ? (disabled(name) ? "disabled" : "connected") : null, pluginId: null, httpOrigin: null,
+          serverInfo: null, serverCapabilities: null, toolListMeta: null, tools: {}, toolsError: null, resources: [],
+          resourceTemplates: [], authStatus: "unsupported",
+        })),
+        nextCursor: null,
+      });
+    }
     case "account/read":
       return reply({
         account: script.loggedOut ? null : { type: "chatgpt", email: null, planType: "plus", workspaceName: null },
@@ -139,6 +166,7 @@ function handleRequest(msg) {
     case "thread/start": {
       if (script.threadStartError) return fail(script.threadStartError);
       const cfg = p.config ?? {};
+      threadConfig = cfg;
       return reply({
         thread: { id: THREAD, cwd: p.cwd, turns: [] }, model: "fake-model", modelProvider: "openai", serviceTier: null,
         disabledPluginIds: [], cwd: p.cwd, instructionSources: [],

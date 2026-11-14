@@ -36,6 +36,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
         return { decision: ok ? "allow" : "deny", reason: ok ? "read" : "read-only test", actionId: `act-${++n}` };
       },
       emit: (e) => events.push(e),
+      recordDenied: async () => {},
     });
     expect(r).toEqual({ status: "completed" });
     expect(proposed.some((a) => a.tool === "Read")).toBe(true);

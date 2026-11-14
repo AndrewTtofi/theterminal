@@ -283,6 +283,7 @@ export class AgentRunner {
           cwd, prompt, authMode, signal: abort.signal,
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
+          recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
         });
         status = r.status;
         error = r.status === "failed" ? (r.error ?? "agent failed") : null;
@@ -304,18 +305,45 @@ export class AgentRunner {
     })();
   }
 
+  /** Records a proposal through the same snapshot, redaction and scrub as every action; returns what was recorded. */
+  private recordProposal(runId: string, s: Session, actionId: string, proposed: ProposedAction) {
+    const a = snapshot(proposed); // recording and classify see only this copy
+    const input = this.cleanInput(a.input, s.scrub);
+    this.recordRequest(s, runId, {
+      runId, actionId, kind: a.kind,
+      tool: this.clean(a.tool, MAX.tool, s.scrub) || "unknown",
+      summary: this.clean(a.summary, MAX.summary, s.scrub) || "(no summary)",
+      input,
+    });
+    return { a, input };
+  }
+
+  /** An action the adapter refuses outright: recorded as requested and denied by policy, with no human wait. */
+  private recordDenied(runId: string, s: Session, proposed: ProposedAction, reason: string): void {
+    const actionId = this.newId();
+    let recorded = false;
+    try {
+      this.recordProposal(runId, s, actionId, proposed);
+      recorded = true;
+      this.settle(s.projectId, runId, actionId, "deny", this.clean(reason, MAX.reason, s.scrub) || "denied");
+    } catch {
+      s.failure ??= INTERNAL_ERROR;
+      try {
+        if (!recorded) {
+          this.recordRequest(s, runId, { runId, actionId, kind: "other", tool: "unknown", summary: "(unrecordable action)", input: null });
+        }
+        this.settle(s.projectId, runId, actionId, "deny", INTERNAL_ERROR);
+      } catch {
+        // Nothing more we can record.
+      }
+    }
+  }
+
   private async gate(runId: string, s: Session, worktreeAbs: string, proposed: ProposedAction): Promise<GateOutcome> {
     const actionId = this.newId();
     let recorded = false;
     try {
-      const a = snapshot(proposed); // recording and classify see only this copy
-      const input = this.cleanInput(a.input, s.scrub);
-      this.recordRequest(s, runId, {
-        runId, actionId, kind: a.kind,
-        tool: this.clean(a.tool, MAX.tool, s.scrub) || "unknown",
-        summary: this.clean(a.summary, MAX.summary, s.scrub) || "(no summary)",
-        input,
-      });
+      const { a, input } = this.recordProposal(runId, s, actionId, proposed);
       recorded = true;
       if (s.abort.signal.aborted) return this.settle(s.projectId, runId, actionId, "deny", "run stopped");
       const v = classify({ ...a, input }, worktreeAbs, this.deps.worktrees) // classify sees what was recorded;

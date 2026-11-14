@@ -183,6 +183,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
       return { ...(await decide(a)), actionId: `act-${++n}` };
     },
     emit: (e) => events.push(e),
+    recordDenied: async () => {},
   };
   return { opts, proposed, events, abort };
 }

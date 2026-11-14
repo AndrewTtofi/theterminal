@@ -275,6 +275,31 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(strings).toContain("home is ~");
   });
 
+  it("recordDenied records a denied action by policy, cleaned, without waiting for anyone", async () => {
+    const adapter: AgentAdapter = {
+      id: "fake",
+      async start(o) {
+        await o.recordDenied(
+          {
+            tool: "codex.x/y", kind: "other", summary: `Unsupported request in ${o.cwd}`,
+            input: { method: "x/y", params: { api_key: "sk-TESTKEY0123456789abcdef" } }, paths: [],
+          },
+          "unsupported request x/y",
+        );
+        return { status: "completed" };
+      },
+    };
+    const runner = makeRunner({ fake: adapter });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(getRun(db, run.id)!.status).toBe("completed");
+    expect(listPendingActions(db, projectId)).toEqual([]);
+    expect(listActions(db, run.id)).toMatchObject([{
+      kind: "other", tool: "codex.x/y", summary: "Unsupported request in .", status: "denied", decidedBy: "policy",
+      reason: "unsupported request x/y", input: { method: "x/y", params: { api_key: "[REDACTED]" } },
+    }]);
+  });
+
   it("records the OS username as <user>, as a whole word only", async () => {
     const runner = fakeRunner([
       { message: "-rw-r--r--  1 alice  staff  0 a.txt; mail alice@example.com; malice alicex alice_x" },

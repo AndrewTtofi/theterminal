@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,6 +114,7 @@ describe("CodexAdapter (fake app-server)", () => {
     o: Partial<AdapterStartOptions> = {},
   ) {
     const proposed: ProposedAction[] = [];
+    const denied: [ProposedAction, string][] = [];
     const events: AdapterEvent[] = [];
     let n = 0;
     const result = adapter.start({
@@ -127,26 +128,30 @@ describe("CodexAdapter (fake app-server)", () => {
         return { ...(await decide(a)), actionId: id };
       },
       emit: (e) => events.push(e),
+      recordDenied: async (a, reason) => {
+        denied.push([a, reason]);
+      },
       ...o,
     });
-    return { result, proposed, events };
+    return { result, proposed, denied, events };
   }
 
-  it("runs a command the gate allows, answers accept and reports its result", async () => {
+  it("runs a command the gate allows (announced before its approval), answers accept and reports its result", async () => {
     script([{ approve: "command", command: "ls", itemId: "i1", output: "a.txt\n" }, { message: "All done." }]);
     const { result, proposed, events } = run(make());
     expect(await result).toEqual({ status: "completed" });
     expect(proposed).toEqual([
-      { tool: "codex.command", kind: "shell", summary: "Run: ls", input: { command: "ls" }, paths: [] },
+      // The approval carries no cwd here; the one announced in item/started fills it in.
+      { tool: "codex.command", kind: "shell", summary: "Run: ls", input: { command: "ls", cwd: dir }, paths: [dir] },
     ]);
     expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }]);
     expect(events).toEqual([
       { type: "action_result", actionId: "act-1", ok: true, output: "a.txt\n" },
       { type: "message", text: "All done." },
     ]);
-    // The handshake: initialize, then initialized, a login check, the strict thread and the prompt.
+    // The handshake: initialize, initialized, a login check, the MCP inventory, the strict thread and the prompt.
     const order = fakeLog().filter((e) => e.received).map((e) => e.received);
-    expect(order.slice(0, 5)).toEqual(["initialize", "initialized", "account/read", "thread/start", "turn/start"]);
+    expect(order.slice(0, 6)).toEqual(["initialize", "initialized", "account/read", "mcpServerStatus/list", "thread/start", "turn/start"]);
     expect(received("initialize")[0].params.clientInfo).toMatchObject({ name: "theterminal" });
     expect(received("turn/start")[0].params).toMatchObject({
       threadId: "thread-1", input: [{ type: "text", text: "do the thing", text_elements: [] }],
@@ -197,24 +202,21 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(events).toEqual([{ type: "action_result", actionId: "act-2", ok: true, output: "completed: inside.txt" }]);
   });
 
-  it("records an unknown server-request and answers it with an error", async () => {
+  it("records an unknown server-request as denied without asking anyone, and answers it with an error", async () => {
     script([{ unknownRequest: "item/tool/requestUserInput" }, { message: "ok" }]);
-    const { result, proposed } = run(make(), (a) => ({ decision: a.kind === "other" ? "deny" : "allow", reason: "unsupported" }));
+    const { result, proposed, denied } = run(make(), () => new Promise<GateResult>(() => {}));
     expect(await result).toEqual({ status: "completed" });
-    expect(proposed).toMatchObject([
-      { kind: "other", tool: "codex.item/tool/requestUserInput", summary: "Unsupported Codex request: item/tool/requestUserInput" },
-    ]);
+    expect(proposed).toEqual([]);
+    expect(denied).toEqual([[
+      {
+        kind: "other", tool: "codex.item/tool/requestUserInput", summary: "Unsupported Codex request: item/tool/requestUserInput",
+        input: { method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId: "turn-1", itemId: "u1" } }, paths: [],
+      },
+      "unsupported request item/tool/requestUserInput",
+    ]]);
     expect(answers("item/tool/requestUserInput")).toEqual([
       { answered: "item/tool/requestUserInput", error: { code: -32000, message: "denied" } },
     ]);
-  });
-
-  it("still answers an unknown request with an error when the gate allows it", async () => {
-    script([{ unknownRequest: "x/y" }]);
-    const { result, events } = run(make());
-    expect(await result).toEqual({ status: "completed" });
-    expect(answers("x/y")[0].error).toBeDefined();
-    expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: "unsupported request x/y" }]);
   });
 
   it("starts the thread with the strict approval policy, the user as reviewer and a networkless workspace sandbox", async () => {
@@ -230,7 +232,23 @@ describe("CodexAdapter (fake app-server)", () => {
       "sandbox_workspace_write.network_access": false,
       "sandbox_workspace_write.exclude_slash_tmp": true,
       "sandbox_workspace_write.exclude_tmpdir_env_var": true,
+      "features.view_image": false,
+      "features.multi_agent": false,
+      "features.multi_agent_v2": false,
     });
+  });
+
+  it("uses the command announced in item/started when the approval omits it", async () => {
+    script([{ approve: "command", command: "make test", cwd: dir, itemId: "i1", nullCommand: true }]);
+    const { result, proposed } = run(make());
+    expect(await result).toEqual({ status: "completed" });
+    expect(proposed).toMatchObject([{ kind: "shell", summary: "Run: make test", input: { command: "make test", cwd: dir }, paths: [dir] }]);
+  });
+
+  it("does not trip on a command that was announced and then declined", async () => {
+    script([{ approve: "command", command: "ls", itemId: "i1" }, { message: "ok" }]);
+    const { result } = run(make(), () => ({ decision: "deny", reason: "no" }));
+    expect(await result).toEqual({ status: "completed" });
   });
 
   it.each([
@@ -244,20 +262,20 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(proposed).toEqual([]);
   });
 
-  it("fails and records the action when Codex runs a command that was never approved", async () => {
+  it("fails and records the action when a command that was never approved produces output", async () => {
     script([{ ungated: "commandExecution", command: "cat notes.txt", itemId: "u1" }, { hang: true }]);
-    const { result, proposed } = run(make());
+    const { result, proposed, denied } = run(make());
     const r = await result;
-    expect(r.status).toBe("failed");
-    expect(r.error).toMatch(/without approval/);
-    expect(proposed).toMatchObject([{ kind: "other", tool: "codex.commandExecution" }]);
+    expect(r).toEqual({ status: "failed", error: "Codex ran commandExecution without approval" });
+    expect(proposed).toEqual([]);
+    expect(denied).toMatchObject([[{ kind: "other", tool: "codex.commandExecution" }, "ran without approval"]]);
   });
 
   it("fails when Codex uses a tool that cannot be gated", async () => {
     script([{ ungated: "mcpToolCall" }, { hang: true }]);
-    const { result, proposed } = run(make());
+    const { result, denied } = run(make());
     expect((await result).error).toMatch(/mcpToolCall without approval/);
-    expect(proposed).toMatchObject([{ kind: "other", tool: "codex.mcpToolCall" }]);
+    expect(denied).toMatchObject([[{ kind: "other", tool: "codex.mcpToolCall" }, "ran without approval"]]);
   });
 
   it("fails the run with the turn's error", async () => {
@@ -285,14 +303,14 @@ describe("CodexAdapter (fake app-server)", () => {
   it.each([
     ["exits on EOF", {}],
     ["ignores EOF and SIGTERM", { ignoreSigterm: true, ignoreEof: true }],
-  ])("aborting mid-approval interrupts, kills Codex (which %s) within 6s and never accepts", async (_label, cfg) => {
+  ])("aborting mid-approval interrupts, kills Codex (which %s) promptly and never accepts", async (_label, cfg) => {
     script({ ...cfg, steps: [{ approve: "command", command: "ls", itemId: "i1" }] });
     const ac = new AbortController();
     let gateDenied = false;
     let gateAsked!: () => void;
     const asked = new Promise<void>((r) => (gateAsked = r));
     const { result } = run(
-      make(),
+      make({ killGraceMs: 300 }),
       () =>
         new Promise<GateResult>((resolve) => {
           gateAsked();
@@ -308,8 +326,9 @@ describe("CodexAdapter (fake app-server)", () => {
     const t0 = Date.now();
     ac.abort();
     expect(await result).toEqual({ status: "failed", error: "run stopped" });
-    expect(Date.now() - t0).toBeLessThan(6000);
+    expect(Date.now() - t0).toBeLessThan(3000);
     expect(gateDenied).toBe(true);
+    if ("ignoreSigterm" in cfg && process.platform !== "win32") expect(fakeLog().some((e) => e.signal === "SIGTERM")).toBe(true);
     expect(() => process.kill(pid, 0)).toThrow();
     expect(received("turn/interrupt")).toHaveLength(1);
     expect(answers(CMD).every((e) => e.result?.decision !== "accept")).toBe(true);
@@ -330,12 +349,57 @@ describe("CodexAdapter (fake app-server)", () => {
       vi.stubEnv("CODEX_API_KEY", "sk-INHERITED-TESTKEY");
     });
 
-    it("chatgpt mode passes no API key and relies on the user's own login", async () => {
+    it("chatgpt mode passes no API key, keeps the user's CODEX_HOME and relies on their own login", async () => {
+      vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
       script([]);
       const { result } = run(make(), undefined, { authMode: "chatgpt" });
       expect(await result).toEqual({ status: "completed" });
-      expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null });
+      const start = fakeLog().find((e) => e.start);
+      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: join(dir, "users-codex-home") });
+      expect(start.argv).not.toContain("cli_auth_credentials_store=ephemeral");
       expect(received("account/login/start")).toEqual([]);
+    });
+
+    it("chatgpt mode refuses when Codex has exec-policy rules, without reading them", async () => {
+      const home = join(dir, "home");
+      mkdirSync(join(home, "rules"), { recursive: true });
+      writeFileSync(join(home, "rules", "notes.txt"), "not a rules file");
+      script({ codexHome: home, steps: [] });
+      expect(await run(make()).result).toEqual({ status: "completed" });
+
+      writeFileSync(join(home, "rules", "default.rules"), "prefix_rule(pattern=[\"ls\"], decision=\"allow\")");
+      const { result } = run(make());
+      expect(await result).toEqual({
+        status: "failed",
+        error: "Codex has 'always allow' rules that would bypass approvals; remove them from your Codex rules folder or use API-key mode",
+      });
+      expect(received("thread/start")).toHaveLength(1); // only the first run started a thread
+    });
+
+    it("chatgpt mode refuses when the worktree has project exec-policy rules", async () => {
+      mkdirSync(join(dir, ".codex", "rules"), { recursive: true });
+      writeFileSync(join(dir, ".codex", "rules", "project.rules"), "");
+      script([]);
+      const { result } = run(make());
+      expect((await result).error).toMatch(/'always allow' rules/);
+      expect(received("thread/start")).toEqual([]);
+    });
+
+    it("chatgpt mode disables every configured MCP server and checks they are disabled", async () => {
+      script({ mcpServers: ["docs", "tracker"], steps: [] });
+      const { result } = run(make());
+      expect(await result).toEqual({ status: "completed" });
+      expect(received("thread/start")[0].params.config).toMatchObject({
+        "mcp_servers.docs.enabled": false, "mcp_servers.tracker.enabled": false,
+      });
+      expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
+    });
+
+    it("chatgpt mode refuses to start the turn when an MCP server stays enabled", async () => {
+      script({ mcpServers: ["docs"], mcpIgnoresDisable: true, steps: [] });
+      const { result } = run(make());
+      expect(await result).toEqual({ status: "failed", error: "Codex MCP servers could not be disabled; remove them or use API-key mode" });
+      expect(received("turn/start")).toEqual([]);
     });
 
     it("chatgpt mode fails when the CLI reports no login", async () => {
@@ -345,12 +409,15 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("thread/start")).toEqual([]);
     });
 
-    it("api_key mode passes exactly the configured key and logs in with it, kept in memory only", async () => {
+    it("api_key mode passes exactly the configured key, an isolated CODEX_HOME, and logs in in memory only", async () => {
+      vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
       script([]);
       const { result } = run(make(), undefined, { authMode: "api_key" });
       expect(await result).toEqual({ status: "completed" });
       const start = fakeLog().find((e) => e.start);
-      expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY });
+      expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY, CODEX_HOME: join(dir, "codex-home") });
+      expect(existsSync(join(dir, "codex-home"))).toBe(true);
+      expect(received("mcpServerStatus/list")).toEqual([]);
       expect(start.argv).toEqual(["app-server", "-c", "cli_auth_credentials_store=ephemeral"]);
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
     });
@@ -379,9 +446,21 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(await result).toEqual({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
     });
 
-    it("refuses a Windows .cmd shim rather than using a shell", async () => {
+    it("runs the script behind an npm .cmd shim with node instead of a shell", async () => {
+      script([]);
+      const shim = join(dir, "npm", "codex.CMD");
+      const target = join(dir, "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
+      const real = (await import("node:child_process")).spawn;
+      const spawn = vi.fn((_file: string, args: string[], opts: object) => real(process.execPath, [FAKE, ...args.slice(1)], opts));
+      const exists = vi.fn((p: string) => p === target);
+      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => shim, spawn: spawn as never, exists }));
+      expect(await result).toEqual({ status: "completed" });
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [target, "app-server"], expect.objectContaining({ shell: false }));
+    });
+
+    it("refuses a .cmd shim with no npm package script behind it", async () => {
       const spawn = vi.fn();
-      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => "C:\\tools\\codex.CMD", spawn: spawn as never }));
+      const { result } = run(new CodexAdapter({ dataDir: dir, bin: () => join(dir, "codex.cmd"), spawn: spawn as never, exists: () => false }));
       expect(await result).toEqual({ status: "failed", error: "Codex CLI must be a native executable on Windows (found a .cmd shim)" });
       expect(spawn).not.toHaveBeenCalled();
     });
