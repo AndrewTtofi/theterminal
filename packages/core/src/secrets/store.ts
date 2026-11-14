@@ -91,9 +91,26 @@ export class ChunkedSecretStore implements SecretStore {
       return;
     }
     const chunks = splitUtf8(value, this.maxChunkBytes);
-    for (let i = 0; i < chunks.length; i++) await this.backend.set(chunkAccount(account, i), chunks[i]!);
-    await this.backend.set(account, manifestFor(chunks.length));
+    let attempted = 0;
+    try {
+      // Drop the old manifest first: an interrupted write then reads as null, never as old and new chunks mixed.
+      if (previous > 0) await this.backend.delete(account);
+      for (; attempted < chunks.length; ) {
+        const index = attempted++;
+        await this.backend.set(chunkAccount(account, index), chunks[index]!);
+      }
+      await this.backend.set(account, manifestFor(chunks.length));
+    } catch (err) {
+      await this.discard(account, Math.max(attempted, previous));
+      throw err;
+    }
     await this.deleteChunks(account, chunks.length, previous);
+  }
+
+  /** Best-effort removal of the head and chunks `#0..count-1` after a failed write; cleanup errors are dropped. */
+  private async discard(account: string, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) await this.backend.delete(chunkAccount(account, i)).catch(() => undefined);
+    await this.backend.delete(account).catch(() => undefined);
   }
 
   async delete(account: string): Promise<void> {

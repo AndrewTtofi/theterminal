@@ -31,6 +31,38 @@ class SpyStore implements SecretStore {
   }
 }
 
+/**
+ * A memory backend that, once armed, fails the Nth `set` (1-based) as an unavailable keychain would.
+ * With `failDeletesAfterFirst`, every delete after the first armed one fails too.
+ */
+class FailingStore implements SecretStore {
+  readonly inner = new MemorySecretStore();
+  private setsLeft = Infinity;
+  private deletesBeforeFailure = Infinity;
+  arm(failOnSet: number, opts: { failDeletesAfterFirst?: boolean } = {}): void {
+    this.setsLeft = failOnSet;
+    if (opts.failDeletesAfterFirst) this.deletesBeforeFailure = 1;
+  }
+  async get(account: string): Promise<string | null> {
+    return this.inner.get(account);
+  }
+  async set(account: string, value: string): Promise<void> {
+    if (--this.setsLeft === 0) throw new SecretStoreUnavailableError();
+    return this.inner.set(account, value);
+  }
+  async delete(account: string): Promise<void> {
+    if (this.deletesBeforeFailure-- <= 0) throw new SecretStoreUnavailableError();
+    return this.inner.delete(account);
+  }
+  /** Every entry belonging to `account`: the head and any `#k` chunk up to `max`. */
+  async entriesFor(account: string, max = 32): Promise<string[]> {
+    const found: string[] = [];
+    if ((await this.inner.get(account)) !== null) found.push(account);
+    for (let k = 0; k < max; k++) if ((await this.inner.get(`${account}#${k}`)) !== null) found.push(`${account}#${k}`);
+    return found;
+  }
+}
+
 /** A fake keyring: a shared map keyed by service + account, with optional failures. */
 function fakeKeyring(fail: { set?: boolean; get?: boolean; delete?: boolean; create?: boolean } = {}) {
   const data = new Map<string, string>();
@@ -193,6 +225,37 @@ describe("ChunkedSecretStore", () => {
     await expect(store.set(ACCOUNT, "x".repeat(20 * 1024))).rejects.toBeInstanceOf(RangeError);
     await expect(store.set(ACCOUNT, "")).rejects.toBeInstanceOf(RangeError);
     expect(backend.calls).toEqual([]);
+  });
+
+  it("a failed 3 → 9 chunk overwrite leaves nothing behind and reads as null", async () => {
+    const backend = new FailingStore();
+    const store = new ChunkedSecretStore(backend, 16);
+    const old = "o".repeat(48); // 3 chunks
+    const next = "n".repeat(144); // 9 chunks
+    await store.set(ACCOUNT, old);
+    expect(await backend.entriesFor(ACCOUNT)).toHaveLength(4);
+    backend.arm(7); // the 7th set is chunk #6
+    const err = await store.set(ACCOUNT, next).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect(await store.get(ACCOUNT)).toBeNull();
+    expect(await backend.entriesFor(ACCOUNT)).toEqual([]);
+  });
+
+  it("a failed chunked-over-chunked overwrite never returns a mixed value, at any failure point", async () => {
+    const old = "o".repeat(48);
+    const next = "n".repeat(48); // same chunk count: the case where a stale manifest would mix chunks
+    for (const failDeletesAfterFirst of [false, true]) {
+      for (let n = 1; n <= 4; n++) {
+        const backend = new FailingStore();
+        const store = new ChunkedSecretStore(backend, 16);
+        await store.set(ACCOUNT, old);
+        backend.arm(n, { failDeletesAfterFirst });
+        await expect(store.set(ACCOUNT, next)).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+        const read = await store.get(ACCOUNT);
+        expect(read).toBeNull();
+        if (!failDeletesAfterFirst) expect(await backend.entriesFor(ACCOUNT)).toEqual([]);
+      }
+    }
   });
 
   it("defaults to 2048-byte chunks", async () => {
