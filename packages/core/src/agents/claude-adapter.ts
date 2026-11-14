@@ -4,6 +4,7 @@ import { query as sdkQuery, type HookCallback, type HookJSONOutput, type Options
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
 import { redact } from "./redact.js";
+import { EMPTY_GITCONFIG } from "./worktrees.js";
 import { which } from "./which.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
@@ -12,6 +13,8 @@ const NO_API_KEY = "No Anthropic API key configured";
 const NO_CLAUDE_CODE = "Claude Code is not installed or not on PATH";
 /** Inherited variables that could send requests elsewhere, pick another provider or authenticate differently. */
 const INHERITED_CLAUDE_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_USE_)/i;
+/** Inherited git variables (identity, repository, config) would override what the worktree is set up with. */
+const INHERITED_GIT_ENV = /^GIT_/i;
 const STOPPED = "run stopped";
 const MAX_COMMAND = 150;
 const MAX_DESCRIPTION = 120;
@@ -136,15 +139,19 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly query: typeof sdkQuery;
   private readonly apiKey: () => string | undefined;
   private readonly findClaude: () => string | null;
+  private readonly emptyGitConfig: string;
 
   constructor(
     opts: {
+      /** The data directory that holds the empty global git config (see WorktreeManager). */
+      dataDir: string;
       query?: typeof sdkQuery;
       apiKey?: () => string | undefined;
       /** Locates the user's own Claude Code for subscription mode. Default: `claude` on PATH. */
       findClaude?: () => string | null;
-    } = {},
+    },
   ) {
+    this.emptyGitConfig = join(opts.dataDir, EMPTY_GITCONFIG);
     this.query = opts.query ?? sdkQuery;
     this.apiKey = opts.apiKey ?? (() => process.env.ANTHROPIC_API_KEY);
     this.findClaude = opts.findClaude ?? (() => which("claude"));
@@ -260,10 +267,12 @@ export class ClaudeAdapter implements AgentAdapter {
     const env: Record<string, string | undefined> = { ...process.env };
     // Inherited settings that could send requests elsewhere or authenticate with something other than our choice.
     for (const k of Object.keys(env)) {
-      if (INHERITED_CLAUDE_ENV.test(k)) delete env[k];
+      if (INHERITED_CLAUDE_ENV.test(k) || INHERITED_GIT_ENV.test(k)) delete env[k];
     }
     // Keep the shell in the worktree root after every command, so relative paths resolve where the gate judged them.
     env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
+    env.GIT_CONFIG_GLOBAL = this.emptyGitConfig;
+    env.GIT_CONFIG_NOSYSTEM = "1";
     if (mode === "subscription") return env; // the user's own Claude Code login is used, untouched
     if (mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
     delete env.CLAUDE_CODE_OAUTH_TOKEN;

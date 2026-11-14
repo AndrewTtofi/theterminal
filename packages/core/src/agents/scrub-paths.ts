@@ -89,6 +89,8 @@ export function pathScrubber(
 
 /** Characters that continue a name: a username next to one of these is part of a longer word. */
 const WORD = "A-Za-z0-9_.\\-";
+// On the right a "." ends the word unless a name character follows it (alice. but not alice.bak).
+const RIGHT_WORD = "A-Za-z0-9_\\-";
 const MIN_USERNAME = 3;
 
 /**
@@ -98,6 +100,6 @@ const MIN_USERNAME = 3;
 export function usernameScrubber(username: string, opts: { caseless?: boolean } = {}): Scrub {
   if (username.length < MIN_USERNAME) return (s) => s;
   const caseless = opts.caseless ?? (process.platform === "darwin" || process.platform === "win32");
-  const re = new RegExp(`(?<![${WORD}])${escapeRegExp(username)}(?![${WORD}])`, caseless ? "giu" : "gu");
+  const re = new RegExp(`(?<![${WORD}])${escapeRegExp(username)}(?![${RIGHT_WORD}]|\\.[${RIGHT_WORD}])`, caseless ? "giu" : "gu");
   return (s) => s.replace(re, "<user>");
 }

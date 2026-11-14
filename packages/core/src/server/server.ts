@@ -79,8 +79,8 @@ const DEFAULT_FAKE_SCRIPT: FakeStep[] = [
 ];
 
 /** Claude always; the scripted fake adapter only when THETERMINAL_FAKE_AGENT=1 (tests and demos). */
-function buildAdapters(): Partial<Record<AdapterId, AgentAdapter>> {
-  const adapters: Partial<Record<AdapterId, AgentAdapter>> = { claude: new ClaudeAdapter() };
+function buildAdapters(dataDir: string): Partial<Record<AdapterId, AgentAdapter>> {
+  const adapters: Partial<Record<AdapterId, AgentAdapter>> = { claude: new ClaudeAdapter({ dataDir }) };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;
     let script: FakeStep[] = DEFAULT_FAKE_SCRIPT;
@@ -107,7 +107,7 @@ export async function createServer(opts: {
   /** How long close() waits for agent adapters to return after stopping them. */
   shutdownTimeoutMs?: number;
 }): Promise<RunningServer> {
-  const adapters = buildAdapters();
+  const adapters = buildAdapters(opts.dataDir);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));

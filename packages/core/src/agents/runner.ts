@@ -308,15 +308,16 @@ export class AgentRunner {
     let recorded = false;
     try {
       const a = snapshot(proposed); // recording and classify see only this copy
+      const input = this.cleanInput(a.input, s.scrub);
       this.recordRequest(s, runId, {
         runId, actionId, kind: a.kind,
         tool: this.clean(a.tool, MAX.tool, s.scrub) || "unknown",
         summary: this.clean(a.summary, MAX.summary, s.scrub) || "(no summary)",
-        input: this.cleanInput(a.input, s.scrub),
+        input,
       });
       recorded = true;
       if (s.abort.signal.aborted) return this.settle(s.projectId, runId, actionId, "deny", "run stopped");
-      const v = classify(a, worktreeAbs, this.deps.worktrees);
+      const v = classify({ ...a, input }, worktreeAbs, this.deps.worktrees) // classify sees what was recorded;
       if (v.verdict !== "ask") {
         return this.settle(s.projectId, runId, actionId, v.verdict === "auto_allow" ? "allow" : "deny", v.reason);
       }
@@ -455,9 +456,12 @@ export class AgentRunner {
       .get(actionId) as ActionRow | undefined;
   }
 
-  /** Scrub paths, redact, then truncate: never truncate first. */
+  /**
+   * Redact the configured secrets, scrub paths, redact again, then truncate (never truncate first). The first
+   * pass runs before scrubbing so a secret that contains the username or a path is still matched whole.
+   */
   private clean(s: string, max: number, scrub: Scrub): string {
-    return truncate(redact(scrub(s), this.deps.extraSecrets), max);
+    return truncate(redact(scrub(redact(s, this.deps.extraSecrets)), this.deps.extraSecrets), max);
   }
 
   /**
@@ -468,7 +472,7 @@ export class AgentRunner {
   private cleanInput(input: unknown, scrub: Scrub): unknown {
     const json = JSON.stringify(input ?? null);
     const plain: unknown = json === undefined ? null : JSON.parse(json);
-    const value = redact(scrubJson(plain, scrub), this.deps.extraSecrets);
+    const value = redact(scrubJson(redact(plain, this.deps.extraSecrets), scrub), this.deps.extraSecrets);
     const out = JSON.stringify(value);
     if (out.length <= MAX.input) return value;
     return {

@@ -25,7 +25,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
     const proposed: ProposedAction[] = [];
     const events: AdapterEvent[] = [];
     let n = 0;
-    const r = await new ClaudeAdapter().start({
+    const r = await new ClaudeAdapter({ dataDir: worktree }).start({
       cwd: worktree,
       prompt: "Read README.md and reply with the magic word only. Do not modify anything.",
       authMode: "api_key",
@@ -51,7 +51,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
     const projectId = new BoardService(db, ledger).createProject(owner, { name: "Live" }).id;
     const runner = new AgentRunner({
       db, ledger, worktrees: new WorktreeManager(worktree), broker: new ApprovalBroker(),
-      adapters: { claude: new ClaudeAdapter() }, extraSecrets: [], dataDir: worktree,
+      adapters: { claude: new ClaudeAdapter({ dataDir: worktree }) }, extraSecrets: [], dataDir: worktree,
     });
     try {
       const run = await runner.start(owner, {

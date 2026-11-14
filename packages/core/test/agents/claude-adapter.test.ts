@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HookCallbackMatcher, HookInput, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
 import { DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
+import { EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
 import { ClaudeSettings } from "../../src/agents/settings.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getSetting } from "../../src/events/projections.js";
@@ -199,9 +200,13 @@ describe("ClaudeAdapter", () => {
     ANTHROPIC_MODEL: "fake-model",
     ANTHROPIC_CUSTOM_HEADERS: "x-fake: 1",
     CLAUDE_CODE_USE_FOUNDRY: "1",
+    GIT_AUTHOR_EMAIL: "someone@example.com",
+    GIT_COMMITTER_NAME: "someone",
+    GIT_DIR: "/nonexistent/fake.git",
   };
   const STRIPPED = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
   const CLAUDE_BIN = "/opt/fake/bin/claude";
+  const DATA_DIR = join(tmpdir(), "fake-data-dir");
   const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
     for (const [k, v] of Object.entries(FAKE_ENV)) {
@@ -219,7 +224,7 @@ describe("ClaudeAdapter", () => {
   it("passes a locked-down configuration with a fail-closed PreToolUse hook", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     const { prompt, options } = q.calls[0]!;
     expect(prompt).toBe("do it");
     expect(options.cwd).toBe(CWD);
@@ -248,7 +253,7 @@ describe("ClaudeAdapter", () => {
       success(0.0123),
     ]);
     const h = harness();
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     expect(r).toEqual({ status: "completed" });
     expect(h.proposed.map((a) => [a.tool, a.kind])).toEqual([["Read", "file_read"], ["Bash", "shell"], ["Edit", "file_edit"]]);
     expect(q.preDecisions.map((d) => d.hookSpecificOutput)).toEqual([
@@ -268,7 +273,7 @@ describe("ClaudeAdapter", () => {
   it("returns a hook deny with the reason when the gate denies", async () => {
     const q = fakeQuery([{ tool: "Write", input: { file_path: "x" }, id: "tu-1", response: "written" }, success(0)]);
     const h = harness(() => ({ decision: "deny", reason: "outside worktree" }));
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     expect(r.status).toBe("completed");
     expect(q.preDecisions[0]!.hookSpecificOutput).toEqual({
       hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "outside worktree",
@@ -281,7 +286,7 @@ describe("ClaudeAdapter", () => {
     const h = harness(() => {
       throw new Error(`gate exploded with ${FAKE_KEY}`);
     });
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     expect(q.preDecisions[0]!.hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" });
     expect(r.status).toBe("failed");
     expect(r.error).toContain("gate");
@@ -291,7 +296,7 @@ describe("ClaudeAdapter", () => {
 
   it("api_key mode passes the configured key and drops anything that could redirect or override it", async () => {
     const q = fakeQuery([success(0)]);
-    await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
     const env = q.calls[0]!.options.env!;
     expect(env.ANTHROPIC_API_KEY).toBe(FAKE_KEY);
     for (const k of [...STRIPPED, "CLAUDE_CODE_OAUTH_TOKEN"]) expect(env).not.toHaveProperty(k);
@@ -303,7 +308,7 @@ describe("ClaudeAdapter", () => {
   it("api_key mode keeps the bundled Claude Code and never looks for one on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const findClaude = vi.fn(() => CLAUDE_BIN);
-    await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY, findClaude }).start(harness().opts);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, findClaude }).start(harness().opts);
     expect(q.calls[0]!.options).not.toHaveProperty("pathToClaudeCodeExecutable");
     expect(findClaude).not.toHaveBeenCalled();
   });
@@ -311,21 +316,21 @@ describe("ClaudeAdapter", () => {
   it("subscription mode runs the user's own Claude Code found on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    await new ClaudeAdapter({ query: q.fn, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
     expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(CLAUDE_BIN);
   });
 
   it("subscription mode fails without starting Claude when Claude Code is not on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    const r = await new ClaudeAdapter({ query: q.fn, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
     expect(r).toEqual({ status: "failed", error: "Claude Code is not installed or not on PATH" });
     expect(q.calls).toHaveLength(0);
   });
 
   it("api_key mode with no key fails with the exact message without starting Claude", async () => {
     const q = fakeQuery([success(0)]);
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => undefined }).start(harness().opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => undefined }).start(harness().opts);
     expect(r).toEqual({ status: "failed", error: "No Anthropic API key configured" });
     expect(q.calls).toHaveLength(0);
   });
@@ -334,7 +339,7 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     const apiKey = vi.fn(() => FAKE_KEY);
     const h = harness();
-    await new ClaudeAdapter({ query: q.fn, apiKey, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
     const env = q.calls[0]!.options.env!;
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     for (const k of STRIPPED) expect(env).not.toHaveProperty(k);
@@ -344,16 +349,28 @@ describe("ClaudeAdapter", () => {
     expect(apiKey).not.toHaveBeenCalled();
   });
 
+  it("strips every inherited GIT_* variable and points git at the empty global config", async () => {
+    const q = fakeQuery([success(0)]);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
+    const env = q.calls[0]!.options.env!;
+    expect(env).not.toHaveProperty("GIT_AUTHOR_EMAIL");
+    expect(env).not.toHaveProperty("GIT_COMMITTER_NAME");
+    expect(env).not.toHaveProperty("GIT_DIR");
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(env.GIT_CONFIG_GLOBAL).toBe(join(DATA_DIR, EMPTY_GITCONFIG));
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
+  });
+
   it("defaults apiKey to process.env.ANTHROPIC_API_KEY", async () => {
     const q = fakeQuery([success(0)]);
-    await new ClaudeAdapter({ query: q.fn }).start(harness().opts);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn }).start(harness().opts);
     expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000");
   });
 
   it("records a remote agent through the gate but never lets it run, even when allowed", async () => {
     const q = fakeQuery([{ tool: "Agent", input: { description: "helper", prompt: "go", isolation: "remote" }, id: "tu-1", response: "ran" }, success(0)]);
     const h = harness();
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     expect(r.status).toBe("completed");
     expect(h.proposed).toEqual([expect.objectContaining({ tool: "Agent", kind: "other", summary: "Run remote agent: helper" })]);
     expect(q.preDecisions[0]!.hookSpecificOutput).toEqual({
@@ -368,7 +385,7 @@ describe("ClaudeAdapter", () => {
   it("fails when Claude reports an error result, still reporting its cost", async () => {
     const q = fakeQuery([{ msg: { type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0.5, errors: ["too many turns"] } }]);
     const h = harness();
-    const r = await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     expect(r).toEqual({ status: "failed", error: "too many turns" });
     expect(h.events).toEqual([{ type: "usage", costUsd: 0.5 }]);
   });
@@ -382,7 +399,7 @@ describe("ClaudeAdapter", () => {
         throw new Error(`spawn failed ${FAKE_KEY}`);
       })(), { close: () => undefined });
     }) as unknown as typeof sdkQuery;
-    const r = await new ClaudeAdapter({ query: throwing, apiKey: () => FAKE_KEY }).start(harness().opts);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: throwing, apiKey: () => FAKE_KEY }).start(harness().opts);
     expect(r.status).toBe("failed");
     expect(r.error).toContain("spawn failed");
     expect(r.error).not.toContain(FAKE_KEY);
@@ -391,7 +408,7 @@ describe("ClaudeAdapter", () => {
   it("aborting the signal aborts the query and closes it", async () => {
     const q = fakeQuery([assistant("working")], { hang: true });
     const h = harness();
-    const done = new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
+    const done = new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts);
     await vi.waitFor(() => expect(h.events).toHaveLength(1));
     h.abort.abort();
     expect(await done).toEqual({ status: "failed", error: "run stopped" });
@@ -403,7 +420,7 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
     h.abort.abort();
-    expect(await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "failed", error: "run stopped" });
+    expect(await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "failed", error: "run stopped" });
     expect(q.calls).toHaveLength(0);
   });
 });

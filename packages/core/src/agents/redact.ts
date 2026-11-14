@@ -175,7 +175,9 @@ function redactPairs(s: string): string {
 
 function redactString(s: string, extra: string[]): string {
   let out = s;
-  for (const secret of extra) out = out.split(secret).join(REDACTED);
+  // Longest first, so a secret that contains a shorter one is never left with a tail.
+  const ordered = [...extra].sort((a, b) => b.length - a.length);
+  for (const secret of ordered) out = out.split(secret).join(REDACTED);
   for (const p of TOKEN_PATTERNS) out = out.replace(p, REDACTED);
   out = out.replace(URL_USERINFO, `$1${REDACTED}$2`);
   out = out.replace(BEARER, `$1${REDACTED}`);

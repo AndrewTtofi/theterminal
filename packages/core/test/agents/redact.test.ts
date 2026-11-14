@@ -37,6 +37,9 @@ describe("redact", () => {
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nFAKEFAKE\nFAKE\n-----END RSA PRIVATE KEY-----";
     expect(redact(`a\n${pem}\nb`)).toBe(`a\n${REDACTED}\nb`);
   });
+  it("applies extraSecrets longest first, so a shorter one never leaves a tail", () => {
+    expect(redact("x abcdef y", ["abc", "abcdef"])).toBe(`x ${REDACTED} y`);
+  });
   it("honours extraSecrets", () => {
     expect(redact("hello workspace-tok-123 bye", ["workspace-tok-123"])).toBe(`hello ${REDACTED} bye`);
   });

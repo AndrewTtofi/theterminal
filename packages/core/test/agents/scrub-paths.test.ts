@@ -157,6 +157,11 @@ describe("pathScrubber", () => {
 
 describe("usernameScrubber", () => {
   const user = usernameScrubber("alice", { caseless: true });
+  it("treats a trailing dot as a boundary unless a name follows it", () => {
+    expect(user("owned by alice.")).toBe("owned by <user>.");
+    expect(user("alice... done")).toBe("<user>... done");
+    expect(user("alice.bak")).toBe("alice.bak");
+  });
 
   it("replaces the username as a whole word", () => {
     expect(user("-rw-r--r--  1 alice  staff  12 Jan  1 00:00 a.txt")).toBe("-rw-r--r--  1 <user>  staff  12 Jan  1 00:00 a.txt");

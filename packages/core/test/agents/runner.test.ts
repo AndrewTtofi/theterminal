@@ -293,9 +293,42 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(text).not.toMatch(/(?<![A-Za-z0-9_.-])alice(?![A-Za-z0-9_.-])/);
   });
 
+  it("redacts extra secrets before the username scrub can break them apart", async () => {
+    const secret = "alice:Fake-Pw-0001";
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), extraSecrets: [secret], dataDir, username: "alice",
+      adapters: {
+        fake: new FakeAdapter([
+          { message: `login ${secret} done` },
+          { propose: { tool: "Bash", kind: "shell", summary: `use ${secret}`, input: { command: `curl -u ${secret} x` }, paths: [] } },
+        ]),
+      },
+    });
+    runners.push(runner);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: `pw ${secret}` });
+    await untilPending();
+    runner.stop(owner, run.id);
+    await untilFinished(run.id);
+    const text = JSON.stringify(agentEvents().map((e) => e.payload));
+    expect(text).toContain("[REDACTED]");
+    expect(text).not.toContain("Fake-Pw-0001");
+  });
+
+  it("auto-denies an oversized shell command without asking a human", async () => {
+    const runner = fakeRunner([
+      { propose: { tool: "Bash", kind: "shell", summary: "big", input: { command: `echo ${"z".repeat(25000)}` }, paths: [] } },
+    ]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+    await untilFinished(run.id);
+    expect(listPendingActions(db, projectId)).toEqual([]);
+    expect(listActions(db, run.id).map((a) => [a.status, a.decidedBy, a.reason])).toEqual([
+      ["denied", "policy", "command too long to review"],
+    ]);
+  });
+
   it("records an oversized input as an auditable truncation with the full JSON's hash and length", async () => {
     const input = { command: `echo ${"z".repeat(25000)}`, cwd: join(dataDir, "x") };
-    const runner = fakeRunner([{ propose: { tool: "Bash", kind: "shell", summary: "big", input, paths: [] } }]);
+    const runner = fakeRunner([{ propose: { tool: "Mcp", kind: "mcp", summary: "big", input, paths: [] } }]);
     await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
     await untilPending();
     const [a] = listPendingActions(db, projectId);

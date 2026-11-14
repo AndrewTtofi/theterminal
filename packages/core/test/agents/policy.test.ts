@@ -61,3 +61,16 @@ describe("classify", () => {
     });
   });
 });
+
+describe("classify truncated input", () => {
+  const truncated = { truncated: true, sha256: "0".repeat(64), totalChars: 25000, preview: "echo zzz" };
+  it("auto-denies a shell action whose recorded input is truncated", () => {
+    expect(classify({ ...action("shell", []), input: truncated }, wt, mgr)).toEqual({
+      verdict: "auto_deny", reason: "command too long to review",
+    });
+  });
+  it("leaves other kinds and plain shell input alone", () => {
+    expect(classify({ ...action("file_write", ["a.txt"]), input: truncated }, wt, mgr).verdict).toBe("ask");
+    expect(classify({ ...action("shell", []), input: { command: "ls" } }, wt, mgr).verdict).toBe("ask");
+  });
+});
