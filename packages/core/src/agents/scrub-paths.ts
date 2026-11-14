@@ -4,13 +4,28 @@ export type Scrub = (s: string) => string;
 
 // Separators as written raw, and as they appear inside JSON text (`\\` and `\/`).
 const SEPARATORS = ["/", "\\", "\\\\", "\\/"];
-// A match starts at the start of the string, after a character that cannot be part of a path,
-// or right after the `//` of a URL such as file:///Users/... (also JSON-escaped: file:\/\/\/...).
-const LEFT = /(?<=^|[\s"'`=:(,[{;|&<>]|\/\/|\\\/\\\/)/.source;
-// A match ends where the path component ends: at a separator, the end of the string, a delimiter,
-// or sentence punctuation followed by whitespace. Anything else (letters, digits, non-ASCII,
-// `.bak`) continues the directory name, so `/Users/ab` and `/Users/aé` are not `/Users/a`.
-const RIGHT = /(?=$|[\\/\s"'`,;:)\]}|&<>=]|[.!?](?:\s|$))/.source;
+// Characters that continue a path component (the right side treats "." separately).
+const NAME = String.raw`A-Za-z0-9_\-\p{L}\p{N}\p{M}`;
+const SEP = String.raw`/\\`;
+
+// Both boundaries are denylists: a match is refused only when it would split a longer path.
+// Every lookbehind is bounded, so the scan stays linear.
+const LEFT = [
+  // The start of the text, or any character that is neither a path character nor a separator.
+  String.raw`(?<![${NAME}.${SEP}])`,
+  // A doubled separator (//Users/a, file:///Users/a): a fresh absolute path, not a longer one.
+  String.raw`(?<=[${SEP}])(?=[${SEP}])`,
+  // After //, after a JSON-escaped \\ (x\\C:\\Users), or after the long-path prefix \\?\.
+  String.raw`(?<=//|\\\\|\\\\\?\\)`,
+  // Escape sequences that end in a path character: \n \t \r, \uXXXX, and ANSI SGR codes
+  // (raw ESC, or written as \u001b or \x1b).
+  String.raw`(?<=\\[ntr]|\\u[0-9A-Fa-f]{4}|(?:\x1b|\\u001b|\\x1b)\[[0-9;]{0,32}m)`,
+  // A command-line flag glued to the path: -v/Users/a, -I/Users/a, --prefix/Users/a.
+  String.raw`(?<=(?:^|[^${NAME}.${SEP}])--?[A-Za-z0-9][A-Za-z0-9_\-]{0,63})`,
+].join("|");
+// The match ends unless the next character continues the component; "." does only when a path
+// character follows it, so /Users/a.bak is kept while /Users/a. and /Users/a... are scrubbed.
+const RIGHT = String.raw`(?![${NAME}]|\.[${NAME}])`;
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
@@ -56,7 +71,9 @@ export function pathScrubber(
   entries.sort((a, b) => b[0].length - a[0].length);
   // One capture group per spelling, so the placeholder never depends on how case folding works.
   const alternatives = entries.map(([s]) => `(${escapeRegExp(s)})`).join("|");
-  const re = new RegExp(`${LEFT}(?:${alternatives})${RIGHT}`, caseless ? "giu" : "gu");
+  // Cheap first-character check before the lookbehinds, so most positions are rejected at once.
+  const firsts = [...new Set(entries.map(([s]) => escapeRegExp(s[0]!)))].join("");
+  const re = new RegExp(`(?=[${firsts}])(?:${LEFT})(?:${alternatives})${RIGHT}`, caseless ? "giu" : "gu");
   return (s) =>
     s.replace(re, (match: string, ...groups: unknown[]) => {
       const i = groups.findIndex((g, j) => j < entries.length && g !== undefined);

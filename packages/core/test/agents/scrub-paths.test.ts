@@ -55,6 +55,78 @@ describe("pathScrubber", () => {
     expect(pathScrubber(dirs)("/USERS/A/x")).toBe(caselessByDefault ? "~/x" : "/USERS/A/x");
   });
 
+  describe("left boundary is a denylist", () => {
+    const win = pathScrubber([["C:\\Users\\a", "~"]], { caseless: true });
+    it.each([
+      ['{"o":"a\\n/Users/a/x"}', '{"o":"a\\n~/x"}'],
+      ['{"o":"a\\t/Users/a/x\\r/Users/a"}', '{"o":"a\\t~/x\\r~"}'],
+      ["\\u00e9/Users/a/x", "\\u00e9~/x"],
+      ["-v/Users/a:/x", "-v~:/x"],
+      ["docker run -v/Users/a/src:/src", "docker run -v~/src:/src"],
+      ["gcc -I/Users/a/inc -L/Users/a/lib", "gcc -I~/inc -L~/lib"],
+      ["--prefix/Users/a", "--prefix~"],
+      ["\x1b[32m/Users/a/x", "\x1b[32m~/x"],
+      ["\\u001b[1;32m/Users/a/x", "\\u001b[1;32m~/x"],
+      ["//Users/a/x", "/~/x"],
+      ["x//Users/a/x", "x/~/x"],
+      ["ssh://h//Users/a", "ssh://h/~"],
+      ["file:///Users/a", "file://~"],
+      ...[")", "@", "!", "*", "$", "+", "#", "%", "?", "~", "\\", "\u0001", "“", "‘", "«"].map(
+        (c) => [`${c}/Users/a/x`, `${c}~/x`] as [string, string],
+      ),
+    ])("scrubs %j", (input, expected) => {
+      expect(scrub(input)).toBe(expected);
+    });
+
+    it.each([
+      ['{"o":"x\\nC:\\\\Users\\\\a\\\\f"}', '{"o":"x\\n~\\\\f"}'],
+      ["\x1b[0mC:\\Users\\a", "\x1b[0m~"],
+      ["\\\\?\\C:\\Users\\a\\x", "\\\\?\\~\\x"],
+      ["x\\\\C:\\\\Users\\\\a", "x\\\\~"],
+    ])("scrubs Windows %j", (input, expected) => {
+      expect(win(input)).toBe(expected);
+    });
+
+    it.each(["/Volumes/B/Users/a/x", "x/Users/a", "é/Users/a", "./Users/a", "a-/Users/a", "C:\\Volumes\\B\\Users\\a"])(
+      "keeps %j, where the directory continues a longer path",
+      (input) => {
+        expect(scrub(input)).toBe(input);
+      },
+    );
+  });
+
+  describe("right boundary is a denylist", () => {
+    it.each([
+      ["/Users/a@h", "~@h"],
+      ["/Users/a?x", "~?x"],
+      ["/Users/a#x", "~#x"],
+      ["/Users/a*", "~*"],
+      ["/Users/a+", "~+"],
+      ["/Users/a%20b", "~%20b"],
+      ["/Users/a$", "~$"],
+      ["/Users/a…", "~…"],
+      ["in /Users/a...", "in ~..."],
+      ["(see /Users/a.)", "(see ~.)"],
+      ["/Users/a.,", "~.,"],
+      ["/Users/a\u0001", "~\u0001"],
+    ])("scrubs %j", (input, expected) => {
+      expect(scrub(input)).toBe(expected);
+    });
+
+    it.each(["/Users/ab", "/Users/aé", "/Users/a.bak", "/Users/a_b", "/Users/a-b", "/Users/a1", "/Users/a.-x"])("keeps %j", (input) => {
+      expect(scrub(input)).toBe(input);
+    });
+  });
+
+  it("stays linear on large inputs", () => {
+    const big = 1_000_000;
+    const t = Date.now();
+    for (const chunk of ["a", "/", "-a", "\\", "\x1b[1", "/Users/a", "-v"]) {
+      scrub(chunk.repeat(Math.ceil(big / chunk.length)));
+    }
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+
   it("never scrubs a root", () => {
     const roots = pathScrubber([["/", "~"], ["C:\\", "<data>"]], { caseless: false });
     expect(roots("/x C:\\y")).toBe("/x C:\\y");
