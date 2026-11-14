@@ -16,7 +16,8 @@ import {
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
-import { applyEvent as defaultApplyEvent } from "./projections.js";
+import { commitEvent } from "../events/commit.js";
+import { applyEvent as defaultApplyEvent, rebuildAllProjections } from "../events/projections.js";
 
 export class NotFoundError extends Error {
   constructor(what: string, id: string) {
@@ -122,39 +123,13 @@ export class BoardService {
     });
   }
 
-  /** Rebuilds the projection tables from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
+  /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
   rebuildProjections(opts: { beforeSeq?: number } = {}): void {
-    const beforeSeq = opts.beforeSeq ?? Infinity;
-    this.db
-      .transaction(() => {
-        this.db.exec("DELETE FROM cards; DELETE FROM projects;");
-        let afterSeq = 0;
-        for (;;) {
-          const batch = this.ledger.list({ afterSeq, limit: 500 }).filter((e) => e.seq < beforeSeq);
-          if (batch.length === 0) break;
-          for (const e of batch) this.apply(this.db, e);
-          afterSeq = batch[batch.length - 1]!.seq;
-        }
-      })
-      .immediate();
+    rebuildAllProjections(this.db, this.ledger, opts);
   }
 
-  /**
-   * Runs one write transaction: the body may read state and returns an event to append (or none for a no-op).
-   * The entry and its projection commit atomically; listeners are notified only after commit.
-   */
   private command<T>(body: () => { event?: NewLedgerEntry; result: () => T }): T {
-    const { entry, value } = this.db
-      .transaction(() => {
-        const { event, result } = body();
-        if (!event) return { entry: undefined, value: result() };
-        const entry = this.ledger.appendInTransaction(event);
-        this.apply(this.db, entry);
-        return { entry, value: result() };
-      })
-      .immediate();
-    if (entry) this.ledger.notify(entry);
-    return value;
+    return commitEvent(this.db, this.ledger, body, this.apply);
   }
 
   private requireProject(id: string): Project {

@@ -3,7 +3,7 @@ import { STAGES } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
-import { applyEvent } from "../../src/board/projections.js";
+import { applyEvent } from "../../src/events/projections.js";
 
 const human = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "a1" } as const;

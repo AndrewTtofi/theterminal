@@ -37,6 +37,40 @@ const MIGRATIONS = [
     updated_at TEXT NOT NULL
   );
   CREATE INDEX cards_project ON cards (project_id);`,
+  `CREATE TABLE agent_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    card_id TEXT,
+    adapter TEXT NOT NULL,
+    auth_mode TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    worktree TEXT NOT NULL,
+    cost_usd REAL,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+  CREATE INDEX agent_runs_project ON agent_runs (project_id);
+  CREATE TABLE agent_actions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    input TEXT NOT NULL,
+    status TEXT NOT NULL,
+    decided_by TEXT,
+    reason TEXT NOT NULL,
+    output TEXT,
+    requested_at TEXT NOT NULL,
+    decided_at TEXT
+  );
+  CREATE INDEX agent_actions_run ON agent_actions (run_id);
+  CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );`,
 ];
 
 export type Db = Database.Database;
