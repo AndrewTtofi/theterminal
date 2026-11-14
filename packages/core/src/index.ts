@@ -22,3 +22,6 @@ export { FakeAdapter } from "./agents/fake-adapter.js";
 export type { FakeStep } from "./agents/fake-adapter.js";
 export { AgentRunner, AdapterUnavailableError } from "./agents/runner.js";
 export type { AgentRunnerDeps } from "./agents/runner.js";
+export { ClaudeAdapter, toolToAction } from "./agents/claude-adapter.js";
+export { ClaudeSettings } from "./agents/settings.js";
+export type { ClaudeAuthMode } from "./agents/settings.js";
