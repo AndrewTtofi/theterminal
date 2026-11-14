@@ -265,6 +265,22 @@ describe("agent API", { timeout: 15000 }, () => {
     expect(detail.actions.map((a) => a.status)).toEqual(["completed", "denied"]);
   });
 
+  it("lists pending actions from every project at /api/pending-actions", async () => {
+    const { s, projectId } = await start([{ propose: { ...shell, paths: [] } }]);
+    const other = await json<{ id: string }>(post(s, "/api/projects", { name: "Other" }));
+    expect(await json(get(s, "/api/pending-actions"))).toEqual([]);
+    await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" });
+    await untilPending(s, projectId);
+    await post(s, `/api/projects/${other.id}/runs`, { adapter: "fake", prompt: "go" });
+    await untilPending(s, other.id);
+    const all = await json<(AgentAction & { projectId: string; projectName: string })[]>(get(s, "/api/pending-actions"));
+    expect(all.map((a) => [a.projectId, a.projectName, a.summary])).toEqual([
+      [projectId, "P", "run tests"],
+      [other.id, "Other", "run tests"],
+    ]);
+    expect(await pending(s, projectId)).toHaveLength(1);
+  });
+
   it("starting a run while the workspace shuts down is 503 shutting_down", async () => {
     const dataDir = tmp();
     const db = openDatabase(":memory:");

@@ -4,6 +4,8 @@ import { ApiError } from "../api";
 
 type Props = {
   action: AgentAction;
+  /** The project the action belongs to, shown when the card may sit beside other projects' cards. */
+  projectName?: string;
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown> | void;
 };
 
@@ -23,7 +25,7 @@ function shellCommand(action: AgentAction): string | null {
   return typeof command === "string" ? command : null;
 }
 
-export function DecisionCard({ action, onDecide }: Props) {
+export function DecisionCard({ action, projectName, onDecide }: Props) {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -47,6 +49,7 @@ export function DecisionCard({ action, onDecide }: Props) {
 
   return (
     <article className="decision-card" aria-label={`Decision: ${action.summary}`}>
+      {projectName !== undefined && <p className="project-name">{projectName}</p>}
       <h3>Agent wants to: {action.summary}</h3>
       {command !== null && <pre className="command">{command}</pre>}
       <details>

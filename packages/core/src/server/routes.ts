@@ -46,13 +46,15 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.get("/api/health", async () => {
     const integrity = getIntegrity();
+    const headSeq = ledger.headSeq();
     return integrity.ok
-      ? { ok: true, integrity: "ok", readOnly: ledger.readOnly }
+      ? { ok: true, integrity: "ok", readOnly: ledger.readOnly, headSeq }
       : {
           ok: true,
           integrity: "broken",
           brokenAtSeq: integrity.brokenAtSeq,
           readOnly: ledger.readOnly,
+          headSeq,
         };
   });
 

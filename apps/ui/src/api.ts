@@ -1,10 +1,12 @@
-import type { AdapterId, AgentAction, AgentRun, Board, Card, LedgerEntry, Project, Stage } from "@theterminal/shared";
+import type { AdapterId, AgentAction, AgentRun, Board, Card, LedgerEntry, PendingAgentAction, Project, Stage } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
   integrity: "ok" | "broken";
   brokenAtSeq?: number;
   readOnly: boolean;
+  /** The last ledger seq when health was read; stream from here to see only new entries. */
+  headSeq: number;
 };
 
 export class ApiError extends Error {
@@ -65,6 +67,7 @@ export const api = {
   stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
   listPendingActions: (projectId: string) =>
     request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),
+  listAllPendingActions: () => request<PendingAgentAction[]>("/api/pending-actions"),
   decideAction: (actionId: string, decision: "allow" | "deny", reason?: string) =>
     request<AgentAction>(`/api/actions/${enc(actionId)}/decision`, {
       method: "POST",

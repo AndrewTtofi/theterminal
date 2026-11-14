@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AdapterId, AgentAction, AgentRun, Board as BoardData, LedgerEntry, Project, Stage } from "@theterminal/shared";
+import type { AdapterId, AgentAction, AgentRun, Board as BoardData, LedgerEntry, PendingAgentAction, Project, Stage } from "@theterminal/shared";
 import { api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health } from "./api";
 import { AgentPanel } from "./components/AgentPanel";
@@ -44,10 +44,11 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const refreshAgents = useRef<() => void>(() => {});
+  const refreshPending = useRef<() => void>(() => {});
   const selectedRunRef = useRef<string | null>(null);
   const [agentsInfo, setAgentsInfo] = useState<AgentsInfo | null>(null);
   const [runs, setRuns] = useState<AgentRun[]>([]);
-  const [pending, setPending] = useState<AgentAction[]>([]);
+  const [pending, setPending] = useState<PendingAgentAction[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runActions, setRunActions] = useState<AgentAction[]>([]);
 
@@ -61,11 +62,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let unsubscribe = () => {};
+    // "Needs you" covers every project: stream from the ledger head and refetch on any agent entry.
+    const refresh = coalesced(async () => {
+      const p = await api.listAllPendingActions();
+      if (!cancelled) setPending(p);
+    }, () => cancelled);
+    refreshPending.current = refresh;
     void run(async () => {
-      setHealth(await api.health());
+      const h = await api.health();
+      if (cancelled) return;
+      setHealth(h);
+      unsubscribe = subscribeLedger(h.headSeq, (e) => {
+        if (e.type.startsWith("agent.")) refresh();
+      });
+      refresh();
       setProjects(await api.listProjects());
     });
     void api.getAgents().then(setAgentsInfo, () => {});
+    return () => {
+      cancelled = true;
+      refreshPending.current = () => {};
+      unsubscribe();
+    };
   }, [run]);
 
   useEffect(() => {
@@ -77,20 +97,17 @@ export function App() {
     if (!selectedId) return;
     let cancelled = false;
     setRuns([]);
-    setPending([]);
     setRunActions([]);
     setSelectedRunId(null);
     selectedRunRef.current = null;
     const refresh = coalesced(async () => {
       const runId = selectedRunRef.current;
-      const [r, p, detail] = await Promise.all([
+      const [r, detail] = await Promise.all([
         api.listRuns(selectedId),
-        api.listPendingActions(selectedId),
         runId ? api.getRun(runId) : Promise.resolve(null),
       ]);
       if (cancelled) return;
       setRuns(r);
-      setPending(p);
       setRunActions(detail ? detail.actions : []);
     }, () => cancelled);
     refreshAgents.current = refresh;
@@ -162,17 +179,19 @@ export function App() {
           }
         />
         <main>
-          {selectedId && pending.length > 0 && (
+          {pending.length > 0 && (
             <section className="needs-you" aria-label="Needs you">
               <h2>Needs you</h2>
               {pending.map((a) => (
                 <DecisionCard
                   key={a.id}
                   action={a}
+                  projectName={a.projectName}
                   onDecide={async (id, decision, reason) => {
                     try {
                       await api.decideAction(id, decision, reason);
                     } finally {
+                      refreshPending.current();
                       refreshAgents.current();
                     }
                   }}

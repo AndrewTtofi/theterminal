@@ -5,7 +5,7 @@ import type { AgentRunner } from "../agents/runner.js";
 import type { ClaudeSettings } from "../agents/settings.js";
 import { NotFoundError } from "../board/board-service.js";
 import type { Db } from "../db.js";
-import { listPendingActions } from "../events/projections.js";
+import { listAllPendingActions, listPendingActions } from "../events/projections.js";
 
 export type AgentRouteDeps = {
   db: Db;
@@ -65,6 +65,8 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
     requireProject(req.params.id);
     return listPendingActions(db, req.params.id);
   });
+
+  app.get("/api/pending-actions", async () => listAllPendingActions(db));
 
   app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => runner.getRun(req.params.id));
 

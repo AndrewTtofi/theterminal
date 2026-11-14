@@ -5,7 +5,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { commitEvent } from "../../src/events/commit.js";
 import {
-  getRun, getSetting, listActions, listPendingActions, listRuns, rebuildAllProjections,
+  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections,
 } from "../../src/events/projections.js";
 
 const human = { kind: "human", id: "owner" } as const;
@@ -64,6 +64,23 @@ describe("agent projections", () => {
     emit("agent.action.decided", { runId: "r1", actionId: "a1", decision: "allow", by: "human", reason: "" }, human);
     expect(listActions(db, "r1")[0]).toMatchObject({ status: "allowed", decidedBy: "human", output: null });
     expect(listPendingActions(db, "p1").map((a) => a.id)).toEqual(["a2"]);
+  });
+
+  it("lists pending actions across all projects, oldest first, with their project", () => {
+    const board = new BoardService(db, ledger);
+    const alpha = board.createProject(human, { name: "Alpha" }).id;
+    const beta = board.createProject(human, { name: "Beta" }).id;
+    emit("agent.started", { runId: "ra", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/ra" }, human, alpha);
+    emit("agent.started", { runId: "rb", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/rb" }, human, beta);
+    emit("agent.action.requested", { runId: "ra", actionId: "a1", kind: "shell", tool: "Bash", summary: "s", input: null }, agent, alpha);
+    emit("agent.action.requested", { runId: "rb", actionId: "b1", kind: "shell", tool: "Bash", summary: "s", input: null }, agent, beta);
+    emit("agent.action.requested", { runId: "ra", actionId: "a2", kind: "shell", tool: "Bash", summary: "s", input: null }, agent, alpha);
+    emit("agent.action.decided", { runId: "ra", actionId: "a1", decision: "deny", by: "human", reason: "" }, human, alpha);
+    expect(listAllPendingActions(db).map((a) => [a.id, a.projectId, a.projectName])).toEqual([
+      ["b1", beta, "Beta"],
+      ["a2", alpha, "Alpha"],
+    ]);
+    expect(listAllPendingActions(db)[0]).toMatchObject({ runId: "rb", status: "pending", kind: "shell" });
   });
 
   it("lists runs newest first", () => {

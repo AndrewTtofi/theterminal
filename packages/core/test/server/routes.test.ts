@@ -36,14 +36,21 @@ describe("routes", () => {
   it("GET /api/health reports ok", async () => {
     const res = await app.inject({ url: "/api/health" });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, integrity: "ok", readOnly: false });
+    expect(res.json()).toEqual({ ok: true, integrity: "ok", readOnly: false, headSeq: 0 });
+  });
+
+  it("GET /api/health reports the ledger head, so a client can stream only what comes next", async () => {
+    await mkProject();
+    await mkProject("Beta");
+    const res = await app.inject({ url: "/api/health" });
+    expect(res.json()).toMatchObject({ headSeq: ledger.list().at(-1)!.seq });
   });
 
   it("GET /api/health reports broken integrity", async () => {
     integrity = { ok: false, brokenAtSeq: 3 };
     ledger.readOnly = true;
     const res = await app.inject({ url: "/api/health" });
-    expect(res.json()).toEqual({ ok: true, integrity: "broken", brokenAtSeq: 3, readOnly: true });
+    expect(res.json()).toEqual({ ok: true, integrity: "broken", brokenAtSeq: 3, readOnly: true, headSeq: 0 });
   });
 
   it("POST/GET /api/projects", async () => {

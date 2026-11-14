@@ -146,6 +146,11 @@ export class Ledger {
     return entries;
   }
 
+  /** The highest seq in the ledger, or 0 when it is empty. */
+  headSeq(): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS head FROM ledger").get() as { head: number }).head;
+  }
+
   verify(): VerifyResult {
     let prevHash = GENESIS_HASH;
     let count = 0;

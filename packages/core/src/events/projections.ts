@@ -1,4 +1,4 @@
-import type { AgentAction, AgentRun, LedgerEntry } from "@theterminal/shared";
+import type { AgentAction, AgentRun, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
 import type { Ledger } from "../ledger/ledger.js";
@@ -124,6 +124,18 @@ export function listActions(db: Db, runId: string): AgentAction[] {
     .prepare("SELECT * FROM agent_actions WHERE run_id = ? ORDER BY requested_at, rowid")
     .all(runId) as ActionRow[];
   return rows.map(toAction);
+}
+
+/** Pending actions across every project, oldest first, each with its project's id and name. */
+export function listAllPendingActions(db: Db): PendingAgentAction[] {
+  const rows = db
+    .prepare(
+      `SELECT a.*, r.project_id AS p_id, p.name AS p_name FROM agent_actions a
+       JOIN agent_runs r ON r.id = a.run_id JOIN projects p ON p.id = r.project_id
+       WHERE a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+    )
+    .all() as (ActionRow & { p_id: string; p_name: string })[];
+  return rows.map((r) => ({ ...toAction(r), projectId: r.p_id, projectName: r.p_name }));
 }
 
 export function listPendingActions(db: Db, projectId: string): AgentAction[] {
