@@ -4,8 +4,10 @@ export const REDACTED = "[REDACTED]";
 const SECRET_KEY =
   /(api[_-]?key|secret|token|password|passwd|pwd|private[_-]?key|authorization|cookie|credentials?)|(?:^|[_-])(?:auth|pass|session)(?:$|[_-])/i;
 // Counters such as max_tokens are not secrets.
-const NOT_SECRET_KEY = /^(?:max|min|num|total|input|output|prompt|completion|max[_-]?output)[_-]?tokens$/i;
-const HEADER_KEY = /^(?:proxy-)?authorization$|^(?:set-)?cookie$/i;
+const NOT_SECRET_KEY =
+  /^(?:(?:max|min|num|total|input|output|prompt|completion|reasoning|max[_-]?output|cache[_-]?read[_-]?input|cache[_-]?creation[_-]?input)[_-]?)?tokens$/i;
+// Header names whose value is redacted to the end of the line.
+const HEADER_KEY = /^(?:proxy-)?authorization$|^(?:set-)?cookie$|^(?:[a-z]+-)?api-key$/i;
 
 function isSecretKey(key: string): boolean {
   return SECRET_KEY.test(key) && !NOT_SECRET_KEY.test(key);
@@ -33,20 +35,47 @@ const BASIC = /\b(Basic\s+)(?!\[REDACTED\])[A-Za-z0-9+/]{8,}={0,2}/g;
 // scheme://user:pass@host -> keep scheme and user. The lookbehind keeps the scan linear.
 const URL_USERINFO = /((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:@/]*:)[^\s@/]+(@)/g;
 
-// Finds "key" + separator only. The value is parsed by hand in redactPairs, so a non-secret
-// pair never swallows a secret pair inside its value, and every scan stays linear.
-const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(["']?\s*[=:]\s*)/g;
-const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)\s+/iy;
+// Finds "key" + separator only (the key may sit inside escaped JSON, \"key\":). The value is
+// parsed by hand in redactPairs, so a non-secret pair never swallows a secret pair inside its
+// value, and every scan stays linear.
+const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(\\?["']?\s*[=:]\s*)/g;
+const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)[ \t]+/iy;
 const BARE_END = /[\s'",;&}]/;
+const BLOCK_SCALAR = /[|>][+-]?[ \t]*(?=\r?\n|$)/y;
 
 /** End of a quoted value starting at `start` (a quote char): closing quote, else end of string. */
-function quotedEnd(s: string, start: number): { end: number; closed: boolean } {
-  const q = s[start];
-  for (let i = start + 1; i < s.length; i++) {
-    if (s[i] === "\\") i++;
-    else if (s[i] === q) return { end: i + 1, closed: true };
+function quotedEnd(s: string, start: number, escaped: boolean): { end: number; closed: boolean } {
+  const q = s[start + (escaped ? 1 : 0)];
+  for (let i = start + (escaped ? 2 : 1); i < s.length; i++) {
+    if (s[i] === "\\") {
+      if (escaped && s[i + 1] === q) return { end: i + 2, closed: true };
+      i++;
+    } else if (!escaped && s[i] === q) return { end: i + 1, closed: true };
   }
   return { end: s.length, closed: false };
+}
+
+/** End of a YAML block scalar body: the following lines indented deeper than the key's line. */
+function blockScalarEnd(s: string, keyIndex: number, from: number): number {
+  const lineStart = s.lastIndexOf("\n", keyIndex - 1) + 1;
+  let indent = 0;
+  while (s[lineStart + indent] === " " || s[lineStart + indent] === "\t") indent++;
+  let end = from;
+  let pos = s.indexOf("\n", from);
+  while (pos !== -1) {
+    const next = pos + 1;
+    let eol = s.indexOf("\n", next);
+    if (eol === -1) eol = s.length;
+    let ind = 0;
+    while (next + ind < eol && (s[next + ind] === " " || s[next + ind] === "\t")) ind++;
+    const blank = next + ind >= eol || s[next + ind] === "\r";
+    if (!blank) {
+      if (ind <= indent) break;
+      end = eol;
+    }
+    pos = eol >= s.length ? -1 : eol;
+  }
+  return end;
 }
 
 function redactPairs(s: string): string {
@@ -57,6 +86,7 @@ function redactPairs(s: string): string {
   while ((m = KEY_SEP.exec(s)) !== null) {
     const key = m[1]!;
     if (!isSecretKey(key)) continue; // resume scanning inside the value
+    if (m.index >= 3 && s.startsWith("://", m.index - 3)) continue; // URL userinfo: handled separately
     let pos = m.index + m[0].length;
     const header = HEADER_KEY.test(key) && m[2]!.includes(":");
     if (header) {
@@ -64,19 +94,25 @@ function redactPairs(s: string): string {
       const scheme = AUTH_SCHEME.exec(s);
       if (scheme) pos += scheme[0].length;
     }
-    if (s.startsWith(REDACTED, pos)) continue; // already redacted
-    const q = s[pos];
+    const escaped = s[pos] === "\\" && (s[pos + 1] === '"' || s[pos + 1] === "'");
+    const q = escaped ? s[pos + 1]! : s[pos];
     let end: number;
     let replacement = REDACTED;
     if (q === '"' || q === "'") {
-      const r = quotedEnd(s, pos);
+      const r = quotedEnd(s, pos, escaped);
       end = r.end;
-      replacement = q + REDACTED + (r.closed ? q : "");
+      const qs = escaped ? "\\" + q : q;
+      replacement = qs + REDACTED + (r.closed ? qs : "");
     } else {
-      end = pos;
-      if (header) {
-        while (end < s.length && !/[\r\n"']/.test(s[end]!)) end++;
+      BLOCK_SCALAR.lastIndex = pos;
+      const block = BLOCK_SCALAR.exec(s);
+      if (block) {
+        end = blockScalarEnd(s, m.index, pos + block[0].length);
+      } else if (header) {
+        end = pos;
+        while (end < s.length && s[end] !== "\n" && s[end] !== "\r") end++;
       } else {
+        end = pos;
         while (end < s.length && !BARE_END.test(s[end]!)) end++;
       }
       if (end === pos) continue;

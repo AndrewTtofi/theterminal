@@ -133,6 +133,45 @@ describe("redact: leak fixes", () => {
       maxTokens: 4,
     });
   });
+  it("redacts the whole value when part of it was already redacted", () => {
+    expect(r("Authorization: Bearer abc.def!FAKE")).toBe(`Authorization: Bearer ${REDACTED}`);
+    expect(r("GITHUB_TOKEN=ghp_" + "F".repeat(36) + "!FAKE")).toBe(`GITHUB_TOKEN=${REDACTED}`);
+    expect(r("password=sk-ant-ABCDEFGHIJKL.FAKESECRET1")).toBe(`password=${REDACTED}`);
+    expect(redact("password=abcFAKESECRET1", ["abc"])).toBe(`password=${REDACTED}`);
+    expect(redact("Cookie: abcFAKESECRET1", ["abc"])).toBe(`Cookie: ${REDACTED}`);
+    expect(r("password=[REDACTED]FAKESECRET1")).toBe(`password=${REDACTED}`);
+    expect(r("password=[REDACTED]")).toBe(`password=${REDACTED}`);
+  });
+  it("redacts JSON embedded in a string", () => {
+    expect(r('"{\\"password\\":\\"FAKESECRET1\\",\\"user\\":\\"bob\\"}"')).toBe(
+      '"{\\"password\\":\\"' + REDACTED + '\\",\\"user\\":\\"bob\\"}"',
+    );
+  });
+  it("redacts quoted header values and whole header lines", () => {
+    expect(r('Cookie: sid="FAKE"; other=1')).toBe(`Cookie: ${REDACTED}`);
+    expect(r('Authorization: Digest username="u", response="FAKERESP"\nHost: example.com')).toBe(
+      `Authorization: Digest ${REDACTED}\nHost: example.com`,
+    );
+    expect(r("x-api-key: FAKE VALUE")).toBe(`x-api-key: ${REDACTED}`);
+  });
+  it("redacts YAML block scalars", () => {
+    for (const ind of ["|", ">", "|-", ">-"]) {
+      expect(r(`a: 1\npassword: ${ind}\n  FAKE1\n  FAKE2\nnext: x`)).toBe(`a: 1\npassword: ${REDACTED}\nnext: x`);
+    }
+    expect(r("  cfg:\n    secret: |\n      FAKE\n    keep: y")).toBe(`  cfg:\n    secret: ${REDACTED}\n    keep: y`);
+  });
+  it("keeps usage counters readable", () => {
+    const usage = {
+      cache_read_input_tokens: 1,
+      cache_creation_input_tokens: 2,
+      reasoning_tokens: 3,
+      tokens: 4,
+      cacheReadInputTokens: 5,
+      outputTokens: 6,
+    };
+    expect(redact(usage)).toEqual(usage);
+    expect(r("tokens=5 output_tokens: 7")).toBe("tokens=5 output_tokens: 7");
+  });
   it("is linear on large input", () => {
     const inputs = [
       "a".repeat(1_000_000),
@@ -142,6 +181,9 @@ describe("redact: leak fixes", () => {
       "a=b=c=".repeat(170_000),
       '"'.repeat(1_000_000),
       'password="'.repeat(100_000),
+      '\\"password\\":\\"'.repeat(60_000),
+      "password: |\n".repeat(80_000),
+      "password: |\n  x\n".repeat(60_000),
     ];
     for (const input of inputs) {
       const t = performance.now();
