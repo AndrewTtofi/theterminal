@@ -74,7 +74,13 @@ Anything you store through a connection is redacted from agent traffic as soon a
 
 ## Bundled agent programs
 
-Codex and Gemini CLI are bundled with The Terminal. That adds about 460 MB to the install. A copy of either on your `PATH` is used only when the bundled one is missing for your platform.
+Three agent programs are bundled with The Terminal, so nothing else needs installing:
+
+- Claude Code, which ships inside the Claude Agent SDK's platform package (about 330 MB)
+- Codex CLI (about 360 MB)
+- Gemini CLI (about 100 MB)
+
+Together they add roughly 800 MB to the install; the exact sizes depend on your platform. A copy of a program on your `PATH` is used only when the bundled one is missing for your platform.
 
 ## Usage numbers
 
