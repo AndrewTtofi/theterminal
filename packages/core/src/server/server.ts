@@ -10,6 +10,15 @@ import { registerRoutes } from "./routes.js";
 import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
+import { registerAgentRoutes } from "./agent-routes.js";
+import { ADAPTERS, type AdapterId } from "@theterminal/shared";
+import type { AgentAdapter } from "../agents/adapter.js";
+import { ApprovalBroker } from "../agents/approvals.js";
+import { ClaudeAdapter } from "../agents/claude-adapter.js";
+import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
+import { AgentRunner } from "../agents/runner.js";
+import { ClaudeSettings } from "../agents/settings.js";
+import { WorktreeManager } from "../agents/worktrees.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -56,12 +65,48 @@ function assertDataDirOutsideUiDir(dataDir: string, uiDir: string): void {
   }
 }
 
+/** Demo script for the fake adapter: an inside read, a shell action that asks, then completion. */
+const DEFAULT_FAKE_SCRIPT: FakeStep[] = [
+  {
+    propose: { tool: "Read", kind: "file_read", summary: "read README.md", input: { path: "README.md" }, paths: ["README.md"] },
+    result: { ok: true, output: "(fake) README contents" },
+  },
+  {
+    propose: { tool: "Bash", kind: "shell", summary: "run the tests", input: { command: "npm test" }, paths: [] },
+    result: { ok: true, output: "(fake) tests passed" },
+  },
+];
+
+/** Claude always; the scripted fake adapter only when THETERMINAL_FAKE_AGENT=1 (tests and demos). */
+function buildAdapters(): Partial<Record<AdapterId, AgentAdapter>> {
+  const adapters: Partial<Record<AdapterId, AgentAdapter>> = { claude: new ClaudeAdapter() };
+  if (process.env.THETERMINAL_FAKE_AGENT === "1") {
+    const raw = process.env.THETERMINAL_FAKE_SCRIPT;
+    let script: FakeStep[] = DEFAULT_FAKE_SCRIPT;
+    if (raw !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new Error("Refusing to start: THETERMINAL_FAKE_SCRIPT is not valid JSON");
+      }
+      if (!Array.isArray(parsed)) throw new Error("Refusing to start: THETERMINAL_FAKE_SCRIPT must be a JSON array of steps");
+      script = parsed as FakeStep[];
+    }
+    adapters.fake = new FakeAdapter(script);
+  }
+  return adapters;
+}
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
   uiDir?: string;
   token?: string;
+  /** How long close() waits for agent adapters to return after stopping them. */
+  shutdownTimeoutMs?: number;
 }): Promise<RunningServer> {
+  const adapters = buildAdapters();
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
@@ -78,12 +123,30 @@ export async function createServer(opts: {
     ledger.readOnly = true;
   }
 
+  const runner = new AgentRunner({
+    db,
+    ledger,
+    worktrees: new WorktreeManager(opts.dataDir),
+    broker: new ApprovalBroker(),
+    adapters,
+    extraSecrets: [token],
+    dataDir: opts.dataDir,
+    ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
+  });
+
   const app = Fastify();
   let boundPort = 0;
   try {
+    if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
     registerAuth(app, { token, port: () => boundPort });
     registerLedgerStream(app, ledger);
     registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+    registerAgentRoutes(app, {
+      db,
+      runner,
+      settings: new ClaudeSettings(db, ledger),
+      adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
+    });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 
@@ -117,6 +180,7 @@ export async function createServer(opts: {
     token,
     integrity,
     async close() {
+      await runner.shutdown(); // stops runs and denies pending actions while the db is still open
       for (const client of app.websocketServer.clients) client.terminate();
       await app.close();
       db.close();
