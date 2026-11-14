@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { devNull } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -10,13 +11,21 @@ type GitRunner = (args: string[], cwd: string) => Promise<string>;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 const COMMIT_IDENTITY = ["-c", "user.name=The Terminal", "-c", "user.email=agent@theterminal.localhost", "-c", "commit.gpgsign=false"];
 
+/** Drops every inherited GIT_* variable and ignores global/system git config. */
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!/^GIT_/i.test(k)) env[k] = v;
+  }
+  return { ...env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+}
+
 const defaultGit: GitRunner = async (args, cwd) => {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
+  const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv() });
   return stdout;
 };
+
+const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 
 function assertId(kind: string, id: string): void {
   if (!ID_PATTERN.test(id)) throw new Error(`invalid ${kind}`);
@@ -52,10 +61,15 @@ export class WorktreeManager {
 
   private async initRepo(projectId: string): Promise<string> {
     const repo = join(this.dataDir, "projects", projectId, "repo");
-    if (existsSync(join(repo, ".git"))) return repo;
     mkdirSync(repo, { recursive: true });
-    await this.git(["init"], repo);
-    await this.git([...COMMIT_IDENTITY, "commit", "--allow-empty", "-m", "Initial commit"], repo);
+    if (!existsSync(join(repo, ".git"))) await this.git(["init"], repo);
+    const hasHead = await this.git(["rev-parse", "--verify", "HEAD"], repo).then(
+      () => true,
+      () => false,
+    );
+    if (!hasHead) {
+      await this.git([...COMMIT_IDENTITY, "commit", "--allow-empty", "--no-verify", "-m", "Initial commit"], repo);
+    }
     return repo;
   }
 
@@ -72,37 +86,47 @@ export class WorktreeManager {
     });
   }
 
-  /** Returns the realpath-resolved absolute path if `p` is inside the worktree, else null. */
+  /**
+   * Returns the realpath-resolved absolute path if `p` is inside the worktree, else null.
+   * Fails closed: `..` segments, `.git`, dangling symlinks and any unexpected fs error yield null.
+   */
   resolveInside(worktreeAbs: string, p: string): string | null {
     if (p.includes("\0") || worktreeAbs.includes("\0")) return null;
+    if (p.split(/[\\/]/).includes("..")) return null;
     let root: string;
     try {
-      root = realpathSync(worktreeAbs);
+      root = realpathSync.native(worktreeAbs);
     } catch {
       return null;
     }
-    const target = resolve(root, p);
 
     // Realpath the longest existing ancestor, then re-append the missing remainder.
-    let existing = target;
+    let existing = resolve(root, p);
     const remainder: string[] = [];
     for (;;) {
       try {
-        existing = realpathSync(existing);
+        existing = realpathSync.native(existing);
         break;
-      } catch {
+      } catch (e) {
+        if (errCode(e) !== "ENOENT") return null;
+        try {
+          lstatSync(existing); // exists but realpath failed: dangling symlink
+          return null;
+        } catch (e2) {
+          if (errCode(e2) !== "ENOENT") return null;
+        }
         const parent = dirname(existing);
         if (parent === existing) return null;
         remainder.unshift(existing.slice(parent.length).replace(/^[\\/]+/, ""));
         existing = parent;
       }
     }
-    if (remainder.some((seg) => seg === ".." || seg.split(/[\\/]/).includes(".."))) return null;
     const real = normalize(join(existing, ...remainder));
 
     const rel = relative(fold(root), fold(real));
     if (rel === "") return real;
     if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+    if (rel.split(sep)[0] === ".git") return null;
     return real;
   }
 }

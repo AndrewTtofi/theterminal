@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 
 const run = promisify(execFile);
-const git = async (cwd: string, ...args: string[]) => (await run("git", args, { cwd })).stdout.trim();
+const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+const git = async (cwd: string, ...args: string[]) =>
+  (await run("git", args, { cwd, env: cleanEnv() })).stdout.trim();
 
 let dataDir: string;
 let outside: string;
@@ -45,6 +47,48 @@ describe("WorktreeManager", () => {
     const repo = await mgr.ensureProjectRepo("proj1");
     expect(await git(repo, "log", "-1", "--format=%ae")).toBe("agent@theterminal.localhost");
     expect(await git(repo, "log", "-1", "--format=%an")).toBe("The Terminal");
+  });
+
+  it("ignores identity and hooks from the environment and global config", async (ctx) => {
+    if (process.platform === "win32") return ctx.skip();
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "wt-home-")));
+    const hooks = join(home, "hooks");
+    mkdirSync(hooks);
+    const marker = join(home, "hook-ran");
+    writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\ntouch "${marker}"\n`);
+    chmodSync(join(hooks, "pre-commit"), 0o755);
+    writeFileSync(join(home, ".gitconfig"), `[core]\n\thooksPath = ${hooks}\n`);
+    const keys = ["HOME", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_DIR"];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    try {
+      process.env.HOME = home;
+      process.env.GIT_AUTHOR_NAME = "Someone";
+      process.env.GIT_AUTHOR_EMAIL = "someone@example.com";
+      process.env.GIT_COMMITTER_NAME = "Someone";
+      process.env.GIT_COMMITTER_EMAIL = "someone@example.com";
+      process.env.GIT_DIR = join(home, "nowhere");
+      const repo = await mgr.ensureProjectRepo("proj1");
+      expect(await git(repo, "log", "-1", "--format=%an|%ae|%cn|%ce")).toBe(
+        "The Terminal|agent@theterminal.localhost|The Terminal|agent@theterminal.localhost",
+      );
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a repo whose initial commit never happened", async () => {
+    const repo = join(dataDir, "projects", "proj1", "repo");
+    mkdirSync(repo, { recursive: true });
+    await git(repo, "init");
+    await mgr.ensureProjectRepo("proj1");
+    expect(await git(repo, "rev-list", "--count", "HEAD")).toBe("1");
+    const wt = await mgr.createRunWorktree("proj1", "run-a");
+    expect(await git(wt.absPath, "rev-parse", "--abbrev-ref", "HEAD")).toBe("run/run-a");
   });
 
   it("gives two runs separate worktrees on separate branches", async () => {
@@ -89,6 +133,20 @@ describe("WorktreeManager", () => {
       expect(mgr.resolveInside(wt, "nope/../../x")).toBeNull();
     });
 
+    it("rejects any .. segment, even if it would stay inside", () => {
+      expect(mgr.resolveInside(wt, "a/../b")).toBeNull();
+      expect(mgr.resolveInside(wt, "a\\..\\b")).toBeNull();
+      expect(mgr.resolveInside(wt, "sub/../.git")).toBeNull();
+    });
+
+    it("never treats .git as inside", () => {
+      expect(mgr.resolveInside(wt, ".git")).toBeNull();
+      expect(mgr.resolveInside(wt, "./.git")).toBeNull();
+      expect(mgr.resolveInside(wt, ".GIT/config")).toBeNull();
+      expect(mgr.resolveInside(wt, join(wt, ".git"))).toBeNull();
+      expect(mgr.resolveInside(wt, ".gitignore")).not.toBeNull();
+    });
+
     it("rejects absolute paths elsewhere and NUL bytes", () => {
       expect(mgr.resolveInside(wt, join(outside, "f"))).toBeNull();
       expect(mgr.resolveInside(wt, "src/a.ts\0.png")).toBeNull();
@@ -111,6 +169,22 @@ describe("WorktreeManager", () => {
       expect(mgr.resolveInside(wt, "link/secret")).toBeNull();
       expect(mgr.resolveInside(wt, "link/newfile")).toBeNull();
       expect(mgr.resolveInside(wt, "flink")).toBeNull();
+    });
+
+    it("rejects dangling symlinks, link loops and dir links combined with ..", (ctx) => {
+      try {
+        symlinkSync(join(outside, "planted"), join(wt, "dangling"), "file");
+        symlinkSync(join(wt, "loopb"), join(wt, "loopa"), "file");
+        symlinkSync(join(wt, "loopa"), join(wt, "loopb"), "file");
+        symlinkSync(outside, join(wt, "dlink"), "dir");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EPERM") return ctx.skip();
+        throw e;
+      }
+      expect(mgr.resolveInside(wt, "dangling")).toBeNull();
+      expect(mgr.resolveInside(wt, "loopa")).toBeNull();
+      expect(mgr.resolveInside(wt, "loopa/x")).toBeNull();
+      expect(mgr.resolveInside(wt, "dlink/../x")).toBeNull();
     });
   });
 });
