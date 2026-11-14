@@ -3,7 +3,7 @@
 // "jsonrpc" field, item ids link approvals to items, and a command's or file change's item/started precedes its
 // approval request.
 //
-// THETERMINAL_FAKE_SCRIPT: JSON, either an array of steps or { steps, loggedOut, threadStartPolicy,
+// THETERMINAL_FAKE_CODEX_SCRIPT: JSON, either an array of steps or { steps, loggedOut, threadStartPolicy,
 //   threadStartError, ignoreSigterm, ignoreEof, codexHome, mcpServers: ["name"], mcpIgnoresDisable,
 //   mcpAddedByThread: ["name"] (servers only the started thread sees, e.g. from a project layer) }. Steps:
 //   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true,
@@ -16,7 +16,7 @@
 //   answers to the fake's own server-requests), for test assertions.
 import { appendFileSync } from "node:fs";
 
-const raw = process.env.THETERMINAL_FAKE_SCRIPT ?? "[]";
+const raw = process.env.THETERMINAL_FAKE_CODEX_SCRIPT ?? "[]";
 const parsed = JSON.parse(raw);
 const script = Array.isArray(parsed) ? { steps: parsed } : parsed;
 const steps = script.steps ?? [];

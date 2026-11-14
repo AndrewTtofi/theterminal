@@ -20,6 +20,7 @@ import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
+  "THETERMINAL_FAKE_CODEX_SCRIPT",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_OPENAI_KEY = "sk-TESTKEY-openai-0000000000000000";
@@ -98,6 +99,28 @@ describe("agent API", { timeout: 15000 }, () => {
     });
   });
 
+  it("a provider with a test binary override reports installed only under the fake env", async () => {
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    const installed = async (s: RunningServer) =>
+      Object.fromEntries(
+        Object.entries((await json<{ providers: Record<string, { installed: boolean }> }>(get(s, "/api/agents"))).providers)
+          .map(([p, v]) => [p, v.installed]),
+      );
+    const { s: withFake } = await start(script);
+    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: false });
+
+    delete process.env.THETERMINAL_FAKE_AGENT;
+    const { s: real } = await start(null);
+    expect(await installed(real)).toEqual({ claude: false, codex: false, gemini: false });
+  });
+
+  it("provider-auth rejects unknown body fields", async () => {
+    const { s } = await start(script);
+    const res = await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "api_key", extra: true });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_input" });
+  });
+
   it("provider-auth sets a provider's mode; a mode the provider lacks or a missing acknowledgement is 400", async () => {
     const { s } = await start(script);
     const wrongMode = await post(s, "/api/settings/provider-auth", { provider: "claude", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.claude });
@@ -125,8 +148,11 @@ describe("agent API", { timeout: 15000 }, () => {
   it("with the fake env and THETERMINAL_CODEX_BIN, a Codex run goes start, ask, allow, completed", async () => {
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
     process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
-    const codexScript = [{ approve: "command", command: "npm test", itemId: "i1", output: "ok" }, { message: "All done." }];
-    const { s, projectId } = await start(codexScript as unknown as FakeStep[]);
+    process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([
+      { approve: "command", command: "npm test", itemId: "i1", output: "ok" },
+      { message: "All done." },
+    ]);
+    const { s, projectId } = await start(script);
     const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "run the tests" });
     expect(res.status).toBe(201);
     const run = (await res.json()) as AgentRun;

@@ -39,7 +39,7 @@ const providerAuthBody = z.object({
   provider: z.enum(PROVIDERS),
   mode: z.enum(["api_key", "subscription", "chatgpt", "google"]), // which suit the provider: ProviderSettings checks
   acknowledgement: z.string().optional(),
-});
+}).strict();
 
 /** Agent runs, decisions and the per-provider auth settings. Errors are mapped by the handler in routes.ts. */
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps): void {

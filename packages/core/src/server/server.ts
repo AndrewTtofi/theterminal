@@ -87,11 +87,12 @@ const PROVIDER_CLI: Record<Provider, string> = { claude: "claude", codex: "codex
 export type Which = (cmd: string) => string | null;
 
 /**
- * Tests only: when THETERMINAL_FAKE_AGENT=1, `envName` may name a fixture script that stands in for a provider
- * CLI, run with this Node. Ignored otherwise, so a real workspace always uses the CLI found on PATH.
+ * Tests only: when THETERMINAL_FAKE_AGENT=1, THETERMINAL_<PROVIDER>_BIN may name a fixture script that stands in
+ * for that provider's CLI, run with this Node (the fixture reads its own THETERMINAL_FAKE_<PROVIDER>_SCRIPT).
+ * Ignored otherwise, so a real workspace always uses the CLI found on PATH.
  */
-function fakeCliCommand(envName: string): { file: string; args: string[] } | undefined {
-  const fixture = process.env[envName];
+function fakeCliCommand(p: Provider): { file: string; args: string[] } | undefined {
+  const fixture = process.env[`THETERMINAL_${p.toUpperCase()}_BIN`];
   if (process.env.THETERMINAL_FAKE_AGENT !== "1" || !fixture) return undefined;
   return { file: process.execPath, args: [fixture] };
 }
@@ -101,13 +102,13 @@ function fakeCliCommand(envName: string): { file: string; args: string[] } | und
  * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
  */
 function buildAdapters(dataDir: string, which: Which): Partial<Record<AdapterId, AgentAdapter>> {
-  const codexCommand = fakeCliCommand("THETERMINAL_CODEX_BIN");
+  const codexCommand = fakeCliCommand("codex");
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
     claude: new ClaudeAdapter({ dataDir }),
     // The API key is read from OPENAI_API_KEY when each run starts.
     codex: new CodexAdapter({ dataDir, bin: () => which("codex"), ...(codexCommand && { command: codexCommand }) }),
     // Gemini registration point: add the Gemini adapter here, the same way as Codex, with
-    // fakeCliCommand("THETERMINAL_GEMINI_BIN"). Until then a gemini run is rejected as unavailable.
+    // fakeCliCommand("gemini"). Until then a gemini run is rejected as unavailable.
   };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;
@@ -178,7 +179,7 @@ export async function createServer(opts: {
       runner,
       settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
-      installed: (p) => which(PROVIDER_CLI[p]) !== null,
+      installed: (p) => fakeCliCommand(p) !== undefined || which(PROVIDER_CLI[p]) !== null,
     });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();

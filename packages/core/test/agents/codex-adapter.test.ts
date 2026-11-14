@@ -108,7 +108,7 @@ describe("CodexAdapter (fake app-server)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const script = (s: unknown) => vi.stubEnv("THETERMINAL_FAKE_SCRIPT", JSON.stringify(s));
+  const script = (s: unknown) => vi.stubEnv("THETERMINAL_FAKE_CODEX_SCRIPT", JSON.stringify(s));
   const fakeLog = (): LogEntry[] =>
     existsSync(logFile) ? readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
   const received = (method: string) => fakeLog().filter((e) => e.received === method);
