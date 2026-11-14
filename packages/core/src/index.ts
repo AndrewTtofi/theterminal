@@ -31,3 +31,8 @@ export { buildChildEnv } from "./agents/child-env.js";
 export { JsonRpcPeer } from "./agents/jsonrpc.js";
 export type { RpcHandler } from "./agents/jsonrpc.js";
 export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";
+export { SecretStoreUnavailableError, SECRET_SERVICE, MAX_SECRET_BYTES, ChunkedSecretStore } from "./secrets/store.js";
+export type { SecretStore } from "./secrets/store.js";
+export { MemorySecretStore } from "./secrets/memory-store.js";
+export { KeychainSecretStore } from "./secrets/keychain-store.js";
+export type { KeyringEntryLike, KeyringEntryFactory } from "./secrets/keychain-store.js";
