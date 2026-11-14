@@ -67,6 +67,13 @@ const MAX_CWD = 60;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
 const MESSAGE_PAUSE_MS = 250;
+/**
+ * When a long message is split by size, up to this much of its end is held back and joined with what streams
+ * next, so redaction sees a secret whole instead of in two messages. The split falls after the last whitespace
+ * in that window (secrets hold none); only a window with no whitespace at all is cut at its start.
+ */
+const HELD_TAIL = 512;
+const INTERNAL_ERROR = "internal error";
 const STDERR_TAIL = 200;
 /** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
 const STDERR_KEEP = 4096;
@@ -507,20 +514,23 @@ class GeminiRun {
     };
   }
 
-  /** Streamed chunks are joined into one message: flushed before any tool activity, when large, or after a pause. */
+  /**
+   * Streamed chunks are joined into one message: flushed whole before any tool activity, after a pause and when the
+   * run ends; when large, flushed with its tail held back (see HELD_TAIL).
+   */
   private text(t: string): void {
     this.pendingText += t;
-    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText();
+    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText(true);
     this.flushTimer ??= setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
   }
 
-  private flushText(): void {
+  private flushText(split = false): void {
     clearTimeout(this.flushTimer);
     this.flushTimer = undefined;
-    if (this.pendingText === "") return;
-    const text = this.pendingText;
-    this.pendingText = "";
-    this.o.emit({ type: "message", text });
+    const all = this.pendingText;
+    const cut = split ? heldTailStart(all) : all.length;
+    this.pendingText = all.slice(cut);
+    if (cut > 0) this.o.emit({ type: "message", text: all.slice(0, cut) });
   }
 
   // ---- requests from the agent ----
@@ -653,13 +663,22 @@ class GeminiRun {
     const argv = args ?? [];
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
     // Where it runs and how many variables it sets are part of what the reviewer approves.
-    // Both parts are capped for layout, so both are cleaned (the run's live redaction) before they are cut.
-    const context = cwd != null || (env != null && env.length > 0)
-      ? ` (in ${cwd == null ? "." : cap(this.o.clean(display(this.o.cwd, cwd)), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
-      : "";
-    const line = this.o.clean([command, ...argv].join(" "));
-    const summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
-    const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths: cwd == null ? [] : [cwd] });
+    const paths = cwd == null ? [] : [cwd];
+    let summary: string;
+    try {
+      // Both parts are capped for layout, so both are cleaned (the run's live redaction) before they are cut.
+      const context = cwd != null || (env != null && env.length > 0)
+        ? ` (in ${cwd == null ? "." : cap(this.o.clean(display(this.o.cwd, cwd)), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
+        : "";
+      const line = this.o.clean([command, ...argv].join(" "));
+      summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
+    } catch {
+      // Cleaning failed, so the gate cannot record what it would approve: recorded as denied, and the run fails.
+      void this.o.recordDenied({ tool: method, kind: "shell", summary: "Run a terminal command", input, paths }, INTERNAL_ERROR).catch(() => undefined);
+      this.fail(INTERNAL_ERROR);
+      throw new Error(INTERNAL_ERROR);
+    }
+    const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths });
     if (g.decision !== "allow") throw new Error(g.reason);
     let dir = this.o.cwd;
     if (cwd != null) {
@@ -729,6 +748,15 @@ async function readCapped(real: string): Promise<string> {
   } finally {
     await h.close();
   }
+}
+
+/** Where the held-back tail of a size-split message starts: after the last whitespace in the last HELD_TAIL characters. */
+function heldTailStart(text: string): number {
+  const min = Math.max(0, text.length - HELD_TAIL);
+  for (let i = text.length - 1; i >= min; i--) {
+    if (/\s/.test(text[i]!)) return i + 1;
+  }
+  return min;
 }
 
 /** `s`, or its first `max - 1` characters and an ellipsis. */

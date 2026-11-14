@@ -101,6 +101,30 @@ describe("WorktreeManager", () => {
     expect(ensureEmptyGitconfig(dataDir)).toBe(cfg); // idempotent on a read-only file
   });
 
+  it("repair empties a modified shared git config and makes it read-only again", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    chmodSync(cfg, 0o644);
+    writeFileSync(cfg, "[user]\n\tname = x\n");
+    ensureEmptyGitconfig(dataDir); // without repair, never rewritten
+    expect(readFileSync(cfg, "utf8")).not.toBe("");
+    expect(ensureEmptyGitconfig(dataDir, { repair: true })).toBe(cfg);
+    expect(readFileSync(cfg, "utf8")).toBe("");
+    if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a symlink in place of the shared git config, never chmod-ing through it", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    rmSync(cfg);
+    const target = join(outside, "target");
+    writeFileSync(target, "");
+    chmodSync(target, 0o644);
+    symlinkSync(target, cfg);
+    expect(() => ensureEmptyGitconfig(dataDir)).toThrow(SharedGitconfigModifiedError);
+    expect(() => ensureEmptyGitconfig(dataDir, { repair: true })).toThrow(SharedGitconfigModifiedError);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
+    expect(() => new WorktreeManager(dataDir)).not.toThrow(); // the per-run check fails the run instead
+  });
+
   it("a shared git config with a byte in it fails buildChildEnv before any CLI starts", () => {
     const cfg = join(dataDir, EMPTY_GITCONFIG);
     expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir })).not.toThrow();

@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { registerAgentRoutes } from "../../src/server/agent-routes.js";
 import { registerRoutes } from "../../src/server/routes.js";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { openDatabase } from "../../src/db.js";
 import { listPendingActions } from "../../src/events/projections.js";
@@ -382,6 +382,16 @@ describe("agent API", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = "{not json";
     await expect(createServer({ dataDir: tmp(), port: 0 })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
+  });
+
+  it("repairs a modified shared git config at startup: emptied and read-only", async () => {
+    const dataDir = tmp();
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    writeFileSync(cfg, "[user]\n\temail = someone@example.com\n");
+    const s = await createServer({ dataDir, port: 0, which: noCli });
+    running.push(s);
+    expect(readFileSync(cfg, "utf8")).toBe("");
+    if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
   });
 
   it("close() with a pending action does not hang, and records the run as stopped", async () => {

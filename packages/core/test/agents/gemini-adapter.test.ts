@@ -497,7 +497,7 @@ describe("GeminiAdapter", () => {
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
     expect(h.proposed[0]).toMatchObject({ kind: "shell", paths: [outside] });
     expect(h.decisions[0]).toMatchObject({ decision: "deny", reason: "outside worktree" });
-    expect(logged("terminal/create")[0]!.error).toBeDefined();
+    expect(logged("terminal/output")).toEqual([]); // no terminal was ever created
     expect(existsSync(marker)).toBe(false);
     expect(h.events).toEqual([]);
   });
@@ -533,6 +533,32 @@ describe("GeminiAdapter", () => {
       `Run: npm run build (in ${"d".repeat(52)}[REDACT…)`,
       `Run: echo ${"a".repeat(134)} [REDACTED]`,
     ]);
+  });
+
+  it("a clean() that throws while building a terminal summary records the request as denied and fails the run", async () => {
+    script([{ type: "terminal", command: "npm", args: ["run", "build"] }, { type: "message", text: "after" }]);
+    const h = harness();
+    h.opts.clean = () => {
+      throw new Error("secret store unavailable");
+    };
+    expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "internal error" });
+    expect(h.proposed).toEqual([]);
+    expect(h.denied.map(([a, reason]) => [a.tool, a.kind, reason])).toEqual([["terminal/create", "shell", "internal error"]]);
+    expect(logged("terminal/output")).toEqual([]); // no terminal was ever created
+  });
+
+  it("holds back the tail of a size-split message, so a secret streamed across two chunks is redacted whole", async () => {
+    const head = "w ".repeat(1995); // 3990 characters, then the secret begins
+    script([
+      { type: "message", text: `${head}${STORED.slice(0, 12)}` },
+      { type: "message", text: `${STORED.slice(12)} end` },
+    ]);
+    const h = harness();
+    h.opts.clean = (t) => redact(t, [STORED]);
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`${head}${STORED} end`);
+    expect(texts.some((t) => t.includes(STORED))).toBe(true); // one message carries the whole secret, for the runner to redact
   });
 
   it("records the output of a truncated terminal without the partial word its cut left at the start", async () => {
@@ -893,4 +919,37 @@ describe("GeminiAdapter through the runner", () => {
       db.close();
     }
   }, 30_000);
+
+  for (const [label, steps, field] of [
+    [
+      "a secret streamed across a message split",
+      [{ type: "message", text: `${"w ".repeat(1995)}${STORED.slice(0, 12)}` }, { type: "message", text: `${STORED.slice(12)} end` }],
+      "messages",
+    ],
+    ["a secret across char 500 of a peer error", [{ type: "fail", message: `${"e".repeat(490)} ${STORED} rest` }], "error"],
+  ] as const) {
+    it(`leaves no fragment of ${label} in the record`, async () => {
+      const owner = { kind: "human", id: "owner" } as const;
+      const db = openDatabase(":memory:");
+      const ledger = new Ledger(db);
+      const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
+      const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+      const runner = new AgentRunner({
+        db, ledger, worktrees: new WorktreeManager(outside), broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: () => [STORED], dataDir: outside,
+      });
+      try {
+        script([...steps]);
+        const run = await runner.start(owner, { projectId, adapter: "gemini", prompt: "go" });
+        await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 20_000, interval: 50 });
+        const record = JSON.stringify(ledger.list());
+        expect(record).toContain("[REDACTED]");
+        expect(record).not.toContain(STORED.slice(0, 6));
+        expect(record).not.toContain(STORED.slice(12));
+        if (field === "error") expect(getRun(db, run.id)!.error).toContain("[REDACTED] rest");
+      } finally {
+        await runner.shutdown();
+        db.close();
+      }
+    }, 30_000);
+  }
 });

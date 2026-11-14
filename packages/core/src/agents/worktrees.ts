@@ -32,15 +32,31 @@ export class SharedGitconfigModifiedError extends Error {
 /**
  * Creates the shared empty git config if it is missing and makes it read-only (best effort on Windows, where
  * chmod only sets the read-only attribute), so `git config --global` in a run fails instead of writing to it.
- * An existing file is never rewritten: content in it is caught by `assertEmptyGitconfig`. Returns its path.
+ * An existing file is rewritten only with `repair` (at server start); otherwise content in it is caught by
+ * `assertEmptyGitconfig` before every run. A symlink or anything but a regular file in its place is refused with
+ * SharedGitconfigModifiedError, never followed. Returns its path.
  */
-export function ensureEmptyGitconfig(dataDir: string): string {
+export function ensureEmptyGitconfig(dataDir: string, opts: { repair?: boolean } = {}): string {
   const file = join(dataDir, EMPTY_GITCONFIG);
   mkdirSync(dataDir, { recursive: true });
+  let st;
   try {
-    writeFileSync(file, "", { flag: "wx", mode: 0o444 });
+    st = lstatSync(file);
   } catch (e) {
-    if (errCode(e) !== "EEXIST") throw e;
+    if (errCode(e) !== "ENOENT") throw new SharedGitconfigModifiedError();
+  }
+  if (st === undefined) {
+    try {
+      writeFileSync(file, "", { flag: "wx", mode: 0o444 });
+    } catch (e) {
+      if (errCode(e) !== "EEXIST") throw e;
+      return ensureEmptyGitconfig(dataDir, opts); // created meanwhile: judge what is there now
+    }
+  } else if (!st.isFile()) {
+    throw new SharedGitconfigModifiedError();
+  } else if (opts.repair && st.size > 0) {
+    chmodSync(file, 0o644); // our own file: make it writable, empty it, then read-only again below
+    writeFileSync(file, "");
   }
   try {
     chmodSync(file, 0o444);
@@ -105,7 +121,12 @@ export class WorktreeManager {
     private readonly dataDir: string,
     git?: GitRunner,
   ) {
-    this.emptyGlobalConfig = ensureEmptyGitconfig(dataDir);
+    this.emptyGlobalConfig = join(dataDir, EMPTY_GITCONFIG);
+    try {
+      ensureEmptyGitconfig(dataDir);
+    } catch (e) {
+      if (!(e instanceof SharedGitconfigModifiedError)) throw e; // the check before every git call and run fails closed
+    }
     this.git = git ?? gitRunner(this.emptyGlobalConfig);
   }
 

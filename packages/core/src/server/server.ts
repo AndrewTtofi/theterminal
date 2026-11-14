@@ -22,7 +22,7 @@ import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { which as whichOnPath } from "../agents/which.js";
-import { WorktreeManager } from "../agents/worktrees.js";
+import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig } from "../agents/worktrees.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -169,6 +169,15 @@ export async function createServer(opts: {
   } else {
     board.rebuildProjections({ beforeSeq: integrity.brokenAtSeq });
     ledger.readOnly = true;
+  }
+
+  // Nothing runs yet: a shared git config modified before this start is emptied and made read-only again. One
+  // that is a symlink or not a file is left alone; every run then fails before its CLI starts.
+  try {
+    ensureEmptyGitconfig(opts.dataDir, { repair: true });
+  } catch (e) {
+    if (!(e instanceof SharedGitconfigModifiedError)) throw e;
+    console.warn("The Terminal: the shared git config is not a regular file; agent runs will fail until it is removed");
   }
 
   const runner = new AgentRunner({

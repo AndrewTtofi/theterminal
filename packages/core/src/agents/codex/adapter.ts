@@ -121,14 +121,14 @@ const movePath = (c: P.FileUpdateChange): string | null =>
  * the changes Codex announced for that item); the policy decides. Unknown methods are `other`, so a human decides.
  * Summaries carry whole commands, which the runner redacts before it caps. The few parts capped here for layout
  * (a stdin approval's command and input, each diff preview) go through `clean` (the run's live redaction) first,
- * so a cut never leaves a fragment of a secret that no pattern matches. Default `clean`: the built-in patterns only.
+ * so a cut never leaves a fragment of a secret that no pattern matches.
  */
 export function codexApprovalToAction(
   method: string,
   params: unknown,
   cwd: string,
+  clean: (s: string) => string,
   changes?: P.FileUpdateChange[],
-  clean: (s: string) => string = (s) => redact(s),
 ): ProposedAction {
   const p = isRecord(params) ? params : {};
   const display = (path: string) => displayPath(cwd, path);
@@ -448,7 +448,7 @@ class CodexSession {
       : params;
     let g;
     try {
-      g = await this.o.gate(codexApprovalToAction(method, request, this.o.cwd, this.fileChanges.get(itemId), this.o.clean));
+      g = await this.o.gate(codexApprovalToAction(method, request, this.o.cwd, this.o.clean, this.fileChanges.get(itemId)));
     } catch (e) {
       // Fail closed: the gate can no longer be trusted.
       this.fail(`gate error: ${redact(errorMessage(e))}`);
@@ -464,7 +464,7 @@ class CodexSession {
   private refuse(method: string, params: unknown, reason: string): void {
     const failed = (e: unknown) => this.fail(`gate error: ${redact(errorMessage(e))}`);
     try {
-      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd, undefined, this.o.clean), reason).catch(failed);
+      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd, this.o.clean), reason).catch(failed);
     } catch (e) {
       failed(e);
     }

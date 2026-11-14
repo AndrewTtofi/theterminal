@@ -27,75 +27,75 @@ const CWD = join("tmp", "worktree");
 
 describe("codexApprovalToAction", () => {
   it("maps a command approval to a shell action", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "ls -la", cwd: "/w/sub" }, "/w");
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "ls -la", cwd: "/w/sub" }, "/w", redact);
     expect(a).toEqual({
       tool: "codex.command", kind: "shell", summary: "Run: ls -la", input: { command: "ls -la", cwd: "/w/sub" }, paths: ["/w/sub"],
     });
   });
 
   it("passes the whole command in the summary (the runner caps after redacting) and has no paths without a cwd", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "x".repeat(400) }, CWD);
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: "x".repeat(400) }, CWD, redact);
     expect(a.summary).toBe(`Run: ${"x".repeat(400)}`);
     expect(a.input).toEqual({ command: "x".repeat(400) });
     expect(a.paths).toEqual([]);
   });
 
   it("maps a file change to file_write or file_edit by change kind, with every changed path", () => {
-    const add = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.txt", kind: { type: "add" }, diff: "+hi" }]);
+    const add = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.txt", kind: { type: "add" }, diff: "+hi" }]);
     expect(add).toMatchObject({ tool: "codex.fileChange", kind: "file_write", summary: "Create a.txt", paths: ["a.txt"] });
     expect(add.input).toEqual({ changes: [{ path: "a.txt", kind: "add", diff: "+hi" }] });
 
-    const edit = codexApprovalToAction(FILE, { itemId: "f2" }, CWD, [
+    const edit = codexApprovalToAction(FILE, { itemId: "f2" }, CWD, redact, [
       { path: "a.ts", kind: { type: "update", move_path: null }, diff: "" },
       { path: "b.ts", kind: { type: "update", move_path: null }, diff: "" },
       { path: "c.ts", kind: { type: "update", move_path: null }, diff: "" },
     ]);
     expect(edit).toMatchObject({ kind: "file_edit", summary: "Edit a.ts (+2 more)", paths: ["a.ts", "b.ts", "c.ts"] });
 
-    const del = codexApprovalToAction(FILE, { itemId: "f3" }, CWD, [{ path: "old.txt", kind: { type: "delete" }, diff: "" }]);
+    const del = codexApprovalToAction(FILE, { itemId: "f3" }, CWD, redact, [{ path: "old.txt", kind: { type: "delete" }, diff: "" }]);
     expect(del).toMatchObject({ kind: "file_write", summary: "Delete old.txt", paths: ["old.txt"] });
   });
 
   it("treats a move as a write to both paths", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "update", move_path: "../b.ts" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.ts", kind: { type: "update", move_path: "../b.ts" }, diff: "" }]);
     expect(a).toMatchObject({ kind: "file_write", paths: ["a.ts", "../b.ts"] });
   });
 
   it("caps each diff preview at 4000 characters, cleaned before the cut", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff: "d".repeat(9000) }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact, [{ path: "a.ts", kind: { type: "add" }, diff: "d".repeat(9000) }]);
     expect((a.input as { changes: { diff: string }[] }).changes[0]!.diff).toHaveLength(4000);
     const diff = `${"d".repeat(3990)}${STORED}${"d".repeat(100)}`;
-    const b = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff }], liveClean);
+    const b = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, liveClean, [{ path: "a.ts", kind: { type: "add" }, diff }]);
     const shown = (b.input as { changes: { diff: string }[] }).changes[0]!.diff;
     expect(shown).toBe(`${"d".repeat(3990)}[REDACTED]`);
   });
 
   it("cleans a stdin approval's command and input with the run's live secrets before capping them", () => {
     const a = codexApprovalToAction(
-      CMD, { itemId: "s1", kind: "writeStdin", command: `${"c".repeat(55)}${STORED}`, reason: `${"b".repeat(75)}${STORED}` }, CWD, undefined, liveClean,
+      CMD, { itemId: "s1", kind: "writeStdin", command: `${"c".repeat(55)}${STORED}`, reason: `${"b".repeat(75)}${STORED}` }, CWD, liveClean,
     );
     expect(a.summary).toBe(`Type into ${"c".repeat(55)}[REDA: ${"b".repeat(75)}[REDA`);
     expect(a.summary).not.toContain(STORED.slice(0, 3));
   });
 
   it("adds a requested grant root to the paths so policy judges it", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1", grantRoot: "/elsewhere" }, CWD, [{ path: "a.ts", kind: { type: "add" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1", grantRoot: "/elsewhere" }, CWD, redact, [{ path: "a.ts", kind: { type: "add" }, diff: "" }]);
     expect(a.paths).toEqual(["a.ts", "/elsewhere"]);
   });
 
   it("asks a human when the changed files are unknown", () => {
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, CWD, redact);
     expect(a).toMatchObject({ kind: "file_write", summary: "Edit (unknown files)", paths: [] });
   });
 
   it("summarises absolute paths inside the worktree relative to it", () => {
     const root = join(process.cwd(), CWD);
-    const a = codexApprovalToAction(FILE, { itemId: "f1" }, root, [{ path: join(root, "src", "a.ts"), kind: { type: "add" }, diff: "" }]);
+    const a = codexApprovalToAction(FILE, { itemId: "f1" }, root, redact, [{ path: join(root, "src", "a.ts"), kind: { type: "add" }, diff: "" }]);
     expect(a.summary).toBe("Create src/a.ts");
   });
 
   it("maps a network approval to a web action, never to the command it belongs to", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", command: null, cwd: null, networkApprovalContext: { host: "example.com", protocol: "https" } }, CWD);
+    const a = codexApprovalToAction(CMD, { itemId: "i1", command: null, cwd: null, networkApprovalContext: { host: "example.com", protocol: "https" } }, CWD, redact);
     expect(a).toEqual({
       tool: "codex.network", kind: "web", summary: "Network access to example.com (https)",
       input: { host: "example.com", protocol: "https" }, paths: [],
@@ -103,37 +103,37 @@ describe("codexApprovalToAction", () => {
   });
 
   it("records the request's reason for a plain command", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "command", command: "ls", reason: "list the files" }, CWD);
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "command", command: "ls", reason: "list the files" }, CWD, redact);
     expect(a.input).toEqual({ command: "ls", reason: "list the files" });
   });
 
   it("maps a stdin approval to sending input to the running command, never to running it", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w");
+    const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w", redact);
     expect(a).toEqual({
       tool: "codex.stdin", kind: "shell", summary: "Type into python3 repl.py: y\\n",
       input: { command: "python3 repl.py", cwd: "/w", kind: "writeStdin", reason: "y\n" }, paths: ["/w"],
     });
-    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q".repeat(400) }, CWD);
+    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q".repeat(400) }, CWD, redact);
     expect(long.summary).toBe(`Type into ${"x".repeat(60)}: ${"q".repeat(80)}`);
   });
 
   it("shows the typed input of a stdin approval with control characters made visible", () => {
-    const a = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", cwd: "/w", reason: "rm -rf /\n" }, "/w");
+    const a = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", cwd: "/w", reason: "rm -rf /\n" }, "/w", redact);
     expect(a.summary).toBe("Type into bash: rm -rf /\\n");
-    const ctl = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: "\u0003\t\r" }, CWD);
+    const ctl = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: "\u0003\t\r" }, CWD, redact);
     expect(ctl.summary).toBe("Type into bash: \\u0003\\t\\r");
     // Redacted before it is cut: a token that straddles the cut leaves no fragment behind.
     const key = "sk-ant-TESTKEY-0000000000";
-    const cut = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: `${"a".repeat(70)}${key}` }, CWD);
+    const cut = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: `${"a".repeat(70)}${key}` }, CWD, redact);
     expect(cut.summary).toBe(`Type into bash: ${"a".repeat(70)}[REDACTED]`);
-    const none = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", reason: "q" }, CWD);
+    const none = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", reason: "q" }, CWD, redact);
     expect(none.summary).toBe("Type into (no command): q");
   });
 
   it.each([["a string", "registry.example.com"], ["an array", ["x"]], ["a number", 1]])(
     "treats a malformed network context (%s) as a network request",
     (_label, ctx) => {
-      const a = codexApprovalToAction(CMD, { itemId: "i1", command: "npm install", networkApprovalContext: ctx }, CWD);
+      const a = codexApprovalToAction(CMD, { itemId: "i1", command: "npm install", networkApprovalContext: ctx }, CWD, redact);
       expect(a).toEqual({
         tool: "codex.network", kind: "web", summary: "Network access to (unknown host) (unknown)", input: { host: "", protocol: "" }, paths: [],
       });
@@ -141,7 +141,7 @@ describe("codexApprovalToAction", () => {
   );
 
   it("maps any other request to an other action", () => {
-    expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD)).toEqual({
+    expect(codexApprovalToAction("item/tool/call", { a: 1 }, CWD, redact)).toEqual({
       tool: "codex.item/tool/call", kind: "other", summary: "Unsupported Codex request: item/tool/call",
       input: { method: "item/tool/call", params: { a: 1 } }, paths: [],
     });
