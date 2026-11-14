@@ -17,6 +17,22 @@ const MIGRATIONS = [
   BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
   CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
   BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;`,
+  `CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    pitch TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE cards (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX cards_project ON cards (project_id);`,
 ];
 
 export type Db = Database.Database;
