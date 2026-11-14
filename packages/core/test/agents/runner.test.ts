@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentAdapter } from "../../src/agents/adapter.js";
+import type { AgentAdapter, ProposedAction } from "../../src/agents/adapter.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { AdapterUnavailableError, AgentRunner } from "../../src/agents/runner.js";
@@ -173,6 +173,24 @@ describe("AgentRunner with the FakeAdapter", () => {
     const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilPending();
     expect(listActions(db, run.id)[0]).toMatchObject({ kind: "other", tool: "42", summary: "(no summary)", status: "pending" });
+  });
+
+  it("reads a proposal once, so what is recorded is what policy classifies", async () => {
+    const reads = { kind: 0, paths: 0 };
+    const shifty = {
+      tool: "Read", summary: "read", input: {},
+      get kind() {
+        return reads.kind++ === 0 ? "shell" : "file_read";
+      },
+      get paths() {
+        return reads.paths++ === 0 ? ["README.md"] : ["../outside"];
+      },
+    } as unknown as ProposedAction;
+    const runner = fakeRunner([{ propose: shifty }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilPending();
+    expect(listActions(db, run.id)[0]).toMatchObject({ kind: "shell", status: "pending" });
+    expect(reads).toEqual({ kind: 1, paths: 1 });
   });
 
   it("normalises class instances and toJSON values before redacting them", async () => {

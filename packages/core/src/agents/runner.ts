@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
@@ -12,6 +11,7 @@ import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction } from "./a
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
 import { redact, truncate } from "./redact.js";
+import { pathScrubber, type Scrub } from "./scrub-paths.js";
 import type { WorktreeManager } from "./worktrees.js";
 
 export class AdapterUnavailableError extends Error {
@@ -36,7 +36,6 @@ export type AgentRunnerDeps = {
 };
 
 type FinishStatus = "completed" | "failed" | "stopped";
-type Scrub = (s: string) => string;
 type Session = {
   projectId: string;
   /** Replaces this run's absolute paths in recorded strings. */
@@ -67,6 +66,22 @@ function errorMessage(e: unknown): string {
   }
 }
 
+/**
+ * Reads each field of a proposal exactly once, so a getter cannot show policy one thing and the
+ * ledger another. Unknown kinds become "other"; a non-array `paths` is checked as a single path.
+ */
+function snapshot(a: ProposedAction): ProposedAction {
+  const { kind, tool, summary, input, paths } = a;
+  const list: unknown[] = Array.isArray(paths) ? [...paths] : paths === null || paths === undefined ? [] : [paths];
+  return {
+    kind: (ACTION_KINDS as readonly unknown[]).includes(kind) ? kind : "other",
+    tool: asText(tool),
+    summary: asText(summary),
+    input,
+    paths: list as string[],
+  };
+}
+
 /** Adapter-reported text as a string; anything unprintable becomes "". */
 function asText(v: unknown): string {
   if (typeof v === "string") return v;
@@ -76,40 +91,6 @@ function asText(v: unknown): string {
   } catch {
     return "";
   }
-}
-
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/** A path as written and as resolved, with either separator, without a trailing separator; never a root. */
-function pathVariants(p: string): string[] {
-  const out = new Set<string>();
-  const add = (x: string) => {
-    for (const v of [x, x.replace(/\\/g, "/"), x.replace(/\//g, "\\")]) out.add(v.replace(/[\\/]+$/, ""));
-  };
-  add(p);
-  try {
-    add(realpathSync.native(p));
-  } catch {
-    // Not resolvable: the raw spelling still gets scrubbed.
-  }
-  return [...out].filter((v) => v.length > 1 && !/^[A-Za-z]:$/.test(v));
-}
-
-/**
- * Replaces absolute directories with placeholders, longest first, only where the path ends
- * (at a separator or a non-path character), so `/x/wt-other` is left alone when scrubbing `/x/wt`.
- */
-function pathScrubber(dirs: [path: string, placeholder: string][]): Scrub {
-  const caseless = process.platform === "win32";
-  const fold = (s: string) => (caseless ? s.toLowerCase() : s);
-  const byVariant = new Map<string, string>();
-  for (const [dir, placeholder] of dirs) {
-    for (const v of pathVariants(dir)) if (!byVariant.has(fold(v))) byVariant.set(fold(v), placeholder);
-  }
-  if (byVariant.size === 0) return (s) => s;
-  const alternatives = [...byVariant.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
-  const re = new RegExp(`(?:${alternatives.join("|")})(?![A-Za-z0-9._~-])`, caseless ? "gi" : "g");
-  return (s) => s.replace(re, (m) => byVariant.get(fold(m))!);
 }
 
 function scrubJson(v: unknown, scrub: Scrub): unknown {
@@ -284,15 +265,15 @@ export class AgentRunner {
     })();
   }
 
-  private async gate(runId: string, s: Session, worktreeAbs: string, a: ProposedAction): Promise<GateOutcome> {
+  private async gate(runId: string, s: Session, worktreeAbs: string, proposed: ProposedAction): Promise<GateOutcome> {
     const actionId = this.newId();
     let recorded = false;
     try {
-      const kind = (ACTION_KINDS as readonly unknown[]).includes(a.kind) ? a.kind : "other";
+      const a = snapshot(proposed); // recording and classify see only this copy
       this.recordRequest(s, runId, {
-        runId, actionId, kind,
-        tool: this.clean(asText(a.tool), MAX.tool, s.scrub) || "unknown",
-        summary: this.clean(asText(a.summary), MAX.summary, s.scrub) || "(no summary)",
+        runId, actionId, kind: a.kind,
+        tool: this.clean(a.tool, MAX.tool, s.scrub) || "unknown",
+        summary: this.clean(a.summary, MAX.summary, s.scrub) || "(no summary)",
         input: this.cleanInput(a.input, s.scrub),
       });
       recorded = true;

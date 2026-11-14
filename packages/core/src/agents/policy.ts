@@ -5,7 +5,8 @@ export type Verdict = { verdict: "auto_allow" | "auto_deny" | "ask"; reason: str
 
 /** Decides what needs a human: outside paths are denied, inside reads are allowed, the rest asks. */
 export function classify(a: ProposedAction, worktreeAbs: string, wt: WorktreeManager): Verdict {
-  const paths: unknown[] = Array.isArray(a.paths) ? a.paths : [];
+  const raw: unknown = a.paths;
+  const paths: unknown[] = Array.isArray(raw) ? raw : [];
   if (paths.some((p) => typeof p !== "string" || wt.resolveInside(worktreeAbs, p) === null)) {
     return { verdict: "auto_deny", reason: "outside worktree" };
   }
