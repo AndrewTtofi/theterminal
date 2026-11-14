@@ -172,6 +172,48 @@ describe("redact: leak fixes", () => {
     expect(redact(usage)).toEqual(usage);
     expect(r("tokens=5 output_tokens: 7")).toBe("tokens=5 output_tokens: 7");
   });
+  it("redacts the rest of a raw header line even when the value starts with a quote", () => {
+    expect(r('Cookie: "a"; sid=FAKESECRET1')).toBe(`Cookie: ${REDACTED}`);
+    expect(r("Cookie: 'a'; sid=FAKESECRET1")).toBe(`Cookie: ${REDACTED}`);
+    expect(r('Authorization: Bearer "x" FAKESECRET1')).toBe(`Authorization: Bearer ${REDACTED}`);
+    expect(r('Authorization: Digest "u", response="FAKESECRET1"\nHost: example.com')).toBe(
+      `Authorization: Digest ${REDACTED}\nHost: example.com`,
+    );
+    expect(r('Cookie: "a\nFAKESECRET1" tail\nHost: x')).toBe(`Cookie: ${REDACTED}\nHost: x`);
+  });
+  it("keeps JSON valid for quoted header keys", () => {
+    expect(r('{"Cookie": "a", "sid": "x"}')).toBe(`{"Cookie": "${REDACTED}", "sid": "x"}`);
+    expect(r('{\\"Cookie\\":\\"a\\",\\"n\\":1}')).toBe(`{\\"Cookie\\":\\"${REDACTED}\\",\\"n\\":1}`);
+  });
+  it("skips only URL userinfo that was already redacted", () => {
+    for (const s of [
+      "a://password=FAKESECRET1",
+      "redis://secret=FAKESECRET1",
+      "s3://token=FAKESECRET1",
+      "x://token:FAKESECRET1 rest",
+      "git://token:FAKESECRET1",
+      "x://password:FAKESECRET1/path",
+      "https://token:FAKE/SECRET1@host",
+    ]) {
+      const out = r(s);
+      expect(out).toContain(REDACTED);
+      expect(out).not.toContain("SECRET1");
+    }
+    expect(r("https://token:FAKESECRET1@example.com/x")).toBe(`https://token:${REDACTED}@example.com/x`);
+  });
+  it("tracks inner escaping in double-encoded JSON", () => {
+    const enc = JSON.stringify(JSON.stringify({ password: 'FA"KE1', user: "bob" }));
+    const out = r(enc);
+    expect(out).not.toContain("KE1");
+    expect(JSON.parse(JSON.parse(out))).toEqual({ password: REDACTED, user: "bob" });
+    const enc2 = JSON.stringify(JSON.stringify({ password: "FA\\", user: "bob" }));
+    expect(JSON.parse(JSON.parse(r(enc2)))).toEqual({ password: REDACTED, user: "bob" });
+  });
+  it("recognises YAML block headers with indentation digits and comments", () => {
+    for (const h of ["|2", "|-2", ">2-", "|+", "| # comment", "|2 # c"]) {
+      expect(r(`password: ${h}\n  FAKE1\nnext: x`)).toBe(`password: ${REDACTED}\nnext: x`);
+    }
+  });
   it("is linear on large input", () => {
     const inputs = [
       "a".repeat(1_000_000),
@@ -184,6 +226,14 @@ describe("redact: leak fixes", () => {
       '\\"password\\":\\"'.repeat(60_000),
       "password: |\n".repeat(80_000),
       "password: |\n  x\n".repeat(60_000),
+      "Cookie: \"a\" ".repeat(100_000),
+      "Cookie: 'a'; ".repeat(80_000) + "\n",
+      "x://token:".repeat(100_000),
+      "https://token:[REDACTED]@".repeat(40_000),
+      '\\"password\\":\\"' + '\\\\\\"'.repeat(150_000),
+      '\\"password\\":\\"\\\\'.repeat(60_000),
+      "password: |2 # c\n".repeat(60_000),
+      "password: | # password: | #".repeat(40_000) + "\r",
     ];
     for (const input of inputs) {
       const t = performance.now();

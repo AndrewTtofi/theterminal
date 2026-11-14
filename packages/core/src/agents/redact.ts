@@ -41,18 +41,40 @@ const URL_USERINFO = /((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:@/]*:
 const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(\\?["']?\s*[=:]\s*)/g;
 const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)[ \t]+/iy;
 const BARE_END = /[\s'",;&}]/;
-const BLOCK_SCALAR = /[|>][+-]?[ \t]*(?=\r?\n|$)/y;
+// YAML block header: indicator, optional chomping/indentation digit (either order), optional comment.
+// The comment runs to the line end, so a match never backtracks across a line.
+const BLOCK_SCALAR = /[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?(?=[\r\n]|$)/y;
 
-/** End of a quoted value starting at `start` (a quote char): closing quote, else end of string. */
+/**
+ * End of a quoted value starting at `start` (a quote char): closing quote, else end of string.
+ * In escaped mode the value sits inside an outer JSON string: each `\X` pair stands for one
+ * inner char, and only an inner quote that is not itself escaped (`\"` but not `\\\"`) closes.
+ */
 function quotedEnd(s: string, start: number, escaped: boolean): { end: number; closed: boolean } {
-  const q = s[start + (escaped ? 1 : 0)];
-  for (let i = start + (escaped ? 2 : 1); i < s.length; i++) {
-    if (s[i] === "\\") {
-      if (escaped && s[i + 1] === q) return { end: i + 2, closed: true };
-      i++;
-    } else if (!escaped && s[i] === q) return { end: i + 1, closed: true };
+  if (!escaped) {
+    const q = s[start];
+    for (let i = start + 1; i < s.length; i++) {
+      if (s[i] === "\\") i++;
+      else if (s[i] === q) return { end: i + 1, closed: true };
+    }
+    return { end: s.length, closed: false };
+  }
+  const q = s[start + 1];
+  let innerEscape = false;
+  for (let i = start + 2; i < s.length; i++) {
+    const pair = s[i] === "\\";
+    const c = pair ? s[++i] : s[i];
+    if (innerEscape) innerEscape = false;
+    else if (pair && c === "\\") innerEscape = true;
+    else if (pair && c === q) return { end: i + 1, closed: true };
   }
   return { end: s.length, closed: false };
+}
+
+function lineEnd(s: string, from: number): number {
+  let end = from;
+  while (end < s.length && s[end] !== "\n" && s[end] !== "\r") end++;
+  return end;
 }
 
 /** End of a YAML block scalar body: the following lines indented deeper than the key's line. */
@@ -86,9 +108,12 @@ function redactPairs(s: string): string {
   while ((m = KEY_SEP.exec(s)) !== null) {
     const key = m[1]!;
     if (!isSecretKey(key)) continue; // resume scanning inside the value
-    if (m.index >= 3 && s.startsWith("://", m.index - 3)) continue; // URL userinfo: handled separately
     let pos = m.index + m[0].length;
+    // URL userinfo already redacted by URL_USERINFO (scheme://token:[REDACTED]@host): keep the host.
+    if (m.index >= 3 && s.startsWith("://", m.index - 3) && s.startsWith(REDACTED + "@", pos)) continue;
     const header = HEADER_KEY.test(key) && m[2]!.includes(":");
+    // A quoted key ("Cookie": or \"Cookie\":) is JSON; an unquoted one is a raw header line.
+    const rawHeader = header && !/^[\\"']/.test(m[2]!);
     if (header) {
       AUTH_SCHEME.lastIndex = pos;
       const scheme = AUTH_SCHEME.exec(s);
@@ -103,14 +128,21 @@ function redactPairs(s: string): string {
       end = r.end;
       const qs = escaped ? "\\" + q : q;
       replacement = qs + REDACTED + (r.closed ? qs : "");
+      if (rawHeader) {
+        // The rest of a header line is secret too: keep the quotes only if nothing else follows.
+        const eol = lineEnd(s, end);
+        if (s.slice(end, eol).trim() !== "") {
+          replacement = REDACTED;
+          end = eol;
+        }
+      }
     } else {
       BLOCK_SCALAR.lastIndex = pos;
       const block = BLOCK_SCALAR.exec(s);
       if (block) {
         end = blockScalarEnd(s, m.index, pos + block[0].length);
       } else if (header) {
-        end = pos;
-        while (end < s.length && s[end] !== "\n" && s[end] !== "\r") end++;
+        end = lineEnd(s, pos);
       } else {
         end = pos;
         while (end < s.length && !BARE_END.test(s[end]!)) end++;
