@@ -71,6 +71,19 @@ describe("pathScrubber", () => {
       ["x//Users/a/x", "x/~/x"],
       ["ssh://h//Users/a", "ssh://h/~"],
       ["file:///Users/a", "file://~"],
+      ["\r\x1b[K/Users/a/x", "\r\x1b[K~/x"],
+      ["\x1b[2K\x1b[1G/Users/a", "\x1b[2K\x1b[1G~"],
+      ["\x1b[0K/Users/a", "\x1b[0K~"],
+      ["\x1b[H/Users/a", "\x1b[H~"],
+      ["\x1b[?25h/Users/a", "\x1b[?25h~"],
+      ["\x1b(B/Users/a", "\x1b(B~"],
+      ["\x1b)0/Users/a", "\x1b)0~"],
+      ["\\u001b[K/Users/a", "\\u001b[K~"],
+      ["\\x1b[K/Users/a", "\\x1b[K~"],
+      ["\\033[32m/Users/a", "\\033[32m~"],
+      ["\\e[32m/Users/a", "\\e[32m~"],
+      ['"\\b/Users/a"', '"\\b~"'],
+      ['"\\f/Users/a"', '"\\f~"'],
       ...[")", "@", "!", "*", "$", "+", "#", "%", "?", "~", "\\", "\u0001", "“", "‘", "«"].map(
         (c) => [`${c}/Users/a/x`, `${c}~/x`] as [string, string],
       ),
@@ -83,6 +96,15 @@ describe("pathScrubber", () => {
       ["\x1b[0mC:\\Users\\a", "\x1b[0m~"],
       ["\\\\?\\C:\\Users\\a\\x", "\\\\?\\~\\x"],
       ["x\\\\C:\\\\Users\\\\a", "x\\\\~"],
+      ["\x1b[KC:\\Users\\a", "\x1b[K~"],
+      ['"\\bC:\\\\Users\\\\a"', '"\\b~"'],
+      ["cl /IC:\\Users\\a\\inc /FoC:\\Users\\a\\o\\", "cl /I~\\inc /Fo~\\o\\"],
+      ["cl /IC:/Users/a/inc", "cl /I~/inc"],
+      ['{"c":"/IC:\\\\Users\\\\a"}', '{"c":"/I~"}'],
+      ["1C:\\Users\\a", "1~"],
+      ["_C:\\Users\\a", "_~"],
+      ["ëC:\\Users\\a", "ë~"],
+      ["rC:\\Users\\a", "r~"],
     ])("scrubs Windows %j", (input, expected) => {
       expect(win(input)).toBe(expected);
     });
@@ -121,7 +143,7 @@ describe("pathScrubber", () => {
   it("stays linear on large inputs", () => {
     const big = 1_000_000;
     const t = Date.now();
-    for (const chunk of ["a", "/", "-a", "\\", "\x1b[1", "/Users/a", "-v"]) {
+    for (const chunk of ["a", "/", "-a", "\\", "\x1b[1", "\x1b[?1", "\\e[1", "C:", "/Users/a", "-v"]) {
       scrub(chunk.repeat(Math.ceil(big / chunk.length)));
     }
     expect(Date.now() - t).toBeLessThan(3000);

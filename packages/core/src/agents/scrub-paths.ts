@@ -7,6 +7,8 @@ const SEPARATORS = ["/", "\\", "\\\\", "\\/"];
 // Characters that continue a path component (the right side treats "." separately).
 const NAME = String.raw`A-Za-z0-9_\-\p{L}\p{N}\p{M}`;
 const SEP = String.raw`/\\`;
+// ESC as a raw character, or as written in JSON, JS, C or shell text.
+const ESC = String.raw`(?:\x1b|\\u001b|\\x1b|\\033|\\e)`;
 
 // Both boundaries are denylists: a match is refused only when it would split a longer path.
 // Every lookbehind is bounded, so the scan stays linear.
@@ -17,9 +19,13 @@ const LEFT = [
   String.raw`(?<=[${SEP}])(?=[${SEP}])`,
   // After //, after a JSON-escaped \\ (x\\C:\\Users), or after the long-path prefix \\?\.
   String.raw`(?<=//|\\\\|\\\\\?\\)`,
-  // Escape sequences that end in a path character: \n \t \r, \uXXXX, and ANSI SGR codes
-  // (raw ESC, or written as \u001b or \x1b).
-  String.raw`(?<=\\[ntr]|\\u[0-9A-Fa-f]{4}|(?:\x1b|\\u001b|\\x1b)\[[0-9;]{0,32}m)`,
+  // Escape sequences that end in a path character: the JSON escapes \b \f \n \r \t and \uXXXX,
+  // any ANSI CSI sequence (ESC[2K, ESC[?25h, ESC[32m) and ESC( or ESC) charset selections, with ESC
+  // raw or written as \u001b, \x1b, \033 or \e.
+  String.raw`(?<=\\[bfnrt]|\\u[0-9A-Fa-f]{4}|${ESC}(?:\[[0-9;?]{0,32}[@-~]|[()].))`,
+  // A drive-rooted spelling (C:\, C:/, C:\\): a drive can never continue a longer path, so any
+  // preceding character is a boundary (cl /IC:\x, 1C:\x). The match still starts at the drive letter.
+  String.raw`(?=[A-Za-z]:[${SEP}])`,
   // A command-line flag glued to the path: -v/Users/a, -I/Users/a, --prefix/Users/a.
   String.raw`(?<=(?:^|[^${NAME}.${SEP}])--?[A-Za-z0-9][A-Za-z0-9_\-]{0,63})`,
 ].join("|");
