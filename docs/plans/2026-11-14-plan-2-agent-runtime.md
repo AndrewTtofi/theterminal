@@ -1,6 +1,5 @@
 # Plan 2: Agent Runtime, Part A (glass-box Claude agent with human approval) Implementation Plan
 
-
 **Goal:** An Owner starts an agent from the workspace. The agent works in its own git worktree. Every action it proposes is recorded in the ledger **before** it runs, and consequential actions wait on a decision card the Owner allows or denies. The first real agent is Claude, using an API key by default, or the user's own Claude Code login after an explicit, ledger-recorded opt-in. This plan also moves the workspace to its own local hostname, so the session cookie never reaches other local web servers.
 
 **Architecture:**
@@ -28,6 +27,7 @@
 - Claude defaults to `api_key` auth. `subscription` mode requires a prior `settings.claude_auth_changed` ledger entry carrying the exact acknowledgement text.
 - **Fail closed:** any adapter, hook or gate error, any timeout, or any restart while an action is pending results in **deny**, and the denial is recorded.
 - Every agent action is recorded **before** it executes (spec §10.2). No adapter configuration may auto-approve tools outside our gate: no `allowedTools`, no `bypassPermissions`, and `settingSources: []`.
+- Commits are authored by the repository owner only (repo-local noreply address), with no AI attribution or co-author trailers.
 - Existing Plan 1 constraints still hold: Node ≥ 22, TS strict ESM, macOS and Windows, append-only ledger, 127.0.0.1 bind, default-deny auth.
 
 ## Review Focus

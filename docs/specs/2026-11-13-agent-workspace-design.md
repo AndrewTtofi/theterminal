@@ -75,7 +75,7 @@ Anyone who wants to build something and is willing to engage seriously: solo fou
 - **Local models** (via the first project, §9, or existing engines like Ollama/llama.cpp/MLX/vLLM) are treated as just another capacity source.
 
 ### 4.3 Main screen: lifecycle board plus modular panels
- *(Decided together.)*
+*(Decided together, using mockups reviewed during design.)*
 - **Home base is the lifecycle board**: Plan → Design → Build → Ship → Operate, with work items as cards in each stage. The board teaches the process by showing it.
 - **Everything else is a panel** the user can pin, move, collapse or close, and save as a layout:
   conversation · live agent feed · needs-you (decisions and gates) · decision ledger · learn · code and diffs (read-only) · terminal (read-only) · cost and usage · capacity · monitoring · connections · daily digest.

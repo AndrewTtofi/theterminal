@@ -1,6 +1,5 @@
 # Plan 1 — Foundation Implementation Plan
 
-
 **Goal:** A locally running core server with a tamper-evident, hash-chained decision ledger, an event-sourced project/lifecycle-board model, a secured local HTTP + WebSocket API, and a web UI showing the lifecycle board and live ledger. This is the base every later plan builds on.
 
 **Architecture:** pnpm monorepo, TypeScript everywhere. `@theterminal/shared` holds domain types and zod schemas. `@theterminal/core` is a Node server. Every state change is first appended to an append-only, SHA-256 hash-chained SQLite ledger, and board state is a projection rebuilt from ledger events, so nothing can change state without leaving a ledger entry (spec §5, §8). `@theterminal/ui` is a React/Vite app that the core serves on `127.0.0.1`, protected by a per-install token.
@@ -83,7 +82,7 @@ playwright.config.ts
 **Interfaces:**
 - Produces: root scripts `pnpm build`, `pnpm test` (Vitest across workspaces), `pnpm e2e` (Playwright), `pnpm dev` (core + ui). Workspace packages `@theterminal/shared`, `@theterminal/core`, `@theterminal/ui`.
 
-- [ ] **Step 1:** `git init`, then write all the config files above.
+- [ ] **Step 1:** `git init`, then write all the config files above. The `.gitignore` must include `node_modules/`.
 - [ ] **Step 2: Write the smoke test:** `smoke.test.ts` asserts `expect(1 + 1).toBe(2)` so the test harness is proven.
 - [ ] **Step 3:** Run `pnpm install && pnpm test`. Expected: 1 test passes.
 - [ ] **Step 4:** Make CI run `pnpm install --frozen-lockfile && pnpm build && pnpm test` on `macos-latest` and `windows-latest` with Node 22.
