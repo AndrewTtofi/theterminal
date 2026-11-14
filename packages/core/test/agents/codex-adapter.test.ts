@@ -88,11 +88,24 @@ describe("codexApprovalToAction", () => {
   it("maps a stdin approval to sending input to the running command, never to running it", () => {
     const a = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "python3 repl.py", cwd: "/w", reason: "y\n" }, "/w");
     expect(a).toEqual({
-      tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+      tool: "codex.stdin", kind: "shell", summary: "Type into python3 repl.py: y\\n",
       input: { command: "python3 repl.py", cwd: "/w", kind: "writeStdin", reason: "y\n" }, paths: ["/w"],
     });
-    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q" }, CWD);
-    expect(long.summary).toBe(`Send input to running command: ${"x".repeat(150)}`);
+    const long = codexApprovalToAction(CMD, { itemId: "i1", kind: "writeStdin", command: "x".repeat(400), reason: "q".repeat(400) }, CWD);
+    expect(long.summary).toBe(`Type into ${"x".repeat(60)}: ${"q".repeat(80)}`);
+  });
+
+  it("shows the typed input of a stdin approval with control characters made visible", () => {
+    const a = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", cwd: "/w", reason: "rm -rf /\n" }, "/w");
+    expect(a.summary).toBe("Type into bash: rm -rf /\\n");
+    const ctl = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: "\u0003\t\r" }, CWD);
+    expect(ctl.summary).toBe("Type into bash: \\u0003\\t\\r");
+    // Redacted before it is cut: a token that straddles the cut leaves no fragment behind.
+    const key = "sk-ant-TESTKEY-0000000000";
+    const cut = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", command: "bash", reason: `${"a".repeat(70)}${key}` }, CWD);
+    expect(cut.summary).toBe(`Type into bash: ${"a".repeat(70)}[REDACTED]`);
+    const none = codexApprovalToAction(CMD, { itemId: "s1", kind: "writeStdin", reason: "q" }, CWD);
+    expect(none.summary).toBe("Type into (no command): q");
   });
 
   it.each([["a string", "registry.example.com"], ["an array", ["x"]], ["a number", 1]])(
@@ -300,7 +313,7 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(proposed).toEqual([
       { tool: "codex.command", kind: "shell", summary: "Run: python3 repl.py", input: { command: "python3 repl.py", cwd: dir }, paths: [dir] },
       {
-        tool: "codex.stdin", kind: "shell", summary: "Send input to running command: python3 repl.py",
+        tool: "codex.stdin", kind: "shell", summary: "Type into python3 repl.py: y\\n",
         input: { command: "python3 repl.py", cwd: dir, kind: "writeStdin", reason: "y\n" }, paths: [dir],
       },
     ]);
@@ -310,8 +323,9 @@ describe("CodexAdapter (fake app-server)", () => {
 
   it("declines denied input to a running command without failing the run", async () => {
     script([{ approve: "command", command: "python3 repl.py", itemId: "i1", output: "done", stdin: "rm -rf /\n" }]);
-    const { result, events } = run(make(), (a) => ({ decision: a.tool === "codex.stdin" ? "deny" : "allow", reason: "r" }));
+    const { result, proposed, events } = run(make(), (a) => ({ decision: a.tool === "codex.stdin" ? "deny" : "allow", reason: "r" }));
     expect(await result).toEqual({ status: "completed" });
+    expect(proposed[1]).toMatchObject({ tool: "codex.stdin", summary: "Type into python3 repl.py: rm -rf /\\n" });
     expect(answers(CMD).map((e) => e.result)).toEqual([{ decision: "accept" }, { decision: "decline" }]);
     expect(events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "done" }]);
   });

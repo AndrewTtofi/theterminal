@@ -86,6 +86,17 @@ describe("redact", () => {
       [REDACTED]: "x", nested: { [REDACTED]: 1 },
     });
   });
+  it("never merges object keys that redact to the same string", () => {
+    const secrets = ["fake-alpha-1111", "fake-bravo-2222", "fake-charlie-3333"];
+    expect(redact({ [secrets[0]!]: "a", [secrets[1]!]: "b" }, secrets)).toEqual({ [REDACTED]: "a", [`${REDACTED}#2`]: "b" });
+    expect(redact({ [secrets[0]!]: "a", [secrets[1]!]: "b", [secrets[2]!]: "c" }, secrets)).toEqual({
+      [REDACTED]: "a", [`${REDACTED}#2`]: "b", [`${REDACTED}#3`]: "c",
+    });
+    // A disambiguated name never overwrites a key that already has it.
+    expect(redact({ [`${REDACTED}#2`]: "x", [REDACTED]: "y", [secrets[0]!]: "z" }, secrets)).toEqual({
+      [`${REDACTED}#2`]: "x", [REDACTED]: "y", [`${REDACTED}#3`]: "z",
+    });
+  });
   it("leaves non-secret text and non-string values unchanged", () => {
     expect(redact("just some text, 42 files")).toBe("just some text, 42 files");
     expect(redact({ n: 1, b: true, z: null })).toEqual({ n: 1, b: true, z: null });

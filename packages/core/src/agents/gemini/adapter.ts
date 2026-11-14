@@ -62,6 +62,8 @@ const PROJECT_ID = /^[A-Za-z0-9_-]{1,100}$/;
 /** Variables of every provider's key family: a terminal command run for the agent never sees them. */
 const PROVIDER_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i;
 const MAX_COMMAND = 150;
+/** The cwd part of a terminal summary, so a long cwd never hides the command. */
+const MAX_CWD = 60;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
 const MESSAGE_PAUSE_MS = 250;
@@ -634,7 +636,7 @@ class GeminiRun {
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
     // Where it runs and how many variables it sets are part of what the reviewer approves.
     const context = cwd != null || (env != null && env.length > 0)
-      ? ` (in ${cwd == null ? "." : display(this.o.cwd, cwd)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
+      ? ` (in ${cwd == null ? "." : cap(display(this.o.cwd, cwd), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
       : "";
     const line = [command, ...argv].join(" ");
     const summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
@@ -709,14 +711,17 @@ async function readCapped(real: string): Promise<string> {
   }
 }
 
-/** Writes through a temp file in the same directory, then renames it into place, keeping an existing file's mode. */
+/** `s`, or its first `max - 1` characters and an ellipsis. */
+const cap = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
+
+/** Writes through a temp file in the same directory, then renames it into place, keeping an existing file's permission bits. */
 async function writeAtomic(real: string, content: string): Promise<void> {
   await mkdir(dirname(real), { recursive: true });
   const tmp = join(dirname(real), `.${basename(real)}.${randomUUID()}.tmp`);
   await writeFile(tmp, content, "utf8");
   try {
     const mode = await stat(real).then(
-      (st) => st.mode & 0o7777,
+      (st) => st.mode & 0o777, // permission bits only: never setuid, setgid or sticky
       (e: NodeJS.ErrnoException) => {
         if (e.code === "ENOENT") return null;
         throw e;

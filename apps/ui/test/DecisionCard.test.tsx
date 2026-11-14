@@ -79,6 +79,17 @@ describe("DecisionCard", () => {
     expect(pre?.closest("details")).toBeNull();
   });
 
+  it("shows the text to be typed, not the running command, for input to a running command", () => {
+    const stdin = {
+      ...action,
+      tool: "codex.stdin",
+      summary: "Type into python3 repl.py: rm -rf /\\n",
+      input: { command: "python3 repl.py", cwd: "/w", kind: "writeStdin", reason: "rm -rf /\n" },
+    };
+    const { container } = render(<DecisionCard action={stdin} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")?.textContent).toBe("rm -rf /\n");
+  });
+
   it("shows no command block for other kinds of action", () => {
     const edit = { ...action, kind: "file_edit" as const, input: { command: "not a shell action" } };
     const { container } = render(<DecisionCard action={edit} onDecide={vi.fn()} />);

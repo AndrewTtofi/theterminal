@@ -18,11 +18,15 @@ function hiddenChars(input: unknown): number | null {
   return Math.max(0, totalChars - shown);
 }
 
-/** The full command of a shell action (the title is capped), or null. */
+/**
+ * The full command of a shell action (the title is capped), or null. For input to a running command
+ * (`codex.stdin`) it is the text that will be typed, not the command already running.
+ */
 function shellCommand(action: AgentAction): string | null {
   if (action.kind !== "shell" || typeof action.input !== "object" || action.input === null) return null;
-  const { command } = action.input as { command?: unknown };
-  return typeof command === "string" ? command : null;
+  const { command, reason } = action.input as { command?: unknown; reason?: unknown };
+  const shown = action.tool === "codex.stdin" ? reason : command;
+  return typeof shown === "string" ? shown : null;
 }
 
 export function DecisionCard({ action, projectName, onDecide }: Props) {

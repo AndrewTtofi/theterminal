@@ -433,6 +433,19 @@ describe("GeminiAdapter", () => {
     if (process.platform !== "win32") expect(statSync(path).mode & 0o7777).toBe(0o755);
   });
 
+  it("overwriting a setuid file keeps only its permission bits", async () => {
+    if (process.platform === "win32") return;
+    const path = join(worktree, "tool.sh");
+    writeFileSync(path, "#!/bin/sh\necho old\n");
+    chmodSync(path, 0o4755);
+    expect(statSync(path).mode & 0o7777).toBe(0o4755);
+    script([{ type: "write", path, content: "#!/bin/sh\necho new\n" }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(readFileSync(path, "utf8")).toBe("#!/bin/sh\necho new\n");
+    expect(statSync(path).mode & 0o7777).toBe(0o755);
+  });
+
   it("Deny on the write leaves no file and returns an error to the agent", async () => {
     const path = join(worktree, "notes.md");
     script([{ type: "write", path, content: "x" }]);
@@ -493,6 +506,15 @@ describe("GeminiAdapter", () => {
     expect(h.proposed[0]!.paths).toEqual([join(worktree, "pkg")]);
     expect(h.proposed[0]!.summary).toBe(`Run: ${process.execPath} -e process.stdout.write(process.cwd()) (in pkg)`);
     expect(logged("terminal/output")[0]!.result.output).toBe(join(worktree, "pkg"));
+  });
+
+  it("caps a long terminal cwd in the summary so the command stays visible", async () => {
+    const cwd = join(outside, "d".repeat(200));
+    script([{ type: "terminal", command: "npm", args: ["run", "build"], cwd }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const shown = `${cwd.slice(0, 59)}…`;
+    expect(h.proposed[0]!.summary).toBe(`Run: npm run build (in ${shown})`);
   });
 
   it("caps terminal output at 1 MiB keeping the tail, and reports a non-zero exit", async () => {

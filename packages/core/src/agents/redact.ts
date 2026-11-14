@@ -222,6 +222,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** `key`, or `key#2`, `key#3`, … when taken, so keys that redact to the same string never drop a value. */
+function uniqueKey(out: Record<string, unknown>, key: string): string {
+  if (!Object.hasOwn(out, key)) return key;
+  let n = 2;
+  while (Object.hasOwn(out, `${key}#${n}`)) n++;
+  return `${key}#${n}`;
+}
+
 function walk(value: unknown, extra: string[]): unknown {
   if (typeof value === "string") return redactString(value, extra);
   if (Array.isArray(value)) return value.map((v) => walk(v, extra));
@@ -229,7 +237,7 @@ function walk(value: unknown, extra: string[]): unknown {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       const sensitive = isSecretKey(k) && v !== null && v !== undefined && typeof v !== "boolean";
-      out[redactString(k, extra)] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
+      out[uniqueKey(out, redactString(k, extra))] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
     }
     return out;
   }

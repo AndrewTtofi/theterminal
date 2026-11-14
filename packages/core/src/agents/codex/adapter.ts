@@ -29,6 +29,8 @@ const PROJECT_ID = /^[A-Za-z0-9_-]+$/;
 const STOPPED = "run stopped";
 const CLIENT_VERSION = "0.0.0";
 const MAX_COMMAND = 150;
+const MAX_STDIN_COMMAND = 60;
+const MAX_STDIN_INPUT = 80;
 const MAX_DIFF = 4000;
 const MAX_OUTPUT = 4000;
 const MAX_MESSAGE = 256 * 1024;
@@ -143,13 +145,18 @@ export function codexApprovalToAction(
 
   if (method === P.COMMAND_APPROVAL && p.kind === "writeStdin") {
     // Input typed into a command that is already running (the input is the reason): never the command itself.
+    // The summary shows what will be typed, with control characters escaped so a newline cannot hide. Both parts
+    // are redacted before they are cut, so a cut never leaves a fragment of a token that no pattern matches.
     const command = str(p.command);
     const dir = str(p.cwd);
+    const reason = str(p.reason);
+    const shownCommand = redact(command || "(no command)").slice(0, MAX_STDIN_COMMAND);
+    const typed = redact(JSON.stringify(reason).slice(1, -1)).slice(0, MAX_STDIN_INPUT);
     return {
       tool: "codex.stdin",
       kind: "shell",
-      summary: `Send input to running command: ${(command || "(no command)").slice(0, MAX_COMMAND)}`,
-      input: { command, cwd: dir, kind: p.kind, reason: str(p.reason) },
+      summary: `Type into ${shownCommand}: ${typed}`,
+      input: { command, cwd: dir, kind: p.kind, reason },
       paths: dir ? [dir] : [],
     };
   }
@@ -449,7 +456,7 @@ class CodexSession {
       return decline;
     }
     if (g.decision !== "allow" || this.stopping || itemId === "") return decline;
-    // Input to a running command shares the command's item id; the item's result stays the command's.
+    // Input to a running command has its own item id and no item result; the running command keeps its own.
     if (p.kind !== "writeStdin") this.allowed.set(itemId, g.actionId);
     return { decision: "accept" };
   }
