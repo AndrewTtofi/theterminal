@@ -117,11 +117,27 @@ function blockScalarEnd(s: string, keyIndex: number, from: number): number {
   return end;
 }
 
+/** One environment-variable reference: $VAR, ${VAR}, %VAR% or $env:VAR, optionally preceded by a (JSON-escaped) quote. */
+const ENV_REFERENCE = /^(\\?["'])?(?:\$\{[A-Za-z_]\w*\}|\$env:[A-Za-z_]\w*|\$[A-Za-z_]\w*|%[A-Za-z_]\w*%)/i;
+const SHELL_SEPARATOR = /[;|&\r\n]/;
+
 /**
- * A value that is exactly one environment-variable reference ($VAR, ${VAR}, %VAR%, $env:VAR), optionally
- * quoted, is a name and not a secret. Nothing may be attached to it, so `$VAR-x` or `a$VAR` is still redacted.
+ * Whether the value at `pos` is exactly one environment-variable reference, which is a name and not a secret.
+ * Nothing literal may be attached to it:
+ * - quoted: the matching closing quote must follow the reference immediately;
+ * - header value: the reference ends the line, or a shell separator follows, or a quote closes the string the
+ *   header sits in (`-H "Authorization: Bearer $TOKEN" url`); whitespace or a comma may not follow;
+ * - other value: the reference ends the string or is followed by whitespace or a shell separator.
  */
-const ENV_REFERENCE = /^\\?["']?(?:\$\{[A-Za-z_]\w*\}|\$env:[A-Za-z_]\w*|\$[A-Za-z_]\w*|%[A-Za-z_]\w*%)\\?["']?(?![\w$.\-/:@%{])/i;
+function isEnvReference(s: string, pos: number, header: boolean): boolean {
+  const m = ENV_REFERENCE.exec(s.slice(pos, pos + 128));
+  if (!m) return false;
+  const next = s[pos + m[0].length];
+  if (m[1] !== undefined) return s.startsWith(m[1], pos + m[0].length);
+  if (next === undefined || SHELL_SEPARATOR.test(next)) return true;
+  if (header) return next === '"' || next === "'" || next === "\\";
+  return isBlank(next);
+}
 
 function redactPairs(s: string): string {
   let out = "";
@@ -142,7 +158,7 @@ function redactPairs(s: string): string {
       const scheme = AUTH_SCHEME.exec(s);
       if (scheme) pos += scheme[0].length;
     }
-    if (ENV_REFERENCE.test(s.slice(pos, pos + 128))) continue;
+    if (isEnvReference(s, pos, header)) continue;
     const escaped = s[pos] === "\\" && (s[pos + 1] === '"' || s[pos + 1] === "'");
     const q = escaped ? s[pos + 1]! : s[pos];
     let end: number;
