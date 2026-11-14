@@ -30,7 +30,7 @@ export const CHILD_ENV_ALLOWLIST: readonly string[] = [
 ];
 export const CHILD_ENV_ALLOWLIST_PREFIXES: readonly string[] = ["LC_"];
 /** Additionally allowlisted on Windows. */
-const WIN32_ALLOWLIST: readonly string[] = [
+export const WIN32_ALLOWLIST: readonly string[] = [
   "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
   "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
   "USERNAME", "USERDOMAIN", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",

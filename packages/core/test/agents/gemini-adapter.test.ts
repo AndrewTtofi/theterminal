@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
-import { CHILD_ENV_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
+import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { GeminiAdapter } from "../../src/agents/gemini/adapter.js";
 import { classify } from "../../src/agents/policy.js";
 import { redact } from "../../src/agents/redact.js";
@@ -234,10 +234,12 @@ describe("GeminiAdapter", () => {
     const keys = Object.keys(seen[0]!);
     for (const k of ["AWS_SECRET_ACCESS_KEY", "NPM_TOKEN", "NODE_OPTIONS", "THETERMINAL_FAKE_AGENT", "GIT_DIR", "OPENAI_API_KEY"]) expect(keys).not.toContain(k);
     const allowed = new Set([
-      ...CHILD_ENV_ALLOWLIST, "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GEMINI_API_KEY", "GEMINI_CLI_HOME",
+      ...CHILD_ENV_ALLOWLIST, ...(process.platform === "win32" ? WIN32_ALLOWLIST : []), "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GEMINI_API_KEY", "GEMINI_CLI_HOME",
       "GEMINI_CLI_TRUST_WORKSPACE", "GEMINI_CLI_NO_RELAUNCH", "NO_BROWSER", "THETERMINAL_FAKE_GEMINI_SCRIPT", "THETERMINAL_FAKE_LOG",
     ]);
-    expect(keys.filter((k) => !allowed.has(k) && !k.startsWith("LC_"))).toEqual([]);
+    const fold = (k: string) => (process.platform === "win32" ? k.toUpperCase() : k);
+    const allowedFolded = new Set([...allowed].map(fold));
+    expect(keys.filter((k) => !allowedFolded.has(fold(k)) && !fold(k).startsWith("LC_"))).toEqual([]);
     expect(keys).toContain("THETERMINAL_FAKE_GEMINI_SCRIPT");
   });
 
