@@ -107,7 +107,7 @@ export function Workbench({ model }: Props) {
             </div>
           </main>
         </div>
-        <StatusBar running={running} pending={pending} onResetLayout={() => dockRef.current?.reset()} />
+        <StatusBar status={model.status} running={running} pending={pending} onSelectView={selectView} onResetLayout={() => dockRef.current?.reset()} />
       </div>
     </ShellContext.Provider>
   );

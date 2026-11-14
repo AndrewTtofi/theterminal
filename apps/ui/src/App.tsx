@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentAction, AgentRun, Board as BoardData, LedgerEntry, PendingAgentAction, Project } from "@theterminal/shared";
 import { api, errorMessage, subscribeLedger } from "./api";
-import type { AgentsInfo, Health } from "./api";
+import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import type { LedgerScope, WorkbenchModel } from "./shell/model";
 import { useConnections } from "./use-connections";
@@ -50,6 +50,7 @@ export function App() {
   const [pending, setPending] = useState<PendingAgentAction[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runActions, setRunActions] = useState<AgentAction[]>([]);
+  const [status, setStatus] = useState<Status | null>(null);
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -72,22 +73,31 @@ export function App() {
       if (!cancelled) setPending(p);
     }, () => cancelled);
     refreshPending.current = refresh;
+    // Status bar numbers: refetched on any ledger entry and every 30 s (spend and run counts change quietly too).
+    const refreshStatus = coalesced(async () => {
+      const s = await api.getStatus();
+      if (!cancelled) setStatus(s);
+    }, () => cancelled);
+    const timer = setInterval(refreshStatus, 30_000);
     void run(async () => {
       const h = await api.health();
       if (cancelled) return;
       setHealth(h);
       unsubscribe = subscribeLedger(h.headSeq, (e) => {
+        refreshStatus();
         if (e.type.startsWith("agent.")) refresh();
         // Tests, enables and removals change a connection's status: reread the list from the server.
         if (e.type.startsWith("connection.")) refreshConnections.current();
       });
       refresh();
+      refreshStatus();
       setProjects(await api.listProjects());
     });
     void api.getAgents().then(setAgentsInfo, () => {});
     return () => {
       cancelled = true;
       refreshPending.current = () => {};
+      clearInterval(timer);
       unsubscribe();
     };
   }, [run]);
@@ -253,6 +263,7 @@ export function App() {
       }
     },
     connections,
+    status,
   };
 
   return (

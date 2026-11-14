@@ -16,6 +16,7 @@ const h = vi.hoisted(() => {
 vi.mock("../src/api", () => ({
   api: {
     health: vi.fn(),
+    getStatus: vi.fn(),
     listProjects: vi.fn(),
     getBoard: vi.fn(),
     listLedger: vi.fn(),
@@ -74,6 +75,10 @@ beforeEach(() => {
   vi.resetAllMocks();
   h.onEntry = undefined;
   h.subs.clear();
+  m.getStatus.mockResolvedValue({
+    runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0,
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
+  });
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
   m.listProjects.mockResolvedValue([mk("A").project, mk("B").project]);
   m.listLedger.mockResolvedValue([]);

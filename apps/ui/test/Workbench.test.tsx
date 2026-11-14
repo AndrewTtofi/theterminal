@@ -56,6 +56,7 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     board,
     onAddCard: vi.fn(),
     onMoveCard: vi.fn(),
+    status: null,
     agentsInfo: {
       adapters: ["fake"],
       providers: {

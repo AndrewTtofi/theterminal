@@ -11,7 +11,7 @@ import type {
   Provider,
   Stage,
 } from "@theterminal/shared";
-import type { AgentsInfo } from "../api";
+import type { AgentsInfo, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 
@@ -48,6 +48,9 @@ export type WorkbenchModel = {
   onProviderAuthChange: (provider: Provider, mode: AuthMode, acknowledgement?: string) => Promise<boolean>;
 
   connections: ConnectionsModel;
+
+  /** The server's status counts for the status bar; null until the first answer. */
+  status: Status | null;
 };
 
 export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null };

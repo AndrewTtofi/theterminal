@@ -13,6 +13,29 @@ const entry = (seq: number, type: LedgerEntry["type"], payload: unknown, actor: 
   actor,
 });
 
+describe("describeEntry connections", () => {
+  const c = { connectionId: "c1", name: "Work key" };
+  it("describes connection events", () => {
+    expect(describeEntry(entry(1, "connection.added", { ...c, kind: "llm", provider: "claude", config: {}, secretFields: [], privateFields: [] }))).toBe(
+      'Owner connected "Work key" (AI model)',
+    );
+    expect(describeEntry(entry(2, "connection.updated", { ...c, changes: { enabled: true } }))).toBe('Owner enabled "Work key"');
+    expect(describeEntry(entry(3, "connection.updated", { ...c, changes: { enabled: false } }))).toBe('Owner disabled "Work key"');
+    expect(describeEntry(entry(4, "connection.updated", { ...c, changes: { secretsSet: ["apiKey", "token"] } }))).toBe(
+      'Owner replaced the apiKey, token of "Work key"',
+    );
+    expect(describeEntry(entry(5, "connection.updated", { ...c, changes: { name: "New" } }))).toBe('Owner updated "Work key"');
+    expect(describeEntry(entry(6, "connection.removed", c))).toBe('Owner removed "Work key"');
+    expect(describeEntry(entry(7, "connection.tested", { ...c, ok: true, message: "" }))).toBe('"Work key" connected');
+    expect(describeEntry(entry(8, "connection.tested", { ...c, ok: false, message: "Key rejected" }))).toBe(
+      '"Work key" failed to connect: Key rejected',
+    );
+    expect(
+      describeEntry(entry(9, "connection.used", { ...c, runId: "abcdef1234567890", purpose: "api_key" }, { kind: "system", id: "runner" })),
+    ).toBe('Agent abcdef12 was given access to "Work key"');
+  });
+});
+
 describe("describeEntry", () => {
   it("describes each event type", () => {
     expect(describeEntry(entry(1, "project.created", { name: "Demo" }))).toBe('Owner created project "Demo"');
