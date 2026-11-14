@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,12 +11,12 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { registerAgentRoutes } from "../../src/server/agent-routes.js";
 import { registerRoutes } from "../../src/server/routes.js";
-import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
+import { EMPTY_GITCONFIG, WorktreeManager, ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { openDatabase } from "../../src/db.js";
 import { listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
-import { createServer, type RunningServer } from "../../src/server/server.js";
+import { createServer, repairSharedGitconfig, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
@@ -392,6 +392,62 @@ describe("agent API", { timeout: 15000 }, () => {
     running.push(s);
     expect(readFileSync(cfg, "utf8")).toBe("");
     if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
+  });
+
+  describe("a shared git config that cannot be repaired at startup", () => {
+    /** Starts with console.warn captured; returns what was warned. */
+    async function startWarned(dataDir: string): Promise<string[]> {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        running.push(await createServer({ dataDir, port: 0, which: noCli }));
+        return warn.mock.calls.map((c) => c.map(String).join(" "));
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it.skipIf(process.platform === "win32")("a symlink: starts and warns with a fixed message holding no path", async () => {
+      const dataDir = tmp();
+      const target = join(tmp(), "target");
+      writeFileSync(target, "x");
+      symlinkSync(target, join(dataDir, EMPTY_GITCONFIG));
+      const warned = await startWarned(dataDir);
+      expect(warned).toEqual(["The Terminal: the shared git config is not a regular file; agent runs will fail until it is removed"]);
+      expect(readFileSync(target, "utf8")).toBe("x");
+    });
+
+    it("a hard link: starts, leaves the linked file alone and warns with a fixed message holding no path", async () => {
+      const dataDir = tmp();
+      const other = join(tmp(), "other-config");
+      writeFileSync(other, "[user]\n\tname = x\n");
+      linkSync(other, join(dataDir, EMPTY_GITCONFIG));
+      const warned = await startWarned(dataDir);
+      expect(warned).toEqual(["The Terminal: the shared git config has another hard link; agent runs will fail until it is removed"]);
+      expect(readFileSync(other, "utf8")).toBe("[user]\n\tname = x\n");
+    });
+
+    it("any other repair error: never thrown, warned with a fixed message holding no path or error text", () => {
+      const dataDir = tmp();
+      const warned: string[] = [];
+      const failing = () => {
+        throw Object.assign(new Error(`EPERM: operation not permitted, open '${join(dataDir, EMPTY_GITCONFIG)}'`), { code: "EPERM" });
+      };
+      expect(() => repairSharedGitconfig(dataDir, failing, (m) => warned.push(m))).not.toThrow();
+      expect(warned).toEqual(["The Terminal: the shared git config could not be repaired; agent runs will fail until this is fixed"]);
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a config that cannot be checked: warned as such, not as a non-file", () => {
+      const dataDir = tmp();
+      ensureEmptyGitconfig(dataDir);
+      const warned: string[] = [];
+      chmodSync(dataDir, 0o600); // no search permission: lstat fails with EACCES
+      try {
+        repairSharedGitconfig(dataDir, ensureEmptyGitconfig, (m) => warned.push(m));
+      } finally {
+        chmodSync(dataDir, 0o700);
+      }
+      expect(warned).toEqual(["The Terminal: the shared git config could not be checked; agent runs will fail until this is fixed"]);
+    });
   });
 
   it("close() with a pending action does not hang, and records the run as stopped", async () => {

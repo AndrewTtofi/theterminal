@@ -22,8 +22,14 @@ export const EMPTY_GITCONFIG = ".theterminal-empty-gitconfig";
 
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 
+/**
+ * Why the shared git config is refused: `modified` (content in it), `not_file` (a symlink or anything but a regular
+ * file), `linked` (a regular file with another hard link) or `unchecked` (it could not be inspected).
+ */
+export type SharedGitconfigProblem = "modified" | "not_file" | "linked" | "unchecked";
+
 export class SharedGitconfigModifiedError extends Error {
-  constructor() {
+  constructor(readonly reason: SharedGitconfigProblem = "modified") {
     super("shared git config was modified");
     this.name = "SharedGitconfigModifiedError";
   }
@@ -33,8 +39,9 @@ export class SharedGitconfigModifiedError extends Error {
  * Creates the shared empty git config if it is missing and makes it read-only (best effort on Windows, where
  * chmod only sets the read-only attribute), so `git config --global` in a run fails instead of writing to it.
  * An existing file is rewritten only with `repair` (at server start); otherwise content in it is caught by
- * `assertEmptyGitconfig` before every run. A symlink or anything but a regular file in its place is refused with
- * SharedGitconfigModifiedError, never followed. Returns its path.
+ * `assertEmptyGitconfig` before every run. A symlink or anything but a regular file in its place, or a file with
+ * another hard link (repairing it would empty the linked file), is refused with SharedGitconfigModifiedError before
+ * any write or chmod, never followed. Returns its path.
  */
 export function ensureEmptyGitconfig(dataDir: string, opts: { repair?: boolean } = {}): string {
   const file = join(dataDir, EMPTY_GITCONFIG);
@@ -43,7 +50,7 @@ export function ensureEmptyGitconfig(dataDir: string, opts: { repair?: boolean }
   try {
     st = lstatSync(file);
   } catch (e) {
-    if (errCode(e) !== "ENOENT") throw new SharedGitconfigModifiedError();
+    if (errCode(e) !== "ENOENT") throw new SharedGitconfigModifiedError("unchecked");
   }
   if (st === undefined) {
     try {
@@ -53,7 +60,9 @@ export function ensureEmptyGitconfig(dataDir: string, opts: { repair?: boolean }
       return ensureEmptyGitconfig(dataDir, opts); // created meanwhile: judge what is there now
     }
   } else if (!st.isFile()) {
-    throw new SharedGitconfigModifiedError();
+    throw new SharedGitconfigModifiedError("not_file");
+  } else if (st.nlink > 1) {
+    throw new SharedGitconfigModifiedError("linked");
   } else if (opts.repair && st.size > 0) {
     chmodSync(file, 0o644); // our own file: make it writable, empty it, then read-only again below
     writeFileSync(file, "");

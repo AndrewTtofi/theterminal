@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -123,6 +123,34 @@ describe("WorktreeManager", () => {
     expect(() => ensureEmptyGitconfig(dataDir, { repair: true })).toThrow(SharedGitconfigModifiedError);
     expect(statSync(target).mode & 0o777).toBe(0o644);
     expect(() => new WorktreeManager(dataDir)).not.toThrow(); // the per-run check fails the run instead
+  });
+
+  it("refuses a shared git config with another hard link, never writing or chmod-ing the linked file", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    rmSync(cfg);
+    const other = join(outside, "other-config");
+    writeFileSync(other, "[user]\n\tname = x\n");
+    chmodSync(other, 0o644);
+    linkSync(other, cfg);
+    for (const opts of [{}, { repair: true }]) {
+      expect(() => ensureEmptyGitconfig(dataDir, opts)).toThrow(expect.objectContaining({ name: "SharedGitconfigModifiedError", reason: "linked" }));
+    }
+    expect(readFileSync(other, "utf8")).toBe("[user]\n\tname = x\n");
+    if (process.platform !== "win32") expect(statSync(other).mode & 0o777).toBe(0o644);
+  });
+
+  it.skipIf(process.platform === "win32")("tells a symlink apart from a shared git config that cannot be checked", () => {
+    const cfg = join(dataDir, EMPTY_GITCONFIG);
+    rmSync(cfg);
+    symlinkSync(join(outside, "target"), cfg);
+    expect(() => ensureEmptyGitconfig(dataDir)).toThrow(expect.objectContaining({ reason: "not_file" }));
+    if (process.getuid?.() === 0) return; // root can search a directory without the permission
+    chmodSync(dataDir, 0o600); // no search permission: lstat fails with EACCES
+    try {
+      expect(() => ensureEmptyGitconfig(dataDir)).toThrow(expect.objectContaining({ reason: "unchecked" }));
+    } finally {
+      chmodSync(dataDir, 0o700);
+    }
   });
 
   it("a shared git config with a byte in it fails buildChildEnv before any CLI starts", () => {

@@ -22,7 +22,7 @@ import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { which as whichOnPath } from "../agents/which.js";
-import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig } from "../agents/worktrees.js";
+import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, type SharedGitconfigProblem } from "../agents/worktrees.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -136,6 +136,27 @@ function buildAdapters(
   return adapters;
 }
 
+const GITCONFIG_REPAIR_FAILED = "the shared git config could not be repaired; agent runs will fail until this is fixed";
+const GITCONFIG_WARNINGS: Partial<Record<SharedGitconfigProblem, string>> = {
+  not_file: "the shared git config is not a regular file; agent runs will fail until it is removed",
+  linked: "the shared git config has another hard link; agent runs will fail until it is removed",
+  unchecked: "the shared git config could not be checked; agent runs will fail until this is fixed",
+};
+
+/**
+ * At start, while nothing runs: a shared git config modified before this start is emptied and made read-only again.
+ * One that cannot be repaired is left alone with a warning, and every run then fails before its CLI starts. Never
+ * throws, and the warning is fixed text: console output ends up in bug reports, so it holds no path or fs error.
+ */
+export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitconfig, warn: (message: string) => void = console.warn): void {
+  try {
+    ensure(dataDir, { repair: true });
+  } catch (e) {
+    const known = e instanceof SharedGitconfigModifiedError ? GITCONFIG_WARNINGS[e.reason] : undefined;
+    warn(`The Terminal: ${known ?? GITCONFIG_REPAIR_FAILED}`);
+  }
+}
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -171,14 +192,7 @@ export async function createServer(opts: {
     ledger.readOnly = true;
   }
 
-  // Nothing runs yet: a shared git config modified before this start is emptied and made read-only again. One
-  // that is a symlink or not a file is left alone; every run then fails before its CLI starts.
-  try {
-    ensureEmptyGitconfig(opts.dataDir, { repair: true });
-  } catch (e) {
-    if (!(e instanceof SharedGitconfigModifiedError)) throw e;
-    console.warn("The Terminal: the shared git config is not a regular file; agent runs will fail until it is removed");
-  }
+  repairSharedGitconfig(opts.dataDir);
 
   const runner = new AgentRunner({
     db,
