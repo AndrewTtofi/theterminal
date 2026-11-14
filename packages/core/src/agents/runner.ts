@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
@@ -63,7 +63,7 @@ type GateOutcome = GateResult & { actionId: string };
 const POLICY: Actor = { kind: "system", id: "policy" };
 const RUNNER: Actor = { kind: "system", id: "runner" };
 // Bounds from the agent payload schemas in @theterminal/shared; input has no schema bound, so we cap it.
-const MAX = { tool: 200, summary: 200, reason: 500, text: 4000, output: 4000, prompt: 20000, error: 1000, input: 20000 };
+const MAX = { tool: 200, summary: 200, reason: 500, text: 4000, output: 4000, prompt: 20000, error: 1000, input: 20000, preview: 4000 };
 const promptSchema = z.string().min(1).max(MAX.prompt);
 const INTERNAL_ERROR = "internal error";
 const NOT_ALLOWED_RESULT = "adapter reported a result for an action that was not allowed";
@@ -431,13 +431,20 @@ export class AgentRunner {
 
   /**
    * Normalises to plain JSON first (class instances and toJSON values become plain data that redact
-   * can see into); a value that cannot be serialised throws and is denied by the gate.
+   * can see into); a value that cannot be serialised throws and is denied by the gate. An input over
+   * the cap is recorded as its hash, length and a preview, so what was approved can still be checked.
    */
   private cleanInput(input: unknown, scrub: Scrub): unknown {
     const json = JSON.stringify(input ?? null);
     const plain: unknown = json === undefined ? null : JSON.parse(json);
     const value = redact(scrubJson(plain, scrub), this.deps.extraSecrets);
     const out = JSON.stringify(value);
-    return out.length > MAX.input ? truncate(out, MAX.input) : value;
+    if (out.length <= MAX.input) return value;
+    return {
+      truncated: true,
+      sha256: createHash("sha256").update(out).digest("hex"),
+      totalChars: out.length,
+      preview: truncate(out, MAX.preview),
+    };
   }
 }

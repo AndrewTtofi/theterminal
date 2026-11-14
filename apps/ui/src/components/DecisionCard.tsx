@@ -7,6 +7,15 @@ type Props = {
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown> | void;
 };
 
+/** For an input the core recorded as truncated, how many characters the card cannot show; else null. */
+function hiddenChars(input: unknown): number | null {
+  if (typeof input !== "object" || input === null) return null;
+  const { truncated, totalChars, preview } = input as { truncated?: unknown; totalChars?: unknown; preview?: unknown };
+  if (truncated !== true || typeof totalChars !== "number") return null;
+  const shown = typeof preview === "string" ? preview.replace(/…\[truncated\]$/, "").length : 0;
+  return Math.max(0, totalChars - shown);
+}
+
 export function DecisionCard({ action, onDecide }: Props) {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
@@ -26,6 +35,8 @@ export function DecisionCard({ action, onDecide }: Props) {
     }
   };
 
+  const hidden = hiddenChars(action.input);
+
   return (
     <article className="decision-card" aria-label={`Decision: ${action.summary}`}>
       <h3>Agent wants to: {action.summary}</h3>
@@ -33,6 +44,7 @@ export function DecisionCard({ action, onDecide }: Props) {
         <summary>Details</summary>
         <pre>{JSON.stringify(action.input, null, 2)}</pre>
       </details>
+      {hidden !== null && <p className="note">{hidden} characters hidden — full input not shown</p>}
       {denying ? (
         <div className="decision-actions">
           <label>

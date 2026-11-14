@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -258,6 +259,31 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(text).toContain("<user>@example.com");
     expect(text).toContain("malice alicex alice_x");
     expect(text).not.toMatch(/(?<![A-Za-z0-9_.-])alice(?![A-Za-z0-9_.-])/);
+  });
+
+  it("records an oversized input as an auditable truncation with the full JSON's hash and length", async () => {
+    const input = { command: `echo ${"z".repeat(25000)}`, cwd: join(dataDir, "x") };
+    const runner = fakeRunner([{ propose: { tool: "Bash", kind: "shell", summary: "big", input, paths: [] } }]);
+    await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+    await untilPending();
+    const [a] = listPendingActions(db, projectId);
+    const full = JSON.stringify({ command: input.command, cwd: "<data>/x" }); // normalised, scrubbed and redacted
+    expect(a!.input).toEqual({
+      truncated: true,
+      sha256: createHash("sha256").update(full).digest("hex"),
+      totalChars: full.length,
+      preview: expect.any(String),
+    });
+    const preview = (a!.input as { preview: string }).preview;
+    expect(full.startsWith(preview.replace(/…\[truncated\]$/, ""))).toBe(true);
+    expect(JSON.stringify(a!.input).length).toBeLessThan(20000);
+  });
+
+  it("records an input within the cap as the plain value", async () => {
+    const runner = fakeRunner([{ propose: { tool: "Bash", kind: "shell", summary: "small", input: { command: "ls" }, paths: [] } }]);
+    await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+    await untilPending();
+    expect(listPendingActions(db, projectId)[0]!.input).toEqual({ command: "ls" });
   });
 
   it("shutdown does not hang on an adapter that ignores abort, and forgets the session", async () => {

@@ -70,6 +70,18 @@ describe("DecisionCard", () => {
     expect(onDecide).toHaveBeenCalledTimes(1);
   });
 
+  it("says how much of a truncated input is hidden", () => {
+    const preview = `{"command":"echo ${"z".repeat(3970)}…[truncated]`;
+    const truncated = { ...action, input: { truncated: true, sha256: "ab".repeat(32), totalChars: 25000, preview } };
+    render(<DecisionCard action={truncated} onDecide={vi.fn()} />);
+    expect(screen.getByText(`${25000 - (preview.length - "…[truncated]".length)} characters hidden — full input not shown`)).toBeTruthy();
+  });
+
+  it("does not show a hidden-characters note for a complete input", () => {
+    render(<DecisionCard action={action} onDecide={vi.fn()} />);
+    expect(screen.queryByText(/characters hidden/)).toBeNull();
+  });
+
   it("renders hostile summary and input as inert text", () => {
     const evil = { ...action, summary: '<img src=x onerror="window.__pwned=1">', input: { x: "<script>window.__pwned=1</script>" } };
     const { container } = render(<DecisionCard action={evil} onDecide={vi.fn()} />);
