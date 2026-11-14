@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keep the CI actions current. npm dependencies are pinned on purpose and
+  # updated by hand; security alerts for them still arrive through GitHub.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
