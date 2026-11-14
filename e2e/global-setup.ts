@@ -32,6 +32,7 @@ const AT_CREATE = {
   THETERMINAL_GEMINI_BIN: fixture("fake-gemini.mjs"),
 };
 // Read at every run start (the API keys) or by the fake CLIs, which inherit the server's env: kept until teardown.
+// The fake OPENAI_API_KEY/GEMINI_API_KEY therefore stay in the Playwright main process env for the whole run.
 const DURING_RUNS = {
   THETERMINAL_FAKE_CODEX_SCRIPT: FAKE_CODEX_SCRIPT,
   THETERMINAL_FAKE_GEMINI_SCRIPT: FAKE_GEMINI_SCRIPT,

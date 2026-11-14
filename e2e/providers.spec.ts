@@ -52,5 +52,10 @@ test("Gemini: a read outside the worktree is denied by policy, and the owner den
 
   await expect(line(ledger, "Owner denied: not now")).toHaveCount(1);
   await expect(line(ledger, "Agent run completed")).toHaveCount(1);
+  // Newest first: the completion, then the owner's deny, then the policy's.
+  const texts = (await ledger.allInnerTexts()).map((t) => t.trim());
+  const at = (text: string) => texts.findIndex((t) => t.endsWith(` · ${text}`));
+  expect(at("Agent run completed")).toBeLessThan(at("Owner denied: not now"));
+  expect(at("Owner denied: not now")).toBeLessThan(at("Policy denied: outside worktree"));
   await expect(card).toHaveCount(0);
 });
