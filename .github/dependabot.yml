@@ -1,8 +1,51 @@
+# Dependabot keeps dependencies current and patches known vulnerabilities.
+#
+# - Security updates: opened as soon as GitHub publishes an advisory for a
+#   dependency we use (enabled in the repository's security settings).
+#   They skip the cooldown below.
+# - Version updates: checked weekly. A new release must be at least 14 days
+#   old before Dependabot proposes it, so we never adopt a release in its
+#   first days (supply-chain caution). Minor and patch updates are grouped
+#   into one pull request per ecosystem; major updates arrive one by one,
+#   because they can change behaviour and need their own review.
+#
+# Every Dependabot pull request runs the full CI on macOS and Windows and is
+# merged only after the maintainer reviews it.
 version: 2
 updates:
-  # Keep the CI actions current. npm dependencies are pinned on purpose and
-  # updated by hand; security alerts for them still arrive through GitHub.
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /packages/*
+      - /apps/*
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 10
+    labels: [dependencies]
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      npm-security:
+        applies-to: security-updates
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    cooldown:
+      default-days: 14
+    labels: [dependencies]
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        update-types: [minor, patch]
