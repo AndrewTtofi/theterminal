@@ -36,3 +36,8 @@ export type { SecretStore } from "./secrets/store.js";
 export { MemorySecretStore } from "./secrets/memory-store.js";
 export { KeychainSecretStore } from "./secrets/keychain-store.js";
 export type { KeyringEntryLike, KeyringEntryFactory } from "./secrets/keychain-store.js";
+export { ConnectionService, ConflictError, SecretInConfigError, UnknownFieldError } from "./connections/service.js";
+export type {
+  AddConnectionInput, ConnectionServiceDeps, ConnectionTester, Credentials, UpdateConnectionPatch,
+} from "./connections/service.js";
+export { CONNECTION_TESTERS } from "./connections/testers.js";

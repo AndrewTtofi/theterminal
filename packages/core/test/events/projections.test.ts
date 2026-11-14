@@ -4,6 +4,8 @@ import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { commitEvent } from "../../src/events/commit.js";
+import { ConnectionService } from "../../src/connections/service.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
   getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections,
 } from "../../src/events/projections.js";
@@ -123,6 +125,28 @@ describe("agent projections", () => {
       );
     const live = dump();
     expect(live[2]).toHaveLength(1);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  it("rebuild after connection add/update/test/remove equals the live connections table", async () => {
+    let n = 0;
+    const svc = new ConnectionService({
+      db, ledger, secrets: new MemorySecretStore(), newId: () => `c${++n}`,
+      testers: { claude: async () => ({ ok: true, message: "Connected" }) },
+    });
+    const claude = await svc.add(human, { kind: "llm", provider: "claude", name: "Claude", config: {}, secrets: { apiKey: "sk-ant-TESTKEY-0000000000" } });
+    const gemini = await svc.add(human, {
+      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "p" }, private: { cliHome: "home" },
+    });
+    const github = await svc.add(human, { kind: "github", provider: "github", name: "GitHub", config: {}, secrets: { token: "ghp_TESTKEY0000000000000000" } });
+    await svc.update(human, gemini.id, { name: "G2", enabled: false, secrets: { apiKey: "AIzaTESTKEY" }, private: { cliHome: null } });
+    await svc.test(human, claude.id);
+    await svc.test(human, gemini.id);
+    await svc.remove(human, github.id);
+    const dump = () => db.prepare("SELECT * FROM connections ORDER BY id").all();
+    const live = dump();
+    expect(live).toHaveLength(2);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
   });

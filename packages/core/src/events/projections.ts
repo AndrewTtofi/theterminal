@@ -59,16 +59,62 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "settings.provider_auth_changed":
       setSetting(db, `auth_mode:${p.provider}`, p.mode);
       break;
+    case "connection.added":
+      db.prepare(
+        `INSERT INTO connections (id, kind, provider, name, enabled, config, secret_fields, private_fields,
+           status_state, status_message, tested_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'untested', '', NULL, ?, ?)`,
+      ).run(
+        p.connectionId, p.kind, p.provider, p.name, canonicalJson(p.config),
+        JSON.stringify(sortedFields(p.secretFields)), JSON.stringify(sortedFields(p.privateFields)), e.ts, e.ts,
+      );
+      break;
+    case "connection.updated":
+      updateConnection(db, p, e.ts);
+      break;
+    case "connection.removed":
+      db.prepare("DELETE FROM connections WHERE id = ?").run(p.connectionId);
+      break;
+    case "connection.tested":
+      db.prepare("UPDATE connections SET status_state = ?, status_message = ?, tested_at = ? WHERE id = ?").run(
+        p.ok ? "ok" : "failed", p.message, e.ts, p.connectionId,
+      );
+      break;
     default:
       break;
   }
+}
+
+/** `current` plus `added` minus `removed`, deduplicated and sorted. */
+function sortedFields(current: string[], added: string[] = [], removed: string[] = []): string[] {
+  const out = new Set([...current, ...added]);
+  for (const f of removed) out.delete(f);
+  return [...out].sort();
+}
+
+function updateConnection(db: Db, p: Payload, ts: string): void {
+  const row = db.prepare("SELECT secret_fields, private_fields FROM connections WHERE id = ?").get(p.connectionId) as
+    | { secret_fields: string; private_fields: string }
+    | undefined;
+  if (!row) return;
+  const c = p.changes as Payload;
+  const secretFields = sortedFields(JSON.parse(row.secret_fields), c.secretsSet, c.secretsRemoved);
+  const privateFields = sortedFields(JSON.parse(row.private_fields), c.privateSet, c.privateRemoved);
+  db.prepare(
+    `UPDATE connections SET name = COALESCE(?, name), config = COALESCE(?, config), enabled = COALESCE(?, enabled),
+       secret_fields = ?, private_fields = ?, updated_at = ? WHERE id = ?`,
+  ).run(
+    c.name ?? null, c.config === undefined ? null : canonicalJson(c.config),
+    c.enabled === undefined ? null : c.enabled ? 1 : 0,
+    JSON.stringify(secretFields), JSON.stringify(privateFields), ts, p.connectionId,
+  );
 }
 
 function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
-const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings"];
+const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings", "connections"];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
 export function rebuildAllProjections(db: Db, ledger: Ledger, opts: { beforeSeq?: number } = {}): void {
