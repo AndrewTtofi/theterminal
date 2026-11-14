@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Connection } from "@theterminal/shared";
+import type { Connection, ConnectionProvider } from "@theterminal/shared";
 
 /** The name an MCP server is given in a run: unique per connection, never the Owner's own name for it. */
 export const MCP_SERVER_NAME = /^tt-[a-z0-9]{8}$/;
@@ -10,6 +10,11 @@ export type McpServerSpec = { serverName: string; connectionId: string; name: st
   | { transport: "stdio"; command: string; args: string[]; env: Record<string, string> }
   | { transport: "http"; url: string; headers: Record<string, string> }
 );
+
+/** Which name rule a provider's "pairs" field follows: HTTP header names for a remote server, variable names otherwise. */
+export function pairsKind(provider: ConnectionProvider): "env" | "headers" {
+  return provider === "mcp_http" ? "headers" : "env";
+}
 
 /** "tt-" and the first 8 letters or digits of the connection id, lower case. */
 export function mcpServerName(connectionId: string): string {
