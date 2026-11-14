@@ -1,3 +1,4 @@
+import Fastify from "fastify";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,9 @@ import { CLAUDE_SUBSCRIPTION_ACK, type AgentAction, type AgentRun } from "@thete
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
+import { ClaudeSettings } from "../../src/agents/settings.js";
+import { registerAgentRoutes } from "../../src/server/agent-routes.js";
+import { registerRoutes } from "../../src/server/routes.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { openDatabase } from "../../src/db.js";
@@ -259,6 +263,30 @@ describe("agent API", { timeout: 15000 }, () => {
     const detail = await getRun(b, run.id);
     expect(detail.run.status).toBe("stopped");
     expect(detail.actions.map((a) => a.status)).toEqual(["completed", "denied"]);
+  });
+
+  it("starting a run while the workspace shuts down is 503 shutting_down", async () => {
+    const dataDir = tmp();
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const board = new BoardService(db, ledger);
+    const projectId = board.createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(),
+      adapters: { fake: new FakeAdapter(script) }, extraSecrets: [], dataDir,
+    });
+    const app = Fastify();
+    try {
+      registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
+      registerAgentRoutes(app, { db, runner, settings: new ClaudeSettings(db, ledger), adapters: ["fake"] });
+      await runner.shutdown();
+      const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toEqual({ error: "shutting_down" });
+    } finally {
+      await app.close();
+      db.close();
+    }
   });
 
   it("at startup, denies actions left pending and fails runs left running by a crash", async () => {

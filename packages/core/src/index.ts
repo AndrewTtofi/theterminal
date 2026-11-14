@@ -20,7 +20,7 @@ export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
 export { FakeAdapter } from "./agents/fake-adapter.js";
 export type { FakeStep } from "./agents/fake-adapter.js";
-export { AgentRunner, AdapterUnavailableError } from "./agents/runner.js";
+export { AgentRunner, AdapterUnavailableError, ShuttingDownError } from "./agents/runner.js";
 export type { AgentRunnerDeps } from "./agents/runner.js";
 export { ClaudeAdapter, toolToAction } from "./agents/claude-adapter.js";
 export { ClaudeSettings } from "./agents/settings.js";

@@ -21,6 +21,16 @@ export class AdapterUnavailableError extends Error {
   }
 }
 
+export class ShuttingDownError extends Error {
+  constructor() {
+    super("workspace is shutting down");
+    this.name = "ShuttingDownError";
+  }
+}
+
+/** How long the gate waits for a human by default: less than the Claude hook's 24h, so a timeout is recorded. */
+export const DEFAULT_GATE_TIMEOUT_MS = 23 * 60 * 60 * 1000;
+
 export type AgentRunnerDeps = {
   db: Db;
   ledger: Ledger;
@@ -33,6 +43,8 @@ export type AgentRunnerDeps = {
   newId?: () => string;
   /** How long shutdown() waits for adapters to return after aborting them. Default 5000. */
   shutdownTimeoutMs?: number;
+  /** How long the gate waits for a human decision before denying with "timed out". Default 23h. */
+  gateTimeoutMs?: number;
   /** Recorded strings show this name as `<user>`. Default: the OS username. */
   username?: string;
 };
@@ -123,6 +135,8 @@ export class AgentRunner {
   /** Scrubs dataDir, the home directory and the username, for strings recorded outside a live run. */
   private readonly scrub: Scrub;
   private readonly scrubUser: Scrub;
+  /** Set once shutdown() begins; no run may start after that. */
+  private closing = false;
 
   constructor(private readonly deps: AgentRunnerDeps) {
     this.newId = deps.newId ?? (() => randomUUID());
@@ -148,6 +162,7 @@ export class AgentRunner {
       throw new NotFoundError("project", input.projectId);
     }
     if (ledger.readOnly) throw new LedgerReadOnlyError();
+    if (this.closing) throw new ShuttingDownError();
     const adapter = this.deps.adapters[input.adapter];
     if (!adapter) throw new AdapterUnavailableError(input.adapter);
     const prompt = promptSchema.parse(input.prompt);
@@ -160,6 +175,7 @@ export class AgentRunner {
 
     const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
+    if (this.closing) throw new ShuttingDownError(); // shutdown began while the worktree was created
     const scrub = this.runScrubber(wt.absPath);
     const run = commitEvent(db, ledger, () => ({
       event: {
@@ -236,6 +252,7 @@ export class AgentRunner {
 
   /** Stops every running run and waits for the adapters to return. */
   async shutdown(): Promise<void> {
+    this.closing = true;
     const all = [...this.sessions.entries()];
     for (const [runId] of all) {
       try {
@@ -303,10 +320,11 @@ export class AgentRunner {
       if (v.verdict !== "ask") {
         return this.settle(s.projectId, runId, actionId, v.verdict === "auto_allow" ? "allow" : "deny", v.reason);
       }
-      const r = await this.deps.broker.wait(actionId, s.abort.signal);
-      // decide() has already committed a human decision; any other outcome (a stop) is recorded here.
+      const r = await this.waitForHuman(actionId, s.abort.signal);
+      // decide() has already committed a human decision; any other outcome (a stop or timeout) is recorded here.
       return this.settle(s.projectId, runId, actionId, r.decision, r.reason);
     } catch {
+      s.failure ??= INTERNAL_ERROR; // the gate can no longer be trusted: the run fails
       try {
         if (!recorded) {
           // The proposal itself could not be recorded: record that an unrecordable action was denied.
@@ -319,6 +337,19 @@ export class AgentRunner {
         // Nothing more we can record; deny regardless.
       }
       return { actionId, decision: "deny", reason: INTERNAL_ERROR };
+    }
+  }
+
+  /** The broker's wait, cut off after gateTimeoutMs with a "timed out" denial. */
+  private async waitForHuman(actionId: string, runSignal: AbortSignal): Promise<GateResult> {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), this.deps.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS);
+    try {
+      const r = await this.deps.broker.wait(actionId, AbortSignal.any([runSignal, timeout.signal]));
+      // A timeout ends the wait like a stop; say why. A decision already in the ledger wins in settle().
+      return timeout.signal.aborted && !runSignal.aborted ? { decision: "deny", reason: "timed out" } : r;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

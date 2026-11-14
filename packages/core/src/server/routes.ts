@@ -4,7 +4,7 @@ import { cardStatusSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
-import { AdapterUnavailableError } from "../agents/runner.js";
+import { AdapterUnavailableError, ShuttingDownError } from "../agents/runner.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -32,6 +32,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof AdapterUnavailableError) return reply.code(400).send({ error: "invalid_input" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
     if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
+    if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
     if (err instanceof LedgerReadOnlyError) {
       return reply.code(423).send({ error: "ledger_read_only" });
     }

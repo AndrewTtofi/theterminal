@@ -5,6 +5,7 @@ import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
+import { DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
 import { ClaudeSettings } from "../../src/agents/settings.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getSetting } from "../../src/events/projections.js";
@@ -229,6 +230,8 @@ describe("ClaudeAdapter", () => {
     expect(pre).toHaveLength(1);
     expect(pre[0]!.onFailure).toBe("block");
     expect(pre[0]!.matcher).toBeUndefined();
+    // The runner's own gate timeout must fire first, so a timeout is recorded as a denial.
+    expect(pre[0]!.timeout! * 1000).toBeGreaterThan(DEFAULT_GATE_TIMEOUT_MS);
   });
 
   it("gates each tool call before it runs, links results by tool-use id, and reports text and cost", async () => {

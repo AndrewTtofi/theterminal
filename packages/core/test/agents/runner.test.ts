@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, ProposedAction } from "../../src/agents/adapter.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
-import { AdapterUnavailableError, AgentRunner } from "../../src/agents/runner.js";
+import { AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, ShuttingDownError } from "../../src/agents/runner.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -36,8 +36,15 @@ afterEach(async () => {
   rmSync(dataDir, { recursive: true, force: true });
 });
 
-function makeRunner(adapters: Partial<Record<"claude" | "fake", AgentAdapter>>, broker = new ApprovalBroker(), shutdownTimeoutMs?: number) {
-  const r = new AgentRunner({ db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs, username: "alice" });
+function makeRunner(
+  adapters: Partial<Record<"claude" | "fake", AgentAdapter>>,
+  broker = new ApprovalBroker(),
+  shutdownTimeoutMs?: number,
+  gateTimeoutMs?: number,
+) {
+  const r = new AgentRunner({
+    db, ledger, worktrees, broker, adapters, extraSecrets: [EXTRA_SECRET], dataDir, shutdownTimeoutMs, gateTimeoutMs, username: "alice",
+  });
   runners.push(r);
   return r;
 }
@@ -167,6 +174,31 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(gated[0]!.payload).toMatchObject({ kind: "other", tool: "unknown", summary: "(unrecordable action)", input: null });
     expect(gated[1]!.payload).toMatchObject({ decision: "deny", by: "policy", reason: "internal error" });
     expect(gated[1]!.actor).toEqual({ kind: "system", id: "policy" });
+    expect(getRun(db, run.id)).toMatchObject({ status: "failed", error: "internal error" });
+  });
+
+  it("denies an action nobody decides within the gate timeout, recorded by policy", async () => {
+    const runner = makeRunner({ fake: new FakeAdapter([{ propose: write, result: { ok: true, output: "x" } }]) }, new ApprovalBroker(), undefined, 50);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const [a] = listActions(db, run.id);
+    expect(a).toMatchObject({ status: "denied", decidedBy: "policy", reason: "timed out" });
+    expect(() => runner.decide(owner, a!.id, "allow")).toThrow(AlreadyDecidedError);
+    expect(getRun(db, run.id)!.status).toBe("completed");
+  });
+
+  it("waits for a human for less than the Claude hook's 24 hours by default", () => {
+    expect(DEFAULT_GATE_TIMEOUT_MS).toBe(23 * 60 * 60 * 1000);
+  });
+
+  it("refuses to start a run once shutdown has begun, even mid-start", async () => {
+    const runner = fakeRunner([{ propose: write }]);
+    const starting = runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    const stopping = runner.shutdown();
+    await expect(starting).rejects.toThrow(ShuttingDownError);
+    await stopping;
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p" })).rejects.toThrow("workspace is shutting down");
+    expect(agentEvents()).toEqual([]);
   });
 
   it("coerces an unknown kind to 'other' and a non-string tool or summary to strings", async () => {
