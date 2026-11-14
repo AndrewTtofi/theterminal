@@ -257,12 +257,14 @@ function walk(value: unknown, extra: string[]): unknown {
   if (typeof value === "string") return redactString(value, extra);
   if (Array.isArray(value)) return value.map((v) => walk(v, extra));
   if (isPlainObject(value)) {
-    const out: Record<string, unknown> = {};
+    // Built without a prototype, so an own "__proto__" key stays data instead of setting the prototype; the spread
+    // copies it as an own property of an ordinary object.
+    const out: Record<string, unknown> = Object.create(null);
     for (const [k, v] of Object.entries(value)) {
       const sensitive = isSecretKey(k) && v !== null && v !== undefined && typeof v !== "boolean";
       out[uniqueKey(out, redactString(k, extra))] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
     }
-    return out;
+    return { ...out };
   }
   return value;
 }

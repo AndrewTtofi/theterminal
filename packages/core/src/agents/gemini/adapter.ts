@@ -360,7 +360,7 @@ class GeminiRun {
   ) {
     const fold = (p: string) => (isWindows ? p.toLowerCase() : p);
     this.tracker = new ToolCallTracker((a, b) => fold(resolve(o.cwd, a)) === fold(resolve(o.cwd, b)));
-    this.terminals = new Terminals(spawn, (id, status, output, truncated) => this.onTerminalExit(id, status, output, truncated));
+    this.terminals = new Terminals(spawn, (s) => o.clean(s), (id, status, record) => this.onTerminalExit(id, status, record));
     this.terminalEnv = {};
     for (const [k, v] of Object.entries(env)) {
       if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
@@ -570,10 +570,11 @@ class GeminiRun {
   /**
    * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
    * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
-   * `message` (before tool activity): flush everything but what `safeCut` keeps back at the very end (an open private
-   * key block, a partial BEGIN marker, a trailing secret context), which the tool call must not part from what
-   * follows. `end`: flush everything, an open block as REDACTED. The text itself is never changed otherwise:
-   * redaction sees a key block from BEGIN to END.
+   * `message` (before tool activity): flush everything but a trailing word (see `trailingWordStart`) and what `safeCut`
+   * keeps back at the very end (an open private key block, a partial BEGIN marker, a trailing secret context), which
+   * the tool call must not part from what follows; held text goes out after the tool's result. `end`: flush
+   * everything, an open block as REDACTED. The text itself is never changed otherwise: redaction sees a key block
+   * from BEGIN to END.
    */
   private flushText(mode: "size" | "stream" | "message" | "end"): void {
     this.clearFlushTimers();
@@ -584,7 +585,7 @@ class GeminiRun {
       const open = openKeyBlock(all);
       if (open >= 0) text = all.slice(0, open) + REDACTED;
     } else {
-      cut = safeCut(all, mode === "message" ? all.length : mode === "size" ? sizeCut(all) : streamCut(all));
+      cut = safeCut(all, mode === "message" ? trailingWordStart(all) : mode === "size" ? sizeCut(all) : streamCut(all));
       text = all.slice(0, cut);
     }
     this.pendingText = all.slice(cut);
@@ -796,12 +797,12 @@ class GeminiRun {
     }
   }
 
-  private onTerminalExit(terminalId: string, status: ExitStatus, output: string, truncated: boolean): void {
+  /** `record` is the output for the record: cleaned before any cut it went through (see Terminals). */
+  private onTerminalExit(terminalId: string, status: ExitStatus, record: string): void {
     const actionId = this.terminalActions.get(terminalId);
     if (actionId === undefined) return;
     this.terminalActions.delete(terminalId);
-    // A kept tail starts wherever the cut fell, possibly inside a secret: drop that partial word from the record.
-    this.result(actionId, status.exitCode === 0, truncated ? output.replace(/^\S*/, "") : output);
+    this.result(actionId, status.exitCode === 0, record);
   }
 
   /** Records that an allowed action was not performed after all, and tells the agent it was denied. */
@@ -853,6 +854,19 @@ function streamCut(text: string): number {
     if (/\s/.test(text[i]!)) return i + 1;
   }
   return 0;
+}
+
+/**
+ * Where the run of non-whitespace that ends `text` starts (`text.length` when it ends in whitespace), at most HELD_TAIL
+ * back. A tool call can land in the middle of a token: the part already here may be the start of a secret (`Bea` of
+ * `Bearer`, the first characters of a value), which only the whole token lets redaction judge.
+ */
+function trailingWordStart(text: string): number {
+  const floor = Math.max(0, text.length - HELD_TAIL);
+  for (let i = text.length; i > floor; i--) {
+    if (/\s/.test(text[i - 1]!)) return i;
+  }
+  return floor;
 }
 
 /**

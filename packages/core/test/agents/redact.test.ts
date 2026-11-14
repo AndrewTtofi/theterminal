@@ -109,6 +109,15 @@ describe("redact", () => {
     expect(input).toEqual(copy);
     expect(out).not.toBe(input);
   });
+  it("keeps an own __proto__ key as data, redacted underneath, and never touches the output's prototype", () => {
+    const input = JSON.parse('{"__proto__": {"x": "sk-ant-TESTKEY000000abcdef", "password": "hunter2abc"}, "a": 1}') as Record<string, unknown>;
+    const out = redact(input) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(JSON.stringify(out)).toBe('{"__proto__":{"x":"[REDACTED]","password":"[REDACTED]"},"a":1}');
+    expect("x" in out).toBe(false); // nothing landed on the prototype chain
+    expect(Object.hasOwn({}, "x")).toBe(false);
+  });
 });
 
 describe("redact: leak fixes", () => {

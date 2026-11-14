@@ -42,9 +42,12 @@ function straddle(line: string, cut: number): Step[] {
 const chunked = (text: string, size: number): Step[] =>
   Array.from({ length: Math.ceil(text.length / size) }, (_, i) => ({ type: "message", text: text.slice(i * size, (i + 1) * size) }));
 const streamed = (steps: Step[]) => steps.map((s) => s.text as string).join("");
+/** Fails when any 6-character stretch of `secret` is in `text`. */
 function expectNoFragment(text: string, secret: string): void {
-  for (let i = 0; i + 8 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 8));
+  for (let i = 0; i + 6 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 6));
 }
+/** A command that prints the file named by its first argument. */
+const PRINT_FILE = 'process.stdout.write(require("fs").readFileSync(process.argv[1], "utf8"))';
 const MiB = 1024 * 1024;
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
 /** The per-run arguments: the policy directory varies, the allowlist name matches no tool. */
@@ -1072,6 +1075,56 @@ describe("GeminiAdapter", () => {
     expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: " tail" }]);
   });
 
+  for (const [label, text, cut, secret, cleaned] of [
+    [
+      "a private key", `before\n${KEY_FORMS.plain!(RSA_KEY)}after\n`, keyLines(RSA_KEY)[10]!, RSA_KEY.body, "before\n[REDACTED]\nafter\n",
+    ],
+    [
+      "a JSON secret", `{\n  "apiKey": "${OPAQUE_VALUE}",\n  "n": 1\n}\n`, ' "', OPAQUE_VALUE, `{\n  "apiKey": "[REDACTED]",\n  "n": 1\n}\n`,
+    ],
+  ] as const) {
+    it(`cleans a truncated terminal's output before the cut, so ${label} the cut lands in leaves no fragment in the record`, async () => {
+      const file = join(worktree, "out.txt");
+      writeFileSync(file, text);
+      const cutAt = text.indexOf(cut);
+      expect(cutAt).toBeGreaterThan(0);
+      script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file], outputByteLimit: text.length - cutAt }]);
+      const h = harness();
+      h.opts.clean = (t) => redact(t);
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      // The agent gets the tail of its own command's output; the record gets the whole output cleaned, which fits.
+      expect(logged("terminal/output")[0]!.result).toMatchObject({ output: text.slice(cutAt), truncated: true });
+      expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: cleaned }]);
+      for (let i = 0; i + 6 <= secret.length; i += 3) expect(cleaned).not.toContain(secret.slice(i, i + 6));
+    });
+  }
+
+  it("the record of a truncated terminal is cleaned before every cut while output keeps coming, and is withheld when clean() throws", async () => {
+    // Twenty secrets spread through 3 MiB of output, with a 1 MiB cap: every cut the record goes through has been cleaned first.
+    const file = join(worktree, "big.txt");
+    const line = `${"y".repeat(99)}\n`;
+    const chunk = line.repeat(1500); // 150 000 bytes
+    writeFileSync(file, Array.from({ length: 20 }, () => `${chunk}token=${OPAQUE_TOKEN}\n`).join("") + "END\n");
+    script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file] }]);
+    const h = harness();
+    h.opts.clean = (t) => redact(t);
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const [result] = h.events as { type: string; output: string }[];
+    expect(result!.type).toBe("action_result");
+    expect(result!.output.endsWith("token=[REDACTED]\nEND\n")).toBe(true);
+    expect(Buffer.byteLength(result!.output, "utf8")).toBeLessThanOrEqual(MiB);
+    expectNoFragment(result!.output, OPAQUE_TOKEN);
+
+    script([{ type: "terminal", command: process.execPath, args: ["-e", PRINT_FILE, file] }]);
+    const broken = harness();
+    broken.opts.clean = (t) => {
+      if (t.length > 10_000) throw new Error("scrubber failed"); // the record; summaries still clean
+      return t;
+    };
+    expect(await adapter().start(broken.opts)).toEqual({ status: "completed" });
+    expect(broken.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "" }]);
+  });
+
   it("emits a reported cumulative USD cost once, at the end of the turn; context-size usage alone is not reported", async () => {
     script([
       { type: "update", update: { sessionUpdate: "usage_update", used: 1200, size: 1000000 } },
@@ -1216,7 +1269,8 @@ describe("GeminiAdapter", () => {
     expect(h.denied).toEqual([
       [{ tool: "gemini", kind: "other", summary: "Ungated tool: rm -rf /", input: expect.objectContaining({ toolCallId: "tc-x", kind: "execute" }), paths: [] }, "agent executed an ungated tool"],
     ]);
-    expect(h.events).toEqual([{ type: "message", text: "about to run" }]);
+    // The trailing word was held for the tool call and goes out when the run ends.
+    expect(h.events).toEqual([{ type: "message", text: "about to " }, { type: "message", text: "run" }]);
     expect(existsSync(later)).toBe(false);
     expect(logged("write")).toEqual([]);
   });
@@ -1236,7 +1290,7 @@ describe("GeminiAdapter", () => {
     ]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
-    expect(h.events).toEqual([{ type: "message", text: "still here" }]);
+    expect(h.events).toEqual([{ type: "message", text: "still " }, { type: "message", text: "here" }]);
     expect(h.denied).toHaveLength(1);
     expect(h.denied[0]![0]).toMatchObject({ summary: "Ungated tool: unknown tool", input: expect.objectContaining({ toolCallId: "ghost" }) });
   });
@@ -1331,21 +1385,50 @@ describe("GeminiAdapter", () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  it("messages are flushed before tool results so the ledger keeps their order", async () => {
+  it("messages are flushed before tool results so the ledger keeps their order; a trailing word is held until after", async () => {
     script([
       { type: "message", text: "Reading " },
       { type: "message", text: "the file" },
       { type: "read", path: join(worktree, "README.md") },
-      { type: "message", text: "done" },
+      { type: "message", text: " done" },
     ]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    // "file" may still be the start of a longer token (a secret's first characters), so it waits for what follows.
     expect(h.events).toEqual([
-      { type: "message", text: "Reading the file" },
+      { type: "message", text: "Reading the " },
       { type: "action_result", actionId: "act-1", ok: true, output: "hello from the worktree\n" },
-      { type: "message", text: "done" },
+      { type: "message", text: "file done" },
     ]);
   });
+
+  for (const [label, text, secret] of [
+    ["an auth header", `Authorization: Bearer ${OPAQUE_TOKEN}\n`, OPAQUE_TOKEN],
+    ["a YAML block scalar", `password: |\n  ${OPAQUE_VALUE}\n`, OPAQUE_VALUE],
+  ] as const) {
+    it(`a tool call at every character position of ${label} leaves no fragment of the value in any message`, { timeout: 120_000 }, async () => {
+      const positions = Array.from({ length: text.length }, (_, i) => i + 1);
+      for (let b = 0; b < positions.length; b += 12) {
+        const runs = positions.slice(b, b + 12).map((i) => {
+          script([
+            { type: "message", text: text.slice(0, i) },
+            { type: "read", path: join(worktree, "README.md"), toolCall: true },
+            { type: "message", text: text.slice(i) },
+          ]);
+          const h = harness();
+          return adapter().start(h.opts).then((r) => ({ i, r, h }));
+        });
+        for (const { i, r, h } of await Promise.all(runs)) {
+          expect(r, `split at ${i}`).toEqual({ status: "completed" });
+          const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+          expect(texts.join(""), `split at ${i}`).toBe(text);
+          const recorded = texts.map((t) => redact(t)).join("");
+          expect(recorded, `split at ${i}`).toBe(redact(text));
+          for (const t of texts) expectNoFragment(redact(t), secret);
+        }
+      }
+    });
+  }
 });
 
 describe("GeminiAdapter through the runner", () => {

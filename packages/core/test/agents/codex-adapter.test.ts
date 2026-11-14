@@ -21,6 +21,10 @@ import { CodexAdapter as IndexCodexAdapter, codexApprovalToAction as indexCodexA
 // A stored secret no pattern matches, and the clean() a runner would pass with it in its live secrets.
 const STORED = "stored-conn-value-0123456789";
 const liveClean = (t: string) => redact(t, [STORED]);
+/** Fails when any 6-character stretch of `secret` is in `text`. */
+function expectNoFragment(text: string, secret: string): void {
+  for (let i = 0; i + 6 <= secret.length; i++) expect(text).not.toContain(secret.slice(i, i + 6));
+}
 const FAKE = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_KEY = "sk-TESTKEY0123456789abcdef";
 const CMD = "item/commandExecution/requestApproval";
@@ -432,6 +436,18 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(r.status).toBe("failed");
     expect(r.error).toMatch(/fatal: it broke$/);
     expect(r.error!.length).toBeLessThanOrEqual(300);
+  });
+
+  it("cleans stderr before its window is cut, so a stored key straddling the window leaves no fragment in the error", async () => {
+    // The key straddles the 4096 characters the adapter keeps. What follows it cleans down to a few characters, so the
+    // short tail the error shows would otherwise start with the key's second half.
+    const after = `\nAuthorization: Bearer ${"t".repeat(4058)}`;
+    script([{ exit: 3, stderr: `${"x".repeat(4086)}${STORED}${after}` }]);
+    const { result } = run(make(), undefined, { clean: liveClean });
+    const r = await result;
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/^Codex exited before the turn completed: .*Bearer \[REDACTED\]$/s);
+    expectNoFragment(r.error!, STORED);
   });
 
   it("through the runner: a stored secret across the old command and stdin caps leaves no fragment in the record", async () => {

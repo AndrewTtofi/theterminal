@@ -337,7 +337,13 @@ class CodexSession {
       this.fail(e.code === "ENOENT" || e.code === "EACCES" ? NO_CLI : this.withStderr("Codex could not be started"));
     });
     child.stderr.on("data", (d: Buffer) => {
-      this.stderr = (this.stderr + d.toString("utf8")).slice(-STDERR_KEEP);
+      // Cleaned before the window is cut, so no cut ever parts a secret from the context that redacts it, or leaves
+      // a fragment of one in the window. Without a working clean, stderr is withheld.
+      try {
+        this.stderr = this.o.clean(this.stderr + d.toString("utf8")).slice(-STDERR_KEEP);
+      } catch {
+        this.stderr = "";
+      }
     });
     this.peer = new JsonRpcPeer(
       { input: child.stdout, output: child.stdin },
