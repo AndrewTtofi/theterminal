@@ -174,7 +174,7 @@ const catalogFor = (provider: ConnectionProvider): CatalogEntry | undefined =>
 
 /**
  * Why a URL is refused, or null: it must be https, or http to this computer only. A URL is config and reaches the
- * ledger, so one carrying a user name, a password or a query string (where tokens tend to go) is refused too.
+ * ledger, so one carrying a user name, a password, a query string or a fragment (where tokens tend to go) is refused too.
  */
 function urlProblem(value: string): string | null {
   let url: URL;
@@ -186,7 +186,7 @@ function urlProblem(value: string): string | null {
   if (!(url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)))) {
     return "must be an https URL, or http on localhost";
   }
-  if (url.username !== "" || url.password !== "" || url.search !== "" || url.href.includes("?")) {
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || /[?#]/.test(url.href)) {
     return "Put credentials in Headers, not in the URL.";
   }
   return null;

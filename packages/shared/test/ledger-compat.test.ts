@@ -13,9 +13,12 @@ const samples = JSON.parse(readFileSync(new URL("./fixtures/ledger-payloads-lega
   payload: unknown;
 }[];
 
+/** Event types added after the zod 4 upgrade: no zod 3 ledger ever held them, so they have no legacy sample. */
+const ADDED_AFTER_ZOD_3: readonly EventType[] = ["agent.rate_limited"];
+
 describe("ledger payloads written by zod 3", () => {
   it("has a saved sample of every event type", () => {
-    const covered = new Set(samples.map((s) => s.type));
+    const covered = new Set<EventType>([...samples.map((s) => s.type), ...ADDED_AFTER_ZOD_3]);
     expect(Object.keys(eventPayloadSchemas).filter((t) => !covered.has(t as EventType))).toEqual([]);
   });
 
