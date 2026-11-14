@@ -1,0 +1,663 @@
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
+import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { GeminiAdapter } from "../../src/agents/gemini/adapter.js";
+import { classify } from "../../src/agents/policy.js";
+import { AgentRunner } from "../../src/agents/runner.js";
+import { WorktreeManager, EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
+import { BoardService } from "../../src/board/board-service.js";
+import { openDatabase } from "../../src/db.js";
+import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
+import { Ledger } from "../../src/ledger/ledger.js";
+import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
+
+const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
+const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
+const SECRET = "sk-ant-TESTKEY0123456789abcdef";
+const MiB = 1024 * 1024;
+
+type Step = Record<string, unknown>;
+type Script = Step[] | { config?: Record<string, unknown>; steps: Step[] };
+type LogEntry = Record<string, any>;
+
+let worktree: string;
+let outside: string;
+let logFile: string;
+const saved: Record<string, string | undefined> = {};
+const FAKE_ENV: Record<string, string> = {
+  GOOGLE_API_KEY: "AIzaFAKEfromprocessenv00000000000000000000",
+  GOOGLE_CLOUD_PROJECT: "fake-project",
+  GEMINI_MODEL: "fake-model",
+  GEMINI_API_KEY: "AIzaFAKEinheritedkey0000000000000000000000",
+  VERTEXAI_LOCATION: "nowhere",
+  GIT_DIR: "/nonexistent/fake.git",
+  GIT_AUTHOR_EMAIL: "someone@example.com",
+};
+
+beforeEach(() => {
+  worktree = realpathSync(mkdtempSync(join(tmpdir(), "gemini-wt-")));
+  outside = realpathSync(mkdtempSync(join(tmpdir(), "gemini-outside-")));
+  logFile = join(outside, "fake.log");
+  writeFileSync(join(worktree, "README.md"), "hello from the worktree\n");
+  for (const k of [...Object.keys(FAKE_ENV), "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_LOG"]) saved[k] = process.env[k];
+  for (const [k, v] of Object.entries(FAKE_ENV)) process.env[k] = v;
+  process.env.THETERMINAL_FAKE_LOG = logFile;
+});
+afterEach(() => {
+  for (const [k, v] of Object.entries(saved)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  rmSync(worktree, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
+
+function script(s: Script): void {
+  process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(s);
+}
+function readLog(): LogEntry[] {
+  if (!existsSync(logFile)) return [];
+  return readFileSync(logFile, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as LogEntry);
+}
+const methodsCalled = () => readLog().filter((e) => typeof e.method === "string").map((e) => e.method as string);
+const logged = (step: string) => readLog().filter((e) => e.step === step);
+
+/** Policy as the runner applies it; `ask` decides what a human would say. */
+function policyGate(ask: (a: ProposedAction) => GateResult = () => ({ decision: "allow", reason: "owner allowed" })) {
+  const wt = new WorktreeManager(outside);
+  return (a: ProposedAction): GateResult => {
+    const v = classify(a, worktree, wt);
+    if (v.verdict === "auto_allow") return { decision: "allow", reason: v.reason };
+    if (v.verdict === "auto_deny") return { decision: "deny", reason: v.reason };
+    return ask(a);
+  };
+}
+
+function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult> = policyGate(), authMode: AdapterStartOptions["authMode"] = "api_key") {
+  const proposed: ProposedAction[] = [];
+  const decisions: (GateResult & { actionId: string })[] = [];
+  const events: AdapterEvent[] = [];
+  let n = 0;
+  const abort = new AbortController();
+  const opts: AdapterStartOptions = {
+    cwd: worktree, prompt: "do it", authMode, signal: abort.signal,
+    gate: async (a) => {
+      proposed.push(a);
+      const d = { ...(await decide(a)), actionId: `act-${++n}` };
+      decisions.push(d);
+      return d;
+    },
+    emit: (e) => events.push(e),
+  };
+  return { opts, proposed, decisions, events, abort };
+}
+
+/** Spawns the fake through node and remembers the child, so a test can check it was killed. */
+function fakeSpawn() {
+  const children: ChildProcess[] = [];
+  const spawn = ((file: string, args: string[], o: Record<string, unknown>) => {
+    const child = nodeSpawn(file, args, o as never);
+    children.push(child);
+    return child;
+  }) as typeof nodeSpawn;
+  return { spawn, children };
+}
+
+function adapter(extra: { spawn?: typeof nodeSpawn; apiKey?: () => string | undefined; bin?: () => string | null } = {}) {
+  return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, ...extra });
+}
+
+const exited = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
+const waitExit = (c: ChildProcess) => vi.waitFor(() => expect(exited(c)).toBe(true), { timeout: 10_000 });
+
+describe("GeminiAdapter", () => {
+  it("is exported from the core index", () => {
+    expect(IndexGeminiAdapter).toBe(GeminiAdapter);
+  });
+
+  it("starts gemini in ACP mode locked down, advertises fs and terminal, never authenticates, and completes", async () => {
+    script([{ type: "message", text: "Hello " }, { type: "message", text: "there" }]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(r).toEqual({ status: "completed" });
+    expect(h.events).toEqual([{ type: "message", text: "Hello there" }]);
+    expect(h.proposed).toEqual([]);
+
+    expect(methodsCalled()).toEqual(["initialize", "session/new", "session/prompt"]);
+    const init = readLog().find((e) => e.method === "initialize")!;
+    expect(init.params.protocolVersion).toBe(1);
+    expect(init.params.clientCapabilities).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true });
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.cwd).toBe(worktree);
+    expect(snap.argv).toEqual(["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"]);
+    expect(snap.settings).toEqual({
+      security: { auth: { selectedType: "gemini-api-key" }, disableAlwaysAllow: true },
+      tools: { core: ["read_file", "write_file", "replace", "run_shell_command"], allowed: [] },
+    });
+    expect(snap.env.NO_BROWSER).toBe("true");
+    const session = readLog().find((e) => e.method === "session/new")!;
+    expect(session.params).toEqual({ cwd: worktree, mcpServers: [] });
+    const prompt = readLog().find((e) => e.method === "session/prompt")!;
+    expect(prompt.params).toEqual({ sessionId: "fake-session", prompt: [{ type: "text", text: "do it" }] });
+  });
+
+  it("api_key mode passes only the configured key; inherited Gemini, Google, Vertex and git variables are stripped", async () => {
+    script([]);
+    await adapter().start(harness().opts);
+    const env = readLog().find((e) => e.initialize)!.initialize.env as Record<string, string>;
+    expect(env.GEMINI_API_KEY).toBe(FAKE_KEY);
+    for (const k of ["GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT", "GEMINI_MODEL", "VERTEXAI_LOCATION", "GIT_DIR", "GIT_AUTHOR_EMAIL"]) expect(env).not.toHaveProperty(k);
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(env.GIT_CONFIG_GLOBAL).toBe(join(outside, EMPTY_GITCONFIG));
+    expect(process.env.GEMINI_API_KEY).toBe(FAKE_ENV.GEMINI_API_KEY); // a copy, not the real env
+  });
+
+  it("google mode passes no API key, selects the Google login, and never calls authenticate", async () => {
+    script([]);
+    const apiKey = vi.fn(() => FAKE_KEY);
+    const r = await adapter({ apiKey }).start(harness(policyGate(), "google").opts);
+    expect(r).toEqual({ status: "completed" });
+    expect(apiKey).not.toHaveBeenCalled();
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env).not.toHaveProperty("GEMINI_API_KEY");
+    expect(snap.env).not.toHaveProperty("GOOGLE_API_KEY");
+    expect(snap.settings.security.auth.selectedType).toBe("oauth-personal");
+    expect(methodsCalled()).not.toContain("authenticate");
+  });
+
+  it("google mode reports a missing login when gemini exits before the session exists", async () => {
+    script({ config: { exitAt: "session/new" }, steps: [] });
+    const r = await adapter().start(harness(policyGate(), "google").opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini is not logged in; run 'gemini' once yourself" });
+  });
+
+  it("api_key mode without a key fails with the exact message without starting gemini", async () => {
+    script([]);
+    const { spawn, children } = fakeSpawn();
+    const r = await adapter({ spawn, apiKey: () => undefined }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "No Gemini API key configured" });
+    expect(children).toEqual([]);
+  });
+
+  it("fails without starting when the Gemini CLI is not on PATH", async () => {
+    const { spawn, children } = fakeSpawn();
+    const r = await new GeminiAdapter({ dataDir: outside, bin: () => null, apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini CLI is not installed or not on PATH" });
+    expect(children).toEqual([]);
+  });
+
+  it("refuses a .cmd shim rather than running it through a shell", async () => {
+    const { spawn, children } = fakeSpawn();
+    const r = await new GeminiAdapter({ dataDir: outside, bin: () => "C:\\Users\\alice\\AppData\\Roaming\\npm\\gemini.cmd", apiKey: () => FAKE_KEY, spawn }).start(harness().opts);
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/\.cmd/);
+    expect(children).toEqual([]);
+  });
+
+  it("rejects unsupported auth modes", async () => {
+    const r = await adapter().start(harness(policyGate(), "subscription").opts);
+    expect(r).toEqual({ status: "failed", error: "Unsupported auth mode for Gemini: subscription" });
+  });
+
+  it("does not start gemini when the signal is already aborted", async () => {
+    script([]);
+    const h = harness();
+    h.abort.abort();
+    const { spawn, children } = fakeSpawn();
+    expect(await adapter({ spawn }).start(h.opts)).toEqual({ status: "failed", error: "run stopped" });
+    expect(children).toEqual([]);
+  });
+
+  it("switches the session to the default mode when it starts in another one", async () => {
+    script({ config: { modes: { currentModeId: "yolo", availableModes: [{ id: "default", name: "Default" }, { id: "yolo", name: "YOLO" }] } }, steps: [] });
+    expect(await adapter().start(harness().opts)).toEqual({ status: "completed" });
+    expect(methodsCalled()).toEqual(["initialize", "session/new", "session/set_mode", "session/prompt"]);
+    expect(readLog().find((e) => e.method === "session/set_mode")!.params).toEqual({ sessionId: "fake-session", modeId: "default" });
+  });
+
+  it("refuses to prompt when no mode asks for every tool", async () => {
+    script({ config: { modes: { currentModeId: "yolo", availableModes: [{ id: "yolo", name: "YOLO" }] } }, steps: [] });
+    const r = await adapter().start(harness().opts);
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/mode/);
+    expect(methodsCalled()).not.toContain("session/prompt");
+  });
+
+  it("fails on an unsupported protocol version without prompting", async () => {
+    script({ config: { protocolVersion: 2 }, steps: [] });
+    const r = await adapter().start(harness().opts);
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/protocol version/);
+    expect(methodsCalled()).toEqual(["initialize"]);
+  });
+
+  it("a read inside the worktree is gated as file_read, auto-allowed by policy, and the content returned", async () => {
+    const path = join(worktree, "README.md");
+    script([{ type: "read", path, toolCall: true }]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(r).toEqual({ status: "completed" });
+    expect(h.proposed).toEqual([{ tool: "fs/read_text_file", kind: "file_read", summary: "Read README.md", input: { path }, paths: [path] }]);
+    expect(h.decisions[0]).toMatchObject({ decision: "allow", reason: "read-only inside worktree" });
+    expect(logged("read")[0]!.result).toEqual({ content: "hello from the worktree\n" });
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: "hello from the worktree\n" }]);
+  });
+
+  it("honours line and limit on a read", async () => {
+    writeFileSync(join(worktree, "lines.txt"), "one\ntwo\nthree\nfour\n");
+    script([{ type: "read", path: join(worktree, "lines.txt"), line: 2, limit: 2 }]);
+    await adapter().start(harness().opts);
+    expect(logged("read")[0]!.result).toEqual({ content: "two\nthree\n" });
+  });
+
+  it("denies reads of ../x, an absolute path outside, .git/config and a symlink escape, and reads nothing", async () => {
+    mkdirSync(join(worktree, ".git"));
+    writeFileSync(join(worktree, ".git", "config"), "[core]\n");
+    writeFileSync(join(outside, "secret.txt"), "outside secret\n");
+    symlinkSync(join(outside, "secret.txt"), join(worktree, "link.txt"));
+    const paths = ["../x", join(outside, "secret.txt"), join(worktree, ".git", "config"), join(worktree, "link.txt"), ".git/config", "sub/../../x"];
+    script(paths.map((path) => ({ type: "read", path })));
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed.map((a) => a.paths)).toEqual(paths.map((p) => [p]));
+    for (const d of h.decisions) expect(d).toMatchObject({ decision: "deny", reason: "outside worktree" });
+    const reads = logged("read");
+    expect(reads).toHaveLength(paths.length);
+    for (const e of reads) {
+      expect(e.error).toBeDefined();
+      expect(JSON.stringify(e)).not.toContain("outside secret");
+    }
+    expect(h.events).toEqual([]);
+  });
+
+  it("reads only regular files and caps them at 8 MiB", async () => {
+    mkdirSync(join(worktree, "dir"));
+    writeFileSync(join(worktree, "big.txt"), Buffer.alloc(8 * MiB + 1, 0x61));
+    script([{ type: "read", path: join(worktree, "dir") }, { type: "read", path: join(worktree, "big.txt") }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const reads = logged("read");
+    expect(reads[0]!.error).toBeDefined();
+    expect(reads[1]!.error).toBeDefined();
+    expect(h.events).toEqual([
+      { type: "action_result", actionId: "act-1", ok: false, output: "not a regular file" },
+      { type: "action_result", actionId: "act-2", ok: false, output: "file is larger than 8 MiB" },
+    ]);
+  });
+
+  it("a write asks; Allow writes the file (creating parent directories) and reports the result", async () => {
+    const path = join(worktree, "sub", "dir", "notes.md");
+    script([{ type: "write", path, content: "# notes\n", permission: true }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([
+      ["gemini", "file_edit", `Write ${path}`, [path]],
+      ["fs/write_text_file", "file_write", "Write sub/dir/notes.md", [path]],
+    ]);
+    expect(h.proposed[1]!.input).toEqual({ path, content: "# notes\n" });
+    expect(readFileSync(path, "utf8")).toBe("# notes\n");
+    expect(logged("permission")[0]!.result).toEqual({ outcome: { outcome: "selected", optionId: "proceed_once" } });
+    expect(logged("write")[0]!.result).toEqual({});
+    expect(h.events).toEqual([
+      { type: "action_result", actionId: "act-2", ok: true, output: "wrote 8 bytes" },
+      { type: "action_result", actionId: "act-1", ok: true, output: "written" },
+    ]);
+  });
+
+  it("Deny on the write leaves no file and returns an error to the agent", async () => {
+    const path = join(worktree, "notes.md");
+    script([{ type: "write", path, content: "x" }]);
+    const h = harness(policyGate(() => ({ decision: "deny", reason: "not now" })));
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed).toHaveLength(1);
+    expect(existsSync(path)).toBe(false);
+    expect(logged("write")[0]!.error).toBeDefined();
+    expect(h.events).toEqual([]);
+  });
+
+  it("never writes outside the worktree, even if the gate allowed it", async () => {
+    const path = join(outside, "escaped.txt");
+    script([{ type: "write", path, content: "x" }]);
+    const h = harness(() => ({ decision: "allow", reason: "a bug" }));
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(existsSync(path)).toBe(false);
+    expect(logged("write")[0]!.error).toBeDefined();
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: "outside worktree" }]);
+  });
+
+  it("a terminal asks as shell, runs the command without a shell in the worktree, and returns the output", async () => {
+    const probe = "process.stdout.write(JSON.stringify({ cwd: process.cwd(), key: process.env.GEMINI_API_KEY ?? null, git: process.env.GIT_CONFIG_NOSYSTEM, extra: process.env.FAKE_EXTRA }))";
+    script([{ type: "terminal", command: process.execPath, args: ["-e", probe], env: [{ name: "FAKE_EXTRA", value: "yes" }] }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed).toHaveLength(1);
+    expect(h.proposed[0]).toMatchObject({ tool: "terminal/create", kind: "shell", paths: [] });
+    expect(h.proposed[0]!.summary).toBe(`Run: ${process.execPath} -e ${probe}`.slice(0, 155));
+    expect(h.proposed[0]!.input).toEqual({ command: process.execPath, args: ["-e", probe], env: [{ name: "FAKE_EXTRA", value: "yes" }] });
+    const out = logged("terminal/output")[0]!.result;
+    expect(out.truncated).toBe(false);
+    expect(out.exitStatus).toEqual({ exitCode: 0, signal: null });
+    expect(JSON.parse(out.output)).toEqual({ cwd: worktree, key: null, git: "1", extra: "yes" });
+    expect(logged("terminal/wait_for_exit")[0]!.result).toEqual({ exitCode: 0, signal: null });
+    expect(logged("terminal/release")[0]!.result).toEqual({});
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: out.output }]);
+  });
+
+  it("a terminal with a cwd outside the worktree is denied and never runs", async () => {
+    const marker = join(outside, "ran.txt");
+    script([{ type: "terminal", command: process.execPath, args: ["-e", `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran")`], cwd: outside }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed[0]).toMatchObject({ kind: "shell", paths: [outside] });
+    expect(h.decisions[0]).toMatchObject({ decision: "deny", reason: "outside worktree" });
+    expect(logged("terminal/create")[0]!.error).toBeDefined();
+    expect(existsSync(marker)).toBe(false);
+    expect(h.events).toEqual([]);
+  });
+
+  it("a terminal cwd inside the worktree is used", async () => {
+    mkdirSync(join(worktree, "pkg"));
+    script([{ type: "terminal", command: process.execPath, args: ["-e", "process.stdout.write(process.cwd())"], cwd: join(worktree, "pkg") }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed[0]!.paths).toEqual([join(worktree, "pkg")]);
+    expect(logged("terminal/output")[0]!.result.output).toBe(join(worktree, "pkg"));
+  });
+
+  it("caps terminal output at 1 MiB keeping the tail, and reports a non-zero exit", async () => {
+    const code = "process.stdout.write('x'.repeat(1536 * 1024) + 'TAIL'); process.exitCode = 3";
+    script([{ type: "terminal", command: process.execPath, args: ["-e", code] }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const out = logged("terminal/output")[0]!.result;
+    expect(out.truncated).toBe(true);
+    expect(out.output.length).toBeLessThanOrEqual(MiB);
+    expect(out.output.endsWith("TAIL")).toBe(true);
+    expect(out.exitStatus).toEqual({ exitCode: 3, signal: null });
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: out.output }]);
+  });
+
+  it("honours a smaller outputByteLimit and refuses terminals it did not create", async () => {
+    script([
+      { type: "terminal", command: process.execPath, args: ["-e", "process.stdout.write('abcdefghij')"], outputByteLimit: 4 },
+      { type: "request", method: "terminal/output", params: { sessionId: "fake-session", terminalId: "not-ours" } },
+    ]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(logged("terminal/output")[0]!.result).toMatchObject({ output: "ghij", truncated: true });
+    expect(r).toEqual({ status: "failed", error: "unknown terminal from agent: terminal/output" });
+  });
+
+  it("kills a terminal still running when the run finishes", async () => {
+    const pidFile = join(outside, "pid.txt");
+    const code = `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`;
+    script([{ type: "request", method: "terminal/create", params: { sessionId: "fake-session", command: process.execPath, args: ["-e", code] } }, { type: "sleep", ms: 300 }]);
+    const h = harness();
+    const started = Date.now();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(Date.now() - started).toBeLessThan(8000);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 5000 });
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: false, output: "" }]);
+  });
+
+  it("request_permission maps tool kinds and locations, answers allow_once, and links the result", async () => {
+    const options = [
+      { optionId: "always", name: "Allow for this session", kind: "allow_always" },
+      { optionId: "once", name: "Allow", kind: "allow_once" },
+      { optionId: "no", name: "Reject", kind: "reject_once" },
+    ];
+    const file = join(worktree, "a.ts");
+    const calls: [string, Record<string, unknown>][] = [
+      ["edit", { locations: [{ path: file, line: 3 }] }],
+      ["delete", { locations: [{ path: file }] }],
+      ["execute", {}],
+      ["read", { locations: [{ path: file }] }],
+      ["fetch", {}],
+      ["search", {}],
+      ["other", { name: "my_tool" }],
+    ];
+    script(calls.map(([kind, extra], i) => ({ type: "requestPermission", result: `out-${i}`, options, toolCall: { toolCallId: `tc-${i}`, title: `Title ${i}`, kind, content: [], ...extra } })));
+    const h = harness(() => ({ decision: "allow", reason: "ok" }));
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.proposed.map((a) => [a.tool, a.kind, a.summary, a.paths])).toEqual([
+      ["gemini", "file_edit", "Title 0", [file]],
+      ["gemini", "file_write", "Title 1", [file]],
+      ["gemini", "shell", "Title 2", []],
+      ["gemini", "file_read", "Title 3", [file]],
+      ["gemini", "web", "Title 4", []],
+      ["gemini", "other", "Title 5", []],
+      ["my_tool", "other", "Title 6", []],
+    ]);
+    expect(h.proposed[0]!.input).toEqual({ toolCallId: "tc-0", title: "Title 0", kind: "edit", content: [], locations: [{ path: file, line: 3 }] });
+    for (const e of logged("requestPermission")) expect(e.result).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+    expect(h.events).toEqual(calls.map((_, i) => ({ type: "action_result", actionId: `act-${i + 1}`, ok: true, output: `out-${i}` })));
+  });
+
+  it("request_permission answers reject_once on deny, and a failed call reports ok false", async () => {
+    const options = [
+      { optionId: "always", name: "Allow for this session", kind: "allow_always" },
+      { optionId: "once", name: "Allow", kind: "allow_once" },
+      { optionId: "no", name: "Reject", kind: "reject_once" },
+    ];
+    script([
+      { type: "requestPermission", options, toolCall: { toolCallId: "tc-1", title: "rm -rf build", kind: "execute" } },
+      { type: "requestPermission", options, toolCall: { toolCallId: "tc-2", title: "ls", kind: "execute" } },
+      { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "tc-2", status: "failed", content: [{ type: "content", content: { type: "text", text: "boom" } }] } },
+    ]);
+    let n = 0;
+    const h = harness(() => (++n === 1 ? { decision: "deny", reason: "no" } : { decision: "allow", reason: "ok" }));
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const answers = logged("requestPermission");
+    expect(answers[0]!.result).toEqual({ outcome: { outcome: "selected", optionId: "no" } });
+    expect(answers[1]!.result).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+    // The fake reports tc-2 completed (ok) and then the scripted update fails it again: only the first result counts.
+    expect(h.events).toEqual([{ type: "action_result", actionId: "act-2", ok: true, output: "done" }]);
+  });
+
+  it("never picks allow_always: without an allow_once option an allowed call is rejected and recorded as not run", async () => {
+    script([
+      { type: "requestPermission", options: [{ optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "no", name: "Reject", kind: "reject_once" }], toolCall: { toolCallId: "tc-1", title: "edit", kind: "edit", locations: [{ path: join(worktree, "a") }] } },
+      { type: "requestPermission", options: [{ optionId: "always", name: "Always", kind: "allow_always" }], toolCall: { toolCallId: "tc-2", title: "edit", kind: "edit", locations: [{ path: join(worktree, "a") }] } },
+    ]);
+    const h = harness(() => ({ decision: "allow", reason: "ok" }));
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const answers = logged("requestPermission");
+    expect(answers[0]!.result).toEqual({ outcome: { outcome: "selected", optionId: "no" } });
+    expect(answers[1]!.result).toEqual({ outcome: { outcome: "cancelled" } });
+    expect(h.events).toEqual([
+      { type: "action_result", actionId: "act-1", ok: false, output: "agent offered no allow_once option" },
+      { type: "action_result", actionId: "act-2", ok: false, output: "agent offered no allow_once option" },
+    ]);
+  });
+
+  it("an ungated tool execution fails the run, kills gemini, and records a denied action", async () => {
+    const later = join(worktree, "later.txt");
+    script([
+      { type: "message", text: "about to run" },
+      { type: "ungatedTool", toolCallId: "tc-x", kind: "execute", title: "rm -rf /" },
+      { type: "sleep", ms: 2000 },
+      { type: "write", path: later, content: "x" },
+    ]);
+    const { spawn, children } = fakeSpawn();
+    const h = harness();
+    const r = await adapter({ spawn }).start(h.opts);
+    expect(r).toEqual({ status: "failed", error: "agent executed an ungated tool" });
+    await waitExit(children[0]!);
+    expect(h.proposed).toEqual([
+      { tool: "gemini", kind: "other", summary: "Ungated tool: rm -rf /", input: expect.objectContaining({ toolCallId: "tc-x", kind: "execute" }), paths: [] },
+    ]);
+    expect(h.events).toEqual([{ type: "message", text: "about to run" }]);
+    expect(existsSync(later)).toBe(false);
+    expect(logged("write")).toEqual([]);
+  });
+
+  it("a read tool that completes without ever reading through the client is ungated", async () => {
+    script([{ type: "ungatedTool", toolCallId: "tc-r", kind: "read", title: "Read README.md", locations: [{ path: join(worktree, "README.md") }] }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
+    expect(h.proposed[0]).toMatchObject({ kind: "other", summary: "Ungated tool: Read README.md" });
+  });
+
+  it("a completed tool call we never saw before is ungated, while one that failed before running is ignored", async () => {
+    script([
+      { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "never-ran", status: "failed", content: [] } },
+      { type: "message", text: "still here" },
+      { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "ghost", status: "completed", content: [] } },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
+    expect(h.events).toEqual([{ type: "message", text: "still here" }]);
+    expect(h.proposed).toHaveLength(1);
+  });
+
+  it("a mode change away from default fails the run", async () => {
+    script([{ type: "update", update: { sessionUpdate: "current_mode_update", currentModeId: "yolo" } }, { type: "sleep", ms: 2000 }]);
+    const r = await adapter().start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "agent changed its approval mode" });
+  });
+
+  it("an unknown client request is denied and fails the run", async () => {
+    script([{ type: "request", method: "fs/delete_file", params: { sessionId: "fake-session", path: join(worktree, "README.md") } }, { type: "sleep", ms: 2000 }]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(r).toEqual({ status: "failed", error: "unknown request from agent: fs/delete_file" });
+    expect(h.proposed).toEqual([]);
+    expect(existsSync(join(worktree, "README.md"))).toBe(true);
+  });
+
+  it("a malformed client request is denied and fails the run", async () => {
+    script([{ type: "request", method: "fs/read_text_file", params: { sessionId: "fake-session", path: 42 } }, { type: "sleep", ms: 2000 }]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(r).toEqual({ status: "failed", error: "malformed request from agent: fs/read_text_file" });
+    expect(h.proposed).toEqual([]);
+  });
+
+  it("a request or update for another session fails the run", async () => {
+    script([{ type: "request", method: "fs/read_text_file", params: { sessionId: "other", path: join(worktree, "README.md") } }, { type: "sleep", ms: 2000 }]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "malformed request from agent: fs/read_text_file" });
+    expect(h.proposed).toEqual([]);
+
+    rmSync(logFile, { force: true });
+    script([{ type: "update", sessionId: "other", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "x" } } }, { type: "sleep", ms: 2000 }]);
+    const h2 = harness();
+    expect(await adapter().start(h2.opts)).toEqual({ status: "failed", error: "update for an unknown session" });
+    expect(h2.events).toEqual([]);
+  });
+
+  it("fails with the stop reason when gemini does not end its turn normally", async () => {
+    script([{ type: "stop", reason: "refusal" }]);
+    expect(await adapter().start(harness().opts)).toEqual({ status: "failed", error: "Gemini stopped: refusal" });
+  });
+
+  it("fails with a redacted error when the prompt fails", async () => {
+    script([{ type: "fail", message: `quota exceeded for ${SECRET}` }]);
+    const r = await adapter().start(harness().opts);
+    expect(r.status).toBe("failed");
+    expect(r.error).toContain("quota exceeded");
+    expect(r.error).not.toContain(SECRET);
+  });
+
+  it("fails when gemini exits in the middle of a prompt", async () => {
+    script([{ type: "message", text: "partial" }, { type: "exit", code: 2 }]);
+    const h = harness();
+    const r = await adapter().start(h.opts);
+    expect(r.status).toBe("failed");
+    expect(r.error).toMatch(/exited/);
+    expect(h.events).toEqual([{ type: "message", text: "partial" }]);
+  });
+
+  it("aborting kills gemini and returns run stopped", async () => {
+    script([{ type: "message", text: "working" }, { type: "hang" }]);
+    const { spawn, children } = fakeSpawn();
+    const h = harness();
+    const done = adapter({ spawn }).start(h.opts);
+    await vi.waitFor(() => expect(h.events).toHaveLength(1));
+    h.abort.abort();
+    expect(await done).toEqual({ status: "failed", error: "run stopped" });
+    await waitExit(children[0]!);
+  });
+
+  it("a gate that waits is cut off by abort: the pending write is denied and nothing is written", async () => {
+    const path = join(worktree, "notes.md");
+    script([{ type: "write", path, content: "x" }]);
+    const { spawn, children } = fakeSpawn();
+    let release: (() => void) | undefined;
+    const h = harness(() => new Promise<GateResult>((resolve) => (release = () => resolve({ decision: "deny", reason: "run stopped" }))));
+    const done = adapter({ spawn }).start(h.opts);
+    await vi.waitFor(() => expect(h.proposed).toHaveLength(1));
+    h.abort.abort();
+    release!();
+    expect(await done).toEqual({ status: "failed", error: "run stopped" });
+    await waitExit(children[0]!);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("messages are flushed before tool results so the ledger keeps their order", async () => {
+    script([
+      { type: "message", text: "Reading " },
+      { type: "message", text: "the file" },
+      { type: "read", path: join(worktree, "README.md") },
+      { type: "message", text: "done" },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    expect(h.events).toEqual([
+      { type: "message", text: "Reading the file" },
+      { type: "action_result", actionId: "act-1", ok: true, output: "hello from the worktree\n" },
+      { type: "message", text: "done" },
+    ]);
+  });
+});
+
+describe("GeminiAdapter through the runner", () => {
+  it("records a human-approved write and a terminal whose output holds a secret, redacted", async () => {
+    const owner = { kind: "human", id: "owner" } as const;
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Gemini" }).id;
+    const worktrees = new WorktreeManager(outside);
+    const gemini = new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY });
+    const runner = new AgentRunner({ db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { gemini }, extraSecrets: [], dataDir: outside });
+    try {
+      // The fake does not know the worktree the runner creates: it resolves relative paths against its cwd.
+      script([
+        { type: "write", path: "hello.txt", content: `hi\n${SECRET}\n`, permission: true },
+        // The secret comes from the file, not the command: a command that holds a secret is auto-denied by policy.
+        { type: "terminal", command: process.execPath, args: ["-e", `console.log("line two is " + require("fs").readFileSync("hello.txt", "utf8").split("\\n")[1])`] },
+        { type: "message", text: `the key is ${SECRET}` },
+      ]);
+      const run = await runner.start(owner, { projectId, adapter: "gemini", prompt: "write hello and run a command" });
+      await vi.waitFor(
+        () => {
+          for (const a of listPendingActions(db, projectId)) runner.decide(owner, a.id, "allow", "fine");
+          expect(getRun(db, run.id)!.status).not.toBe("running");
+        },
+        { timeout: 20_000, interval: 50 },
+      );
+      expect(getRun(db, run.id)!.status).toBe("completed");
+      const actions = listActions(db, run.id);
+      expect(actions.map((a) => [a.kind, a.status, a.decidedBy])).toEqual([
+        ["file_edit", "completed", "human"],
+        ["file_write", "completed", "human"],
+        ["shell", "completed", "human"],
+      ]);
+      expect(readFileSync(join(outside, run.worktree, "hello.txt"), "utf8")).toBe(`hi\n${SECRET}\n`);
+      const shell = actions[2]!;
+      expect(shell.output).toBe("line two is [REDACTED]\n");
+      expect(JSON.stringify(actions)).not.toContain(SECRET); // the write's input and the message are redacted too
+      const log = logged("terminal/output")[0]!.result.output as string;
+      expect(log).toContain(SECRET); // the agent itself saw the real output; only the record is redacted
+    } finally {
+      await runner.shutdown();
+      db.close();
+    }
+  }, 30_000);
+});

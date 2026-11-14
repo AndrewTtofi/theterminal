@@ -23,6 +23,7 @@ export type { FakeStep } from "./agents/fake-adapter.js";
 export { AgentRunner, AdapterUnavailableError, ShuttingDownError } from "./agents/runner.js";
 export type { AgentRunnerDeps } from "./agents/runner.js";
 export { ClaudeAdapter, toolToAction } from "./agents/claude-adapter.js";
+export { GeminiAdapter } from "./agents/gemini/adapter.js";
 export { ProviderSettings } from "./agents/settings.js";
 export { which } from "./agents/which.js";
 export type { WhichOptions } from "./agents/which.js";
