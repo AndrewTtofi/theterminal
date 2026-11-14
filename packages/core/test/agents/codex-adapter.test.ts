@@ -450,6 +450,53 @@ describe("CodexAdapter (fake app-server)", () => {
     expectNoFragment(r.error!, STORED);
   });
 
+  // A stored key, and keys only a built-in pattern finds (a fragment of which, cleaned on its own, matches too).
+  const SPLIT_SECRETS = [STORED, "sk-ant-api03-TESTKEYabcdefghijklmnop", "ghp_TESTKEY0123456789abcdefghij"];
+  const splitStderr = (secret: string, at: number) => [`warn: retry\nerror: token ${secret.slice(0, at)}`, `${secret.slice(at)} rejected\n`];
+
+  it("holds an unfinished stderr line raw until it ends, so a key split across two chunks at any position leaves no fragment", async () => {
+    const cases = SPLIT_SECRETS.flatMap((secret) => Array.from({ length: secret.length - 1 }, (_, i) => [secret, i + 1] as const));
+    for (let i = 0; i < cases.length; i += 12) {
+      await Promise.all(
+        cases.slice(i, i + 12).map(async ([secret, at]) => {
+          // Each run reads its own script: the adapter's fake env is fixed when it is made.
+          const env = { ...fakeAgentEnv(), THETERMINAL_FAKE_CODEX_SCRIPT: JSON.stringify([{ exit: 3, stderr: splitStderr(secret, at) }]) };
+          const { result } = run(make({ fakeEnv: env }), undefined, { clean: liveClean });
+          const r = await result;
+          expect(r.status).toBe("failed");
+          expect(r.error, `${secret.slice(0, 4)} split at ${at}`).toMatch(/error: token \[REDACTED\] rejected$/);
+          expectNoFragment(r.error!, secret);
+        }),
+      );
+    }
+  }, 60_000);
+
+  it("through the runner: a key split across two stderr chunks leaves no fragment in agent.finished or anywhere in the ledger", async () => {
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Codex" }).id;
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dir), broker: new ApprovalBroker(), adapters: { codex: make({ fakeEnv: lateFake }) },
+      extraSecrets: () => [STORED], dataDir: dir,
+    });
+    try {
+      for (const secret of SPLIT_SECRETS) {
+        for (const at of [1, 6, Math.floor(secret.length / 2), secret.length - 1]) {
+          script([{ exit: 3, stderr: splitStderr(secret, at) }]);
+          const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "go" });
+          await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 10_000, interval: 50 });
+          const finished = ledger.list().filter((e) => e.type === "agent.finished").at(-1)!;
+          expect(JSON.stringify(finished.payload)).toContain("error: token [REDACTED] rejected");
+          const all = JSON.stringify(ledger.list());
+          for (let i = 0; i + 6 <= secret.length; i++) expect(all).not.toContain(secret.slice(i, i + 6));
+        }
+      }
+    } finally {
+      await runner.shutdown();
+    }
+  }, 60_000);
+
   it("through the runner: a stored secret across the old command and stdin caps leaves no fragment in the record", async () => {
     const db = openDatabase(":memory:");
     const ledger = new Ledger(db);

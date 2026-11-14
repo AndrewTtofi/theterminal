@@ -1,12 +1,13 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { redact } from "../redact.js";
+import { heldTailStart, redact } from "../redact.js";
 import { bundledCodex, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import * as P from "./protocol.js";
@@ -307,7 +308,11 @@ export class CodexAdapter implements AgentAdapter {
 class CodexSession {
   private readonly peer: JsonRpcPeer;
   private readonly exited: Promise<void>;
+  /** The last STDERR_KEEP characters of stderr up to `stderrHeld`, cleaned. */
   private stderr = "";
+  /** The raw tail of stderr that may still go on (see `heldTailStart`), cleaned with the rest once it ends. */
+  private stderrHeld = "";
+  private stderrWithheld = false;
   private threadId: string | undefined;
   private turnId: string | undefined;
   /** The latest cumulative token counts Codex reported for our thread. */
@@ -336,15 +341,8 @@ class CodexSession {
     child.once("error", (e: NodeJS.ErrnoException) => {
       this.fail(e.code === "ENOENT" || e.code === "EACCES" ? NO_CLI : this.withStderr("Codex could not be started"));
     });
-    child.stderr.on("data", (d: Buffer) => {
-      // Cleaned before the window is cut, so no cut ever parts a secret from the context that redacts it, or leaves
-      // a fragment of one in the window. Without a working clean, stderr is withheld.
-      try {
-        this.stderr = this.o.clean(this.stderr + d.toString("utf8")).slice(-STDERR_KEEP);
-      } catch {
-        this.stderr = "";
-      }
-    });
+    const decoder = new StringDecoder("utf8");
+    child.stderr.on("data", (d: Buffer) => this.onStderr(decoder.write(d)));
     this.peer = new JsonRpcPeer(
       { input: child.stdout, output: child.stdin },
       {
@@ -611,11 +609,31 @@ class CodexSession {
     if (Object.keys(counts).length > 0) this.o.emit({ type: "usage", ...counts });
   }
 
+  /**
+   * Adds stderr text to the window. Only what can no longer go on is cleaned (see `heldTailStart`): a chunk can end
+   * inside a secret, and cleaning that part alone could redact it and leave the rest of it, which follows in the next
+   * chunk, plain. The window is cut only after cleaning. Without a working clean, stderr is withheld for good.
+   */
+  private onStderr(text: string): void {
+    if (this.stderrWithheld || text === "") return;
+    const raw = this.stderrHeld + text;
+    const held = heldTailStart(raw);
+    this.stderrHeld = raw.slice(held);
+    if (held === 0) return;
+    try {
+      this.stderr = this.o.clean(this.stderr + raw.slice(0, held)).slice(-STDERR_KEEP);
+    } catch {
+      this.stderr = this.stderrHeld = "";
+      this.stderrWithheld = true;
+    }
+  }
+
   private withStderr(msg: string): string {
-    // Cleaned before the tail is cut, so the cut never leaves part of a secret behind; no tail if that fails.
+    // Cleaned whole (the held tail too) before the tail is cut, so the cut never leaves part of a secret behind; no
+    // tail if that fails.
     let tail = "";
     try {
-      tail = this.o.clean(this.stderr.replace(/\x1b\[[0-9;]*m/g, "")).trim().slice(-STDERR_TAIL);
+      tail = this.o.clean((this.stderr + this.stderrHeld).replace(/\x1b\[[0-9;]*m/g, "")).trim().slice(-STDERR_TAIL);
     } catch {
       // Report the failure without the tail.
     }

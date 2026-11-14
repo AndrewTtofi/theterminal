@@ -327,6 +327,32 @@ function openBlockScalar(text: string, firstLineWhole: boolean): number {
   return -1;
 }
 
+/** The most raw text `heldTailStart` holds back from a stream: an unfinished line (or key block) longer than this is cleaned whole. */
+export const HELD_TAIL_BYTES = 8 * 1024;
+const BEGIN_PRIVATE_KEY = new RegExp(`-----BEGIN ${PRIVATE_KEY_LABEL}-----`, "y");
+const END_PRIVATE_KEY = new RegExp(`-----END ${PRIVATE_KEY_LABEL}-----`);
+
+/**
+ * For text read from a stream that may go on: where the tail to keep raw until more arrives starts, so that what is
+ * cleaned before it never ends inside a secret whose rest (or whose context) is still to come. That is the unfinished
+ * last line, or earlier: a private key block not yet closed, or a secret key whose value may follow on the next lines
+ * (`password:` or a block-scalar header). `text.length` (hold nothing) when that tail is over HELD_TAIL_BYTES.
+ */
+export function heldTailStart(text: string): number {
+  let start = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r")) + 1;
+  const context = trailingSecretContext(text.slice(0, start), false);
+  if (context >= 0) start = Math.min(start, context);
+  const begin = text.lastIndexOf("-----BEGIN ");
+  if (begin >= 0 && begin < start) {
+    BEGIN_PRIVATE_KEY.lastIndex = begin;
+    if (BEGIN_PRIVATE_KEY.test(text) && !END_PRIVATE_KEY.test(text.slice(begin))) start = begin;
+  }
+  // A UTF-16 unit is at most 3 bytes, so the byte count is only measured when it could pass the cap.
+  const held = text.length - start;
+  if (held * 3 > HELD_TAIL_BYTES && Buffer.byteLength(text.slice(start), "utf8") > HELD_TAIL_BYTES) return text.length;
+  return start;
+}
+
 const MARKER = "…[truncated]";
 
 /** Result is at most `max` long (exactly `max` when cut). Call AFTER `redact`, never before. */

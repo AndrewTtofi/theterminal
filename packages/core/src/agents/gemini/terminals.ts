@@ -1,6 +1,7 @@
 import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import { heldTailStart } from "../redact.js";
 
 export type ExitStatus = { exitCode: number | null; signal: string | null };
 export type TerminalOutput = { output: string; truncated: boolean; exitStatus: ExitStatus | null };
@@ -137,25 +138,33 @@ export class Terminals {
     t.truncated = true;
     // Cleaned and cut once it holds twice the cap, so each byte is cleaned a bounded number of times however long
     // the output runs, while the cleaned text before a cut always holds the whole of the kept tail's secrets.
-    if (!t.withheld && Buffer.byteLength(t.record, "utf8") > 2 * t.limit) this.cutRecord(t);
+    if (!t.withheld && Buffer.byteLength(t.record, "utf8") > 2 * t.limit) this.cutRecord(t, false);
   }
 
   /** The record at exit: the output itself while it was never cut, else the record cleaned and cut one last time. */
   private record(t: Terminal): string {
     if (t.record === null) return t.output;
-    this.cutRecord(t);
+    this.cutRecord(t, true);
     return t.record;
   }
 
   /**
-   * Cleans the record, then keeps its last `limit` bytes without the partial word a cut leaves at the start. A clean
+   * Cleans the record, then keeps its last `limit` bytes without the partial word a cut leaves at the start. While
+   * output may still come (`final` false), the tail that may go on (see `heldTailStart`) stays raw and whole: cleaned
+   * alone, a secret the output is still in the middle of could be redacted and its rest, still to come, left plain.
+   * Only the cleaned part is cut, so the record holds at most `limit` bytes plus that tail (at most 8 KiB). A clean
    * that throws withholds the record for good: what it would have let through is unknown.
    */
-  private cutRecord(t: Terminal): void {
+  private cutRecord(t: Terminal, final: boolean): void {
     if (t.withheld) return;
+    const all = t.record!;
+    const held = final ? all.length : heldTailStart(all);
+    const raw = all.slice(held);
     try {
-      const cleaned = this.clean(t.record!);
-      t.record = Buffer.byteLength(cleaned, "utf8") <= t.limit ? cleaned : tail(cleaned, t.limit).replace(/^\S*/, "");
+      const cleaned = this.clean(all.slice(0, held));
+      const room = t.limit - Buffer.byteLength(raw, "utf8");
+      const kept = Buffer.byteLength(cleaned, "utf8") <= room ? cleaned : room <= 0 ? "" : tail(cleaned, room).replace(/^\S*/, "");
+      t.record = kept + raw;
     } catch {
       t.record = "";
       t.withheld = true;
