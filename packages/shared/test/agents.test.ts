@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, eventPayloadSchemas } from "../src/index.js";
+import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, PROVIDERS, PROVIDER_ACKS, eventPayloadSchemas } from "../src/index.js";
 
 const ok = (type: keyof typeof eventPayloadSchemas, payload: unknown) =>
   expect(eventPayloadSchemas[type]!.safeParse(payload).success).toBe(true);
@@ -94,5 +94,32 @@ describe("string bounds", () => {
     bad("agent.message", { runId: "r".repeat(201), text: "" });
     bad("agent.started", { ...started, cardId: "c".repeat(201) });
     bad("settings.claude_auth_changed", { mode: "api_key", acknowledgement: "x".repeat(1001) });
+  });
+});
+
+describe("settings.provider_auth_changed", () => {
+  const ack = PROVIDER_ACKS;
+  it("accepts api_key for every provider without an acknowledgement", () => {
+    for (const provider of PROVIDERS) ok("settings.provider_auth_changed", { provider, mode: "api_key", acknowledgement: "" });
+  });
+  it("accepts each login mode only with that provider's exact acknowledgement", () => {
+    const modes = { claude: "subscription", codex: "chatgpt", gemini: "google" } as const;
+    for (const provider of PROVIDERS) {
+      ok("settings.provider_auth_changed", { provider, mode: modes[provider], acknowledgement: ack[provider] });
+      bad("settings.provider_auth_changed", { provider, mode: modes[provider], acknowledgement: "" });
+      for (const other of PROVIDERS) {
+        if (other !== provider) bad("settings.provider_auth_changed", { provider, mode: modes[provider], acknowledgement: ack[other] });
+      }
+    }
+  });
+  it("rejects modes that do not belong to the provider, and none", () => {
+    bad("settings.provider_auth_changed", { provider: "claude", mode: "chatgpt", acknowledgement: ack.codex });
+    bad("settings.provider_auth_changed", { provider: "codex", mode: "subscription", acknowledgement: ack.claude });
+    bad("settings.provider_auth_changed", { provider: "gemini", mode: "chatgpt", acknowledgement: ack.codex });
+    bad("settings.provider_auth_changed", { provider: "codex", mode: "none", acknowledgement: "" });
+    bad("settings.provider_auth_changed", { provider: "fake", mode: "api_key", acknowledgement: "" });
+  });
+  it("exposes the codex and gemini adapters", () => {
+    expect(ADAPTERS).toEqual(["claude", "codex", "gemini", "fake"]);
   });
 });

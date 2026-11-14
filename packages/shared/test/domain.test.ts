@@ -97,6 +97,7 @@ describe("eventPayloadSchemas", () => {
       "card.status_changed",
       "project.created",
       "settings.claude_auth_changed",
+      "settings.provider_auth_changed",
     ]);
   });
 });

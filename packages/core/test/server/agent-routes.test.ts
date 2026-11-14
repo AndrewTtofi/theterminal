@@ -7,7 +7,7 @@ import { CLAUDE_SUBSCRIPTION_ACK, type AgentAction, type AgentRun } from "@thete
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
-import { ClaudeSettings } from "../../src/agents/settings.js";
+import { ProviderSettings } from "../../src/agents/settings.js";
 import { registerAgentRoutes } from "../../src/server/agent-routes.js";
 import { registerRoutes } from "../../src/server/routes.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
@@ -294,7 +294,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const app = Fastify();
     try {
       registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
-      registerAgentRoutes(app, { db, runner, settings: new ClaudeSettings(db, ledger), adapters: ["fake"] });
+      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"] });
       await runner.shutdown();
       const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });
       expect(res.statusCode).toBe(503);

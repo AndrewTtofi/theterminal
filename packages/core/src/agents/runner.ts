@@ -5,12 +5,13 @@ import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentR
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
-import { getRun, getSetting, listActions, listRuns } from "../events/projections.js";
+import { getRun, listActions, listRuns } from "../events/projections.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction } from "./adapter.js";
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
 import { redact, truncate } from "./redact.js";
+import { ProviderSettings } from "./settings.js";
 import { pathScrubber, usernameScrubber, type Scrub } from "./scrub-paths.js";
 import type { WorktreeManager } from "./worktrees.js";
 
@@ -171,7 +172,7 @@ export class AgentRunner {
       throw new NotFoundError("card", cardId);
     }
     const authMode: AuthMode =
-      input.adapter === "claude" ? (getSetting(db, "claude_auth_mode") === "subscription" ? "subscription" : "api_key") : "none";
+      input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
 
     const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);

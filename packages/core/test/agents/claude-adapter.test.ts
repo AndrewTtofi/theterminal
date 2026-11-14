@@ -7,11 +7,11 @@ import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } fr
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
 import { DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
 import { EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
-import { ClaudeSettings } from "../../src/agents/settings.js";
+import { ProviderSettings } from "../../src/agents/settings.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getSetting } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
-import { ClaudeAdapter as IndexClaudeAdapter, ClaudeSettings as IndexClaudeSettings, toolToAction as indexToolToAction } from "../../src/index.js";
+import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderSettings, toolToAction as indexToolToAction } from "../../src/index.js";
 
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
 const CWD = join("tmp", "worktree");
@@ -115,7 +115,7 @@ describe("toolToAction", () => {
   it("is exported from the core index", () => {
     expect(indexToolToAction).toBe(toolToAction);
     expect(IndexClaudeAdapter).toBe(ClaudeAdapter);
-    expect(IndexClaudeSettings).toBe(ClaudeSettings);
+    expect(IndexProviderSettings).toBe(ProviderSettings);
   });
 });
 
@@ -425,7 +425,7 @@ describe("ClaudeAdapter", () => {
   });
 });
 
-describe("ClaudeSettings", () => {
+describe("ProviderSettings", () => {
   let db: Db;
   let ledger: Ledger;
   const owner = { kind: "human", id: "owner" } as const;
@@ -435,28 +435,28 @@ describe("ClaudeSettings", () => {
   });
 
   it("defaults to api_key", () => {
-    expect(new ClaudeSettings(db, ledger).getMode()).toBe("api_key");
+    expect(new ProviderSettings(db, ledger).getMode("claude")).toBe("api_key");
   });
 
   it("rejects subscription mode without the exact acknowledgement and records nothing", () => {
-    const s = new ClaudeSettings(db, ledger);
-    expect(() => s.setMode(owner, "subscription")).toThrow(expect.objectContaining({ name: "ZodError" }));
-    expect(() => s.setMode(owner, "subscription", `${CLAUDE_SUBSCRIPTION_ACK} `)).toThrow(expect.objectContaining({ name: "ZodError" }));
-    expect(() => s.setMode(owner, "subscription", "yes")).toThrow(expect.objectContaining({ name: "ZodError" }));
+    const s = new ProviderSettings(db, ledger);
+    expect(() => s.setMode(owner, "claude", "subscription")).toThrow(expect.objectContaining({ name: "ZodError" }));
+    expect(() => s.setMode(owner, "claude", "subscription", `${CLAUDE_SUBSCRIPTION_ACK} `)).toThrow(expect.objectContaining({ name: "ZodError" }));
+    expect(() => s.setMode(owner, "claude", "subscription", "yes")).toThrow(expect.objectContaining({ name: "ZodError" }));
     expect(ledger.list()).toEqual([]);
-    expect(s.getMode()).toBe("api_key");
+    expect(s.getMode("claude")).toBe("api_key");
   });
 
   it("records subscription mode with the acknowledgement, and switching back", () => {
-    const s = new ClaudeSettings(db, ledger);
-    s.setMode(owner, "subscription", CLAUDE_SUBSCRIPTION_ACK);
-    expect(s.getMode()).toBe("subscription");
-    expect(getSetting(db, "claude_auth_mode")).toBe("subscription");
-    s.setMode(owner, "api_key", "ignored");
-    expect(s.getMode()).toBe("api_key");
+    const s = new ProviderSettings(db, ledger);
+    s.setMode(owner, "claude", "subscription", CLAUDE_SUBSCRIPTION_ACK);
+    expect(s.getMode("claude")).toBe("subscription");
+    expect(getSetting(db, "auth_mode:claude")).toBe("subscription");
+    s.setMode(owner, "claude", "api_key", "ignored");
+    expect(s.getMode("claude")).toBe("api_key");
     expect(ledger.list().map((e) => [e.type, e.actor, e.projectId, e.payload])).toEqual([
-      ["settings.claude_auth_changed", owner, null, { mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK }],
-      ["settings.claude_auth_changed", owner, null, { mode: "api_key", acknowledgement: "" }],
+      ["settings.provider_auth_changed", owner, null, { provider: "claude", mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK }],
+      ["settings.provider_auth_changed", owner, null, { provider: "claude", mode: "api_key", acknowledgement: "" }],
     ]);
   });
 });

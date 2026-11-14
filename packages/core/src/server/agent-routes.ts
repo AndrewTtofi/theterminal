@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, agentPayloadSchemas, type AdapterId } from "@theterminal/shared";
 import type { AgentRunner } from "../agents/runner.js";
-import type { ClaudeSettings } from "../agents/settings.js";
+import type { ProviderSettings } from "../agents/settings.js";
 import { NotFoundError } from "../board/board-service.js";
 import type { Db } from "../db.js";
 import { listAllPendingActions, listPendingActions } from "../events/projections.js";
@@ -10,7 +10,7 @@ import { listAllPendingActions, listPendingActions } from "../events/projections
 export type AgentRouteDeps = {
   db: Db;
   runner: AgentRunner;
-  settings: ClaudeSettings;
+  settings: ProviderSettings;
   /** The adapters registered in this server, in ADAPTERS order. */
   adapters: AdapterId[];
 };
@@ -35,14 +35,14 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.get("/api/agents", async () => ({
     adapters,
-    claudeAuthMode: settings.getMode(),
+    claudeAuthMode: settings.getMode("claude"),
     subscriptionAck: CLAUDE_SUBSCRIPTION_ACK,
   }));
 
   app.post("/api/settings/claude-auth", async (req) => {
     const body = authBody.parse(req.body);
-    settings.setMode(actor, body.mode, body.acknowledgement);
-    return { mode: settings.getMode() };
+    settings.setMode(actor, "claude", body.mode, body.acknowledgement);
+    return { mode: settings.getMode("claude") };
   });
 
   app.post<{ Params: { id: string } }>("/api/projects/:id/runs", async (req, reply) => {

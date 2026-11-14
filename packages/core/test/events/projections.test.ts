@@ -90,12 +90,12 @@ describe("agent projections", () => {
   });
 
   it("settings projection holds the last mode", () => {
-    expect(getSetting(db, "claude_auth_mode")).toBeNull();
+    expect(getSetting(db, "auth_mode:claude")).toBeNull();
     emit("settings.claude_auth_changed", { mode: "api_key", acknowledgement: "" }, human, null);
     emit("settings.claude_auth_changed", { mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK }, human, null);
-    expect(getSetting(db, "claude_auth_mode")).toBe("subscription");
+    expect(getSetting(db, "auth_mode:claude")).toBe("subscription");
     emit("settings.claude_auth_changed", { mode: "api_key", acknowledgement: "" }, human, null);
-    expect(getSetting(db, "claude_auth_mode")).toBe("api_key");
+    expect(getSetting(db, "auth_mode:claude")).toBe("api_key");
   });
 
   it("rebuild after mixed board + agent history equals the live projections", () => {

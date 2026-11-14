@@ -18,7 +18,7 @@ import { ClaudeAdapter } from "../agents/claude-adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
-import { ClaudeSettings } from "../agents/settings.js";
+import { ProviderSettings } from "../agents/settings.js";
 import { WorktreeManager } from "../agents/worktrees.js";
 
 export type RunningServer = {
@@ -145,7 +145,7 @@ export async function createServer(opts: {
     registerAgentRoutes(app, {
       db,
       runner,
-      settings: new ClaudeSettings(db, ledger),
+      settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
     });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);

@@ -1,8 +1,16 @@
 import { z } from "zod";
 
-export const ADAPTERS = ["claude", "fake"] as const;
+export const ADAPTERS = ["claude", "codex", "gemini", "fake"] as const;
 export type AdapterId = (typeof ADAPTERS)[number];
-export type AuthMode = "api_key" | "subscription" | "none";
+export const PROVIDERS = ["claude", "codex", "gemini"] as const;
+export type Provider = (typeof PROVIDERS)[number];
+/** The auth modes each provider offers. `api_key` is always available; the others use the user's own CLI login. */
+export const PROVIDER_MODES = {
+  claude: ["api_key", "subscription"],
+  codex: ["api_key", "chatgpt"],
+  gemini: ["api_key", "google"],
+} as const;
+export type AuthMode = "api_key" | "subscription" | "chatgpt" | "google" | "none";
 export const ACTION_KINDS = ["file_read", "file_write", "file_edit", "shell", "web", "mcp", "other"] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 export type ActionStatus = "pending" | "allowed" | "denied" | "completed" | "failed";
@@ -45,6 +53,14 @@ export type PendingAgentAction = AgentAction & { projectId: string; projectName:
 export const CLAUDE_SUBSCRIPTION_ACK =
   "I understand that running Claude on my own Claude subscription through The Terminal may violate Anthropic's terms and could put my account at risk. I choose to do this at my own risk.";
 
+export const PROVIDER_ACKS: Record<Provider, string> = {
+  claude: CLAUDE_SUBSCRIPTION_ACK,
+  codex:
+    "I understand that running Codex on my own ChatGPT plan through The Terminal uses my plan's limits and is subject to OpenAI's terms. I choose to do this.",
+  gemini:
+    "I understand that running Gemini on my own Google account through The Terminal is subject to Google's terms. I choose to do this.",
+};
+
 const id = z.string().min(1).max(200);
 
 const isJsonValue = (v: unknown): boolean => {
@@ -67,7 +83,7 @@ export const agentPayloadSchemas = {
     .object({
       runId: id,
       adapter: z.enum(ADAPTERS),
-      authMode: z.enum(["api_key", "subscription", "none"]),
+      authMode: z.enum(["api_key", "subscription", "chatgpt", "google", "none"]),
       prompt: z.string().min(1).max(20000),
       cardId: z.string().max(200).nullable(),
       worktree: relativeWorktree,
@@ -110,6 +126,20 @@ export const agentPayloadSchemas = {
     .refine((p) => p.mode !== "subscription" || p.acknowledgement === CLAUDE_SUBSCRIPTION_ACK, {
       message: "subscription mode requires the exact acknowledgement",
       path: ["acknowledgement"],
+    }),
+  "settings.provider_auth_changed": z
+    .object({
+      provider: z.enum(PROVIDERS),
+      mode: z.enum(["api_key", "subscription", "chatgpt", "google"]),
+      acknowledgement: z.string().max(1000),
+    })
+    .strict()
+    .superRefine((p, ctx) => {
+      if (!(PROVIDER_MODES[p.provider] as readonly string[]).includes(p.mode)) {
+        ctx.addIssue({ code: "custom", message: `mode ${p.mode} is not available for ${p.provider}`, path: ["mode"] });
+      } else if (p.mode !== "api_key" && p.acknowledgement !== PROVIDER_ACKS[p.provider]) {
+        ctx.addIssue({ code: "custom", message: "this mode requires the exact acknowledgement", path: ["acknowledgement"] });
+      }
     }),
 } satisfies Record<string, z.ZodTypeAny>;
 

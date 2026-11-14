@@ -53,14 +53,19 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         p.ok ? "completed" : "failed", p.output, p.actionId,
       );
       break;
-    case "settings.claude_auth_changed":
-      db.prepare("INSERT INTO settings (key, value) VALUES ('claude_auth_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
-        p.mode,
-      );
+    case "settings.claude_auth_changed": // legacy entries stay readable
+      setSetting(db, "auth_mode:claude", p.mode);
+      break;
+    case "settings.provider_auth_changed":
+      setSetting(db, `auth_mode:${p.provider}`, p.mode);
       break;
     default:
       break;
   }
+}
+
+function setSetting(db: Db, key: string, value: string): void {
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
 const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings"];
