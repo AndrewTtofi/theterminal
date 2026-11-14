@@ -21,7 +21,7 @@ const defaultEntry: KeyringEntryFactory = (service, account) => {
 };
 
 /**
- * Secrets in the OS keychain (macOS Keychain, Windows Credential Manager).
+ * Secrets in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
  * Every keyring failure becomes a `SecretStoreUnavailableError` with a fixed message: the library's text may
  * name the account, so it is dropped rather than wrapped.
  */

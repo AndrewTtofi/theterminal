@@ -90,6 +90,37 @@ beforeEach(() => {
   m.getConnectionCatalog.mockResolvedValue([...CONNECTION_CATALOG]);
 });
 
+describe("App status polling", () => {
+  it("refetches status every 30 s and on a ledger entry, and stops after unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = render(<App />);
+      const flush = () => act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await flush();
+      expect(m.getStatus).toHaveBeenCalledTimes(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(m.getStatus).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        h.onEntry!({
+          seq: 8, id: "8", ts: "2026-01-01T00:00:00Z", projectId: "A",
+          actor: { kind: "human", id: "owner" }, type: "card.moved",
+          payload: { from: "plan", to: "build" }, prevHash: "", hash: "",
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(m.getStatus).toHaveBeenCalledTimes(3);
+
+      unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+      expect(m.getStatus).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("App board refresh", () => {
   it("never shows the old project's board after switching while a refresh is pending", async () => {
     let resolveStale!: (b: Board) => void;

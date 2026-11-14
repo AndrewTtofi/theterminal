@@ -69,7 +69,7 @@ export function describeEntry(e: LedgerEntry): string {
     case "connection.removed":
       return `${who} removed "${p.name}"`;
     case "connection.tested":
-      return p.ok ? `"${p.name}" connected` : `"${p.name}" failed to connect: ${p.message}`;
+      return p.ok ? `"${p.name}" connected` : `"${p.name}" failed to connect: ${clip(p.message, 200)}`;
     case "connection.used":
       return `Agent ${String(p.runId).slice(0, 8)} was given access to "${p.name}"`;
     default:

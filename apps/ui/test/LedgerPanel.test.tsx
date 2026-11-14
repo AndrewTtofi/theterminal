@@ -30,6 +30,9 @@ describe("describeEntry connections", () => {
     expect(describeEntry(entry(8, "connection.tested", { ...c, ok: false, message: "Key rejected" }))).toBe(
       '"Work key" failed to connect: Key rejected',
     );
+    expect(describeEntry(entry(10, "connection.tested", { ...c, ok: false, message: "x".repeat(300) }))).toBe(
+      `"Work key" failed to connect: ${"x".repeat(200)}…`,
+    );
     expect(
       describeEntry(entry(9, "connection.used", { ...c, runId: "abcdef1234567890", purpose: "api_key" }, { kind: "system", id: "runner" })),
     ).toBe('Agent abcdef12 was given access to "Work key"');

@@ -24,9 +24,13 @@ Every entry is filed under the keychain service `TheTerminal`. The account name 
 
 macOS ties keychain access to the program that created the entry. If the Node binary that runs The Terminal changes (for example after you upgrade Node or switch version managers), macOS asks you to allow access again. Choose Always Allow. If you decline, saving and reading secrets fails until you allow it, and the status bar shows `Keychain unavailable`.
 
-### Long values on Windows
+### Linux
 
-Windows Credential Manager stores at most 2560 bytes per entry. The Terminal splits longer values into pieces of at most 2048 bytes. The first entry (`<account>`) holds a small marker, `chunks:<n>`, and the pieces are stored as `<account>#1`, `<account>#2` and so on. Reading puts them back together. Values are limited to 16 KiB in total. Deleting a connection's secret deletes all of its pieces.
+On Linux, The Terminal needs a running Secret Service provider, for example GNOME Keyring or KWallet. Without one, the status bar shows `Keychain unavailable` and saving a secret fails.
+
+### Long values
+
+On every platform, The Terminal splits any value longer than 2048 bytes into pieces of at most 2048 bytes, because keychains limit the size of an entry. Windows Credential Manager has the tightest limit, 2560 bytes per entry. The first entry (`<account>`) holds a small marker, `chunks:<n>`, and the pieces are stored as `<account>#0`, `<account>#1` and so on. Reading puts them back together. Values are limited to 16 KiB in total. Deleting a connection's secret deletes all of its pieces.
 
 ## Two ways to use each AI provider
 
@@ -91,7 +95,7 @@ Codex cannot use MCP servers in The Terminal in this version. Codex gives no app
 
 ## What comes next
 
-A later release (Plan 5B) adds:
+A later release adds:
 
 - Cloud accounts (AWS, Google Cloud, Azure) with credentials given to a run only when you select them.
 - A GitHub view with branches, pull requests and CI status, and a live `CI` item in the status bar.
