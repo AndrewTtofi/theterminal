@@ -260,11 +260,12 @@ export class GeminiAdapter implements AgentAdapter {
       }
       // The worktree is never a trusted folder for this run, whatever the user's trust records say: a repo-planted
       // `.gemini/settings.json` or `.env` (which an approved write could create for the next run) is not merged,
-      // project hooks are blocked and workspace MCP servers are skipped. Checked first by Gemini's trust lookup.
+      // all hooks are blocked and workspace MCP servers are skipped. Checked first by Gemini's trust lookup.
       env.GEMINI_CLI_TRUST_WORKSPACE = "false";
-      // Google-login mode runs in the user's own home (the login lives there and is never read or copied), so what
-      // remains in force is the user's OWN `~/.gemini` configuration: their hooks and `tools.discoveryCommand` /
-      // `tools.callCommand` run as they configured them (plus admin-tier policies). Those are the user's commands,
+      // Google-login mode runs in the user's own home (the login lives there and is never read or copied), so some
+      // of the user's OWN `~/.gemini` configuration stays in force. Hooks do not: Gemini blocks all hooks in an
+      // untrusted folder, and this folder is always untrusted. What remains is the user's `tools.discoveryCommand` /
+      // `tools.callCommand`, run as they configured them, plus admin-tier policies. Those are the user's commands,
       // not agent actions; the policy file, the argv overrides and the ungated-tool detector still gate everything
       // the agent itself does.
       env.GEMINI_CLI_NO_RELAUNCH = "1"; // the npm entry point would otherwise relaunch the CLI as a child our signals never reach
