@@ -11,7 +11,6 @@ let app: FastifyInstance;
 let ledger: Ledger;
 let port: number;
 const sockets: WebSocket[] = [];
-const rawSockets = new Set<import("node:net").Socket>();
 
 function append(n: number) {
   for (let i = 0; i < n; i++) {
@@ -29,20 +28,17 @@ beforeEach(async () => {
   app = Fastify();
   await registerAuth(app, { token: TOKEN, port: () => port });
   await registerLedgerStream(app, ledger);
-  app.server.on("connection", (c) => rawSockets.add(c));
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as { port: number }).port;
 });
 
 afterEach(async () => {
   for (const s of sockets.splice(0)) s.terminate();
-  for (const c of rawSockets) c.destroy();
-  rawSockets.clear();
   await app.close();
 });
 
-function connect(query = "", headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/events${query}`, { headers });
+function connect(query = "", headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, path = "/api/events") {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${path}${query}`, { headers });
   sockets.push(ws);
   const messages: { seq: number }[] = [];
   ws.on("message", (d) => messages.push(JSON.parse(String(d))));
@@ -83,9 +79,8 @@ describe("ledger websocket", () => {
   it("refuses a connection without the token", async () => {
     const { ws } = connect("", {});
     const status = await new Promise<number>((resolve) => {
-      ws.on("unexpected-response", (req, res) => {
+      ws.on("unexpected-response", (_req, res) => {
         resolve(res.statusCode ?? 0);
-        req.destroy();
       });
       ws.on("error", () => {});
     });
@@ -95,13 +90,38 @@ describe("ledger websocket", () => {
   it("refuses a bad Host header", async () => {
     const { ws } = connect("", { authorization: `Bearer ${TOKEN}`, host: "evil.example" });
     const status = await new Promise<number>((resolve) => {
-      ws.on("unexpected-response", (req, res) => {
+      ws.on("unexpected-response", (_req, res) => {
         resolve(res.statusCode ?? 0);
-        req.destroy();
       });
       ws.on("error", () => {});
     });
     expect(status).toBe(403);
+  });
+
+  it("refuses an encoded-path upgrade without the token", async () => {
+    const { ws } = connect("", {}, "/%61pi/events");
+    const status = await new Promise<number>((resolve) => {
+      ws.on("unexpected-response", (_req, res) => {
+        resolve(res.statusCode ?? 0);
+      });
+      ws.on("error", () => {});
+    });
+    expect(status).toBe(401);
+  });
+
+  it("refuses a foreign Origin even with a valid cookie, and accepts a matching one", async () => {
+    const cookie = `tt_token=${TOKEN}`;
+    const bad = connect("", { cookie, origin: "http://127.0.0.1:9999" });
+    const status = await new Promise<number>((resolve) => {
+      bad.ws.on("unexpected-response", (_req, res) => {
+        resolve(res.statusCode ?? 0);
+      });
+      bad.ws.on("error", () => {});
+    });
+    expect(status).toBe(403);
+    append(1);
+    const good = connect("", { cookie, origin: `http://127.0.0.1:${port}` });
+    await waitFor(() => good.messages.length === 1);
   });
 
   it("closes with 1008 on an invalid afterSeq", async () => {

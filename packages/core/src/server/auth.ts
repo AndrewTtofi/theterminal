@@ -3,6 +3,9 @@ import cookie from "@fastify/cookie";
 import type { FastifyInstance } from "fastify";
 
 export const TOKEN_COOKIE = "tt_token";
+/** Route config marking a route as reachable without a token: `{ config: PUBLIC_ROUTE }`. */
+export const PUBLIC_ROUTE = { public: true } as const;
+type PublicConfig = { public?: boolean };
 
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
@@ -19,33 +22,50 @@ export function registerAuth(app: FastifyInstance, opts: { token: string; port: 
   app.register(cookie);
 
   app.addHook("onRequest", async (request, reply) => {
-    const host = (request.headers.host ?? "").toLowerCase();
-    const port = opts.port();
-    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
-      return reply.code(403).send({ error: "bad_host" });
-    }
+    // Rejections on a WebSocket upgrade must also drop the socket, or it stays open forever.
+    const reject = (code: number, error: string) => {
+      if (request.headers.upgrade) {
+        reply.header("connection", "close");
+        reply.raw.once("finish", () => request.raw.socket.destroy());
+      }
+      return reply.code(code).send({ error });
+    };
 
-    const [path = "", query = ""] = request.url.split("?", 2);
+    const port = opts.port();
+    const host = (request.headers.host ?? "").toLowerCase();
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return reject(403, "bad_host");
+
+    // Default-deny, keyed on the matched route (find-my-way matches the decoded path, so the raw
+    // URL cannot be trusted). Only routes registered with config.public skip the token.
+    const routeUrl = request.routeOptions.url;
+    const isPublic = routeUrl !== undefined && (request.routeOptions.config as PublicConfig | undefined)?.public === true;
 
     // Bootstrap: GET /?token= trades the token for an HttpOnly cookie. Honoured on "/" only,
     // so the token never has to appear in logs or referrers for any other path.
-    if (request.method === "GET" && path === "/" && query !== "") {
-      const given = new URLSearchParams(query).get("token");
+    if (request.method === "GET" && routeUrl === "/") {
+      const given = new URL(request.url, "http://localhost").searchParams.get("token");
       if (given !== null) {
-        if (!tokenMatches(expected, given)) return reply.code(401).send({ error: "unauthorized" });
+        if (!tokenMatches(expected, given)) return reject(401, "unauthorized");
         return reply
           .setCookie(TOKEN_COOKIE, opts.token, { httpOnly: true, sameSite: "strict", path: "/" })
           .redirect("/", 302);
       }
     }
 
-    if (path !== "/api" && !path.startsWith("/api/")) return;
+    if (isPublic) return;
+
+    // SameSite ignores ports, so a page on another loopback port would carry our cookie.
+    const origin = request.headers.origin;
+    if (origin !== undefined) {
+      const o = origin.toLowerCase();
+      if (o !== `http://127.0.0.1:${port}` && o !== `http://localhost:${port}`) return reject(403, "bad_origin");
+    }
 
     const auth = request.headers.authorization;
     const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
     const fromCookie = app.parseCookie(request.headers.cookie ?? "")[TOKEN_COOKIE];
     if (!tokenMatches(expected, bearer) && !tokenMatches(expected, fromCookie)) {
-      return reply.code(401).send({ error: "unauthorized" });
+      return reject(401, "unauthorized");
     }
   });
 }

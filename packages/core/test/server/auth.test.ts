@@ -4,7 +4,8 @@ import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { registerRoutes } from "../../src/server/routes.js";
-import { registerAuth, TOKEN_COOKIE } from "../../src/server/auth.js";
+import net from "node:net";
+import { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE } from "../../src/server/auth.js";
 
 const TOKEN = "secret-token-123";
 const PORT = 4321;
@@ -17,7 +18,8 @@ beforeEach(async () => {
   const board = new BoardService(db, ledger);
   app = Fastify();
   await registerAuth(app, { token: TOKEN, port: () => PORT });
-  app.get("/", async () => "ui");
+  app.get("/", { config: PUBLIC_ROUTE }, async () => "ui");
+  app.get("/private", async () => "secret");
   registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
 });
 
@@ -95,6 +97,64 @@ describe("auth guard", () => {
     const res = await app.inject({ url: `/api/projects?token=${TOKEN}`, headers: { host: HOST } });
     expect(res.statusCode).toBe(401);
     expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("is default-deny: only config.public routes skip the token", async () => {
+    expect((await app.inject({ url: "/private", headers: { host: HOST } })).statusCode).toBe(401);
+    expect((await app.inject({ url: "/private", headers: bearer })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/nope", headers: { host: HOST } })).statusCode).toBe(401);
+  });
+
+  it("does not let an encoded path bypass the token", async () => {
+    const res = await app.inject({ url: "/%61pi/projects", headers: { host: HOST } });
+    expect(res.statusCode).toBe(401);
+    const ok = await app.inject({ url: "/%61pi/projects", headers: bearer });
+    expect(ok.statusCode).toBe(200);
+  });
+
+  it("does not let an absolute-form request line bypass the token", async () => {
+    const real = Fastify();
+    let realPort = 0;
+    registerAuth(real, { token: TOKEN, port: () => realPort });
+    real.get("/api/projects", async () => []);
+    await real.listen({ port: 0, host: "127.0.0.1" });
+    realPort = (real.server.address() as net.AddressInfo).port;
+    try {
+      const raw = await new Promise<string>((resolve, reject) => {
+        const sock = net.connect(realPort, "127.0.0.1", () =>
+          sock.write(
+            `GET http://127.0.0.1:${realPort}/api/projects HTTP/1.1\r\nHost: 127.0.0.1:${realPort}\r\nConnection: close\r\n\r\n`,
+          ),
+        );
+        let data = "";
+        sock.on("data", (d) => (data += d));
+        sock.on("end", () => resolve(data));
+        sock.on("error", reject);
+      });
+      expect(raw.split("\r\n")[0]).toContain("401");
+    } finally {
+      await real.close();
+    }
+  });
+
+  it("rejects a foreign Origin even with a valid token or cookie", async () => {
+    for (const origin of ["http://127.0.0.1:9999", "http://evil.example", `http://127.0.0.1.evil.com:${PORT}`]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "X" },
+        headers: { host: HOST, origin, cookie: `${TOKEN_COOKIE}=${TOKEN}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ error: "bad_origin" });
+    }
+  });
+
+  it("allows a matching Origin and an absent Origin", async () => {
+    for (const origin of [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]) {
+      const res = await app.inject({ url: "/api/projects", headers: { ...bearer, origin } });
+      expect(res.statusCode).toBe(200);
+    }
   });
 
   it("rejects a wrong cookie", async () => {
