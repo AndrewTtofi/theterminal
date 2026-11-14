@@ -4,7 +4,7 @@ export const REDACTED = "[REDACTED]";
 const SECRET_KEY =
   /(api[_-]?key|secret|token|password|passwd|pwd|private[_-]?key|authorization|cookie|credentials?)|(?:^|[_-])(?:auth|pass|session)(?:$|[_-])/i;
 // Counters such as max_tokens are not secrets.
-const NOT_SECRET_KEY = /tokens$/i;
+const NOT_SECRET_KEY = /^(?:max|min|num|total|input|output|prompt|completion|max[_-]?output)[_-]?tokens$/i;
 const HEADER_KEY = /^(?:proxy-)?authorization$|^(?:set-)?cookie$/i;
 
 function isSecretKey(key: string): boolean {
@@ -33,22 +33,59 @@ const BASIC = /\b(Basic\s+)(?!\[REDACTED\])[A-Za-z0-9+/]{8,}={0,2}/g;
 // scheme://user:pass@host -> keep scheme and user. The lookbehind keeps the scan linear.
 const URL_USERINFO = /((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:@/]*:)[^\s@/]+(@)/g;
 
-const QUOTED_OR_BARE = `"(?:[^"\\\\\\n]|\\\\.){0,4096}"?|'(?:[^'\\\\\\n]|\\\\.){0,4096}'?`;
-// Authorization / Cookie headers: the value runs to the end of the line; an auth scheme is kept.
-const HEADER = new RegExp(
-  `(?<![A-Za-z0-9_-])((?:proxy-)?authorization|set-cookie|cookie)(["']?\\s*:\\s*)(?:(Bearer|Basic|Token|Digest)(\\s+))?(${QUOTED_OR_BARE}|[^\\r\\n"']+)`,
-  "gi",
-);
-// key=value, key: value, "key": "value". The key is tested in the replacer, so the scan is linear.
-const KEY_VALUE = new RegExp(
-  `(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(["']?\\s*[=:]\\s*)(${QUOTED_OR_BARE}|[^\\s'",;&}]+)`,
-  "g",
-);
+// Finds "key" + separator only. The value is parsed by hand in redactPairs, so a non-secret
+// pair never swallows a secret pair inside its value, and every scan stays linear.
+const KEY_SEP = /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(["']?\s*[=:]\s*)/g;
+const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest)\s+/iy;
+const BARE_END = /[\s'",;&}]/;
 
-function redactValue(v: string): string {
-  const q = v[0];
-  if (q === '"' || q === "'") return q + REDACTED + (v.length > 1 && v.endsWith(q) ? q : "");
-  return REDACTED;
+/** End of a quoted value starting at `start` (a quote char): closing quote, else end of string. */
+function quotedEnd(s: string, start: number): { end: number; closed: boolean } {
+  const q = s[start];
+  for (let i = start + 1; i < s.length; i++) {
+    if (s[i] === "\\") i++;
+    else if (s[i] === q) return { end: i + 1, closed: true };
+  }
+  return { end: s.length, closed: false };
+}
+
+function redactPairs(s: string): string {
+  let out = "";
+  let last = 0;
+  KEY_SEP.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = KEY_SEP.exec(s)) !== null) {
+    const key = m[1]!;
+    if (!isSecretKey(key)) continue; // resume scanning inside the value
+    let pos = m.index + m[0].length;
+    const header = HEADER_KEY.test(key) && m[2]!.includes(":");
+    if (header) {
+      AUTH_SCHEME.lastIndex = pos;
+      const scheme = AUTH_SCHEME.exec(s);
+      if (scheme) pos += scheme[0].length;
+    }
+    if (s.startsWith(REDACTED, pos)) continue; // already redacted
+    const q = s[pos];
+    let end: number;
+    let replacement = REDACTED;
+    if (q === '"' || q === "'") {
+      const r = quotedEnd(s, pos);
+      end = r.end;
+      replacement = q + REDACTED + (r.closed ? q : "");
+    } else {
+      end = pos;
+      if (header) {
+        while (end < s.length && !/[\r\n"']/.test(s[end]!)) end++;
+      } else {
+        while (end < s.length && !BARE_END.test(s[end]!)) end++;
+      }
+      if (end === pos) continue;
+    }
+    out += s.slice(last, pos) + replacement;
+    last = end;
+    KEY_SEP.lastIndex = end;
+  }
+  return out + s.slice(last);
 }
 
 function redactString(s: string, extra: string[]): string {
@@ -58,16 +95,7 @@ function redactString(s: string, extra: string[]): string {
   out = out.replace(URL_USERINFO, `$1${REDACTED}$2`);
   out = out.replace(BEARER, `$1${REDACTED}`);
   out = out.replace(BASIC, `$1${REDACTED}`);
-  out = out.replace(
-    HEADER,
-    (_m, key: string, sep: string, scheme: string | undefined, ws: string | undefined, val: string) =>
-      key + sep + (scheme ? scheme + ws : "") + redactValue(val),
-  );
-  out = out.replace(KEY_VALUE, (m, key: string, sep: string, val: string) => {
-    if (!isSecretKey(key)) return m;
-    if (HEADER_KEY.test(key) && sep.includes(":")) return m; // handled by HEADER
-    return key + sep + redactValue(val);
-  });
+  out = redactPairs(out);
   return out;
 }
 

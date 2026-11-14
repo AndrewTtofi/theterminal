@@ -107,12 +107,41 @@ describe("redact: leak fixes", () => {
       secret: REDACTED,
     });
   });
+  it("redacts secret pairs that follow a non-secret key or separator", () => {
+    expect(r("docker run --env=API_KEY=FAKESECRET1 img")).toBe(`docker run --env=API_KEY=${REDACTED} img`);
+    expect(r("env: API_KEY=FAKESECRET1")).toBe(`env: API_KEY=${REDACTED}`);
+    expect(r("https://x.com/api?access_token=FAKESECRET1&b=1")).toBe(`https://x.com/api?access_token=${REDACTED}&b=1`);
+    expect(r("note:password=FAKESECRET1")).toBe(`note:password=${REDACTED}`);
+    expect(r("x=DB_PASSWORD=FAKESECRET1")).toBe(`x=DB_PASSWORD=${REDACTED}`);
+    expect(r("ENV:SECRET_KEY=FAKESECRET1")).toBe(`ENV:SECRET_KEY=${REDACTED}`);
+  });
+  it("redacts long and multi-line quoted values entirely", () => {
+    const long = "a".repeat(5000);
+    expect(r(`password="${long}"`)).toBe(`password="${REDACTED}"`);
+    expect(r(`password='${long}' x`)).toBe(`password='${REDACTED}' x`);
+    expect(r(`Cookie: "${long}"`)).toBe(`Cookie: "${REDACTED}"`);
+    expect(r('password="line1\nline2" after')).toBe(`password="${REDACTED}" after`);
+    expect(r('password="line1\nline2')).toBe(`password="${REDACTED}`);
+  });
+  it("treats only known counters as non-secret tokens", () => {
+    expect(r("GITHUB_TOKENS=FAKESECRET1")).toBe(`GITHUB_TOKENS=${REDACTED}`);
+    expect(redact({ github_tokens: "FAKESECRET1" })).toEqual({ github_tokens: REDACTED });
+    expect(redact({ max_tokens: 1, input_tokens: 2, max_output_tokens: 3, maxTokens: 4 })).toEqual({
+      max_tokens: 1,
+      input_tokens: 2,
+      max_output_tokens: 3,
+      maxTokens: 4,
+    });
+  });
   it("is linear on large input", () => {
     const inputs = [
       "a".repeat(1_000_000),
       "some words here key=value and more text sk-notasecret ".repeat(20_000),
       'k="'.repeat(300_000),
       " ".repeat(1_000_000) + "a",
+      "a=b=c=".repeat(170_000),
+      '"'.repeat(1_000_000),
+      'password="'.repeat(100_000),
     ];
     for (const input of inputs) {
       const t = performance.now();
