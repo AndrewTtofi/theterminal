@@ -1,3 +1,4 @@
+import { KIND_LABELS } from "@theterminal/shared";
 import type { Actor, LedgerEntry } from "@theterminal/shared";
 
 const cap = (s: unknown) => {
@@ -56,6 +57,23 @@ export function describeEntry(e: LedgerEntry): string {
               : "own subscription";
       return `${who} set ${cap(p.provider)} to use ${how}`;
     }
+    case "connection.added":
+      return `${who} connected "${p.name}" (${KIND_LABELS[p.kind as keyof typeof KIND_LABELS] ?? String(p.kind)})`;
+    case "connection.updated": {
+      const c = (p.changes ?? {}) as { enabled?: boolean; secretsSet?: string[] };
+      if (c.enabled === true) return `${who} enabled "${p.name}"`;
+      if (c.enabled === false) return `${who} disabled "${p.name}"`;
+      if (c.secretsSet && c.secretsSet.length > 0) return `${who} replaced the ${c.secretsSet.join(", ")} of "${p.name}"`;
+      return `${who} updated "${p.name}"`;
+    }
+    case "connection.removed":
+      return `${who} removed "${p.name}"`;
+    case "connection.tested":
+      return p.ok ? `"${p.name}" connected` : `"${p.name}" failed to connect: ${clip(p.message, 200)}`;
+    case "connection.signin":
+      return p.ok ? `${who} signed in to ${cap(p.provider)}` : `Sign-in to ${cap(p.provider)} failed`;
+    case "connection.used":
+      return `Agent ${String(p.runId).slice(0, 8)} was given access to "${p.name}"`;
     default:
       return `${who} recorded ${e.type}`;
   }

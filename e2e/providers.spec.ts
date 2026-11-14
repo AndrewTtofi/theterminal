@@ -15,6 +15,7 @@ async function openProject(page: Page, name: string) {
 }
 
 async function startAgent(page: Page, adapter: "codex" | "gemini", prompt: string) {
+  await page.getByRole("navigation", { name: "Views" }).getByRole("button", { name: "Agents" }).click();
   await page.getByRole("combobox", { name: "Agent" }).selectOption(adapter);
   await page.getByLabel("Prompt").fill(prompt);
   await page.getByRole("button", { name: "Start agent" }).click();

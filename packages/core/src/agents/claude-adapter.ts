@@ -2,18 +2,17 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { query as sdkQuery, type HookCallback, type HookJSONOutput, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ActionKind } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
+import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "./adapter.js";
 import { redact } from "./redact.js";
 import { buildChildEnv } from "./child-env.js";
+import { bundledClaude } from "./bundled.js";
 import { which } from "./which.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 
 const NO_API_KEY = "No Anthropic API key configured";
-const NO_CLAUDE_CODE = "Claude Code is not installed or not on PATH";
+const NO_CLAUDE_CODE = "Claude Code is unavailable: its bundled program is missing and none is on PATH";
 const STOPPED = "run stopped";
-const MAX_COMMAND = 150;
-const MAX_DESCRIPTION = 120;
 const REMOTE_AGENT = "remote agents are not supported";
 /** Hook timeout in seconds: a gate may wait on a human for a long time. A timeout blocks the tool. */
 const GATE_TIMEOUT_S = 24 * 60 * 60;
@@ -60,7 +59,8 @@ const isRemoteAgent = (tool: string, input: Record<string, unknown>): boolean =>
 /**
  * Maps an SDK tool call to a ProposedAction. `kind` and `paths` come only from the tool name and the tool's own
  * input fields; policy auto-allows reads whose paths are all inside the worktree, so anything that cannot be
- * judged yields no paths (asks a human) and unknown tools are `other` (always ask).
+ * judged yields no paths (asks a human) and unknown tools are `other` (always ask). Summaries carry the whole
+ * command or description: the runner redacts before it caps, so a cut never leaves part of a secret behind.
  */
 export function toolToAction(tool: string, input: Record<string, unknown>, cwd: string): ProposedAction {
   // Summaries use / on every platform.
@@ -100,11 +100,11 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
     }
     case "Bash":
     case "PowerShell":
-      return action("shell", `Run: ${str(input.command).slice(0, MAX_COMMAND)}`);
+      return action("shell", `Run: ${str(input.command)}`);
     case "Monitor": {
       const ws = isRecord(input.ws) ? str(input.ws.url) : "";
       const what = typeof input.command === "string" ? input.command : `watch ${ws}`;
-      return action("shell", `Run: ${what.slice(0, MAX_COMMAND)}`);
+      return action("shell", `Run: ${what}`);
     }
     case "WebFetch":
       return action("web", `Fetch ${str(input.url)}`);
@@ -115,7 +115,7 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
     const paths = one(tool === "NotebookEdit" ? input.notebook_path : input.file_path);
     return action("file_edit", `Edit ${paths[0] ? display(paths[0]) : "(no path)"}`, paths);
   }
-  if (isRemoteAgent(tool, input)) return action("other", `Run remote agent: ${str(input.description).slice(0, MAX_DESCRIPTION)}`);
+  if (isRemoteAgent(tool, input)) return action("other", `Run remote agent: ${str(input.description)}`);
   if (tool.startsWith("mcp__")) return action("mcp", `MCP tool ${tool}`);
   return action("other", `Use ${tool}`);
 }
@@ -134,6 +134,7 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly id = "claude" as const;
   private readonly query: typeof sdkQuery;
   private readonly apiKey: () => string | undefined;
+  private readonly bundled: () => string | null;
   private readonly findClaude: () => string | null;
   private readonly dataDir: string;
 
@@ -143,24 +144,28 @@ export class ClaudeAdapter implements AgentAdapter {
       dataDir: string;
       query?: typeof sdkQuery;
       apiKey?: () => string | undefined;
-      /** Locates the user's own Claude Code for subscription mode. Default: `claude` on PATH. */
+      /** The Claude Code binary shipped with the Agent SDK, for subscription mode. Default: `bundledClaude`. */
+      bundled?: () => string | null;
+      /** Locates Claude Code on PATH, consulted only when there is no bundled one. Default: `claude` on PATH. */
       findClaude?: () => string | null;
     },
   ) {
     this.dataDir = opts.dataDir;
     this.query = opts.query ?? sdkQuery;
     this.apiKey = opts.apiKey ?? (() => process.env.ANTHROPIC_API_KEY);
+    this.bundled = opts.bundled ?? (() => bundledClaude());
     this.findClaude = opts.findClaude ?? (() => which("claude"));
   }
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
-    const env = this.env(o.authMode);
+    const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
-    // Subscription mode runs the user's own installed Claude Code with its own login; api_key mode the bundled one.
+    // Subscription mode names the Claude Code bundled with the SDK (PATH only when it is missing); Claude Code reads
+    // the user's own login itself, never we. api_key mode leaves the choice to the SDK, which uses the same binary.
     let executable: string | null = null;
     if (o.authMode === "subscription") {
-      executable = this.findClaude();
+      executable = this.bundled() ?? this.findClaude();
       if (executable === null) return { status: "failed", error: NO_CLAUDE_CODE };
     }
 
@@ -252,17 +257,24 @@ export class ClaudeAdapter implements AgentAdapter {
       return null;
     }
     if (m.type !== "result") return null;
-    if (Number.isFinite(m.total_cost_usd)) o.emit({ type: "usage", costUsd: m.total_cost_usd });
+    // SDK 0.3.323 (sdk.d.ts): `total_cost_usd` and `usage` (NonNullableUsage over the API's BetaUsage, so
+    // `input_tokens` and `output_tokens` are numbers) on both result variants. All are estimates; input_tokens
+    // excludes cache reads and writes. Anything else is left unreported.
+    const usage = (m as { usage?: unknown }).usage;
+    const u = isRecord(usage) ? usage : {};
+    const reported = { costUsd: m.total_cost_usd, inputTokens: u.input_tokens, outputTokens: u.output_tokens };
+    const event = Object.fromEntries(Object.entries(reported).filter(([, v]) => typeof v === "number" && Number.isFinite(v)));
+    if (Object.keys(event).length > 0) o.emit({ type: "usage", ...event });
     if (m.subtype === "success" && !m.is_error) return { status: "completed" };
     const detail = m.subtype === "success" ? m.result : m.errors.join("; ");
     return { status: "failed", error: redact(detail || m.subtype) };
   }
 
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
-  private env(mode: AdapterStartOptions["authMode"]): Record<string, string | undefined> | string {
+  private env(mode: AdapterStartOptions["authMode"], credentials: RunCredentials): Record<string, string | undefined> | string {
     if (mode !== "subscription" && mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
-    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir }); // the user's own login, untouched
-    const key = this.apiKey();
+    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome }); // the user's own login, untouched
+    const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
     return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir });
   }

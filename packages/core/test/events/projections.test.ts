@@ -1,12 +1,36 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { commitEvent } from "../../src/events/commit.js";
+import { ConnectionService } from "../../src/connections/service.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections,
+  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
+
+describe("workspaceCounts", () => {
+  it("sums cost only over runs started on the local calendar day", () => {
+    const d = openDatabase(":memory:");
+    const now = new Date(2026, 10, 14, 12, 0, 0);
+    const insert = d.prepare(
+      `INSERT INTO agent_runs (id, project_id, adapter, auth_mode, prompt, status, worktree, cost_usd, started_at)
+       VALUES (?, 'p1', 'fake', 'none', 'p', ?, 'wt', ?, ?)`,
+    );
+    insert.run("before", "completed", 1, new Date(2026, 10, 13, 23, 59, 59, 999).toISOString());
+    insert.run("start", "completed", 0.5, new Date(2026, 10, 14, 0, 0, 0).toISOString());
+    insert.run("late", "completed", 0.25, new Date(2026, 10, 14, 23, 59, 59, 999).toISOString());
+    insert.run("after", "completed", 2, new Date(2026, 10, 15, 0, 0, 0).toISOString());
+    insert.run("live", "running", null, new Date(2026, 10, 14, 9, 0, 0).toISOString());
+    expect(workspaceCounts(d, now)).toEqual({
+      runningAgents: 1, pendingDecisions: 0, todayCostUsd: 0.75, connections: { enabled: 0, failed: 0 },
+    });
+    d.close();
+  });
+});
 
 const human = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "claude" } as const;
@@ -39,7 +63,7 @@ describe("agent projections", () => {
     const run = getRun(db, "r1")!;
     expect(run).toMatchObject({
       id: "r1", projectId: "p1", cardId: "c1", adapter: "fake", authMode: "none", prompt: "do it",
-      status: "completed", worktree: "wt/r1", costUsd: 0.5, error: null,
+      status: "completed", worktree: "wt/r1", costUsd: 0.5, inputTokens: null, outputTokens: null, error: null,
     });
     expect(run.finishedAt).toBe(ledger.list().at(-1)!.ts);
     expect(run.startedAt).toBe(ledger.list()[0]!.ts);
@@ -98,6 +122,19 @@ describe("agent projections", () => {
     expect(getSetting(db, "auth_mode:claude")).toBe("api_key");
   });
 
+  it("projects token totals from agent.finished, NULL for entries without them, and rebuilds the same rows", () => {
+    for (const r of ["r1", "r2"]) {
+      emit("agent.started", { runId: r, adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: `wt/${r}` });
+    }
+    emit("agent.finished", { runId: "r1", status: "completed", costUsd: 0.1, inputTokens: 10, outputTokens: 5, error: null });
+    emit("agent.finished", { runId: "r2", status: "completed", costUsd: null, error: null }); // written before token totals existed
+    expect(getRun(db, "r1")).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
+    expect(getRun(db, "r2")).toMatchObject({ costUsd: null, inputTokens: null, outputTokens: null });
+    const live = listRuns(db, "p1");
+    rebuildAllProjections(db, ledger);
+    expect(listRuns(db, "p1")).toEqual(live);
+  });
+
   it("rebuild after mixed board + agent history equals the live projections", () => {
     const board = new BoardService(db, ledger);
     const p = board.createProject(human, { name: "A" });
@@ -110,6 +147,28 @@ describe("agent projections", () => {
       );
     const live = dump();
     expect(live[2]).toHaveLength(1);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  it("rebuild after connection add/update/test/remove equals the live connections table", async () => {
+    let n = 0;
+    const svc = new ConnectionService({
+      db, ledger, secrets: new MemorySecretStore(), newId: () => `c${++n}`,
+      testers: { claude: async () => ({ ok: true, message: "Connected" }) },
+    });
+    const claude = await svc.add(human, { kind: "llm", provider: "claude", name: "Claude", config: {}, secrets: { apiKey: "sk-ant-TESTKEY-0000000000" } });
+    const gemini = await svc.add(human, {
+      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: "p" }, private: { cliHome: join(tmpdir(), "home") },
+    });
+    const github = await svc.add(human, { kind: "github", provider: "github", name: "GitHub", config: {}, secrets: { token: "ghp_TESTKEY0000000000000000" } });
+    await svc.update(human, gemini.id, { name: "G2", enabled: false, secrets: { apiKey: "AIzaTESTKEY" }, private: { cliHome: null } });
+    await svc.test(human, claude.id);
+    await svc.test(human, gemini.id);
+    await svc.remove(human, github.id);
+    const dump = () => db.prepare("SELECT * FROM connections ORDER BY id").all();
+    const live = dump();
+    expect(live).toHaveLength(2);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
   });

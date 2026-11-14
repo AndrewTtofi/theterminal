@@ -29,6 +29,7 @@ export const COMMAND_OUTPUT_DELTA = "item/commandExecution/outputDelta";
 export const COMMAND_TERMINAL_INTERACTION = "item/commandExecution/terminalInteraction";
 export const TURN_STARTED = "turn/started";
 export const TURN_COMPLETED = "turn/completed";
+export const TOKEN_USAGE_UPDATED = "thread/tokenUsage/updated";
 export const ERROR = "error";
 
 export type ClientInfo = { name: string; title: string | null; version: string };
@@ -132,4 +133,16 @@ export type ItemNotification = { item: ThreadItem; threadId: string; turnId: str
 export type AgentMessageDeltaNotification = { threadId: string; turnId: string; itemId: string; delta: string };
 export type TurnStartedNotification = { threadId: string; turn: Turn };
 export type TurnCompletedNotification = { threadId: string; turn: Turn };
+/**
+ * Cumulative token counts for the thread (`total`); upstream also sends `last` (the latest turn),
+ * `modelContextWindow` and, per breakdown, `cacheWriteInputTokens`.
+ */
+export type TokenUsageBreakdown = {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+};
+export type TokenUsageUpdatedNotification = { threadId: string; turnId?: string; tokenUsage: { total: TokenUsageBreakdown } };
 export type ErrorNotification = { error: TurnError; willRetry: boolean; threadId: string; turnId: string };

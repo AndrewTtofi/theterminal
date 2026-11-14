@@ -5,12 +5,14 @@ import { chmod, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
+import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { redact } from "../redact.js";
+import { REDACTED, redact, trailingSecretContext } from "../redact.js";
+import { bundledGemini, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
+import { keyBlockAround, openKeyBlock } from "./key-blocks.js";
 import { Terminals, type ExitStatus } from "./terminals.js";
 import { ToolCallTracker, type Diff, type ToolCallUpdate, type ToolStatus } from "./tool-calls.js";
 
@@ -19,7 +21,7 @@ type Spawn = typeof nodeSpawn;
 type Rec = Record<string, unknown>;
 
 const NO_API_KEY = "No Gemini API key configured";
-const NO_CLI = "Gemini CLI is not installed or not on PATH";
+const NO_CLI = "Gemini CLI is unavailable: its bundled program is missing and none is on PATH";
 const CMD_SHIM = "Gemini CLI must be a native executable on Windows (found a .cmd shim)";
 const NOT_LOGGED_IN = "Gemini is not logged in; run 'gemini' once yourself";
 const COMMAND_PROMPT = "Gemini treats a prompt starting with / or $ as a command; rephrase it";
@@ -62,10 +64,41 @@ const PROJECT_ID = /^[A-Za-z0-9_-]{1,100}$/;
 /** Variables of every provider's key family: a terminal command run for the agent never sees them. */
 const PROVIDER_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i;
 const MAX_COMMAND = 150;
+/** The cwd part of a terminal summary, so a long cwd never hides the command. */
+const MAX_CWD = 60;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
+/** Streamed text is flushed once the stream pauses this long (the timer restarts on every chunk)… */
 const MESSAGE_PAUSE_MS = 250;
+/** …or this long after its first unflushed chunk, even while it keeps streaming. */
+const MESSAGE_MAX_WAIT_MS = 2000;
+/**
+ * When a long message is split by size, up to this much of its end is held back and joined with what streams
+ * next, so redaction sees a secret whole instead of in two messages. The split falls after the last newline in
+ * that window, else after its last whitespace (secrets hold none), else at its start; see `safeCut` for how it
+ * then moves back so that no secret is parted from the context redaction finds it by.
+ */
+const HELD_TAIL = 512;
+/**
+ * An open private key block (see key-blocks.ts) is held whole up to this size, far more than any real key; a span that
+ * reaches it is emitted as REDACTED and streaming goes on as usual from there.
+ */
+const MAX_HELD_BLOCK = 16 * 1024;
+/** Longer than any `-----BEGIN <label>-----` of a private key: a partial marker is held only up to this length. */
+const MAX_BEGIN_MARKER = 64;
+/**
+ * The start of a private key BEGIN marker that has not fully arrived ("-----BEGIN RSA PRIV"): a proper prefix of
+ * `-----BEGIN <label>-----`, where the label is capitals and spaces and the closing dashes may follow only a complete
+ * private key label. The label part is bounded so the whole match stays under MAX_BEGIN_MARKER: text that can no
+ * longer become such a marker is released as ordinary text.
+ */
+const PARTIAL_BEGIN = new RegExp(
+  `-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: (?:[A-Z ]{0,${MAX_BEGIN_MARKER - "-----BEGIN -----".length}}|[A-Z ]{0,${MAX_BEGIN_MARKER - "-----BEGIN PRIVATE KEY BLOCK-----".length}}PRIVATE KEY(?: BLOCK)?-{1,4}))?)?$`,
+);
+const INTERNAL_ERROR = "internal error";
 const STDERR_TAIL = 200;
+/** Stderr kept for the tail; much longer than the tail, so a secret cut at its start never reaches the tail. */
+const STDERR_KEEP = 4096;
 const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -176,7 +209,7 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
 }
 
 /**
- * Drives the user's installed `gemini` CLI in ACP mode as its client. We advertise the `fs` and `terminal`
+ * Drives the `gemini` CLI (the bundled one by default) in ACP mode as its client. We advertise the `fs` and `terminal`
  * capabilities, so file reads, file writes and (should Gemini use them) commands come to us: each is gated
  * first and then performed by us inside the worktree. `session/request_permission` is gated too, and a tool
  * call that reaches execution without either is reported as ungated: the run fails and Gemini is killed.
@@ -189,6 +222,7 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
 export class GeminiAdapter implements AgentAdapter {
   readonly id = "gemini" as const;
   private readonly dataDir: string;
+  private readonly bundled: () => BundledCli | null;
   private readonly bin: () => string | null;
   private readonly apiKey: () => string | undefined;
   private readonly spawn: Spawn;
@@ -196,11 +230,14 @@ export class GeminiAdapter implements AgentAdapter {
   private readonly readFile: (p: string) => string;
   private readonly command: { file: string; args: string[] } | undefined;
   private readonly worktrees: WorktreeManager;
+  private readonly fakeEnv: NodeJS.ProcessEnv;
 
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
     dataDir: string;
-    /** Locates the user's own Gemini CLI. Default: `gemini` on PATH. */
+    /** The Gemini CLI shipped with The Terminal. Default: `bundledGemini`. */
+    bundled?: () => BundledCli | null;
+    /** Locates a Gemini CLI on PATH, consulted only when there is no bundled one. Default: `gemini` on PATH. */
     bin?: () => string | null;
     apiKey?: () => string | undefined;
     spawn?: Spawn;
@@ -209,8 +246,12 @@ export class GeminiAdapter implements AgentAdapter {
     readFile?: (p: string) => string;
     /** Test override: spawn this program (with these arguments before the ACP flags) instead of the CLI. */
     command?: { file: string; args: string[] };
+    /** Tests only: the fixture CLI's script variables, snapshotted once at construction (see fakeAgentEnv). */
+    fakeEnv?: NodeJS.ProcessEnv;
   }) {
     this.dataDir = opts.dataDir;
+    this.fakeEnv = opts.fakeEnv ?? {};
+    this.bundled = opts.bundled ?? (() => bundledGemini());
     this.bin = opts.bin ?? (() => which("gemini"));
     this.apiKey = opts.apiKey ?? (() => process.env.GEMINI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -225,13 +266,15 @@ export class GeminiAdapter implements AgentAdapter {
     // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
     if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
     if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: "invalid projectId" };
-    const env = this.env(o.authMode);
+    const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
     let base: string[];
-    if (this.command) {
-      file = this.command.file;
-      base = this.command.args;
+    // A test command first, then the bundled CLI, and PATH only when the bundled one is missing.
+    const command = this.command ?? this.bundled();
+    if (command) {
+      file = command.file;
+      base = command.args;
     } else {
       const bin = this.bin();
       if (bin === null) return { status: "failed", error: NO_CLI };
@@ -277,12 +320,13 @@ export class GeminiAdapter implements AgentAdapter {
   }
 
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
-  private env(mode: AuthMode): NodeJS.ProcessEnv | string {
+  private env(mode: AuthMode, credentials: RunCredentials): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    if (mode === "google") return buildChildEnv("gemini", mode, { dataDir: this.dataDir }); // the user's own login, untouched
-    const key = this.apiKey();
+    const { cliHome, googleCloudProject } = credentials;
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject }), ...this.fakeEnv }; // the user's own login, untouched
+    const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir });
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject }), ...this.fakeEnv };
   }
 }
 
@@ -302,7 +346,10 @@ class GeminiRun {
   private failure: string | null = null;
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
+  private capTimer: NodeJS.Timeout | undefined;
   private stderrTail = "";
+  /** The latest cumulative USD cost from an ACP usage_update, if any. */
+  private costUsd: number | undefined;
   private closing: Promise<void> | null = null;
 
   constructor(
@@ -313,7 +360,7 @@ class GeminiRun {
   ) {
     const fold = (p: string) => (isWindows ? p.toLowerCase() : p);
     this.tracker = new ToolCallTracker((a, b) => fold(resolve(o.cwd, a)) === fold(resolve(o.cwd, b)));
-    this.terminals = new Terminals(spawn, (id, status, output) => this.onTerminalExit(id, status, output));
+    this.terminals = new Terminals(spawn, (s) => o.clean(s), (id, status, record) => this.onTerminalExit(id, status, record));
     this.terminalEnv = {};
     for (const [k, v] of Object.entries(env)) {
       if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
@@ -329,7 +376,7 @@ class GeminiRun {
     this.exited = new Promise((resolve) => this.child.on("close", () => resolve()));
     this.child.on("error", (e) => this.fail(`Gemini could not be started: ${redact(errorMessage(e))}`));
     this.child.stderr!.on("data", (chunk: Buffer) => {
-      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL);
+      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_KEEP);
     });
     this.peer = new JsonRpcPeer(
       { input: this.child.stdout!, output: this.child.stdin! },
@@ -344,7 +391,7 @@ class GeminiRun {
       result = { status: "failed", error: this.describe(e) };
     } finally {
       this.o.signal.removeEventListener("abort", stop);
-      this.flushText();
+      this.flushText("end");
       await this.shutdown();
     }
     if (this.o.signal.aborted) return { status: "failed", error: STOPPED };
@@ -373,6 +420,7 @@ class GeminiRun {
     this.inTurn = true;
     const res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
     this.inTurn = false;
+    if (this.costUsd !== undefined) this.o.emit({ type: "usage", costUsd: this.costUsd });
     const stopReason = isRecord(res) && typeof res.stopReason === "string" ? res.stopReason : "unknown";
     if (stopReason === "end_turn") return { status: "completed" };
     return { status: "failed", error: `Gemini stopped: ${stopReason}` };
@@ -404,7 +452,13 @@ class GeminiRun {
   private describe(e: unknown): string {
     const msg = errorMessage(e);
     if (msg === "rpc closed: eof") {
-      const tail = redact(this.stderrTail.trim());
+      // Cleaned before the tail is cut, so the cut never leaves part of a secret behind; no tail if that fails.
+      let tail = "";
+      try {
+        tail = this.o.clean(this.stderrTail).trim().slice(-STDERR_TAIL);
+      } catch {
+        // Report the exit without the tail.
+      }
       return tail === "" ? "Gemini exited unexpectedly" : `Gemini exited unexpectedly: ${tail}`;
     }
     if (msg === "rpc closed: protocol error") return "Gemini sent a malformed message";
@@ -451,10 +505,17 @@ class GeminiRun {
         return;
       case "tool_call":
       case "tool_call_update":
-        this.flushText();
+        this.flushText("message");
         return this.onToolCall(u);
       case "current_mode_update":
         if (u.currentModeId !== DEFAULT_MODE) this.fail(MODE_CHANGED);
+        return;
+      case "usage_update":
+        // gemini-cli 0.68.0 sends `used` and `size` (context-window fill, not consumption: never mapped to tokens)
+        // and no `cost`, so Gemini runs report no usage. ACP's optional `cost` is the cumulative session cost: the
+        // latest USD amount is reported once, when the turn ends; omitted leaves it, null clears it.
+        if (u.cost === null) this.costUsd = undefined;
+        else if (isRecord(u.cost)) this.costUsd = u.cost.currency === "USD" && isNumber(u.cost.amount) ? u.cost.amount : undefined;
         return;
       default:
         return;
@@ -487,20 +548,66 @@ class GeminiRun {
     };
   }
 
-  /** Streamed chunks are joined into one message: flushed before any tool activity, when large, or after a pause. */
+  /**
+   * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
+   * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
+   * An open private key block is never cut: it is held until its END marker arrives, and only the end of the run
+   * flushes one still open, as REDACTED. One that reaches MAX_HELD_BLOCK goes out as REDACTED at once.
+   */
   private text(t: string): void {
     this.pendingText += t;
-    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText();
-    this.flushTimer ??= setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
+    while (this.pendingText.length >= MAX_HELD_BLOCK) {
+      const open = openKeyBlock(this.pendingText);
+      if (open < 0 || this.pendingText.length - open < MAX_HELD_BLOCK) break;
+      this.overflowBlock(open);
+    }
+    if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText("size");
+    clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
+    this.capTimer ??= setTimeout(() => this.flushText("stream"), MESSAGE_MAX_WAIT_MS);
   }
 
-  private flushText(): void {
+  /**
+   * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
+   * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
+   * `message` (before tool activity): flush everything but a trailing word (see `trailingWordStart`) and what `safeCut`
+   * keeps back at the very end (an open private key block, a partial BEGIN marker, a trailing secret context), which
+   * the tool call must not part from what follows; held text goes out after the tool's result. `end`: flush
+   * everything, an open block as REDACTED. The text itself is never changed otherwise: redaction sees a key block
+   * from BEGIN to END.
+   */
+  private flushText(mode: "size" | "stream" | "message" | "end"): void {
+    this.clearFlushTimers();
+    const all = this.pendingText;
+    let cut = all.length;
+    let text = all;
+    if (mode === "end") {
+      const open = openKeyBlock(all);
+      if (open >= 0) text = all.slice(0, open) + REDACTED;
+    } else {
+      cut = safeCut(all, mode === "message" ? trailingWordStart(all) : mode === "size" ? sizeCut(all) : streamCut(all));
+      text = all.slice(0, cut);
+    }
+    this.pendingText = all.slice(cut);
+    if (text !== "") this.o.emit({ type: "message", text });
+    if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
+  }
+
+  /**
+   * Fails closed on a key block held to MAX_HELD_BLOCK: the text before it and REDACTED go out, the held span is
+   * dropped, and what follows streams as usual (a real key is far shorter, so this is prose after a stray marker).
+   */
+  private overflowBlock(start: number): void {
+    this.clearFlushTimers();
+    this.o.emit({ type: "message", text: this.pendingText.slice(0, start) + REDACTED });
+    this.pendingText = this.pendingText.slice(start + MAX_HELD_BLOCK);
+  }
+
+  private clearFlushTimers(): void {
     clearTimeout(this.flushTimer);
+    clearTimeout(this.capTimer);
     this.flushTimer = undefined;
-    if (this.pendingText === "") return;
-    const text = this.pendingText;
-    this.pendingText = "";
-    this.o.emit({ type: "message", text });
+    this.capTimer = undefined;
   }
 
   // ---- requests from the agent ----
@@ -549,7 +656,7 @@ class GeminiRun {
   private async onPermission(p: Rec): Promise<unknown> {
     const tc = p.toolCall;
     if (!isRecord(tc) || typeof tc.toolCallId !== "string" || !Array.isArray(p.options)) throw this.malformed("session/request_permission", p);
-    this.flushText();
+    this.flushText("message");
     const kind = typeof tc.kind === "string" ? tc.kind : null;
     const title = typeof tc.title === "string" && tc.title !== "" ? tc.title : `${kind ?? "unknown"} tool`;
     const action: ProposedAction = { tool: toolName(tc), kind: (kind !== null && TOOL_KINDS[kind]) || "other", summary: title, input: tc, paths: locationPaths(tc.locations) };
@@ -577,7 +684,7 @@ class GeminiRun {
   private async onRead(method: string, p: Rec): Promise<unknown> {
     const { path, line, limit } = p;
     if (!isString(path) || !optional(line, isNumber) || !optional(limit, isNumber)) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate(path);
     const input: Rec = { path, ...(line != null && { line }), ...(limit != null && { limit }) };
     const g = await this.o.gate({ tool: method, kind: "file_read", summary: `Read ${display(this.o.cwd, path)}`, input, paths: [path] });
@@ -597,7 +704,7 @@ class GeminiRun {
   private async onWrite(method: string, p: Rec): Promise<unknown> {
     const { path, content } = p;
     if (!isString(path) || !isString(content)) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate(path);
     const inside = (q: string) => this.worktrees.resolveInside(this.o.cwd, q);
     const real = inside(path);
@@ -628,17 +735,27 @@ class GeminiRun {
     const { command, args, env, cwd, outputByteLimit } = p;
     if (!isString(command) || !optional(args, isStringArray) || !optional(cwd, isString) || !optional(outputByteLimit, isNumber)) throw this.malformed(method, p);
     if (!optional(env, (v): v is { name: string; value: string }[] => Array.isArray(v) && v.every(isEnvVar))) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate();
     const argv = args ?? [];
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
     // Where it runs and how many variables it sets are part of what the reviewer approves.
-    const context = cwd != null || (env != null && env.length > 0)
-      ? ` (in ${cwd == null ? "." : display(this.o.cwd, cwd)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
-      : "";
-    const line = [command, ...argv].join(" ");
-    const summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
-    const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths: cwd == null ? [] : [cwd] });
+    const paths = cwd == null ? [] : [cwd];
+    let summary: string;
+    try {
+      // Both parts are capped for layout, so both are cleaned (the run's live redaction) before they are cut.
+      const context = cwd != null || (env != null && env.length > 0)
+        ? ` (in ${cwd == null ? "." : cap(this.o.clean(display(this.o.cwd, cwd)), MAX_CWD)}${env != null && env.length > 0 ? `, +${env.length} env` : ""})`
+        : "";
+      const line = this.o.clean([command, ...argv].join(" "));
+      summary = `Run: ${(line.slice(0, Math.max(0, MAX_COMMAND - context.length)) + context).slice(0, MAX_COMMAND)}`;
+    } catch {
+      // Cleaning failed, so the gate cannot record what it would approve: recorded as denied, and the run fails.
+      void this.o.recordDenied({ tool: method, kind: "shell", summary: "Run a terminal command", input, paths }, INTERNAL_ERROR).catch(() => undefined);
+      this.fail(INTERNAL_ERROR);
+      throw new Error(INTERNAL_ERROR);
+    }
+    const g = await this.o.gate({ tool: method, kind: "shell", summary, input, paths });
     if (g.decision !== "allow") throw new Error(g.reason);
     let dir = this.o.cwd;
     if (cwd != null) {
@@ -680,11 +797,12 @@ class GeminiRun {
     }
   }
 
-  private onTerminalExit(terminalId: string, status: ExitStatus, output: string): void {
+  /** `record` is the output for the record: cleaned before any cut it went through (see Terminals). */
+  private onTerminalExit(terminalId: string, status: ExitStatus, record: string): void {
     const actionId = this.terminalActions.get(terminalId);
     if (actionId === undefined) return;
     this.terminalActions.delete(terminalId);
-    this.result(actionId, status.exitCode === 0, output);
+    this.result(actionId, status.exitCode === 0, record);
   }
 
   /** Records that an allowed action was not performed after all, and tells the agent it was denied. */
@@ -709,14 +827,92 @@ async function readCapped(real: string): Promise<string> {
   }
 }
 
-/** Writes through a temp file in the same directory, then renames it into place, keeping an existing file's mode. */
+/**
+ * Where a size-split message is cut: after the last newline in its last HELD_TAIL characters, else after the last
+ * whitespace, else after the last `,` `;` `&` or `}` (minified JSON, query strings), else at their start.
+ */
+function sizeCut(text: string): number {
+  const min = Math.max(0, text.length - HELD_TAIL);
+  const newline = text.lastIndexOf("\n");
+  if (newline >= min) return newline + 1;
+  for (const boundary of [/\s/, /[,;&}]/]) {
+    for (let i = text.length - 1; i >= min; i--) {
+      if (boundary.test(text[i]!)) return i + 1;
+    }
+  }
+  return min;
+}
+
+/**
+ * Where streaming text is cut by a timer: like `sizeCut`, but never inside a run of non-whitespace, which may be a
+ * token whose rest has not arrived. With no whitespace at all, nothing is flushed (a size split bounds the wait).
+ */
+function streamCut(text: string): number {
+  const newline = text.lastIndexOf("\n");
+  if (newline >= 0 && newline >= text.length - HELD_TAIL) return newline + 1;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (/\s/.test(text[i]!)) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Where the run of non-whitespace that ends `text` starts (`text.length` when it ends in whitespace), at most HELD_TAIL
+ * back. A tool call can land in the middle of a token: the part already here may be the start of a secret (`Bea` of
+ * `Bearer`, the first characters of a value), which only the whole token lets redaction judge.
+ */
+function trailingWordStart(text: string): number {
+  const floor = Math.max(0, text.length - HELD_TAIL);
+  for (let i = text.length; i > floor; i--) {
+    if (/\s/.test(text[i - 1]!)) return i;
+  }
+  return floor;
+}
+
+/**
+ * Moves `cut` back until the text before it is safe to emit on its own: never inside a private key block (an open
+ * one runs to the end), never after a partial BEGIN line, and never right after the context that redaction finds a
+ * secret value by (`Bearer `, `api_key = `, `"password":"ab`, a `password: |` block still running): that context
+ * goes with its value into what is held. Stepping back over contexts stops 2 * HELD_TAIL from the end, so text
+ * built of nothing but keys is still emitted; the partial-marker step is taken once, within MAX_BEGIN_MARKER of the
+ * cut asked for, so text built of nothing but dashes or marker starts is emitted too. `text` starts a message of its
+ * own, so redaction will see its first line as a whole line: it is judged as one.
+ */
+function safeCut(text: string, cut: number): number {
+  const floor = text.length - 2 * HELD_TAIL;
+  const asked = cut;
+  let partialChecked = false;
+  for (;;) {
+    const block = keyBlockAround(text, cut);
+    if (block >= 0) {
+      cut = block;
+      continue;
+    }
+    const head = text.slice(0, cut);
+    let back = -1;
+    if (!partialChecked && cut > asked - MAX_BEGIN_MARKER) {
+      partialChecked = true;
+      const window = Math.max(0, cut - MAX_BEGIN_MARKER); // a partial marker is at most that long, so nothing before it matters
+      const partial = PARTIAL_BEGIN.exec(head.slice(window));
+      if (partial !== null) back = window + partial.index;
+    }
+    if (back < 0 && cut > floor) back = trailingSecretContext(head, true);
+    if (back < 0) return cut;
+    cut = back;
+  }
+}
+
+/** `s`, or its first `max - 1` characters and an ellipsis. */
+const cap = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
+
+/** Writes through a temp file in the same directory, then renames it into place, keeping an existing file's permission bits. */
 async function writeAtomic(real: string, content: string): Promise<void> {
   await mkdir(dirname(real), { recursive: true });
   const tmp = join(dirname(real), `.${basename(real)}.${randomUUID()}.tmp`);
   await writeFile(tmp, content, "utf8");
   try {
     const mode = await stat(real).then(
-      (st) => st.mode & 0o7777,
+      (st) => st.mode & 0o777, // permission bits only: never setuid, setgid or sticky
       (e: NodeJS.ErrnoException) => {
         if (e.code === "ENOENT") return null;
         throw e;

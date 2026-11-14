@@ -71,6 +71,24 @@ const MIGRATIONS = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );`,
+  `ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER;
+  ALTER TABLE agent_runs ADD COLUMN output_tokens INTEGER;`,
+  `CREATE TABLE connections (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    config TEXT NOT NULL,
+    secret_fields TEXT NOT NULL,
+    private_fields TEXT NOT NULL,
+    status_state TEXT NOT NULL,
+    status_message TEXT NOT NULL,
+    tested_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX connections_provider ON connections (provider);`,
 ];
 
 export type Db = Database.Database;

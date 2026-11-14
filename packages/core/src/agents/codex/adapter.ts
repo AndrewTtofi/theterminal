@@ -1,18 +1,20 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { redact } from "../redact.js";
+import { heldTailStart, redact } from "../redact.js";
+import { bundledCodex, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import * as P from "./protocol.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 
-const NO_CLI = "Codex CLI is not installed or not on PATH";
+const NO_CLI = "Codex CLI is unavailable: its bundled program is missing and none is on PATH";
 const CMD_SHIM = "Codex CLI must be a native executable on Windows (found a .cmd shim)";
 const NO_API_KEY = "No OpenAI API key configured";
 const NOT_LOGGED_IN = "Codex is not logged in; run 'codex login' yourself";
@@ -28,9 +30,9 @@ export const CODEX_HOME_DIR = "codex-home";
 const PROJECT_ID = /^[A-Za-z0-9_-]+$/;
 const STOPPED = "run stopped";
 const CLIENT_VERSION = "0.0.0";
-const MAX_COMMAND = 150;
+const MAX_STDIN_COMMAND = 60;
+const MAX_STDIN_INPUT = 80;
 const MAX_DIFF = 4000;
-const MAX_OUTPUT = 4000;
 const MAX_MESSAGE = 256 * 1024;
 const STDERR_KEEP = 4096;
 const STDERR_TAIL = 200;
@@ -119,11 +121,15 @@ const movePath = (c: P.FileUpdateChange): string | null =>
 /**
  * Maps a Codex server-request to a ProposedAction. `paths` come only from the request (and, for a file change,
  * the changes Codex announced for that item); the policy decides. Unknown methods are `other`, so a human decides.
+ * Summaries carry whole commands, which the runner redacts before it caps. The few parts capped here for layout
+ * (a stdin approval's command and input, each diff preview) go through `clean` (the run's live redaction) first,
+ * so a cut never leaves a fragment of a secret that no pattern matches.
  */
 export function codexApprovalToAction(
   method: string,
   params: unknown,
   cwd: string,
+  clean: (s: string) => string,
   changes?: P.FileUpdateChange[],
 ): ProposedAction {
   const p = isRecord(params) ? params : {};
@@ -143,13 +149,18 @@ export function codexApprovalToAction(
 
   if (method === P.COMMAND_APPROVAL && p.kind === "writeStdin") {
     // Input typed into a command that is already running (the input is the reason): never the command itself.
+    // The summary shows what will be typed, with control characters escaped so a newline cannot hide. Both parts
+    // are cleaned (then escaped) before they are cut, so a cut never leaves a fragment of a secret behind.
     const command = str(p.command);
     const dir = str(p.cwd);
+    const reason = str(p.reason);
+    const shownCommand = clean(command || "(no command)").slice(0, MAX_STDIN_COMMAND);
+    const typed = JSON.stringify(clean(reason)).slice(1, -1).slice(0, MAX_STDIN_INPUT);
     return {
       tool: "codex.stdin",
       kind: "shell",
-      summary: `Send input to running command: ${(command || "(no command)").slice(0, MAX_COMMAND)}`,
-      input: { command, cwd: dir, kind: p.kind, reason: str(p.reason) },
+      summary: `Type into ${shownCommand}: ${typed}`,
+      input: { command, cwd: dir, kind: p.kind, reason },
       paths: dir ? [dir] : [],
     };
   }
@@ -161,7 +172,7 @@ export function codexApprovalToAction(
     return {
       tool: "codex.command",
       kind: "shell",
-      summary: `Run: ${(command || "(no command)").slice(0, MAX_COMMAND)}`,
+      summary: `Run: ${command || "(no command)"}`,
       input: { command, ...(dir ? { cwd: dir } : {}), ...(reason ? { reason } : {}) },
       paths: dir ? [dir] : [],
     };
@@ -186,7 +197,7 @@ export function codexApprovalToAction(
           path: c.path,
           kind: changeKind(c),
           ...(movePath(c) === null ? {} : { movePath: movePath(c) }),
-          ...(typeof c.diff === "string" && c.diff !== "" ? { diff: c.diff.slice(0, MAX_DIFF) } : {}),
+          ...(typeof c.diff === "string" && c.diff !== "" ? { diff: clean(c.diff).slice(0, MAX_DIFF) } : {}),
         })),
         ...(grantRoot ? { grantRoot } : {}),
       },
@@ -199,21 +210,25 @@ export function codexApprovalToAction(
 
 type CommandSpec = { file: string; args: string[] };
 
-/** Drives the user's installed `codex app-server`. Every command and file change waits for our gate. */
+/** Drives `codex app-server` (the bundled Codex CLI by default). Every command and file change waits for our gate. */
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex" as const;
   private readonly dataDir: string;
+  private readonly bundled: () => BundledCli | null;
   private readonly bin: () => string | null;
   private readonly apiKey: () => string | undefined;
   private readonly spawn: typeof nodeSpawn;
   private readonly command: CommandSpec | undefined;
   private readonly exists: (p: string) => boolean;
   private readonly killGraceMs: number;
+  private readonly fakeEnv: NodeJS.ProcessEnv;
 
   constructor(opts: {
     /** The data directory that holds the empty global git config (see WorktreeManager). */
     dataDir: string;
-    /** Locates the user's own Codex CLI. Default: `codex` on PATH. */
+    /** The Codex CLI shipped with The Terminal. Default: `bundledCodex`. */
+    bundled?: () => BundledCli | null;
+    /** Locates a Codex CLI on PATH, consulted only when there is no bundled one. Default: `codex` on PATH. */
     bin?: () => string | null;
     apiKey?: () => string | undefined;
     spawn?: typeof nodeSpawn;
@@ -223,8 +238,12 @@ export class CodexAdapter implements AgentAdapter {
     exists?: (p: string) => boolean;
     /** How long to wait after SIGTERM before SIGKILL. Default 5000. */
     killGraceMs?: number;
+    /** Tests only: the fixture CLI's script variables, snapshotted once at construction (see fakeAgentEnv). */
+    fakeEnv?: NodeJS.ProcessEnv;
   }) {
     this.dataDir = opts.dataDir;
+    this.fakeEnv = opts.fakeEnv ?? {};
+    this.bundled = opts.bundled ?? (() => bundledCodex());
     this.bin = opts.bin ?? (() => which("codex"));
     this.apiKey = opts.apiKey ?? (() => process.env.OPENAI_API_KEY);
     this.spawn = opts.spawn ?? nodeSpawn;
@@ -240,10 +259,11 @@ export class CodexAdapter implements AgentAdapter {
     }
     let apiKey: string | undefined;
     if (o.authMode === "api_key") {
-      apiKey = this.apiKey();
+      apiKey = o.credentials.apiKey ?? this.apiKey();
       if (!apiKey) return { status: "failed", error: NO_API_KEY };
     }
-    let cmd = this.command;
+    // A test command first, then the bundled CLI, and PATH only when the bundled one is missing.
+    let cmd = this.command ?? this.bundled() ?? undefined;
     if (cmd === undefined) {
       const file = this.bin();
       if (file === null) return { status: "failed", error: NO_CLI };
@@ -259,7 +279,7 @@ export class CodexAdapter implements AgentAdapter {
     }
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
-    const env = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir });
+    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome }), ...this.fakeEnv };
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };
@@ -270,8 +290,6 @@ export class CodexAdapter implements AgentAdapter {
         return { status: "failed", error: NO_HOME };
       }
       env.CODEX_HOME = home;
-    } else if (process.env.CODEX_HOME) {
-      env.CODEX_HOME = process.env.CODEX_HOME; // a path, not a credential: where the user's own login lives
     }
 
     let child: ChildProcessWithoutNullStreams;
@@ -290,9 +308,15 @@ export class CodexAdapter implements AgentAdapter {
 class CodexSession {
   private readonly peer: JsonRpcPeer;
   private readonly exited: Promise<void>;
+  /** The last STDERR_KEEP characters of stderr up to `stderrHeld`, cleaned. */
   private stderr = "";
+  /** The raw tail of stderr that may still go on (see `heldTailStart`), cleaned with the rest once it ends. */
+  private stderrHeld = "";
+  private stderrWithheld = false;
   private threadId: string | undefined;
   private turnId: string | undefined;
+  /** The latest cumulative token counts Codex reported for our thread. */
+  private tokenTotal: { inputTokens: unknown; outputTokens: unknown } | undefined;
   /** Set once the run is ending: from then on every approval is declined. */
   private stopping = false;
   private settle!: (r: StartResult) => void;
@@ -317,9 +341,8 @@ class CodexSession {
     child.once("error", (e: NodeJS.ErrnoException) => {
       this.fail(e.code === "ENOENT" || e.code === "EACCES" ? NO_CLI : this.withStderr("Codex could not be started"));
     });
-    child.stderr.on("data", (d: Buffer) => {
-      this.stderr = (this.stderr + d.toString("utf8")).slice(-STDERR_KEEP);
-    });
+    const decoder = new StringDecoder("utf8");
+    child.stderr.on("data", (d: Buffer) => this.onStderr(decoder.write(d)));
     this.peer = new JsonRpcPeer(
       { input: child.stdout, output: child.stdin },
       {
@@ -422,16 +445,12 @@ class CodexSession {
     if (!approval) {
       // We cannot serve it: record it as denied without asking anyone, and refuse it at once.
       const reason = `unsupported request ${method}`;
-      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd), reason).catch((e: unknown) => {
-        this.fail(`gate error: ${redact(errorMessage(e))}`);
-      });
+      this.refuse(method, params, reason);
       throw new Error(reason);
     }
     if (method === P.COMMAND_APPROVAL && isNetworkRequest(p)) {
       // Never asked: accepting may re-run the command outside the sandbox (orchestrator.rs). Recorded and declined.
-      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd), NETWORK_DENIED).catch((e: unknown) => {
-        this.fail(`gate error: ${redact(errorMessage(e))}`);
-      });
+      this.refuse(method, params, NETWORK_DENIED);
       return decline;
     }
     // The command item was announced before this request; its command fills in one the request leaves out.
@@ -439,19 +458,28 @@ class CodexSession {
     const request = method === P.COMMAND_APPROVAL && cached !== undefined
       ? { ...p, command: p.command ?? cached.command, cwd: p.cwd ?? cached.cwd }
       : params;
-    const action = codexApprovalToAction(method, request, this.o.cwd, this.fileChanges.get(itemId));
     let g;
     try {
-      g = await this.o.gate(action);
+      g = await this.o.gate(codexApprovalToAction(method, request, this.o.cwd, this.o.clean, this.fileChanges.get(itemId)));
     } catch (e) {
       // Fail closed: the gate can no longer be trusted.
       this.fail(`gate error: ${redact(errorMessage(e))}`);
       return decline;
     }
     if (g.decision !== "allow" || this.stopping || itemId === "") return decline;
-    // Input to a running command shares the command's item id; the item's result stays the command's.
+    // Input to a running command has its own item id and no item result; the running command keeps its own.
     if (p.kind !== "writeStdin") this.allowed.set(itemId, g.actionId);
     return { decision: "accept" };
+  }
+
+  /** Records a request we refuse without asking anyone; a failure to record it fails the run. */
+  private refuse(method: string, params: unknown, reason: string): void {
+    const failed = (e: unknown) => this.fail(`gate error: ${redact(errorMessage(e))}`);
+    try {
+      this.o.recordDenied(codexApprovalToAction(method, params, this.o.cwd, this.o.clean), reason).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
   }
 
   private onNotification(method: string, params: unknown): void {
@@ -480,10 +508,18 @@ class CodexSession {
         this.turnId ??= str(turn?.id) || undefined;
         return;
       }
+      case P.TOKEN_USAGE_UPDATED: {
+        // Cumulative for the thread: remember the latest, report it once when the turn ends.
+        if (this.threadId === undefined || str(params.threadId) !== this.threadId) return;
+        const usage = isRecord(params.tokenUsage) && isRecord(params.tokenUsage.total) ? params.tokenUsage.total : undefined;
+        if (usage !== undefined) this.tokenTotal = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+        return;
+      }
       case P.TURN_COMPLETED: {
         const turn = isRecord(params.turn) ? (params.turn as P.Turn) : undefined;
         if (turn === undefined || (this.turnId !== undefined && turn.id !== this.turnId)) return;
-        // Codex reports token counts but no dollar cost, so no usage event is emitted.
+        // Codex reports token counts but no dollar cost.
+        this.reportUsage();
         if (turn.status === "completed") return this.end({ status: "completed" });
         const error = isRecord(turn.error) ? str(turn.error.message) : "";
         return this.fail(redact(error || `Codex turn ${turn.status}`));
@@ -535,7 +571,7 @@ class CodexSession {
       type === "commandExecution"
         ? str((item as { aggregatedOutput?: unknown }).aggregatedOutput)
         : `${status}: ${this.changedPaths(item)}`;
-    this.o.emit({ type: "action_result", actionId, ok, output: output.slice(0, MAX_OUTPUT) });
+    this.o.emit({ type: "action_result", actionId, ok, output }); // whole: the runner caps it after redacting
   }
 
   private changedPaths(item: P.ThreadItem): string {
@@ -564,8 +600,43 @@ class CodexSession {
     this.settle(r);
   }
 
+  /** Emits the thread's token totals once (the counts are cumulative), if Codex reported any. */
+  private reportUsage(): void {
+    const t = this.tokenTotal;
+    this.tokenTotal = undefined;
+    if (t === undefined) return;
+    const counts = Object.fromEntries(Object.entries(t).filter(([, v]) => typeof v === "number" && Number.isFinite(v)));
+    if (Object.keys(counts).length > 0) this.o.emit({ type: "usage", ...counts });
+  }
+
+  /**
+   * Adds stderr text to the window. Only what can no longer go on is cleaned (see `heldTailStart`): a chunk can end
+   * inside a secret, and cleaning that part alone could redact it and leave the rest of it, which follows in the next
+   * chunk, plain. The window is cut only after cleaning. Without a working clean, stderr is withheld for good.
+   */
+  private onStderr(text: string): void {
+    if (this.stderrWithheld || text === "") return;
+    const raw = this.stderrHeld + text;
+    const held = heldTailStart(raw);
+    this.stderrHeld = raw.slice(held);
+    if (held === 0) return;
+    try {
+      this.stderr = this.o.clean(this.stderr + raw.slice(0, held)).slice(-STDERR_KEEP);
+    } catch {
+      this.stderr = this.stderrHeld = "";
+      this.stderrWithheld = true;
+    }
+  }
+
   private withStderr(msg: string): string {
-    const tail = this.stderr.replace(/\x1b\[[0-9;]*m/g, "").trim().slice(-STDERR_TAIL);
+    // Cleaned whole (the held tail too) before the tail is cut, so the cut never leaves part of a secret behind; no
+    // tail if that fails.
+    let tail = "";
+    try {
+      tail = this.o.clean((this.stderr + this.stderrHeld).replace(/\x1b\[[0-9;]*m/g, "")).trim().slice(-STDERR_TAIL);
+    } catch {
+      // Report the failure without the tail.
+    }
     return tail ? `${msg}: ${tail}` : msg;
   }
 

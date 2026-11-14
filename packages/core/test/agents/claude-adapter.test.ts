@@ -1,3 +1,4 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HookCallbackMatcher, HookInput, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -5,15 +6,18 @@ import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
-import { DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
-import { EMPTY_GITCONFIG } from "../../src/agents/worktrees.js";
+import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { AgentRunner, DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
+import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
+import { BoardService } from "../../src/board/board-service.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { openDatabase, type Db } from "../../src/db.js";
-import { getSetting } from "../../src/events/projections.js";
+import { getRun, getSetting, listActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderSettings, toolToAction as indexToolToAction } from "../../src/index.js";
 
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
+const CONNECTION_KEY = "sk-ant-TESTKEY-0000000000";
 const CWD = join("tmp", "worktree");
 
 describe("toolToAction", () => {
@@ -47,9 +51,9 @@ describe("toolToAction", () => {
     expect(a.summary.length).toBeGreaterThan(0);
   });
 
-  it("caps the command in a Bash summary at 150 characters", () => {
+  it("passes the whole command to the gate: the runner redacts before it caps", () => {
     const a = toolToAction("Bash", { command: "x".repeat(400) }, CWD);
-    expect(a.summary).toBe(`Run: ${"x".repeat(150)}`);
+    expect(a.summary).toBe(`Run: ${"x".repeat(400)}`);
   });
 
   it("summarises absolute paths inside the worktree relative to it", () => {
@@ -87,8 +91,8 @@ describe("toolToAction", () => {
   });
 
   it("caps the PowerShell command and remote agent description in summaries", () => {
-    expect(toolToAction("PowerShell", { command: "y".repeat(300) }, CWD).summary).toBe(`Run: ${"y".repeat(150)}`);
-    expect(toolToAction("Agent", { description: "d".repeat(300), isolation: "remote" }, CWD).summary).toBe(`Run remote agent: ${"d".repeat(120)}`);
+    expect(toolToAction("PowerShell", { command: "y".repeat(300) }, CWD).summary).toBe(`Run: ${"y".repeat(300)}`);
+    expect(toolToAction("Agent", { description: "d".repeat(300), isolation: "remote" }, CWD).summary).toBe(`Run remote agent: ${"d".repeat(300)}`);
   });
 
   // The CLI trims path input before expanding "~", so padded paths must never be judged as written.
@@ -184,6 +188,8 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     },
     emit: (e) => events.push(e),
     recordDenied: async () => {},
+    clean: (t) => t,
+    credentials: {},
   };
   return { opts, proposed, events, abort };
 }
@@ -306,6 +312,15 @@ describe("ClaudeAdapter", () => {
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000"); // a copy, not the real env
   });
 
+  it("api_key mode prefers the key the runner resolved from a connection over its own fallback", async () => {
+    const q = fakeQuery([success(0)]);
+    const fallback = vi.fn(() => FAKE_KEY);
+    const h = harness();
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY } });
+    expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe(CONNECTION_KEY);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
   it("api_key mode keeps the bundled Claude Code and never looks for one on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const findClaude = vi.fn(() => CLAUDE_BIN);
@@ -314,18 +329,36 @@ describe("ClaudeAdapter", () => {
     expect(findClaude).not.toHaveBeenCalled();
   });
 
-  it("subscription mode runs the user's own Claude Code found on PATH", async () => {
+  it("subscription mode runs the Claude Code bundled with the Agent SDK and never looks on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const findClaude = vi.fn(() => CLAUDE_BIN);
+    const bundled = "node_modules/@anthropic-ai/claude-agent-sdk-x/claude";
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => bundled, findClaude }).start({ ...harness().opts, authMode: "subscription" });
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(bundled);
+    expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("subscription mode uses the SDK's own platform binary when none is injected", async () => {
+    const { bundledClaude } = await import("../../src/agents/bundled.js");
+    const q = fakeQuery([success(0)]);
+    const findClaude = vi.fn(() => CLAUDE_BIN);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude }).start({ ...harness().opts, authMode: "subscription" });
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(bundledClaude());
+    expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("subscription mode falls back to Claude Code on PATH only when the bundled one is missing", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => null, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
     expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(CLAUDE_BIN);
   });
 
-  it("subscription mode fails without starting Claude when Claude Code is not on PATH", async () => {
+  it("subscription mode fails without starting Claude when there is no bundled Claude Code and none on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const h = harness();
-    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
-    expect(r).toEqual({ status: "failed", error: "Claude Code is not installed or not on PATH" });
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, bundled: () => null, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
+    expect(r).toEqual({ status: "failed", error: "Claude Code is unavailable: its bundled program is missing and none is on PATH" });
     expect(q.calls).toHaveLength(0);
   });
 
@@ -345,7 +378,7 @@ describe("ClaudeAdapter", () => {
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
     for (const k of STRIPPED) expect(env).not.toHaveProperty(k);
     expect(Object.keys(env).filter((k) => /^ANTHROPIC_/i.test(k))).toEqual([]);
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("fake-oauth-token-value"); // the user's own CLI login is left alone
+    expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN"); // not allowlisted: the CLI reads its own stored login
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(apiKey).not.toHaveBeenCalled();
   });
@@ -357,7 +390,7 @@ describe("ClaudeAdapter", () => {
     expect(env).not.toHaveProperty("GIT_AUTHOR_EMAIL");
     expect(env).not.toHaveProperty("GIT_COMMITTER_NAME");
     expect(env).not.toHaveProperty("GIT_DIR");
-    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"]);
+    expect(Object.keys(env).filter((k) => /^GIT_/i.test(k)).sort()).toEqual(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"]);
     expect(env.GIT_CONFIG_GLOBAL).toBe(join(DATA_DIR, EMPTY_GITCONFIG));
     expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
   });
@@ -381,6 +414,14 @@ describe("ClaudeAdapter", () => {
       { type: "action_result", actionId: "act-1", ok: false, output: "remote agents are not supported" },
       { type: "usage", costUsd: 0 },
     ]);
+  });
+
+  it("reports the result's cost and token usage", async () => {
+    const usage = { input_tokens: 120, output_tokens: 34, cache_read_input_tokens: 7, cache_creation_input_tokens: 0 };
+    const q = fakeQuery([{ msg: { type: "result", subtype: "success", is_error: false, result: "done", total_cost_usd: 0.25, usage } }]);
+    const h = harness();
+    expect(await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "completed" });
+    expect(h.events).toEqual([{ type: "usage", costUsd: 0.25, inputTokens: 120, outputTokens: 34 }]);
   });
 
   it("fails when Claude reports an error result, still reporting its cost", async () => {
@@ -423,6 +464,40 @@ describe("ClaudeAdapter", () => {
     h.abort.abort();
     expect(await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(h.opts)).toEqual({ status: "failed", error: "run stopped" });
     expect(q.calls).toHaveLength(0);
+  });
+});
+
+describe("ClaudeAdapter through the runner", () => {
+  // A stored secret (not matched by any pattern) that straddles where summaries used to be cut.
+  const STORED = "stored-conn-value-0123456789";
+
+  it.each([
+    ["a Bash command cut at 150", "Bash", { command: `echo ${"a".repeat(136)} ${STORED}` }],
+    ["a remote agent description cut at 120", "Agent", { description: `${"d".repeat(110)} ${STORED}`, prompt: "go", isolation: "remote" }],
+  ])("leaves no fragment of a stored secret across the old cap (%s) in the recorded summary", async (_label, tool, input) => {
+    const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "claude-runner-")));
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const owner = { kind: "human", id: "owner" } as const;
+    const projectId = new BoardService(db, ledger).createProject(owner, { name: "Claude" }).id;
+    const q = fakeQuery([{ tool, input, id: "tu-1", response: "ok" }, success(0)]);
+    const claude = new ClaudeAdapter({ dataDir, query: q.fn, apiKey: () => FAKE_KEY });
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(dataDir), broker: new ApprovalBroker(), adapters: { claude }, extraSecrets: () => [STORED], dataDir,
+    });
+    try {
+      const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "go" });
+      // A shell command holding a secret is denied by policy; the remote agent waits for a human.
+      await vi.waitFor(() => expect(listActions(db, run.id)).toHaveLength(1), { timeout: 5000 });
+      runner.stop(owner, run.id);
+      await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 5000 });
+      const [action] = listActions(db, run.id);
+      expect(action!.summary).toContain("[REDACTED]");
+      expect(JSON.stringify(ledger.list())).not.toContain(STORED.slice(0, 6));
+    } finally {
+      await runner.shutdown();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Provider } from "@theterminal/shared";
 
-const KIND_ICON: Record<ActionKind, string> = {
+export const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
   file_write: "✏️",
   file_edit: "✏️",
@@ -11,32 +11,33 @@ const KIND_ICON: Record<ActionKind, string> = {
   other: "•",
 };
 
-const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
+export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
 
 type Props = {
   adapters: AdapterId[];
-  /** Per-provider install state; a missing entry means the adapter is always available. */
-  providers?: Partial<Record<Provider, { mode: AuthMode; installed: boolean }>>;
+  /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
+  providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
   runs: AgentRun[];
   selectedRunId: string | null;
-  actions: AgentAction[];
+  /** The selected run's actions; omit them when another panel (the Agent feed) shows them. */
+  actions?: AgentAction[];
   /** Resolve false (or reject) when starting failed, so the prompt is kept. */
   onStart: (adapter: AdapterId, prompt: string) => Promise<boolean | void> | void;
   onSelectRun: (runId: string | null) => void;
   onStop: (runId: string) => void;
 };
 
-const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
-const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
+export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
+export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
 export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
-  // The bundled Claude SDK runs without the CLI when signed in with an API key.
+  // Every provider's program ships with The Terminal, so an unavailable one means a broken install.
   const available = (a: AdapterId) => {
     const info = a === "fake" ? undefined : providers?.[a];
-    return !info || info.installed || (a === "claude" && info.mode === "api_key");
+    return !info || info.available;
   };
   const chosen = adapter || adapters.find(available) || "";
   const selected = runs.find((r) => r.id === selectedRunId);
@@ -63,7 +64,7 @@ export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, 
             {adapters.map((a) => (
               <option key={a} value={a} disabled={!available(a)}>
                 {ADAPTER_NAMES[a]}
-                {available(a) ? "" : " (not installed)"}
+                {available(a) ? "" : " (unavailable)"}
               </option>
             ))}
           </select>
@@ -96,7 +97,7 @@ export function AgentPanel({ adapters, providers, runs, selectedRunId, actions, 
           </li>
         ))}
       </ul>
-      {selected && (
+      {selected && actions && (
         <ul className="run-actions" aria-label="Run actions">
           {actions.map((a) => (
             <li key={a.id}>

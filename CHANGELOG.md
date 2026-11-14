@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ## Unreleased
 
 ### Added
+- VS Code-style workbench: activity bar, side bar, tabbed main area with the board as home, bottom panel, saved layout and a live status bar (running agents, today's cost, pending decisions, connections).
+- Connections view: add Claude, Codex (OpenAI), Gemini and GitHub credentials. Secrets are stored in the OS keychain and never reach the ledger, API responses or logs. Each connection has a read-only connection test.
+- Agent runs use the configured connection's key, and each use is recorded in the ledger. A stored key is redacted from agent output immediately and stays redacted after removal.
+- Sign in to your own Claude, ChatGPT or Google subscription from the Connections view, using the provider's own login. The Terminal never sees the credentials.
+- Codex and Gemini CLI are bundled, so nothing has to be installed separately.
+- Token counts on finished runs.
+- Documentation: `docs/connections-and-credentials.md`.
+
+### Changed
+- Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
+- Streamed agent text is held back just enough to redact secrets that arrive split across chunks, including private key blocks, YAML secret blocks and partial markers around tool calls.
+
+### Added (project)
 - Contributor guide, agent contribution guidelines, security policy, code of conduct, pull request and issue templates, and a code owners file.
 
 ## Foundation and agent runtime (merged to `main`, November 2026)

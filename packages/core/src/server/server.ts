@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import Fastify from "fastify";
 import { openDatabase } from "../db.js";
@@ -11,18 +11,28 @@ import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
+import { registerConnectionRoutes } from "./connection-routes.js";
+import { ConnectionService } from "../connections/service.js";
+import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
+import { commitEvent } from "../events/commit.js";
+import { CONNECTION_TESTERS } from "../connections/testers.js";
+import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
+import { KeychainSecretStore } from "../secrets/keychain-store.js";
+import { MemorySecretStore } from "../secrets/memory-store.js";
 import { ADAPTERS, PROVIDERS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
+import { fakeAgentEnv } from "../agents/child-env.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
 import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
+import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
-import { WorktreeManager } from "../agents/worktrees.js";
+import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, type SharedGitconfigProblem } from "../agents/worktrees.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -81,8 +91,16 @@ const DEFAULT_FAKE_SCRIPT: FakeStep[] = [
   },
 ];
 
-/** The CLI each provider runs, as looked up on PATH. */
+/** The CLI each provider runs, as looked up on PATH when its bundled program is missing. */
 const PROVIDER_CLI: Record<Provider, string> = { claude: "claude", codex: "codex", gemini: "gemini" };
+
+/** The agent programs shipped with The Terminal (see bundled.ts); each returns null when its package is missing. */
+export type BundledPrograms = {
+  claude: () => string | null;
+  codex: () => BundledCli | null;
+  gemini: () => BundledCli | null;
+};
+const BUNDLED: BundledPrograms = { claude: () => bundledClaude(), codex: () => bundledCodex(), gemini: () => bundledGemini() };
 
 /** Locates a CLI on PATH: an absolute path, or null. */
 export type Which = (cmd: string) => string | null;
@@ -90,9 +108,37 @@ export type Which = (cmd: string) => string | null;
 type CliCommand = { file: string; args: string[] };
 
 /**
+ * Where a provider's login and status commands run from, as a run would locate the CLI: a test fixture, else the
+ * bundled program, else PATH. On Windows a PATH `.cmd` cannot run without a shell: Codex's npm shim is run as its
+ * script with this Node, as the Codex adapter does; any other `.cmd` is not used (Gemini's is never run to sign in).
+ */
+export function signinProgram(
+  p: Provider,
+  fakeCli: Partial<Record<Provider, CliCommand>>,
+  bundled: BundledPrograms,
+  which: Which,
+): CliCommand | null {
+  const fake = fakeCli[p];
+  if (fake) return fake;
+  if (p === "claude") {
+    const file = bundled.claude();
+    if (file !== null) return { file, args: [] };
+  } else {
+    const cli = bundled[p]();
+    if (cli !== null) return cli;
+  }
+  const file = which(PROVIDER_CLI[p]);
+  if (file === null) return null;
+  if (!/\.cmd$/i.test(file) || p === "gemini") return { file, args: [] };
+  if (p !== "codex") return null;
+  const script = join(dirname(file), "node_modules", "@openai", "codex", "bin", "codex.js");
+  return existsSync(script) ? { file: process.execPath, args: [script] } : null;
+}
+
+/**
  * Tests only: when THETERMINAL_FAKE_AGENT=1, THETERMINAL_<PROVIDER>_BIN may name a fixture script that stands in
  * for that provider's CLI, run with this Node (the fixture reads its own THETERMINAL_FAKE_<PROVIDER>_SCRIPT).
- * Ignored otherwise, so a real workspace always uses the CLI found on PATH.
+ * Ignored otherwise, so a real workspace always uses the bundled CLI (or, if that is missing, the one on PATH).
  */
 function fakeCliCommand(p: Provider): CliCommand | undefined {
   const fixture = process.env[`THETERMINAL_${p.toUpperCase()}_BIN`];
@@ -101,22 +147,25 @@ function fakeCliCommand(p: Provider): CliCommand | undefined {
 }
 
 /**
- * Claude, Codex and Gemini always (their CLIs are looked up at run start, not here); the scripted fake adapter only
+ * Claude, Codex and Gemini always (their programs are located at run start, not here); the scripted fake adapter only
  * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
  */
 function buildAdapters(
   dataDir: string,
   which: Which,
+  bundled: BundledPrograms,
   fakeCli: Partial<Record<Provider, CliCommand>>,
 ): Partial<Record<AdapterId, AgentAdapter>> {
   const codexCommand = fakeCli.codex;
   const geminiCommand = fakeCli.gemini;
+  // Test-only fixture variables, decided once here (not at run time) while THETERMINAL_FAKE_AGENT is in force.
+  const fakeEnv = fakeAgentEnv();
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
-    claude: new ClaudeAdapter({ dataDir }),
+    claude: new ClaudeAdapter({ dataDir, bundled: bundled.claude, findClaude: () => which("claude") }),
     // The API key is read from OPENAI_API_KEY when each run starts.
-    codex: new CodexAdapter({ dataDir, bin: () => which("codex"), ...(codexCommand && { command: codexCommand }) }),
+    codex: new CodexAdapter({ dataDir, bundled: bundled.codex, bin: () => which("codex"), fakeEnv, ...(codexCommand && { command: codexCommand }) }),
     // The API key is read from GEMINI_API_KEY when each run starts.
-    gemini: new GeminiAdapter({ dataDir, bin: () => which("gemini"), ...(geminiCommand && { command: geminiCommand }) }),
+    gemini: new GeminiAdapter({ dataDir, bundled: bundled.gemini, bin: () => which("gemini"), fakeEnv, ...(geminiCommand && { command: geminiCommand }) }),
   };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;
@@ -136,6 +185,67 @@ function buildAdapters(
   return adapters;
 }
 
+const GITCONFIG_REPAIR_FAILED = "the shared git config could not be repaired; agent runs will fail until this is fixed";
+const GITCONFIG_WARNINGS: Partial<Record<SharedGitconfigProblem, string>> = {
+  not_file: "the shared git config is not a regular file; agent runs will fail until it is removed",
+  linked: "the shared git config has another hard link; agent runs will fail until it is removed",
+  unchecked: "the shared git config could not be checked; agent runs will fail until this is fixed",
+};
+
+/**
+ * At start, while nothing runs: a shared git config modified before this start is emptied and made read-only again.
+ * One that cannot be repaired is left alone with a warning, and every run then fails before its CLI starts. Never
+ * throws, and the warning is fixed text: console output ends up in bug reports, so it holds no path or fs error.
+ */
+export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitconfig, warn: (message: string) => void = console.warn): void {
+  try {
+    ensure(dataDir, { repair: true });
+  } catch (e) {
+    const known = e instanceof SharedGitconfigModifiedError ? GITCONFIG_WARNINGS[e.reason] : undefined;
+    warn(`The Terminal: ${known ?? GITCONFIG_REPAIR_FAILED}`);
+  }
+}
+
+/**
+ * Where connection secrets live: the injected store, else the OS keychain. Under THETERMINAL_FAKE_AGENT=1 (tests and
+ * demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ */
+export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+  return new ChunkedSecretStore(new KeychainSecretStore());
+}
+
+/**
+ * Tests only: answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise. Never performs
+ * network I/O.
+ */
+const fakeHttp: typeof fetch = async (input, init) => {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+  let accepted = false;
+  headers.forEach((value) => {
+    if (value.includes("TESTKEY")) accepted = true;
+  });
+  return new Response(accepted ? "{}" : '{"error":"unauthorized"}', {
+    status: accepted ? 200 : 401,
+    headers: { "content-type": "application/json" },
+  });
+};
+
+/**
+ * The fetch connection tests use: the injected one, else the real fetch. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HTTP=1 selects a stub that never leaves the process; it is ignored otherwise.
+ */
+export function selectFetch(env: NodeJS.ProcessEnv = process.env, injected?: typeof fetch): typeof fetch {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeHttp;
+  return globalThis.fetch;
+}
+
+/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
+const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -145,8 +255,18 @@ export async function createServer(opts: {
   shutdownTimeoutMs?: number;
   /** Tests only: the PATH lookup for provider CLIs. Default: the PATH of this process. */
   which?: Which;
+  /** Tests only: replaces the bundled program lookups. Default: the packages installed with this one. */
+  bundled?: Partial<BundledPrograms>;
+  /** Where connection secrets live. Default: the OS keychain (see selectSecretStore). */
+  secrets?: SecretStore;
+  /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
+  fetch?: typeof fetch;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
+  // Located once, at startup: every listing and run start reuses the result.
+  const lookups: BundledPrograms = { ...BUNDLED, ...opts.bundled };
+  const located = { claude: lookups.claude(), codex: lookups.codex(), gemini: lookups.gemini() };
+  const bundled: BundledPrograms = { claude: () => located.claude, codex: () => located.codex, gemini: () => located.gemini };
   // Read once, at startup: the adapters and the install state below must agree for the server's lifetime.
   const fakeCli: Partial<Record<Provider, CliCommand>> = Object.fromEntries(
     PROVIDERS.flatMap((p) => {
@@ -154,7 +274,7 @@ export async function createServer(opts: {
       return command ? [[p, command]] : [];
     }),
   );
-  const adapters = buildAdapters(opts.dataDir, which, fakeCli);
+  const adapters = buildAdapters(opts.dataDir, which, bundled, fakeCli);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
@@ -171,13 +291,40 @@ export async function createServer(opts: {
     ledger.readOnly = true;
   }
 
+  repairSharedGitconfig(opts.dataDir);
+
+  const connections = new ConnectionService({
+    db,
+    ledger,
+    secrets: selectSecretStore(process.env, opts.secrets),
+    testers: CONNECTION_TESTERS,
+    fetch: selectFetch(process.env, opts.fetch),
+  });
+  await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+
+  const signin = new SignInManager({
+    dataDir: opts.dataDir,
+    program: (p) => signinProgram(p, fakeCli, bundled, which),
+    cliHome: (p) => connections.credentialsFor(p)?.cliHome,
+    extraEnv: fakeLoginEnv(),
+    secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+    record: (provider, ok) =>
+      commitEvent(db, ledger, () => ({
+        event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
+        result: () => undefined,
+      })),
+  });
+
   const runner = new AgentRunner({
     db,
     ledger,
     worktrees: new WorktreeManager(opts.dataDir),
     broker: new ApprovalBroker(),
     adapters,
-    extraSecrets: [token, ...secretEnvValues(process.env)],
+    // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
+    // connection's values stay in secretValues() until the process exits.
+    extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+    credentials: (p) => connections.credentialsFor(p),
     dataDir: opts.dataDir,
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });
@@ -194,8 +341,11 @@ export async function createServer(opts: {
       runner,
       settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
-      installed: (p) => fakeCli[p] !== undefined || which(PROVIDER_CLI[p]) !== null,
+      // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
+      available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
+      apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
     });
+    registerConnectionRoutes(app, { db, connections, signin, ledger });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 
@@ -217,6 +367,7 @@ export async function createServer(opts: {
       throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
     }
   } catch (err) {
+    await signin.shutdown();
     await app.close().catch(() => undefined);
     db.close();
     throw err;
@@ -230,6 +381,7 @@ export async function createServer(opts: {
     integrity,
     async close() {
       await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+      await signin.shutdown(); // kills every login and status check before the db closes
       for (const client of app.websocketServer.clients) client.terminate();
       await app.close();
       db.close();

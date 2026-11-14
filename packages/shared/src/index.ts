@@ -1,3 +1,4 @@
 export * from "./domain.js";
 export * from "./events.js";
 export * from "./agents.js";
+export * from "./connections.js";

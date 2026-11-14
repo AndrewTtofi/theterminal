@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { z } from "zod";
-import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
+import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
+import type { Credentials } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
 import { getRun, listActions, listRuns } from "../events/projections.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
-import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction } from "./adapter.js";
+import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./adapter.js";
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
 import { redact, truncate } from "./redact.js";
@@ -38,7 +39,11 @@ export type AgentRunnerDeps = {
   worktrees: WorktreeManager;
   broker: ApprovalBroker;
   adapters: Partial<Record<AdapterId, AgentAdapter>>;
-  extraSecrets: string[];
+  /**
+   * The secrets to redact beyond the built-in patterns. Read on every clean, so a secret stored while a run is
+   * live is redacted from that run's next event.
+   */
+  extraSecrets: () => string[];
   /** Recorded strings show this directory as `<data>`. */
   dataDir: string;
   newId?: () => string;
@@ -48,6 +53,8 @@ export type AgentRunnerDeps = {
   gateTimeoutMs?: number;
   /** Recorded strings show this name as `<user>`. Default: the OS username. */
   username?: string;
+  /** The provider's connection credentials, looked up at each run start. Default: none. */
+  credentials?: (provider: Provider) => Credentials | null;
 };
 
 function osUsername(): string {
@@ -65,7 +72,10 @@ type Session = {
   scrub: Scrub;
   abort: AbortController;
   done: Promise<void>;
+  /** Per-run sums of what the adapter reported; null until something was reported. */
   costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
   /** Set when the runner itself failed during the run (e.g. a commit failed); fails the run. */
   failure: string | null;
 };
@@ -114,6 +124,15 @@ function asText(v: unknown): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Adds a reported amount to a run's sum. Anything but a finite number >= 0 (an integer, for token counts) is
+ * ignored; an unreported amount leaves the sum as it is, so "never reported" stays null.
+ */
+function addUsage(sum: number | null, v: unknown, integer = false): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || (integer && !Number.isInteger(v))) return sum;
+  return (sum ?? 0) + v;
 }
 
 function scrubJson(v: unknown, scrub: Scrub): unknown {
@@ -173,6 +192,14 @@ export class AgentRunner {
     }
     const authMode: AuthMode =
       input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
+    const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
+    // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
+    const credentials: RunCredentials = {};
+    if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
+    if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
+    if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
+    // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
+    const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;
 
     const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
@@ -190,7 +217,21 @@ export class AgentRunner {
       },
       result: () => getRun(db, runId)!,
     }));
-    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode);
+    if (creds && purpose) {
+      try {
+        commitEvent(db, ledger, () => ({
+          event: {
+            projectId: null, actor: RUNNER, type: "connection.used",
+            payload: { connectionId: creds.connectionId, name: creds.name, runId, purpose },
+          },
+          result: () => undefined,
+        }));
+      } catch (e) {
+        this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
+        throw e;
+      }
+    }
+    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials);
     return run;
   }
 
@@ -271,9 +312,13 @@ export class AgentRunner {
     clearTimeout(timer);
   }
 
-  private launch(run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode): void {
+  private launch(
+    run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode, credentials: RunCredentials,
+  ): void {
     const abort = new AbortController();
-    const session: Session = { projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, failure: null };
+    const session: Session = {
+      projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, inputTokens: null, outputTokens: null, failure: null,
+    };
     this.sessions.set(run.id, session);
     session.done = (async () => {
       let status: FinishStatus;
@@ -284,6 +329,8 @@ export class AgentRunner {
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
+          clean: (s) => this.clean(asText(s), Infinity, scrub),
+          credentials,
         });
         status = r.status;
         error = r.status === "failed" ? (r.error ?? "agent failed") : null;
@@ -443,9 +490,10 @@ export class AgentRunner {
         });
         if (!committed) fail(NOT_ALLOWED_RESULT);
       } else if (e.type === "usage") {
-        if (typeof e.costUsd === "number" && Number.isFinite(e.costUsd) && e.costUsd >= 0) {
-          s.costUsd = (s.costUsd ?? 0) + e.costUsd;
-        }
+        const { costUsd, inputTokens, outputTokens } = e; // each read once
+        s.costUsd = addUsage(s.costUsd, costUsd);
+        s.inputTokens = addUsage(s.inputTokens, inputTokens, true);
+        s.outputTokens = addUsage(s.outputTokens, outputTokens, true);
       }
     } catch {
       fail(INTERNAL_ERROR);
@@ -469,7 +517,10 @@ export class AgentRunner {
       return {
         event: {
           projectId: cur.projectId, actor: RUNNER, type: "agent.finished",
-          payload: { runId, status, costUsd: s?.costUsd ?? null, error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub) },
+          payload: {
+            runId, status, costUsd: s?.costUsd ?? null, inputTokens: s?.inputTokens ?? null, outputTokens: s?.outputTokens ?? null,
+            error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub),
+          },
         },
         result: () => undefined,
       };
@@ -490,7 +541,15 @@ export class AgentRunner {
    * pass runs before scrubbing so a secret that contains the username or a path is still matched whole.
    */
   private clean(s: string, max: number, scrub: Scrub): string {
-    return truncate(redact(scrub(redact(s, this.deps.extraSecrets)), this.deps.extraSecrets), max);
+    const secrets = this.secrets();
+    return truncate(redact(scrub(redact(s, secrets)), secrets), max);
+  }
+
+  /** The extra secrets as of now; anything that is not a list of strings is a failure, never "no secrets". */
+  private secrets(): string[] {
+    const list = this.deps.extraSecrets();
+    if (!Array.isArray(list) || list.some((x) => typeof x !== "string")) throw new TypeError("extraSecrets must return strings");
+    return list;
   }
 
   /**
@@ -501,7 +560,8 @@ export class AgentRunner {
   private cleanInput(input: unknown, scrub: Scrub): unknown {
     const json = JSON.stringify(input ?? null);
     const plain: unknown = json === undefined ? null : JSON.parse(json);
-    const value = redact(scrubJson(redact(plain, this.deps.extraSecrets), scrub), this.deps.extraSecrets);
+    const secrets = this.secrets();
+    const value = redact(scrubJson(redact(plain, secrets), scrub), secrets);
     const out = JSON.stringify(value);
     if (out.length <= MAX.input) return value;
     return {
