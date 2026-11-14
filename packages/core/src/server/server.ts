@@ -11,7 +11,7 @@ import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
-import { ADAPTERS, type AdapterId, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
@@ -87,12 +87,14 @@ const PROVIDER_CLI: Record<Provider, string> = { claude: "claude", codex: "codex
 /** Locates a CLI on PATH: an absolute path, or null. */
 export type Which = (cmd: string) => string | null;
 
+type CliCommand = { file: string; args: string[] };
+
 /**
  * Tests only: when THETERMINAL_FAKE_AGENT=1, THETERMINAL_<PROVIDER>_BIN may name a fixture script that stands in
  * for that provider's CLI, run with this Node (the fixture reads its own THETERMINAL_FAKE_<PROVIDER>_SCRIPT).
  * Ignored otherwise, so a real workspace always uses the CLI found on PATH.
  */
-function fakeCliCommand(p: Provider): { file: string; args: string[] } | undefined {
+function fakeCliCommand(p: Provider): CliCommand | undefined {
   const fixture = process.env[`THETERMINAL_${p.toUpperCase()}_BIN`];
   if (process.env.THETERMINAL_FAKE_AGENT !== "1" || !fixture) return undefined;
   return { file: process.execPath, args: [fixture] };
@@ -102,9 +104,13 @@ function fakeCliCommand(p: Provider): { file: string; args: string[] } | undefin
  * Claude, Codex and Gemini always (their CLIs are looked up at run start, not here); the scripted fake adapter only
  * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
  */
-function buildAdapters(dataDir: string, which: Which): Partial<Record<AdapterId, AgentAdapter>> {
-  const codexCommand = fakeCliCommand("codex");
-  const geminiCommand = fakeCliCommand("gemini");
+function buildAdapters(
+  dataDir: string,
+  which: Which,
+  fakeCli: Partial<Record<Provider, CliCommand>>,
+): Partial<Record<AdapterId, AgentAdapter>> {
+  const codexCommand = fakeCli.codex;
+  const geminiCommand = fakeCli.gemini;
   const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
     claude: new ClaudeAdapter({ dataDir }),
     // The API key is read from OPENAI_API_KEY when each run starts.
@@ -141,7 +147,14 @@ export async function createServer(opts: {
   which?: Which;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
-  const adapters = buildAdapters(opts.dataDir, which);
+  // Read once, at startup: the adapters and the install state below must agree for the server's lifetime.
+  const fakeCli: Partial<Record<Provider, CliCommand>> = Object.fromEntries(
+    PROVIDERS.flatMap((p) => {
+      const command = fakeCliCommand(p);
+      return command ? [[p, command]] : [];
+    }),
+  );
+  const adapters = buildAdapters(opts.dataDir, which, fakeCli);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
@@ -181,7 +194,7 @@ export async function createServer(opts: {
       runner,
       settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
-      installed: (p) => fakeCliCommand(p) !== undefined || which(PROVIDER_CLI[p]) !== null,
+      installed: (p) => fakeCli[p] !== undefined || which(PROVIDER_CLI[p]) !== null,
     });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();

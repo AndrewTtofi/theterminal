@@ -109,7 +109,9 @@ describe("agent API", { timeout: 15000 }, () => {
     const { s: withFake } = await start(script);
     expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: true });
 
+    // Decided when the server starts, like the adapters' commands: later changes to the env do not apply.
     delete process.env.THETERMINAL_FAKE_AGENT;
+    expect(await installed(withFake)).toEqual({ claude: false, codex: true, gemini: true });
     const { s: real } = await start(null);
     expect(await installed(real)).toEqual({ claude: false, codex: false, gemini: false });
   });
