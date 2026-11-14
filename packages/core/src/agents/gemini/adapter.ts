@@ -12,7 +12,7 @@ import { REDACTED, redact, trailingSecretContext } from "../redact.js";
 import { bundledGemini, type BundledCli } from "../bundled.js";
 import { which } from "../which.js";
 import { WorktreeManager } from "../worktrees.js";
-import { keyBlockAround, openKeyBlock, scanKeyBody, sealKeyBlocks } from "./key-blocks.js";
+import { keyBlockAround, openKeyBlock } from "./key-blocks.js";
 import { Terminals, type ExitStatus } from "./terminals.js";
 import { ToolCallTracker, type Diff, type ToolCallUpdate, type ToolStatus } from "./tool-calls.js";
 
@@ -79,7 +79,10 @@ const MESSAGE_MAX_WAIT_MS = 2000;
  * then moves back so that no secret is parted from the context redaction finds it by.
  */
 const HELD_TAIL = 512;
-/** An open private key block (see key-blocks.ts) is held whole up to this size; then it is emitted as REDACTED and the rest of its body dropped. */
+/**
+ * An open private key block (see key-blocks.ts) is held whole up to this size, far more than any real key; a span that
+ * reaches it is emitted as REDACTED and streaming goes on as usual from there.
+ */
 const MAX_HELD_BLOCK = 16 * 1024;
 /** The start of a BEGIN line that has not fully arrived ("-----BEGIN RSA PRIV"). */
 const PARTIAL_BEGIN = /-{1,5}(?:B|BE|BEG|BEGI|BEGIN(?: [A-Z ]*-{0,4})?)?$/;
@@ -334,11 +337,6 @@ class GeminiRun {
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
   private capTimer: NodeJS.Timeout | undefined;
-  /** Set once an open key block outgrew MAX_HELD_BLOCK: its body is dropped until its END line or a non-body line. */
-  private droppingBlock = false;
-  private dropEscaped = false;
-  /** The dropped block's text still undecided (the line arriving, after the line break before it). */
-  private dropCarry = "";
   private stderrTail = "";
   /** The latest cumulative USD cost from an ACP usage_update, if any. */
   private costUsd: number | undefined;
@@ -543,18 +541,15 @@ class GeminiRun {
   /**
    * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
    * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
-   * Only the end of the run flushes an open private key block, and then as REDACTED.
+   * An open private key block is never cut: it is held until its END marker arrives, and only the end of the run
+   * flushes one still open, as REDACTED. One that reaches MAX_HELD_BLOCK goes out as REDACTED at once.
    */
   private text(t: string): void {
-    if (this.droppingBlock) {
-      const rest = this.afterDroppedBlock(t);
-      if (rest === null) return;
-      t = rest;
-    }
     this.pendingText += t;
-    if (this.pendingText.length >= MAX_HELD_BLOCK) {
+    while (this.pendingText.length >= MAX_HELD_BLOCK) {
       const open = openKeyBlock(this.pendingText);
-      if (open !== null) return this.dropOpenBlock(open.start, open.at, open.escaped);
+      if (open < 0 || this.pendingText.length - open < MAX_HELD_BLOCK) break;
+      this.overflowBlock(open);
     }
     if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText("size");
     clearTimeout(this.flushTimer);
@@ -566,32 +561,38 @@ class GeminiRun {
    * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
    * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
    * `message` (before tool activity): flush all but an open private key block. `end`: flush everything, an open
-   * block as REDACTED. Every flush emits a key block that ended without an END line (see key-blocks.ts) as REDACTED.
+   * block as REDACTED. The text itself is never changed otherwise: redaction sees a key block from BEGIN to END.
    */
   private flushText(mode: "size" | "stream" | "message" | "end"): void {
     this.clearFlushTimers();
     const all = this.pendingText;
     let cut = all.length;
-    if (mode === "message") cut = openKeyBlock(all)?.start ?? all.length;
-    else if (mode !== "end") cut = safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
+    let text = all;
+    if (mode === "end") {
+      const open = openKeyBlock(all);
+      if (open >= 0) text = all.slice(0, open) + REDACTED;
+    } else {
+      if (mode === "message") {
+        const open = openKeyBlock(all);
+        if (open >= 0) cut = open;
+      } else {
+        cut = safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
+      }
+      text = all.slice(0, cut);
+    }
     this.pendingText = all.slice(cut);
-    if (cut > 0) this.o.emit({ type: "message", text: sealKeyBlocks(all, cut) });
+    if (text !== "") this.o.emit({ type: "message", text });
     if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
   }
 
-  /** Fails closed on a key block too long to hold: the text before it, then REDACTED; its own text never goes out. */
-  private dropOpenBlock(start: number, at: number, escaped: boolean): void {
+  /**
+   * Fails closed on a key block held to MAX_HELD_BLOCK: the text before it and REDACTED go out, the held span is
+   * dropped, and what follows streams as usual (a real key is far shorter, so this is prose after a stray marker).
+   */
+  private overflowBlock(start: number): void {
     this.clearFlushTimers();
-    this.o.emit({ type: "message", text: sealKeyBlocks(this.pendingText, start) + REDACTED });
-    this.dropCarry = this.carryFrom(this.pendingText, at, escaped);
-    this.dropEscaped = escaped;
-    this.pendingText = "";
-    this.droppingBlock = true;
-  }
-
-  /** The undecided text of a dropped block from `at`, with the line break before it, so released text keeps it. */
-  private carryFrom(s: string, at: number, escaped: boolean): string {
-    return !escaped && at > 0 && s[at - 1] === "\n" ? s.slice(at - 1) : s.slice(at);
+    this.o.emit({ type: "message", text: this.pendingText.slice(0, start) + REDACTED });
+    this.pendingText = this.pendingText.slice(start + MAX_HELD_BLOCK);
   }
 
   private clearFlushTimers(): void {
@@ -599,19 +600,6 @@ class GeminiRun {
     clearTimeout(this.capTimer);
     this.flushTimer = undefined;
     this.capTimer = undefined;
-  }
-
-  /** The text after the dropped block's END line or from its first non-body line, or null while neither has arrived. */
-  private afterDroppedBlock(t: string): string | null {
-    const s = this.dropCarry + t;
-    const scan = scanKeyBody(s, !this.dropEscaped && s.startsWith("\n") ? 1 : 0, this.dropEscaped);
-    if (scan.state === "open") {
-      this.dropCarry = this.carryFrom(s, scan.at, this.dropEscaped);
-      return null;
-    }
-    this.droppingBlock = false;
-    this.dropCarry = "";
-    return s.slice(scan.at);
   }
 
   // ---- requests from the agent ----
@@ -865,7 +853,8 @@ function streamCut(text: string): number {
  * one runs to the end), never after a partial BEGIN line, and never right after the context that redaction finds a
  * secret value by (`Bearer `, `api_key = `, `"password":"ab`, a `password: |` block still running): that context
  * goes with its value into what is held. Stepping back over contexts stops 2 * HELD_TAIL from the end, so text
- * built of nothing but keys is still emitted.
+ * built of nothing but keys is still emitted. `text` starts a message of its own, so redaction will see its first
+ * line as a whole line: it is judged as one.
  */
 function safeCut(text: string, cut: number): number {
   const floor = text.length - 2 * HELD_TAIL;
@@ -877,7 +866,7 @@ function safeCut(text: string, cut: number): number {
     }
     const head = text.slice(0, cut);
     const partial = PARTIAL_BEGIN.exec(head);
-    const back = partial !== null ? partial.index : cut > floor ? trailingSecretContext(head) : -1;
+    const back = partial !== null ? partial.index : cut > floor ? trailingSecretContext(head, true) : -1;
     if (back < 0) return cut;
     cut = back;
   }

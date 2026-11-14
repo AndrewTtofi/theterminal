@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redact, truncate } from "../../src/index.js";
 import { secretEnvValues, trailingSecretContext } from "../../src/agents/redact.js";
+import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 describe("redact", () => {
   it("redacts bearer tokens and sk-ant keys", () => {
@@ -358,13 +359,73 @@ describe("trailingSecretContext", () => {
       ['{"a":1,"password":"ab', 'password":"ab'],
       ["db:\n  password: |\n    one\n\n    two\n", "  password: |\n    one\n\n    two\n"],
     ] as const) {
-      expect(trailingSecretContext(head)).toBe(head.length - context.length);
+      expect(trailingSecretContext(head, false)).toBe(head.length - context.length);
     }
   });
 
   it("finds nothing after ordinary text, a non-secret key or a counter", () => {
     for (const head of ["hello world ", "name = ", "max_tokens: ", "Bearer token value ", '{"password":"ab","n":"x', "db:\n  password: |\n    one\n  other: x\n"]) {
-      expect(trailingSecretContext(head)).toBe(-1);
+      expect(trailingSecretContext(head, false)).toBe(-1);
+    }
+  });
+
+  it("judges a block-scalar header on the first line only when the text is known to start at a line boundary", () => {
+    const head = "password: |\n  hunter2abc\n  more";
+    expect(trailingSecretContext(head, true)).toBe(0);
+    expect(trailingSecretContext(head, false)).toBe(-1); // the first line may be the tail of a longer one
+    expect(trailingSecretContext(`x: 1\n${head}`, true)).toBe(5);
+    expect(trailingSecretContext(`x: 1\n${head}`, false)).toBe(5);
+    expect(trailingSecretContext("password: |\n  one\nother: x\n", true)).toBe(-1); // the block has ended
+  });
+});
+
+describe("redact: decorated private keys", () => {
+  for (const key of [RSA_KEY, OPENSSH_KEY]) {
+    for (const [form, render] of Object.entries(KEY_FORMS)) {
+      it(`redacts a ${key.label} shown ${form} from BEGIN to END, with nothing of the body left`, () => {
+        const text = `before\n${render(key)}after\n`;
+        const out = redact(text);
+        expect(out).toContain(REDACTED);
+        expect(leakedKeyBody(out, key)).toBeNull();
+        expect(out).not.toContain("-----BEGIN");
+        expect(out).not.toContain("-----END");
+        expect(out.startsWith("before\n")).toBe(true);
+        expect(out.endsWith("after\n")).toBe(true);
+      });
+    }
+  }
+
+  it("redacts a key whose body lines are interleaved with prose, through its END line", () => {
+    const lines = keyLines(RSA_KEY);
+    lines.splice(4, 0, "An ordinary sentence placed inside the key on purpose.");
+    const out = redact(`${lines.join("\n")}\n`);
+    expect(out).toBe(`${REDACTED}\n`);
+  });
+
+  it("stays well under 10 ms on 16 KiB of adversarial key markers", () => {
+    const size = 16 * 1024;
+    const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    const inputs = [
+      `-----BEGIN PRIVATE KEY-----\n${fill("A ")}`, // an open block that never ends
+      `-----BEGIN PRIVATE KEY-----\n${fill("-----END PRIVATE KE\n")}`, // near-miss END markers
+      `-----BEGIN PRIVATE KEY-----\n-----END ${fill("A")}`, // one END with a label that never completes
+      `-----BEGIN PRIVATE KEY-----\n${fill(`-----END ${"A".repeat(100)}\n`)}`, // many such labels
+      `-----BEGIN ${fill("A ")}`, // a BEGIN whose label never completes
+      fill("-----BEGIN PRIVATE KEY-----\n"), // nothing but BEGIN lines
+      fill("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n"), // many closed blocks
+      fill("-----END PRIVATE KEY-----\n"), // nothing but END lines
+      fill(`${RSA_KEY.body.slice(0, 64)}\n`), // a body with no markers at all
+    ];
+    for (const input of inputs) {
+      expect(input.length).toBeGreaterThanOrEqual(size);
+      redact(input); // warm up
+      let best = Infinity;
+      for (let n = 0; n < 3; n++) {
+        const t = performance.now();
+        redact(input);
+        best = Math.min(best, performance.now() - t);
+      }
+      expect(best).toBeLessThan(10);
     }
   });
 });

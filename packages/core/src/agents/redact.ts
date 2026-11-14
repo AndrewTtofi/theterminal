@@ -27,7 +27,9 @@ export function secretEnvValues(env: NodeJS.ProcessEnv): string[] {
 export const PRIVATE_KEY_LABEL = String.raw`[A-Z ]*PRIVATE KEY(?: BLOCK)?`;
 
 const TOKEN_PATTERNS: RegExp[] = [
-  // PEM/PGP private keys; an unterminated block is redacted to the end of the string.
+  // PEM/PGP private keys, from BEGIN to END inclusive whatever lies between: body lines of any length, each with any
+  // prefix (`> `, `-`, `| `, `3: `, indentation), a key flattened onto one line with spaces or `\n` escapes, prose. An
+  // unterminated block is redacted to the end of the string. The lazy middle tries the END marker once per position.
   new RegExp(`-----BEGIN ${PRIVATE_KEY_LABEL}-----[\\s\\S]*?(?:-----END ${PRIVATE_KEY_LABEL}-----|$)`, "g"),
   /sk-ant-[A-Za-z0-9_-]{10,}/g,
   /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
@@ -275,8 +277,10 @@ export function redact<T>(value: T, extraSecrets: string[] = []): T {
  * Where the context that redaction needs to find a secret value starts, when `head` ends with it: a trailing
  * auth-scheme word (`Bearer `) or a secret key with or without its separator (`api_key = `, `password:\n`).
  * A text cut there would leave the value without its context in the next piece. Otherwise -1.
+ * `atLineStart` says that `head` begins at a line boundary, so a block-scalar header on its first line counts;
+ * otherwise that line may be the tail of a longer one and is not judged.
  */
-export function trailingSecretContext(head: string): number {
+export function trailingSecretContext(head: string, atLineStart: boolean): number {
   const from = Math.max(0, head.length - TRAILING_WINDOW);
   const tail = head.slice(from);
   const scheme = TRAILING_SCHEME.exec(tail);
@@ -285,20 +289,21 @@ export function trailingSecretContext(head: string): number {
     const key = re.exec(tail);
     if (key && isSecretKey(key[1]!)) return from + key.index;
   }
-  const block = openBlockScalar(tail);
+  const block = openBlockScalar(tail, from === 0 && atLineStart);
   return block < 0 ? -1 : from + block;
 }
 
 /**
  * The start of the line of a secret key's YAML block-scalar header whose body runs to the end of `text` (every
- * non-blank line after it indented deeper), else -1. The first line of `text` may be partial and is not judged.
+ * non-blank line after it indented deeper), else -1. The first line of `text` is judged only when `firstLineWhole`
+ * says it starts at a line boundary.
  */
-function openBlockScalar(text: string): number {
+function openBlockScalar(text: string, firstLineWhole: boolean): number {
   let deepest = Infinity; // the least indentation of the non-blank lines after the candidate header
   let end = text.length;
   while (end > 0) {
     const start = text.lastIndexOf("\n", end - 1) + 1;
-    if (start === 0) return -1;
+    if (start === 0 && !firstLineWhole) return -1;
     const line = text.slice(start, end).replace(/[\r\n]+$/, "");
     const header = BLOCK_HEADER_LINE.exec(line);
     if (header && isSecretKey(header[2]!) && header[1]!.length < deepest) return start;
@@ -308,8 +313,8 @@ function openBlockScalar(text: string): number {
       deepest = Math.min(deepest, indent);
       if (deepest === 0) return -1;
     }
-    end = start - 1 >= 0 ? start - 1 : 0;
-    if (end === 0) return -1;
+    if (start === 0) return -1;
+    end = start - 1;
   }
   return -1;
 }

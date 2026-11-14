@@ -17,6 +17,7 @@ import { openDatabase } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
+import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyBodyWindows, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
 const FAKE_KEY = "AIzaFAKEKEY0123456789abcdefghijklmnopqrst";
@@ -697,19 +698,22 @@ describe("GeminiAdapter", () => {
     expect(recorded).not.toContain(KEY_FRAGMENT);
   });
 
-  for (const [label, after, expected] of [
-    ["ends later", [{ type: "message", text: `\n${KEY_END}\nstill here` }], "before\n[REDACTED]\nstill here"],
-    ["never ends", [], "before\n[REDACTED]"],
+  for (const [label, after] of [
+    ["never ends", ""],
+    ["ends later", `${KEY_END}\nstill here\n`],
   ] as const) {
-    it(`emits a 20 KiB key block that ${label} as [REDACTED] at 16 KiB, never its body, and the run goes on`, async () => {
-      const block = `${KEY_BEGIN}\n${keyBody(320).join("\n")}`;
+    it(`emits a key block that reaches 16 KiB as one [REDACTED] and then streams on (a BEGIN line and 20 KiB of prose that ${label})`, async () => {
+      const prose = Array.from({ length: 460 }, (_, i) => `Prose line ${String(i).padStart(3, "0")} follows the marker and goes on.\n`).join("");
+      const block = `${KEY_BEGIN}\n${prose}`;
       expect(block.length).toBeGreaterThan(20 * 1024);
-      script([{ type: "message", text: "before\n" }, ...chunked(block, 1000), ...after]);
+      script([{ type: "message", text: "before\n" }, ...chunked(block, 1000), ...(after === "" ? [] : [{ type: "message", text: after }])]);
       const h = harness();
       expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
       const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
-      expect(texts.join("")).toBe(expected);
-      expect(texts.join("")).not.toContain(KEY_FRAGMENT);
+      const joined = texts.join("");
+      expect(joined).toBe(`before\n[REDACTED]${block.slice(16 * 1024)}${after}`); // the held 16 KiB, and nothing else, is replaced
+      expect(joined.split("[REDACTED]")).toHaveLength(2);
+      expect(texts.length).toBeGreaterThan(2); // the text after the overflow streamed as usual, not in one piece at the end
     });
   }
 
@@ -746,17 +750,17 @@ describe("GeminiAdapter", () => {
   });
 
   for (const [label, mention, shown] of [
-    ["inline", "Start it with -----BEGIN RSA PRIVATE KEY----- and then paste the body.\n", "Start it with [REDACTED] and then paste the body.\n"],
-    ["on its own line", `Example:\n${KEY_BEGIN}\nThe body goes here, then the END line.\n`, "Example:\n[REDACTED]\nThe body goes here, then the END line.\n"],
+    ["inline", "Start it with -----BEGIN RSA PRIVATE KEY----- and then paste the body.\n", "[REDACTED]"],
+    ["on its own line", `Example:\n${KEY_BEGIN}\nThe body goes here, then the END line.\n`, "Example:\n[REDACTED]"],
   ] as const) {
-    it(`releases the prose after a private key BEGIN line mentioned ${label}, from the first line that is not key body`, async () => {
+    it(`holds everything from a private key BEGIN line mentioned ${label} until the run ends, and emits it as [REDACTED]`, async () => {
       const more = Array.from({ length: 40 }, (_, i) => `Line ${i} of the explanation.\n`).join("");
       script([{ type: "message", text: mention }, { type: "sleep", ms: 400 }, ...chunked(more, 300), { type: "read", path: join(worktree, "README.md"), toolCall: true }]);
       const h = harness();
       expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
       const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
-      expect(texts.join("")).toBe(shown + more);
-      expect(h.events.at(-1)!.type).toBe("action_result"); // nothing was held to the end of the run
+      expect(texts.join("")).toBe(shown); // fail closed: without an END line, the span is never released
+      expect(h.events.at(-1)!.type).toBe("message"); // held across the tool call to the end of the run
     });
   }
 
@@ -776,6 +780,81 @@ describe("GeminiAdapter", () => {
     const recorded = texts.map((t) => redact(t)).join("");
     expect(recorded).toBe("Here:\n[REDACTED]\nDone.\n");
     expect(recorded).not.toContain(KEY_FRAGMENT);
+  });
+
+  /** `text` in 37-character chunks, with pauses at a quarter and three quarters of the way and a tool call in the middle. */
+  function streamedWithPausesAndToolCall(text: string): Step[] {
+    const pieces = chunked(text, 37);
+    const steps: Step[] = [];
+    pieces.forEach((p, i) => {
+      steps.push(p);
+      if (i === Math.floor(pieces.length / 4) || i === Math.floor((3 * pieces.length) / 4)) steps.push({ type: "sleep", ms: 400 });
+      if (i === Math.floor(pieces.length / 2)) steps.push({ type: "read", path: join(worktree, "README.md"), toolCall: true });
+    });
+    return steps;
+  }
+
+  /** Every message redacted on its own, as the runner records it, equals the whole text redacted, and no body of either key is in it. */
+  function expectKeysRedactedWhole(texts: string[], text: string): void {
+    expect(texts.join("")).toBe(text);
+    for (const t of texts) {
+      expect(leakedKeyBody(redact(t), RSA_KEY)).toBeNull();
+      expect(leakedKeyBody(redact(t), OPENSSH_KEY)).toBeNull();
+    }
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toContain("[REDACTED]");
+  }
+
+  for (const [form, render] of Object.entries(KEY_FORMS)) {
+    it(`keeps an RSA and an OpenSSH private key shown ${form} whole across chunks, pauses and a tool call`, async () => {
+      const text = `Here is the key:\n${render(RSA_KEY)}And another:\n${render(OPENSSH_KEY)}Done.\n`;
+      script(streamedWithPausesAndToolCall(text));
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.length).toBeGreaterThan(1);
+      expectKeysRedactedWhole(texts, text);
+    });
+  }
+
+  it("keeps a private key whole when prose lines are placed between its body lines, with a pause after each of them", async () => {
+    const lines = keyLines(RSA_KEY);
+    lines.splice(5, 0, "This line is ordinary prose, placed inside the key on purpose.");
+    lines.splice(12, 0, "Another sentence here, with punctuation and no base64 at all!");
+    const text = `Intro.\n${lines.join("\n")}\nOutro.\n`;
+    const firstProse = text.indexOf("\n", text.indexOf("This line")) + 1;
+    const secondProse = text.indexOf("\n", text.indexOf("Another sentence")) + 1;
+    script([
+      ...chunked(text.slice(0, firstProse), 37),
+      { type: "sleep", ms: 400 },
+      ...chunked(text.slice(firstProse, secondProse), 37),
+      { type: "sleep", ms: 400 },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      ...chunked(text.slice(secondProse), 37),
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expectKeysRedactedWhole(texts, text);
+    expect(texts.map((t) => redact(t)).join("")).toBe("Intro.\n[REDACTED]\nOutro.\n");
+  });
+
+  it("holds a secret YAML block scalar whose header is the first line, with a pause after every body line", async () => {
+    const body = ["  hunter2abc-one", "  hunter2abc-two", "  hunter2abc-three", "  hunter2abc-four"]; // nothing here looks like a key name itself
+    const steps: Step[] = [{ type: "message", text: "password: |\n" }, { type: "sleep", ms: 400 }];
+    for (const line of body) steps.push({ type: "message", text: `${line}\n` }, { type: "sleep", ms: 400 });
+    steps.push({ type: "message", text: "done\n" });
+    script(steps);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const text = streamed(steps.filter((s) => s.type === "message"));
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expect(recorded).toBe("password: [REDACTED]\ndone\n");
+    for (const line of body) expect(recorded).not.toContain(line.trim());
   });
 
   it("cuts minified JSON with no whitespace at punctuation, or before a secret key whose quoted value is still open", async () => {
@@ -1228,6 +1307,19 @@ describe("GeminiAdapter through the runner", () => {
   }, 30_000);
 
   const keyText = `${"intro line\n".repeat(330)}${KEY_BEGIN}\n${keyBody(30).join("\n")}\n${KEY_END}\nafter the key\n`;
+  /** Both keys in every form, one form after another, each in 200-character chunks and followed by a pause, with a tool call halfway. */
+  function decoratedKeySteps(): Step[] {
+    const forms = Object.values(KEY_FORMS);
+    const steps: Step[] = [];
+    forms.forEach((render, i) => {
+      steps.push(...chunked(`Form ${i}:\n${render(RSA_KEY)}${render(OPENSSH_KEY)}`, 200), { type: "sleep", ms: 300 });
+      if (i === Math.floor(forms.length / 2)) steps.push({ type: "read", path: "README.md", toolCall: true });
+    });
+    const attacked = keyLines(RSA_KEY);
+    attacked.splice(5, 0, "This line is ordinary prose, placed inside the key on purpose.");
+    steps.push(...chunked(`${attacked.join("\n")}\nDone.\n`, 200));
+    return steps;
+  }
   for (const [label, steps, field, fragments] of [
     [
       "a secret streamed across a message split",
@@ -1243,6 +1335,7 @@ describe("GeminiAdapter through the runner", () => {
       [OPAQUE_TOKEN.slice(0, 8), OPAQUE_TOKEN.slice(12), OPAQUE_TOKEN.slice(-8)],
     ],
     ["a private key block streamed across message splits", chunked(keyText, 200), "messages", [KEY_FRAGMENT]],
+    ["private keys in every decorated form, streamed with pauses and a tool call", decoratedKeySteps(), "messages", [...keyBodyWindows(RSA_KEY), ...keyBodyWindows(OPENSSH_KEY)]],
   ] as const) {
     it(`leaves no fragment of ${label} in the record`, async () => {
       const owner = { kind: "human", id: "owner" } as const;
