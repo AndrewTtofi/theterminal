@@ -81,6 +81,11 @@ describe("redact", () => {
   it("honours extraSecrets", () => {
     expect(redact("hello workspace-tok-123 bye", ["workspace-tok-123"])).toBe(`hello ${REDACTED} bye`);
   });
+  it("redacts an extra secret used as an object key", () => {
+    expect(redact({ "workspace-tok-123": "x", nested: { "sk-ant-TESTKEY000000abcdef": 1 } }, ["workspace-tok-123"])).toEqual({
+      [REDACTED]: "x", nested: { [REDACTED]: 1 },
+    });
+  });
   it("leaves non-secret text and non-string values unchanged", () => {
     expect(redact("just some text, 42 files")).toBe("just some text, 42 files");
     expect(redact({ n: 1, b: true, z: null })).toEqual({ n: 1, b: true, z: null });

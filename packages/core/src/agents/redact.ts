@@ -229,7 +229,7 @@ function walk(value: unknown, extra: string[]): unknown {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       const sensitive = isSecretKey(k) && v !== null && v !== undefined && typeof v !== "boolean";
-      out[k] = sensitive ? REDACTED : walk(v, extra);
+      out[redactString(k, extra)] = sensitive ? REDACTED : walk(v, extra); // a key can be a secret too
     }
     return out;
   }
