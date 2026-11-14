@@ -34,7 +34,7 @@ export type EventType =
 
 const nonEmptyId = z.string().min(1);
 
-export const eventPayloadSchemas: Record<EventType, z.ZodTypeAny> = {
+export const eventPayloadSchemas: Record<EventType, z.ZodType> = {
   "project.created": z.object({ projectId: nonEmptyId, name: z.string(), pitch: z.string() }).strict(),
   "card.created": z.object({ cardId: nonEmptyId, title: z.string(), stage: stageSchema }).strict(),
   "card.moved": z.object({ cardId: nonEmptyId, from: stageSchema, to: stageSchema }).strict(),

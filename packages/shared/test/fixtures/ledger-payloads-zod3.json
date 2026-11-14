@@ -1,0 +1,78 @@
+[
+  { "type": "project.created", "payload": { "name": "Demo", "pitch": "A small demo project", "projectId": "0b6f3c1e-1d2a-4e5f-9a8b-7c6d5e4f3a21" } },
+  { "type": "project.created", "payload": { "name": "No pitch", "pitch": "", "projectId": "p-2" } },
+  { "type": "card.created", "payload": { "cardId": "c-1", "stage": "plan", "title": "Write the spec" } },
+  { "type": "card.moved", "payload": { "cardId": "c-1", "from": "plan", "to": "build" } },
+  { "type": "card.status_changed", "payload": { "cardId": "c-1", "from": "todo", "to": "active" } },
+  {
+    "type": "agent.started",
+    "payload": { "adapter": "claude", "authMode": "api_key", "cardId": "c-1", "prompt": "Fix the failing test", "runId": "r-1", "worktree": "worktrees/r-1" }
+  },
+  {
+    "type": "agent.started",
+    "payload": { "adapter": "fake", "authMode": "none", "cardId": null, "prompt": "hello", "runId": "r-2", "worktree": "worktrees\\r-2" }
+  },
+  { "type": "agent.message", "payload": { "runId": "r-1", "text": "Reading the test file." } },
+  {
+    "type": "agent.action.requested",
+    "payload": { "actionId": "a-1", "input": { "command": "pnpm test", "cwd": "." }, "kind": "shell", "runId": "r-1", "summary": "Run pnpm test", "tool": "Bash" }
+  },
+  {
+    "type": "agent.action.requested",
+    "payload": { "actionId": "a-2", "input": null, "kind": "other", "runId": "r-1", "summary": "Think", "tool": "think" }
+  },
+  { "type": "agent.action.decided", "payload": { "actionId": "a-1", "by": "human", "decision": "allow", "reason": "", "runId": "r-1" } },
+  { "type": "agent.action.decided", "payload": { "actionId": "a-2", "by": "policy", "decision": "deny", "reason": "not allowed by policy", "runId": "r-1" } },
+  { "type": "agent.action.completed", "payload": { "actionId": "a-1", "ok": true, "output": "1 passed", "runId": "r-1" } },
+  { "type": "agent.finished", "payload": { "costUsd": 0.0123, "error": null, "runId": "r-1", "status": "completed" } },
+  {
+    "type": "agent.finished",
+    "payload": { "costUsd": null, "error": "adapter exited", "inputTokens": 1200, "outputTokens": null, "runId": "r-2", "status": "failed" }
+  },
+  { "type": "settings.claude_auth_changed", "payload": { "acknowledgement": "", "mode": "api_key" } },
+  {
+    "type": "settings.claude_auth_changed",
+    "payload": {
+      "acknowledgement": "I understand that running Claude on my own Claude subscription through The Terminal may violate Anthropic's terms and could put my account at risk. I choose to do this at my own risk.",
+      "mode": "subscription"
+    }
+  },
+  { "type": "settings.provider_auth_changed", "payload": { "acknowledgement": "", "mode": "api_key", "provider": "gemini" } },
+  {
+    "type": "settings.provider_auth_changed",
+    "payload": {
+      "acknowledgement": "I understand that running Codex on my own ChatGPT plan through The Terminal uses my plan's limits and is subject to OpenAI's terms. I choose to do this.",
+      "mode": "chatgpt",
+      "provider": "codex"
+    }
+  },
+  {
+    "type": "connection.added",
+    "payload": {
+      "config": { "googleCloudProject": "demo-project" },
+      "connectionId": "k-1",
+      "kind": "llm",
+      "name": "Gemini",
+      "privateFields": ["cliHome"],
+      "provider": "gemini",
+      "secretFields": ["apiKey"]
+    }
+  },
+  {
+    "type": "connection.added",
+    "payload": { "config": {}, "connectionId": "k-2", "kind": "github", "name": "GitHub", "privateFields": [], "provider": "github", "secretFields": ["token"] }
+  },
+  {
+    "type": "connection.updated",
+    "payload": {
+      "changes": { "config": { "googleCloudProject": "other" }, "enabled": false, "name": "Work Gemini", "privateRemoved": ["cliHome"], "secretsSet": ["apiKey"] },
+      "connectionId": "k-1",
+      "name": "Work Gemini"
+    }
+  },
+  { "type": "connection.updated", "payload": { "changes": { "privateSet": ["cliHome"], "secretsRemoved": ["apiKey"] }, "connectionId": "k-1", "name": "Work Gemini" } },
+  { "type": "connection.removed", "payload": { "connectionId": "k-2", "name": "GitHub" } },
+  { "type": "connection.tested", "payload": { "connectionId": "k-1", "message": "Rejected by the provider (HTTP 401)", "name": "Work Gemini", "ok": false } },
+  { "type": "connection.used", "payload": { "connectionId": "k-1", "name": "Work Gemini", "purpose": "api_key", "runId": "r-1" } },
+  { "type": "connection.signin", "payload": { "ok": true, "provider": "codex" } }
+]
