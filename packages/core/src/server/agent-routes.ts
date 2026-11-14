@@ -1,6 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, agentPayloadSchemas, type AdapterId } from "@theterminal/shared";
+import {
+  ADAPTERS,
+  CLAUDE_SUBSCRIPTION_ACK,
+  PROVIDER_ACKS,
+  PROVIDERS,
+  agentPayloadSchemas,
+  type AdapterId,
+  type AuthMode,
+  type Provider,
+} from "@theterminal/shared";
 import type { AgentRunner } from "../agents/runner.js";
 import type { ProviderSettings } from "../agents/settings.js";
 import { NotFoundError } from "../board/board-service.js";
@@ -13,6 +22,8 @@ export type AgentRouteDeps = {
   settings: ProviderSettings;
   /** The adapters registered in this server, in ADAPTERS order. */
   adapters: AdapterId[];
+  /** Whether a provider's CLI is on PATH. Asked on every listing, so installing a CLI shows without a restart. */
+  installed: (p: Provider) => boolean;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -24,10 +35,15 @@ const startBody = z.object({
 });
 const decisionBody = z.object({ decision: z.enum(["allow", "deny"]), reason: z.string().optional() });
 const authBody = z.object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().optional() });
+const providerAuthBody = z.object({
+  provider: z.enum(PROVIDERS),
+  mode: z.enum(["api_key", "subscription", "chatgpt", "google"]), // which suit the provider: ProviderSettings checks
+  acknowledgement: z.string().optional(),
+});
 
-/** Agent runs, decisions and the Claude auth setting. Errors are mapped by the handler in routes.ts. */
+/** Agent runs, decisions and the per-provider auth settings. Errors are mapped by the handler in routes.ts. */
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps): void {
-  const { db, runner, settings, adapters } = deps;
+  const { db, runner, settings, adapters, installed } = deps;
 
   const requireProject = (id: string) => {
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
@@ -35,10 +51,23 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.get("/api/agents", async () => ({
     adapters,
+    providers: Object.fromEntries(PROVIDERS.map((p) => [p, { mode: settings.getMode(p), installed: installed(p) }])) as Record<
+      Provider,
+      { mode: AuthMode; installed: boolean }
+    >,
+    acks: PROVIDER_ACKS,
+    // Legacy fields: the UI on this branch still reads them. Drop them once the UI reads `providers` and `acks`.
     claudeAuthMode: settings.getMode("claude"),
     subscriptionAck: CLAUDE_SUBSCRIPTION_ACK,
   }));
 
+  app.post("/api/settings/provider-auth", async (req) => {
+    const body = providerAuthBody.parse(req.body);
+    settings.setMode(actor, body.provider, body.mode, body.acknowledgement);
+    return { provider: body.provider, mode: settings.getMode(body.provider) };
+  });
+
+  // Alias of provider-auth for provider "claude", kept for compatibility.
   app.post("/api/settings/claude-auth", async (req) => {
     const body = authBody.parse(req.body);
     settings.setMode(actor, "claude", body.mode, body.acknowledgement);

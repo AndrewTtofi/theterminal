@@ -11,14 +11,16 @@ import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
-import { ADAPTERS, type AdapterId } from "@theterminal/shared";
+import { ADAPTERS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
+import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
+import { which as whichOnPath } from "../agents/which.js";
 import { WorktreeManager } from "../agents/worktrees.js";
 
 export type RunningServer = {
@@ -78,9 +80,35 @@ const DEFAULT_FAKE_SCRIPT: FakeStep[] = [
   },
 ];
 
-/** Claude always; the scripted fake adapter only when THETERMINAL_FAKE_AGENT=1 (tests and demos). */
-function buildAdapters(dataDir: string): Partial<Record<AdapterId, AgentAdapter>> {
-  const adapters: Partial<Record<AdapterId, AgentAdapter>> = { claude: new ClaudeAdapter({ dataDir }) };
+/** The CLI each provider runs, as looked up on PATH. */
+const PROVIDER_CLI: Record<Provider, string> = { claude: "claude", codex: "codex", gemini: "gemini" };
+
+/** Locates a CLI on PATH: an absolute path, or null. */
+export type Which = (cmd: string) => string | null;
+
+/**
+ * Tests only: when THETERMINAL_FAKE_AGENT=1, `envName` may name a fixture script that stands in for a provider
+ * CLI, run with this Node. Ignored otherwise, so a real workspace always uses the CLI found on PATH.
+ */
+function fakeCliCommand(envName: string): { file: string; args: string[] } | undefined {
+  const fixture = process.env[envName];
+  if (process.env.THETERMINAL_FAKE_AGENT !== "1" || !fixture) return undefined;
+  return { file: process.execPath, args: [fixture] };
+}
+
+/**
+ * Claude and Codex always (their CLIs are looked up at run start, not here); the scripted fake adapter only
+ * when THETERMINAL_FAKE_AGENT=1 (tests and demos).
+ */
+function buildAdapters(dataDir: string, which: Which): Partial<Record<AdapterId, AgentAdapter>> {
+  const codexCommand = fakeCliCommand("THETERMINAL_CODEX_BIN");
+  const adapters: Partial<Record<AdapterId, AgentAdapter>> = {
+    claude: new ClaudeAdapter({ dataDir }),
+    // The API key is read from OPENAI_API_KEY when each run starts.
+    codex: new CodexAdapter({ dataDir, bin: () => which("codex"), ...(codexCommand && { command: codexCommand }) }),
+    // Gemini registration point: add the Gemini adapter here, the same way as Codex, with
+    // fakeCliCommand("THETERMINAL_GEMINI_BIN"). Until then a gemini run is rejected as unavailable.
+  };
   if (process.env.THETERMINAL_FAKE_AGENT === "1") {
     const raw = process.env.THETERMINAL_FAKE_SCRIPT;
     let script: FakeStep[] = DEFAULT_FAKE_SCRIPT;
@@ -106,8 +134,11 @@ export async function createServer(opts: {
   token?: string;
   /** How long close() waits for agent adapters to return after stopping them. */
   shutdownTimeoutMs?: number;
+  /** Tests only: the PATH lookup for provider CLIs. Default: the PATH of this process. */
+  which?: Which;
 }): Promise<RunningServer> {
-  const adapters = buildAdapters(opts.dataDir);
+  const which: Which = opts.which ?? whichOnPath;
+  const adapters = buildAdapters(opts.dataDir, which);
   mkdirSync(opts.dataDir, { recursive: true });
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   const db = openDatabase(join(opts.dataDir, "ledger.db"));
@@ -147,6 +178,7 @@ export async function createServer(opts: {
       runner,
       settings: new ProviderSettings(db, ledger),
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
+      installed: (p) => which(PROVIDER_CLI[p]) !== null,
     });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();

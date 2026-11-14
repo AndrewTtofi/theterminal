@@ -2,8 +2,9 @@ import Fastify from "fastify";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, type AgentAction, type AgentRun } from "@theterminal/shared";
+import { CLAUDE_SUBSCRIPTION_ACK, PROVIDER_ACKS, type AgentAction, type AgentRun } from "@theterminal/shared";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
@@ -17,7 +18,13 @@ import { listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
-const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN"] as const;
+const ENV_KEYS = [
+  "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
+] as const;
+const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
+const FAKE_OPENAI_KEY = "sk-TESTKEY-openai-0000000000000000";
+/** A PATH lookup that finds nothing, so tests never depend on which CLIs this machine has. */
+const noCli = () => null;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const running: RunningServer[] = [];
 const dirs: string[] = [];
@@ -38,13 +45,16 @@ const tmp = () => {
 };
 
 /** Starts a server with the fake adapter enabled (when `script` is given) and one project. */
-async function start(script?: FakeStep[] | null, opts: { shutdownTimeoutMs?: number } = {}) {
+async function start(
+  script?: FakeStep[] | null,
+  opts: { shutdownTimeoutMs?: number; which?: (cmd: string) => string | null } = {},
+) {
   if (script !== null) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
   }
   const dataDir = tmp();
-  const s = await createServer({ dataDir, port: 0, ...opts });
+  const s = await createServer({ dataDir, port: 0, which: noCli, ...opts });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
   return { s, projectId: project.id, dataDir };
@@ -72,19 +82,90 @@ const script: FakeStep[] = [
 ];
 
 describe("agent API", { timeout: 15000 }, () => {
-  it("GET /api/agents lists registered adapters, the auth mode and the acknowledgement", async () => {
-    const { s } = await start(script);
+  it("GET /api/agents lists registered adapters, each provider's mode and install state, and the acknowledgements", async () => {
+    const { s } = await start(script, { which: (cmd) => (cmd === "codex" ? "/fake/bin/codex" : null) });
     expect(await json(get(s, "/api/agents"))).toEqual({
-      adapters: ["claude", "fake"],
+      adapters: ["claude", "codex", "fake"],
+      providers: {
+        claude: { mode: "api_key", installed: false },
+        codex: { mode: "api_key", installed: true },
+        gemini: { mode: "api_key", installed: false },
+      },
+      acks: PROVIDER_ACKS,
+      // Legacy fields, kept until the UI reads `providers`.
       claudeAuthMode: "api_key",
       subscriptionAck: CLAUDE_SUBSCRIPTION_ACK,
     });
   });
 
-  it("registers only claude when the fake env var is unset, and rejects a fake run with 400", async () => {
+  it("provider-auth sets a provider's mode; a mode the provider lacks or a missing acknowledgement is 400", async () => {
+    const { s } = await start(script);
+    const wrongMode = await post(s, "/api/settings/provider-auth", { provider: "claude", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.claude });
+    expect(wrongMode.status).toBe(400);
+    expect(await wrongMode.json()).toMatchObject({ error: "invalid_input" });
+    expect((await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt" })).status).toBe(400);
+    expect((await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.claude })).status).toBe(400);
+    expect((await post(s, "/api/settings/provider-auth", { provider: "gpt", mode: "api_key" })).status).toBe(400);
+    expect((await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "none" })).status).toBe(400);
+    const before = await json<unknown[]>(get(s, "/api/ledger"));
+
+    const ok = await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.codex });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ provider: "codex", mode: "chatgpt" });
+    const after = await json<{ type: string; payload: unknown }[]>(get(s, "/api/ledger"));
+    expect(after).toHaveLength(before.length + 1);
+    expect(after.at(-1)).toMatchObject({ type: "settings.provider_auth_changed", payload: { provider: "codex", mode: "chatgpt" } });
+    const listing = await json<{ providers: Record<string, { mode: string }> }>(get(s, "/api/agents"));
+    expect(listing.providers.codex!.mode).toBe("chatgpt");
+    expect(listing.providers.claude!.mode).toBe("api_key");
+
+    expect(await json(post(s, "/api/settings/provider-auth", { provider: "codex", mode: "api_key" }))).toEqual({ provider: "codex", mode: "api_key" });
+  });
+
+  it("with the fake env and THETERMINAL_CODEX_BIN, a Codex run goes start, ask, allow, completed", async () => {
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
+    const codexScript = [{ approve: "command", command: "npm test", itemId: "i1", output: "ok" }, { message: "All done." }];
+    const { s, projectId } = await start(codexScript as unknown as FakeStep[]);
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "run the tests" });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect(run).toMatchObject({ adapter: "codex", authMode: "api_key", status: "running" });
+
+    await untilPending(s, projectId);
+    const [action] = await pending(s, projectId);
+    expect(action).toMatchObject({ runId: run.id, kind: "shell", tool: "codex.command", summary: "Run: npm test" });
+    expect((await post(s, `/api/actions/${action!.id}/decision`, { decision: "allow" })).status).toBe(200);
+
+    await untilFinished(s, run.id);
+    const detail = await getRun(s, run.id);
+    expect(detail.run).toMatchObject({ status: "completed", error: null });
+    expect(detail.actions.map((a) => [a.kind, a.status, a.decidedBy])).toEqual([["shell", "completed", "human"]]);
+    const ledger = JSON.stringify(await json(get(s, `/api/ledger?projectId=${projectId}`)));
+    expect(ledger).not.toContain(FAKE_OPENAI_KEY);
+  });
+
+  it("ignores THETERMINAL_CODEX_BIN without the fake env: the run fails because Codex is not on PATH", async () => {
+    delete process.env.THETERMINAL_FAKE_AGENT;
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    process.env.OPENAI_API_KEY = FAKE_OPENAI_KEY;
+    const { s, projectId } = await start(null);
+    const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" }));
+    await untilFinished(s, run.id);
+    expect((await getRun(s, run.id)).run).toMatchObject({ status: "failed", error: "Codex CLI is not installed or not on PATH" });
+  });
+
+  it("a Gemini run is 400 invalid_input until its adapter is registered", async () => {
+    const { s, projectId } = await start(script);
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "go" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_input" });
+  });
+
+  it("registers claude and codex when the fake env var is unset, and rejects a fake run with 400", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
     const { s, projectId } = await start(null);
-    expect((await json<{ adapters: string[] }>(get(s, "/api/agents"))).adapters).toEqual(["claude"]);
+    expect((await json<{ adapters: string[] }>(get(s, "/api/agents"))).adapters).toEqual(["claude", "codex"]);
     const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "invalid_input" });
@@ -192,7 +273,7 @@ describe("agent API", { timeout: 15000 }, () => {
     expect((await post(s, "/api/runs/nope/stop")).status).toBe(404);
   });
 
-  it("switches Claude auth mode; subscription needs the exact acknowledgement", async () => {
+  it("the claude-auth alias switches Claude auth mode; subscription needs the exact acknowledgement", async () => {
     const { s } = await start(script);
     const bad = await post(s, "/api/settings/claude-auth", { mode: "subscription" });
     expect(bad.status).toBe(400);
@@ -203,7 +284,9 @@ describe("agent API", { timeout: 15000 }, () => {
     const ok = await post(s, "/api/settings/claude-auth", { mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ mode: "subscription" });
-    expect((await json<{ claudeAuthMode: string }>(get(s, "/api/agents"))).claudeAuthMode).toBe("subscription");
+    const listing = await json<{ claudeAuthMode: string; providers: Record<string, { mode: string }> }>(get(s, "/api/agents"));
+    expect(listing.providers.claude!.mode).toBe("subscription");
+    expect(listing.claudeAuthMode).toBe("subscription");
 
     expect(await json(post(s, "/api/settings/claude-auth", { mode: "api_key" }))).toEqual({ mode: "api_key" });
   });
@@ -294,7 +377,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const app = Fastify();
     try {
       registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
-      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"] });
+      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], installed: () => false });
       await runner.shutdown();
       const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });
       expect(res.statusCode).toBe(503);
