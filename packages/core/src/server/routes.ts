@@ -6,7 +6,7 @@ import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
 import { AdapterUnavailableError, ShuttingDownError } from "../agents/runner.js";
 import { redact } from "../agents/redact.js";
-import { ConflictError, SecretInConfigError, UnknownFieldError } from "../connections/service.js";
+import { ConflictError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError } from "../connections/service.js";
 import { SecretStoreUnavailableError } from "../secrets/store.js";
 
 export type RouteDeps = {
@@ -62,6 +62,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
     if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
     if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
+    if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
     if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
     if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });

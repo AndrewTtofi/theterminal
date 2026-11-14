@@ -9,6 +9,7 @@ import {
   type Actor,
   type CatalogEntry,
   type Connection,
+  type ConnectionField,
   type ConnectionKind,
   type ConnectionProvider,
   type FieldStorage,
@@ -21,6 +22,7 @@ import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
+import { parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -45,6 +47,33 @@ export class UnknownFieldError extends Error {
     this.name = "UnknownFieldError";
   }
 }
+
+/** A connection that is switched off was asked for. */
+export class ConnectionDisabledError extends Error {
+  constructor(message = "connection is disabled") {
+    super(message);
+    this.name = "ConnectionDisabledError";
+  }
+}
+
+/** A connection that cannot be used this way: given to a run (a model, GitHub, hardware), or written by hand (hardware). */
+export class UnsupportedConnectionError extends Error {
+  constructor(message = "this connection cannot be given to a run") {
+    super(message);
+    this.name = "UnsupportedConnectionError";
+  }
+}
+
+export type CloudSource = {
+  connectionId: string;
+  name: string;
+  provider: "aws" | "gcp" | "azure";
+  config: Record<string, string>;
+  secrets: Record<string, string>;
+};
+export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[] };
+export type GitHubSource = { connectionId: string; token: string; repo: string } | null;
+export type Budget = { connectionId: string; provider: Provider; name: string; plan: string | null; monthlyBudgetUsd: number | null };
 
 export type ConnectionTester = (
   input: { config: Record<string, string>; private: Record<string, string>; secrets: Record<string, string> },
@@ -101,6 +130,13 @@ const UNTESTABLE = "Testing is not available for this connection yet";
 const UNREACHABLE = "Could not reach the provider";
 /** How long past its own timeout a tester may run before it is abandoned. */
 const TESTER_GRACE_MS = 1000;
+/** Written only by hardware detection, never through `add`/`update`. */
+const DETECTED_PROVIDER: ConnectionProvider = "local_hardware";
+const MANAGED_BY_DETECTION = "this connection is managed by detection";
+/** Kinds whose connections a run may be given. */
+const RUN_KINDS: ReadonlySet<ConnectionKind> = new Set(["cloud", "mcp"]);
+const NUMBER_VALUE = /^\d{1,9}(\.\d{1,2})?$/;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
 
@@ -135,6 +171,28 @@ function invalid(path: (string | number)[], message: string): never {
 
 const catalogFor = (provider: ConnectionProvider): CatalogEntry | undefined =>
   CONNECTION_CATALOG.find((e) => e.provider === provider);
+
+/** An https URL, or http to this computer only. */
+function isAllowedUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+}
+
+/**
+ * Checks a value against its field's input type and catalog pattern. Failures name the field's path, never the value.
+ * A "pairs" field is parsed, so a bad line is refused at [field, line] before anything is stored.
+ */
+function checkFormat(field: ConnectionField, value: string, path: (string | number)[]): void {
+  if (field.input === "number" && !NUMBER_VALUE.test(value)) invalid(path, "must be a number with at most 2 decimals");
+  if (field.input === "url" && !isAllowedUrl(value)) invalid(path, "must be an https URL, or http on localhost");
+  if (field.pattern !== undefined && !new RegExp(field.pattern).test(value)) invalid(path, "is not in the expected format");
+  if (field.format === "pairs") parsePairs(value, field.name === "headers" ? "headers" : "env");
+}
 
 /**
  * Connections to model providers and services. Secret and private values live only in the keychain (and an
@@ -195,7 +253,7 @@ export class ConnectionService {
           read = true;
           if (value === null) continue;
           values[field] = value;
-          if (storage === "secret") this.seen.add(value);
+          if (storage === "secret") this.remember(row.provider, field, value);
         }
         next.set(row.id, values);
       }
@@ -260,6 +318,7 @@ export class ConnectionService {
   }
 
   async add(actor: Actor, input: AddConnectionInput): Promise<Connection> {
+    if (input.provider === DETECTED_PROVIDER) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
     await this.tryLoad();
     const entry = this.availableEntry(input.provider);
     if (entry.kind !== input.kind) invalid(["provider"], "provider does not belong to this kind");
@@ -283,7 +342,7 @@ export class ConnectionService {
     });
     const ops = toOps(secrets, priv);
     return this.exclusive(connectionId, async () => {
-      await this.commitWithKeychain(connectionId, ops, () => {
+      await this.commitWithKeychain(connectionId, entry.provider, ops, () => {
         this.assertNoConflict(entry);
         return { projectId: null, actor, type: "connection.added", payload };
       });
@@ -297,6 +356,7 @@ export class ConnectionService {
 
   private async updateNow(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
     const row = this.requireRow(id);
+    if (row.provider === DETECTED_PROVIDER) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
     await this.tryLoad();
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
@@ -311,6 +371,10 @@ export class ConnectionService {
     for (const f of entry.fields) {
       const given = f.storage === "secret" ? secrets : f.storage === "private" ? priv : {};
       if (f.required && given[f.name] === null) invalid([f.storage === "secret" ? "secrets" : f.storage, f.name], "required");
+      // A new config replaces the old one whole, so it must still hold every required field.
+      if (f.required && f.storage === "config" && patch.config !== undefined && patch.config[f.name] === undefined) {
+        invalid(["config", f.name], "required");
+      }
     }
     const setOf = (values: Record<string, string | null>) => Object.keys(values).filter((k) => values[k] !== null).sort();
     const removedOf = (values: Record<string, string | null>) => Object.keys(values).filter((k) => values[k] === null).sort();
@@ -325,7 +389,7 @@ export class ConnectionService {
     // Writes before deletes: a failed write then leaves nothing deleted.
     const all = toOps(secrets, priv);
     const ops = [...all.filter((op) => op.value !== null), ...all.filter((op) => op.value === null)];
-    await this.commitWithKeychain(id, ops, () => {
+    await this.commitWithKeychain(id, row.provider, ops, () => {
       this.requireRow(id);
       return { projectId: null, actor, type: "connection.updated", payload };
     });
@@ -423,15 +487,89 @@ export class ConnectionService {
   }
 
   /**
+   * What a run is given for `ids`, from the cache: cloud accounts with their secrets and MCP server specs, in the order
+   * asked, duplicates collapsed. Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
+   * not start with half its secrets), before anything is returned.
+   */
+  selectForRun(ids: string[]): RunSelection {
+    const rows = [...new Set(ids)].map((id) => this.requireRow(id));
+    for (const row of rows) {
+      if (!RUN_KINDS.has(row.kind)) throw new UnsupportedConnectionError();
+      if (row.enabled !== 1) throw new ConnectionDisabledError();
+    }
+    if (rows.length > 0 && this.keychainState() !== "ok") throw new SecretStoreUnavailableError();
+    const selection: RunSelection = { cloud: [], mcp: [] };
+    for (const row of rows) {
+      const values = this.cache.get(row.id) ?? {};
+      if (row.kind === "mcp") {
+        selection.mcp.push(toMcpSpec(this.toConnection(row), values));
+        continue;
+      }
+      const secretFields = new Set(JSON.parse(row.secret_fields) as string[]);
+      selection.cloud.push({
+        connectionId: row.id, name: row.name, provider: row.provider as CloudSource["provider"],
+        config: JSON.parse(row.config) as Record<string, string>,
+        secrets: Object.fromEntries(Object.entries(values).filter(([f]) => secretFields.has(f))),
+      });
+    }
+    return selection;
+  }
+
+  /** The enabled GitHub connection with a stored token and a repository, else null. */
+  githubSource(): GitHubSource {
+    const row = this.db
+      .prepare("SELECT * FROM connections WHERE provider = 'github' AND enabled = 1 ORDER BY created_at, rowid LIMIT 1")
+      .get() as Row | undefined;
+    if (!row) return null;
+    const token = this.cache.get(row.id)?.token;
+    const repo = (JSON.parse(row.config) as Record<string, string>).repo;
+    return token && repo ? { connectionId: row.id, token, repo } : null;
+  }
+
+  /** The plan and monthly budget of each enabled model connection. */
+  budgets(): Budget[] {
+    return this.rows()
+      .filter((r) => r.kind === "llm" && r.enabled === 1)
+      .map((r) => {
+        const config = JSON.parse(r.config) as Record<string, string>;
+        return {
+          connectionId: r.id, provider: r.provider as Provider, name: r.name, plan: config.plan ?? null,
+          monthlyBudgetUsd: config.monthlyBudgetUsd === undefined ? null : Number(config.monthlyBudgetUsd),
+        };
+      });
+  }
+
+  /**
+   * Adds a secret value to the redaction list. The values of a "pairs" field are added one by one too (those long
+   * enough to be secrets), so a header or variable is redacted on its own, not only as the whole blob.
+   */
+  private remember(provider: ConnectionProvider, field: string, value: string): void {
+    this.seen.add(value);
+    const def = catalogFor(provider)?.fields.find((f) => f.name === field);
+    if (def?.format !== "pairs") return;
+    try {
+      for (const v of Object.values(parsePairs(value, field === "headers" ? "headers" : "env"))) {
+        if (v.length >= MIN_SECRET_LENGTH) this.seen.add(v);
+      }
+    } catch {
+      // A stored value that no longer parses stays redacted as a whole.
+    }
+  }
+
+  /**
    * Applies `ops` to the keychain, then commits the event. If a keychain op or the commit fails, every op done
    * in this call is undone (best effort: the previous value is put back, or the entry deleted) and the error rethrown.
    */
-  private async commitWithKeychain(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
+  private async commitWithKeychain(
+    connectionId: string, provider: ConnectionProvider, ops: KeychainOp[], build: () => NewLedgerEntry,
+  ): Promise<void> {
     if (ops.length > 0) await this.ensureKeychain();
-    await this.mutating(connectionId, () => this.applyAndCommit(connectionId, ops, build));
+    await this.mutating(connectionId, () => this.applyAndCommit(connectionId, provider, ops, build));
   }
 
-  private async applyAndCommit(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
+  private async applyAndCommit(
+    connectionId: string, provider: ConnectionProvider, ops: KeychainOp[], build: () => NewLedgerEntry,
+  ): Promise<void> {
     const cached = this.cache.get(connectionId) ?? {};
     const done: Undo[] = [];
     try {
@@ -439,7 +577,7 @@ export class ConnectionService {
         const account = accountFor(connectionId, op.field);
         // A value the cache does not hold (an entry the projection does not list) is read, so undo can restore it.
         const previous = Object.hasOwn(cached, op.field) ? cached[op.field] : ((await this.secrets.get(account)) ?? undefined);
-        if (previous !== undefined && op.secret) this.seen.add(previous);
+        if (previous !== undefined && op.secret) this.remember(provider, op.field, previous);
         done.push({ account, previous });
         if (op.value === null) await this.secrets.delete(account);
         else await this.secrets.set(account, op.value);
@@ -458,7 +596,7 @@ export class ConnectionService {
     for (const op of ops) {
       if (op.value === null) delete next[op.field];
       else next[op.field] = op.value;
-      if (op.value !== null && op.secret) this.seen.add(op.value);
+      if (op.value !== null && op.secret) this.remember(provider, op.field, op.value);
     }
     this.cache.set(connectionId, next);
   }
@@ -552,6 +690,7 @@ export class ConnectionService {
   private checkConfig(entry: CatalogEntry, input: Record<string, string>, same: string[]): Record<string, string> {
     const config = connectionConfigSchema.parse(input);
     this.checkFields(entry, "config", Object.keys(config));
+    for (const [name, value] of Object.entries(config)) checkFormat(entry.fields.find((f) => f.name === name)!, value, ["config", name]);
     const secrets = [...this.secretValues(), ...same];
     if (JSON.stringify(redact(config, secrets)) !== JSON.stringify(config)) throw new SecretInConfigError();
     return config;
@@ -568,6 +707,7 @@ export class ConnectionService {
       if (field.input !== "multiline" && /[\r\n]/.test(value)) invalid([...path, name], "must be a single line");
       // A relative folder would resolve against wherever the CLI happens to start (the run's worktree).
       if (field.input === "path" && !isAbsolute(value)) invalid([...path, name], "must be an absolute path");
+      checkFormat(field, value, [...path, name]);
     }
   }
 

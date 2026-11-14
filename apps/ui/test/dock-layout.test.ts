@@ -114,7 +114,9 @@ describe("restoreOrDefault", () => {
 describe("staleConnectionPanels", () => {
   it("lists connection tabs whose connection is gone, and new tabs for unknown or unavailable providers", () => {
     const ids = ["board", "ledger", "connection:c1", "connection:gone", "connection:new:github", "connection:new:aws", "connection:new:nope"];
-    expect(staleConnectionPanels(ids, [{ id: "c1" }], CONNECTION_CATALOG)).toEqual([
+    // Every provider is available since 5B; mark one unavailable to cover that path.
+    const catalog = CONNECTION_CATALOG.map((e) => (e.provider === "aws" ? { ...e, available: false } : e));
+    expect(staleConnectionPanels(ids, [{ id: "c1" }], catalog)).toEqual([
       "connection:gone",
       "connection:new:aws",
       "connection:new:nope",
