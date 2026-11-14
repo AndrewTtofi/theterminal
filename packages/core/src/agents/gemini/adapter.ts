@@ -570,8 +570,10 @@ class GeminiRun {
   /**
    * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
    * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
-   * `message` (before tool activity): flush all but an open private key block. `end`: flush everything, an open
-   * block as REDACTED. The text itself is never changed otherwise: redaction sees a key block from BEGIN to END.
+   * `message` (before tool activity): flush everything but what `safeCut` keeps back at the very end (an open private
+   * key block, a partial BEGIN marker, a trailing secret context), which the tool call must not part from what
+   * follows. `end`: flush everything, an open block as REDACTED. The text itself is never changed otherwise:
+   * redaction sees a key block from BEGIN to END.
    */
   private flushText(mode: "size" | "stream" | "message" | "end"): void {
     this.clearFlushTimers();
@@ -582,12 +584,7 @@ class GeminiRun {
       const open = openKeyBlock(all);
       if (open >= 0) text = all.slice(0, open) + REDACTED;
     } else {
-      if (mode === "message") {
-        const open = openKeyBlock(all);
-        if (open >= 0) cut = open;
-      } else {
-        cut = safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
-      }
+      cut = safeCut(all, mode === "message" ? all.length : mode === "size" ? sizeCut(all) : streamCut(all));
       text = all.slice(0, cut);
     }
     this.pendingText = all.slice(cut);
@@ -863,11 +860,14 @@ function streamCut(text: string): number {
  * one runs to the end), never after a partial BEGIN line, and never right after the context that redaction finds a
  * secret value by (`Bearer `, `api_key = `, `"password":"ab`, a `password: |` block still running): that context
  * goes with its value into what is held. Stepping back over contexts stops 2 * HELD_TAIL from the end, so text
- * built of nothing but keys is still emitted. `text` starts a message of its own, so redaction will see its first
- * line as a whole line: it is judged as one.
+ * built of nothing but keys is still emitted; the partial-marker step is taken once, within MAX_BEGIN_MARKER of the
+ * cut asked for, so text built of nothing but dashes or marker starts is emitted too. `text` starts a message of its
+ * own, so redaction will see its first line as a whole line: it is judged as one.
  */
 function safeCut(text: string, cut: number): number {
   const floor = text.length - 2 * HELD_TAIL;
+  const asked = cut;
+  let partialChecked = false;
   for (;;) {
     const block = keyBlockAround(text, cut);
     if (block >= 0) {
@@ -875,9 +875,14 @@ function safeCut(text: string, cut: number): number {
       continue;
     }
     const head = text.slice(0, cut);
-    const window = Math.max(0, cut - MAX_BEGIN_MARKER); // a partial marker is at most that long, so nothing before it matters
-    const partial = PARTIAL_BEGIN.exec(head.slice(window));
-    const back = partial !== null ? window + partial.index : cut > floor ? trailingSecretContext(head, true) : -1;
+    let back = -1;
+    if (!partialChecked && cut > asked - MAX_BEGIN_MARKER) {
+      partialChecked = true;
+      const window = Math.max(0, cut - MAX_BEGIN_MARKER); // a partial marker is at most that long, so nothing before it matters
+      const partial = PARTIAL_BEGIN.exec(head.slice(window));
+      if (partial !== null) back = window + partial.index;
+    }
+    if (back < 0 && cut > floor) back = trailingSecretContext(head, true);
     if (back < 0) return cut;
     cut = back;
   }

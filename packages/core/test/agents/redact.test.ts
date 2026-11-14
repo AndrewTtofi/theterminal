@@ -377,6 +377,16 @@ describe("trailingSecretContext", () => {
     expect(trailingSecretContext(`x: 1\n${head}`, false)).toBe(5);
     expect(trailingSecretContext("password: |\n  one\nother: x\n", true)).toBe(-1); // the block has ended
   });
+
+  it("finds a block-scalar header that is not at the start of its line, and steps back to the key itself", () => {
+    const head = '{"x":1}password: |\n  hunter2abc\n  more\n';
+    expect(trailingSecretContext(head, true)).toBe(7);
+    expect(trailingSecretContext(`a\n${head}`, false)).toBe(9);
+    expect(trailingSecretContext("a\n- item: 1\n  secret_key: |\n    one\n", false)).toBe(12); // after a list item, the key
+    expect(trailingSecretContext("a\n  - password: |\n      one\n", false)).toBe(2); // a header that is the whole item keeps its indentation
+    expect(trailingSecretContext('a\n{"x":1}name: |\n  one\n', false)).toBe(-1); // not a secret key
+    expect(trailingSecretContext('a\n{"x":1}password: |\n  one\nnext: 2\n', false)).toBe(-1); // the block has ended
+  });
 });
 
 describe("redact: decorated private keys", () => {

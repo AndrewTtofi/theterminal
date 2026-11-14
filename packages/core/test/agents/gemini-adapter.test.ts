@@ -776,6 +776,81 @@ describe("GeminiAdapter", () => {
     expect(h.events.findIndex((e) => e.type === "action_result")).toBeLessThan(h.events.length - 1); // prose went out before the run ended
   });
 
+  it("holds a partial BEGIN marker across a tool call, so the key that follows is redacted whole", async () => {
+    const key = KEY_FORMS.plain!(RSA_KEY);
+    const split = key.indexOf("PRIVATE");
+    script([
+      { type: "message", text: `Key:\n${key.slice(0, split)}` },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      { type: "message", text: `${key.slice(split)}after\n` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`Key:\n${key}after\n`);
+    for (const t of texts) expect(leakedKeyBody(redact(t), RSA_KEY)).toBeNull();
+    expect(texts.map((t) => redact(t)).join("")).toBe("Key:\n[REDACTED]\nafter\n");
+  });
+
+  it("holds a trailing auth scheme across a tool call, so the token that follows is redacted", async () => {
+    script([
+      { type: "message", text: "Authorization: Bearer " },
+      { type: "read", path: join(worktree, "README.md"), toolCall: true },
+      { type: "message", text: `${OPAQUE_TOKEN}\n` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    const text = `Authorization: Bearer ${OPAQUE_TOKEN}\n`;
+    expect(texts.join("")).toBe(text);
+    const recorded = texts.map((t) => redact(t)).join("");
+    expect(recorded).toBe(redact(text));
+    expectNoFragment(recorded, OPAQUE_TOKEN);
+  });
+
+  for (const [label, header] of [
+    ["at the start of its line", "password: |\n"],
+    ["after other text on its line", '{"x":1}password: |\n'],
+  ] as const) {
+    it(`holds a secret YAML block scalar whose header is ${label} across a tool call after every body line`, async () => {
+      const body = ["  hunter2abc-one", "  hunter2abc-two", "  hunter2abc-three"];
+      const steps: Step[] = [{ type: "message", text: header }, { type: "read", path: join(worktree, "README.md"), toolCall: true }];
+      for (const line of body) steps.push({ type: "message", text: `${line}\n` }, { type: "read", path: join(worktree, "README.md"), toolCall: true });
+      steps.push({ type: "message", text: "done\n" });
+      script(steps);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      const text = streamed(steps.filter((s) => s.type === "message"));
+      expect(texts.join("")).toBe(text);
+      const recorded = texts.map((t) => redact(t)).join("");
+      expect(recorded).toBe(redact(text));
+      expect(recorded).toBe(`${header.slice(0, header.indexOf("|"))}[REDACTED]\ndone\n`);
+    });
+  }
+
+  for (const [label, text] of [
+    ["a run of dashes", `x ${"-".repeat(40_000)}`],
+    ["----B over and over", "----B".repeat(8000)],
+    ["-----BEGIN over and over", "-----BEGIN".repeat(4000)],
+  ] as const) {
+    it(`streams ${label} out in pieces as it arrives, in bounded time`, async () => {
+      script(chunked(text, 100));
+      const h = harness();
+      const at: number[] = [];
+      h.opts.emit = (e) => {
+        h.events.push(e);
+        if (e.type === "message") at.push(performance.now());
+      };
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+      expect(texts.join("")).toBe(text);
+      expect(texts.length).toBeGreaterThanOrEqual(5); // never held whole
+      expect(texts[0]!.length).toBeGreaterThan(3000); // the first size split went out nearly whole
+      expect(at.at(-1)! - at[0]!).toBeLessThan(200); // from the first message to the last
+    });
+  }
+
   it("releases a partial BEGIN marker once it is longer than any marker can be: capitals and spaces after it stream out normally", async () => {
     const caps = "AB CD EFG ".repeat(1024); // 10 KiB of what a label is made of, never ending in dashes
     const text = `See -----BEGIN ${caps}\ndone\n`;

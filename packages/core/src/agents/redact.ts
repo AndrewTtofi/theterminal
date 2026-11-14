@@ -70,8 +70,11 @@ const TRAILING_SCHEME = new RegExp(`(?<![A-Za-z0-9])(?:${SCHEMES})\\s+$`, "i");
 const TRAILING_KEY = new RegExp(`${KEY_NAME}${KEY_QUOTE}(?:${SEP}(?:${BLOCK_SCALAR_SOURCE}\\s*)?)?$`);
 // A key, its separator and a quoted value that has not closed yet (`"password":"abc`).
 const TRAILING_OPEN_VALUE = new RegExp(`${KEY_NAME}${KEY_QUOTE}${SEP}\\\\?["'][^"'\\\\\\r\\n]*$`);
-// A YAML block-scalar header line (`  password: |`): its indentation and key.
-const BLOCK_HEADER_LINE = new RegExp(`^([ \\t]*)(?:-[ \\t]+)?${KEY_NAME}${KEY_QUOTE}${SEP.replace(String.raw`\s*`, String.raw`[ \t]*`)}${BLOCK_SCALAR_SOURCE}`);
+// A YAML block-scalar header ending a line (`  password: |`, `{"x":1}password: |`): the key and what follows it. Only
+// one can end a line, so the leftmost match is the one.
+const BLOCK_HEADER = new RegExp(`${KEY_NAME}${KEY_QUOTE}${SEP.replace(String.raw`\s*`, String.raw`[ \t]*`)}${BLOCK_SCALAR_SOURCE}`);
+/** What may precede a header that is its whole line: indentation and a list-item dash. */
+const HEADER_ONLY_PREFIX = /^[ \t]*(?:-[ \t]+)?$/;
 /** How much of the end of a text `trailingSecretContext` looks at: longer than any key, header or open value it needs. */
 const TRAILING_WINDOW = 512;
 
@@ -294,9 +297,10 @@ export function trailingSecretContext(head: string, atLineStart: boolean): numbe
 }
 
 /**
- * The start of the line of a secret key's YAML block-scalar header whose body runs to the end of `text` (every
- * non-blank line after it indented deeper), else -1. The first line of `text` is judged only when `firstLineWhole`
- * says it starts at a line boundary.
+ * Where a secret key's YAML block-scalar header whose body runs to the end of `text` (every non-blank line after it
+ * indented deeper than its line) starts, else -1: the start of its line when the header is the whole line, otherwise
+ * the key itself (`{"x":1}password: |`). The first line of `text` is judged only when `firstLineWhole` says it
+ * starts at a line boundary.
  */
 function openBlockScalar(text: string, firstLineWhole: boolean): number {
   let deepest = Infinity; // the least indentation of the non-blank lines after the candidate header
@@ -305,11 +309,13 @@ function openBlockScalar(text: string, firstLineWhole: boolean): number {
     const start = text.lastIndexOf("\n", end - 1) + 1;
     if (start === 0 && !firstLineWhole) return -1;
     const line = text.slice(start, end).replace(/[\r\n]+$/, "");
-    const header = BLOCK_HEADER_LINE.exec(line);
-    if (header && isSecretKey(header[2]!) && header[1]!.length < deepest) return start;
-    if (line.trim() !== "") {
-      let indent = 0;
-      while (isBlank(line[indent])) indent++;
+    let indent = 0;
+    while (isBlank(line[indent])) indent++;
+    const header = BLOCK_HEADER.exec(line);
+    if (header && isSecretKey(header[1]!) && indent < deepest) {
+      return HEADER_ONLY_PREFIX.test(line.slice(0, header.index)) ? start : start + header.index;
+    }
+    if (indent < line.length) {
       deepest = Math.min(deepest, indent);
       if (deepest === 0) return -1;
     }
