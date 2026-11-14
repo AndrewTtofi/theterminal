@@ -652,11 +652,50 @@ describe("GeminiAdapter", () => {
 
   it("flushes the held tail of a size-split message after a pause, without waiting for more output", async () => {
     const head = "w ".repeat(2000);
-    script([{ type: "message", text: `${head}held tail` }, { type: "sleep", ms: 1500 }, { type: "message", text: "later" }]);
+    script([{ type: "message", text: `${head}held\ntail more` }, { type: "sleep", ms: 1500 }, { type: "message", text: "later" }]);
     const h = harness();
     expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
     const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
-    expect(texts).toEqual([`${head}held `, "tail", "later"]);
+    // The pause flush keeps back the trailing word, which may still be growing; the end of the turn flushes it.
+    expect(texts).toEqual([`${head}held\n`, "tail ", "morelater"]);
+  });
+
+  it("never emits part of a secret streamed with pauses longer than the flush delay between its chunks", async () => {
+    script([
+      { type: "message", text: "intro text " },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: STORED.slice(0, 10) },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: STORED.slice(10, 20) },
+      { type: "sleep", ms: 400 },
+      { type: "message", text: `${STORED.slice(20)} done` },
+    ]);
+    const h = harness();
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(`intro text ${STORED} done`);
+    expect(texts[0]).toBe("intro text "); // the pause flushed what was safe
+    for (const t of texts) if (t.includes(STORED.slice(0, 6)) || t.includes(STORED.slice(-6))) expect(t).toContain(STORED);
+  });
+
+  it("debounces the pause flush, but never holds streaming text back longer than 2 s", async () => {
+    const steps: Step[] = [];
+    for (let i = 0; i < 50; i++) steps.push({ type: "message", text: `w${i} ` }, { type: "sleep", ms: 50 });
+    script(steps);
+    const h = harness();
+    const at: number[] = [];
+    const t0 = Date.now();
+    h.opts.emit = (e) => {
+      h.events.push(e);
+      if (e.type === "message") at.push(Date.now() - t0);
+    };
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
+    expect(texts.join("")).toBe(streamed(steps.filter((s) => s.type === "message")));
+    expect(texts.length).toBeGreaterThanOrEqual(2); // flushed at the cap while still streaming
+    expect(texts.length).toBeLessThanOrEqual(4); // not every 250 ms
+    expect(at.at(-1)! - at[0]!).toBeGreaterThan(200); // the first flush came at the cap, well before the end
+    for (const t of texts.slice(0, -1)) expect(t).toMatch(/\s$/); // never cut inside a word
   });
 
   it("records the output of a truncated terminal without the partial word its cut left at the start", async () => {
@@ -901,7 +940,7 @@ describe("GeminiAdapter", () => {
   });
 
   it("aborting kills gemini and returns run stopped", async () => {
-    script([{ type: "message", text: "working" }, { type: "hang" }]);
+    script([{ type: "message", text: "working " }, { type: "hang" }]); // a trailing word would be held until the end
     const { spawn, children } = fakeSpawn();
     const h = harness();
     const done = adapter({ spawn }).start(h.opts);

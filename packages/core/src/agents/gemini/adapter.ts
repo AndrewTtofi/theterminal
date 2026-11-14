@@ -66,7 +66,10 @@ const MAX_COMMAND = 150;
 const MAX_CWD = 60;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 const MAX_MESSAGE_CHUNK = 4000;
+/** Streamed text is flushed once the stream pauses this long (the timer restarts on every chunk)… */
 const MESSAGE_PAUSE_MS = 250;
+/** …or this long after its first unflushed chunk, even while it keeps streaming. */
+const MESSAGE_MAX_WAIT_MS = 2000;
 /**
  * When a long message is split by size, up to this much of its end is held back and joined with what streams
  * next, so redaction sees a secret whole instead of in two messages. The split falls after the last newline in
@@ -322,6 +325,7 @@ class GeminiRun {
   private failure: string | null = null;
   private pendingText = "";
   private flushTimer: NodeJS.Timeout | undefined;
+  private capTimer: NodeJS.Timeout | undefined;
   /** Set once an unterminated PEM block outgrew MAX_HELD_BLOCK: its text is dropped until its END line. */
   private droppingBlock = false;
   private dropCarry = "";
@@ -483,7 +487,7 @@ class GeminiRun {
         return;
       case "tool_call":
       case "tool_call_update":
-        this.flushText();
+        this.flushText("message");
         return this.onToolCall(u);
       case "current_mode_update":
         if (u.currentModeId !== DEFAULT_MODE) this.fail(MODE_CHANGED);
@@ -527,9 +531,9 @@ class GeminiRun {
   }
 
   /**
-   * Streamed chunks are joined into one message: flushed before any tool activity, after a pause and when the run
-   * ends; when large, flushed with its tail held back (see HELD_TAIL). Until the run ends, a flush keeps back an
-   * unterminated PEM block and a trailing secret context (see `safeCut`).
+   * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
+   * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
+   * Only the end of the run flushes an unterminated PEM block, and then as REDACTED.
    */
   private text(t: string): void {
     if (this.droppingBlock) {
@@ -543,16 +547,19 @@ class GeminiRun {
       if (open >= 0) return this.dropOpenBlock(open);
     }
     if (this.pendingText.length >= MAX_MESSAGE_CHUNK) return this.flushText("size");
-    this.flushTimer ??= setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
+    clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
+    this.capTimer ??= setTimeout(() => this.flushText("stream"), MESSAGE_MAX_WAIT_MS);
   }
 
   /**
-   * `size`: cut near the end (see HELD_TAIL) and flush the held tail after a pause. `pause`: flush all but what
-   * `safeCut` keeps back. `end`: flush everything, an unterminated PEM block as REDACTED.
+   * `size`: cut near the end, never at more than HELD_TAIL from it (see `sizeCut`), then flush the held tail after a
+   * pause. `stream` (a pause or the wait cap): cut where the text may still be growing (see `streamCut`).
+   * `message` (before tool activity): flush all but an unterminated PEM block. `end`: flush everything, an
+   * unterminated PEM block as REDACTED.
    */
-  private flushText(mode: "size" | "pause" | "end" = "pause"): void {
-    clearTimeout(this.flushTimer);
-    this.flushTimer = undefined;
+  private flushText(mode: "size" | "stream" | "message" | "end"): void {
+    this.clearFlushTimers();
     const all = this.pendingText;
     if (mode === "end") {
       this.pendingText = "";
@@ -561,20 +568,27 @@ class GeminiRun {
       if (text !== "") this.o.emit({ type: "message", text });
       return;
     }
-    const cut = safeCut(all, mode === "size" ? sizeCut(all) : all.length);
+    const open = mode === "message" ? pemBlockAround(all, all.length) : -1;
+    const cut = mode === "message" ? (open < 0 ? all.length : open) : safeCut(all, mode === "size" ? sizeCut(all) : streamCut(all));
     this.pendingText = all.slice(cut);
     if (cut > 0) this.o.emit({ type: "message", text: all.slice(0, cut) });
-    if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText(), MESSAGE_PAUSE_MS);
+    if (mode === "size" && this.pendingText !== "") this.flushTimer = setTimeout(() => this.flushText("stream"), MESSAGE_PAUSE_MS);
   }
 
   /** Fails closed on a PEM block too long to hold: the text before it, then REDACTED; its own text never goes out. */
   private dropOpenBlock(start: number): void {
-    clearTimeout(this.flushTimer);
-    this.flushTimer = undefined;
+    this.clearFlushTimers();
     this.o.emit({ type: "message", text: this.pendingText.slice(0, start) + REDACTED });
     this.dropCarry = this.pendingText.slice(-END_CARRY);
     this.pendingText = "";
     this.droppingBlock = true;
+  }
+
+  private clearFlushTimers(): void {
+    clearTimeout(this.flushTimer);
+    clearTimeout(this.capTimer);
+    this.flushTimer = undefined;
+    this.capTimer = undefined;
   }
 
   /** The text after the dropped block's END line, or null while it has not arrived. */
@@ -637,7 +651,7 @@ class GeminiRun {
   private async onPermission(p: Rec): Promise<unknown> {
     const tc = p.toolCall;
     if (!isRecord(tc) || typeof tc.toolCallId !== "string" || !Array.isArray(p.options)) throw this.malformed("session/request_permission", p);
-    this.flushText();
+    this.flushText("message");
     const kind = typeof tc.kind === "string" ? tc.kind : null;
     const title = typeof tc.title === "string" && tc.title !== "" ? tc.title : `${kind ?? "unknown"} tool`;
     const action: ProposedAction = { tool: toolName(tc), kind: (kind !== null && TOOL_KINDS[kind]) || "other", summary: title, input: tc, paths: locationPaths(tc.locations) };
@@ -665,7 +679,7 @@ class GeminiRun {
   private async onRead(method: string, p: Rec): Promise<unknown> {
     const { path, line, limit } = p;
     if (!isString(path) || !optional(line, isNumber) || !optional(limit, isNumber)) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate(path);
     const input: Rec = { path, ...(line != null && { line }), ...(limit != null && { limit }) };
     const g = await this.o.gate({ tool: method, kind: "file_read", summary: `Read ${display(this.o.cwd, path)}`, input, paths: [path] });
@@ -685,7 +699,7 @@ class GeminiRun {
   private async onWrite(method: string, p: Rec): Promise<unknown> {
     const { path, content } = p;
     if (!isString(path) || !isString(content)) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate(path);
     const inside = (q: string) => this.worktrees.resolveInside(this.o.cwd, q);
     const real = inside(path);
@@ -716,7 +730,7 @@ class GeminiRun {
     const { command, args, env, cwd, outputByteLimit } = p;
     if (!isString(command) || !optional(args, isStringArray) || !optional(cwd, isString) || !optional(outputByteLimit, isNumber)) throw this.malformed(method, p);
     if (!optional(env, (v): v is { name: string; value: string }[] => Array.isArray(v) && v.every(isEnvVar))) throw this.malformed(method, p);
-    this.flushText();
+    this.flushText("message");
     this.tracker.mediate();
     const argv = args ?? [];
     const input: Rec = { command, args: argv, ...(cwd != null && { cwd }), ...(env != null && { env }), ...(outputByteLimit != null && { outputByteLimit }) };
@@ -817,6 +831,19 @@ function sizeCut(text: string): number {
     if (/\s/.test(text[i]!)) return i + 1;
   }
   return min;
+}
+
+/**
+ * Where streaming text is cut by a timer: like `sizeCut`, but never inside a run of non-whitespace, which may be a
+ * token whose rest has not arrived. With no whitespace at all, nothing is flushed (a size split bounds the wait).
+ */
+function streamCut(text: string): number {
+  const newline = text.lastIndexOf("\n");
+  if (newline >= 0 && newline >= text.length - HELD_TAIL) return newline + 1;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (/\s/.test(text[i]!)) return i + 1;
+  }
+  return 0;
 }
 
 /**
