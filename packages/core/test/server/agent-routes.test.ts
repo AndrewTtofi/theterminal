@@ -21,6 +21,7 @@ import { createServer, repairSharedGitconfig, type RunningServer } from "../../s
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
   "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
+  "ANTHROPIC_API_KEY",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
@@ -87,14 +88,16 @@ const script: FakeStep[] = [
 ];
 
 describe("agent API", { timeout: 15000 }, () => {
-  it("GET /api/agents lists registered adapters, each provider's mode and availability, and the acknowledgements", async () => {
+  it("GET /api/agents lists registered adapters, each provider's mode, availability and key source, and the acknowledgements", async () => {
+    for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const) delete process.env[k];
+    process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
     const { s } = await start(script, { which: (cmd) => (cmd === "codex" ? "/fake/bin/codex" : null) });
     expect(await json(get(s, "/api/agents"))).toEqual({
       adapters: ["claude", "codex", "gemini", "fake"],
       providers: {
-        claude: { mode: "api_key", available: false },
-        codex: { mode: "api_key", available: true },
-        gemini: { mode: "api_key", available: false },
+        claude: { mode: "api_key", available: false, apiKey: "none" },
+        codex: { mode: "api_key", available: true, apiKey: "none" },
+        gemini: { mode: "api_key", available: false, apiKey: "environment" },
       },
       acks: PROVIDER_ACKS,
     });
@@ -530,7 +533,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const app = Fastify();
     try {
       registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
-      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false });
+      registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false, apiKey: () => "none" });
       await runner.shutdown();
       const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });
       expect(res.statusCode).toBe(503);

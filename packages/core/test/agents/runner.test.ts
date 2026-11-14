@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentAdapter, ProposedAction } from "../../src/agents/adapter.js";
+import { PROVIDER_ACKS, type AdapterId, type Provider } from "@theterminal/shared";
+import type { AgentAdapter, ProposedAction, RunCredentials } from "../../src/agents/adapter.js";
+import { ProviderSettings } from "../../src/agents/settings.js";
+import { ConnectionService } from "../../src/connections/service.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, ShuttingDownError } from "../../src/agents/runner.js";
@@ -533,5 +537,100 @@ describe("AgentRunner: live secrets and usage totals", () => {
     const run = await fakeRunner([{ message: "hi" }]).start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilFinished(run.id);
     expect(agentEvents().at(-1)!.payload).toMatchObject({ costUsd: 0, inputTokens: null, outputTokens: null });
+  });
+});
+
+describe("AgentRunner: connection credentials", () => {
+  const STORED_KEY = "sk-ant-TESTKEY-0000000000";
+  const CLI_HOME = "codex-home-for-tests";
+
+  async function connections() {
+    const service = new ConnectionService({ db, ledger, secrets: new MemorySecretStore(), testers: {} });
+    await service.load();
+    return service;
+  }
+
+  function credRunner(adapters: Partial<Record<AdapterId, AgentAdapter>>, service: ConnectionService | null) {
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir,
+      extraSecrets: () => service?.secretValues() ?? [],
+      ...(service && { credentials: (p: Provider) => service.credentialsFor(p) }),
+    });
+    runners.push(runner);
+    return runner;
+  }
+
+  const recording = (id: AdapterId, seen: RunCredentials[]): AgentAdapter => ({
+    id,
+    async start(o) {
+      seen.push(o.credentials);
+      return { status: "completed" };
+    },
+  });
+
+  it("hands the adapter the stored key, records connection.used, and redacts the key from a shell output", async () => {
+    const service = await connections();
+    const conn = await service.add(owner, { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: STORED_KEY } });
+    const seen: RunCredentials[] = [];
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        seen.push(o.credentials);
+        expect(o.credentials.apiKey).toBe(STORED_KEY);
+        const g = await o.gate({ tool: "Bash", kind: "shell", summary: "print the key", input: { command: "env" }, paths: [] });
+        if (g.decision === "allow") o.emit({ type: "action_result", actionId: g.actionId, ok: true, output: `key=${o.credentials.apiKey}` });
+        return { status: "completed" };
+      },
+    };
+    const runner = credRunner({ claude: adapter }, service);
+    const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilPending();
+    runner.decide(owner, listPendingActions(db, projectId)[0]!.id, "allow");
+    await untilFinished(run.id);
+
+    expect(getRun(db, run.id)!.status).toBe("completed");
+    expect(seen).toEqual([{ apiKey: STORED_KEY }]);
+    const types = ledger.list().map((e) => e.type);
+    expect(types.indexOf("connection.used")).toBe(types.indexOf("agent.started") + 1);
+    const used = ledger.list().find((e) => e.type === "connection.used")!;
+    expect(used.actor).toEqual({ kind: "system", id: "runner" });
+    expect(used.payload).toEqual({ connectionId: conn.id, name: "Claude", runId: run.id, purpose: "api_key" });
+    const completed = ledger.list().find((e) => e.type === "agent.action.completed")!;
+    expect((completed.payload as { output: string }).output).toBe("key=[REDACTED]");
+    expect(JSON.stringify(ledger.list())).not.toContain(STORED_KEY);
+  });
+
+  it("records no connection.used and passes empty credentials when no connection exists", async () => {
+    const service = await connections();
+    const seen: RunCredentials[] = [];
+    const run = await credRunner({ claude: recording("claude", seen) }, service).start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(run.id);
+    expect(seen).toEqual([{}]);
+    expect(ledger.list().some((e) => e.type === "connection.used")).toBe(false);
+  });
+
+  it("defaults to no credentials when the runner has no credentials lookup", async () => {
+    const seen: RunCredentials[] = [];
+    const run = await credRunner({ claude: recording("claude", seen) }, null).start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(run.id);
+    expect(seen).toEqual([{}]);
+  });
+
+  it("records purpose cli_home for a login mode with a CLI home, and nothing in api_key mode without a key", async () => {
+    const service = await connections();
+    const conn = await service.add(owner, { kind: "llm", provider: "codex", name: "Codex", private: { cliHome: CLI_HOME } });
+    const seen: RunCredentials[] = [];
+    const runner = credRunner({ codex: recording("codex", seen) }, service);
+
+    const first = await runner.start(owner, { projectId, adapter: "codex", prompt: "p" }); // api_key mode, no key stored
+    await untilFinished(first.id);
+    expect(ledger.list().some((e) => e.type === "connection.used")).toBe(false);
+
+    new ProviderSettings(db, ledger).setMode(owner, "codex", "chatgpt", PROVIDER_ACKS.codex);
+    const second = await runner.start(owner, { projectId, adapter: "codex", prompt: "p" });
+    await untilFinished(second.id);
+    expect(seen).toEqual([{ cliHome: CLI_HOME }, { cliHome: CLI_HOME }]);
+    const used = ledger.list().filter((e) => e.type === "connection.used");
+    expect(used.map((e) => e.payload)).toEqual([{ connectionId: conn.id, name: "Codex", runId: second.id, purpose: "cli_home" }]);
   });
 });

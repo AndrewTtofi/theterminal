@@ -146,6 +146,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
       denied.push([a, reason]);
     },
     clean: (t) => t,
+    credentials: {},
   };
   return { opts, proposed, decisions, denied, events, abort };
 }
@@ -238,6 +239,32 @@ describe("GeminiAdapter", () => {
     ]);
     expect(keys.filter((k) => !allowed.has(k) && !k.startsWith("LC_"))).toEqual([]);
     expect(keys).toContain("THETERMINAL_FAKE_GEMINI_SCRIPT");
+  });
+
+  it("api_key mode prefers the connection's key over its own fallback and sets the connection's Google Cloud project", async () => {
+    script([]);
+    const connectionKey = "AIzaTESTKEYconnection000000000000000000";
+    const apiKey = vi.fn(() => FAKE_KEY);
+    const h = harness();
+    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project" } });
+    expect(r).toEqual({ status: "completed" });
+    expect(apiKey).not.toHaveBeenCalled();
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env.GEMINI_API_KEY).toBe(connectionKey);
+    expect(snap.env.GOOGLE_CLOUD_PROJECT).toBe("test-project");
+    expect(snap.env.GEMINI_CLI_HOME).toBe(join(outside, "projects", "p1", "gemini-home")); // still our isolated home
+  });
+
+  it("google mode points GEMINI_CLI_HOME at the connection's CLI home folder", async () => {
+    script([]);
+    const cliHome = join(outside, "connection-gemini-home");
+    const h = harness(policyGate(), "google");
+    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project" } });
+    expect(r).toEqual({ status: "completed" });
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env.GEMINI_CLI_HOME).toBe(cliHome);
+    expect(snap.env.GOOGLE_CLOUD_PROJECT).toBe("test-project");
+    expect(snap.env).not.toHaveProperty("GEMINI_API_KEY");
   });
 
   it("google mode passes no API key, selects the Google login, and never calls authenticate", async () => {

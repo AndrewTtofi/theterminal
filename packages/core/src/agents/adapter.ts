@@ -31,7 +31,15 @@ export interface AdapterStartOptions {
    * leave a fragment of a secret that no pattern matches.
    */
   clean: (s: string) => string;
+  /**
+   * What the run uses from the provider's connection, resolved by the runner (empty without one). Adapters prefer
+   * it over their own API key fallback (the server's environment variable).
+   */
+  credentials: RunCredentials;
 }
+
+/** Values from a connection: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini. */
+export type RunCredentials = { apiKey?: string; cliHome?: string; googleCloudProject?: string };
 
 export interface AgentAdapter {
   id: AdapterId;

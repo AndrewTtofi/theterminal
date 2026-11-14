@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { z } from "zod";
-import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode } from "@theterminal/shared";
+import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
+import type { Credentials } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
 import { getRun, listActions, listRuns } from "../events/projections.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
-import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction } from "./adapter.js";
+import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./adapter.js";
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
 import { redact, truncate } from "./redact.js";
@@ -52,6 +53,8 @@ export type AgentRunnerDeps = {
   gateTimeoutMs?: number;
   /** Recorded strings show this name as `<user>`. Default: the OS username. */
   username?: string;
+  /** The provider's connection credentials, looked up at each run start. Default: none. */
+  credentials?: (provider: Provider) => Credentials | null;
 };
 
 function osUsername(): string {
@@ -189,6 +192,13 @@ export class AgentRunner {
     }
     const authMode: AuthMode =
       input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
+    const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
+    const credentials: RunCredentials = {};
+    if (creds?.apiKey) credentials.apiKey = creds.apiKey;
+    if (creds?.cliHome) credentials.cliHome = creds.cliHome;
+    if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
+    // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
+    const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;
 
     const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
@@ -206,7 +216,21 @@ export class AgentRunner {
       },
       result: () => getRun(db, runId)!,
     }));
-    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode);
+    if (creds && purpose) {
+      try {
+        commitEvent(db, ledger, () => ({
+          event: {
+            projectId: null, actor: RUNNER, type: "connection.used",
+            payload: { connectionId: creds.connectionId, name: creds.name, runId, purpose },
+          },
+          result: () => undefined,
+        }));
+      } catch (e) {
+        this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
+        throw e;
+      }
+    }
+    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials);
     return run;
   }
 
@@ -287,7 +311,9 @@ export class AgentRunner {
     clearTimeout(timer);
   }
 
-  private launch(run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode): void {
+  private launch(
+    run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode, credentials: RunCredentials,
+  ): void {
     const abort = new AbortController();
     const session: Session = {
       projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, inputTokens: null, outputTokens: null, failure: null,
@@ -303,6 +329,7 @@ export class AgentRunner {
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
           clean: (s) => this.clean(asText(s), Infinity, scrub),
+          credentials,
         });
         status = r.status;
         error = r.status === "failed" ? (r.error ?? "agent failed") : null;

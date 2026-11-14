@@ -138,6 +138,8 @@ export class ConnectionService {
   /** Every secret value loaded or set in this process, removed ones included, for redaction. */
   private readonly seen = new Set<string>();
   private state: "ok" | "unavailable" = "ok";
+  /** The last keychain write or delete failed as unavailable (the cache stays good); cleared by the next success. */
+  private writeFailed = false;
   /** Whether a `load()` has succeeded since the process started. */
   private loaded = false;
   private loading: Promise<void> | null = null;
@@ -193,8 +195,9 @@ export class ConnectionService {
     this.loaded = true;
   }
 
+  /** "unavailable" after a failed load, or after a failed write until a later write succeeds. */
   keychainState(): "ok" | "unavailable" {
-    return this.state;
+    return this.state === "ok" && !this.writeFailed ? "ok" : "unavailable";
   }
 
   list(): Connection[] {
@@ -387,8 +390,10 @@ export class ConnectionService {
         if (op.value === null) await this.secrets.delete(account);
         else await this.secrets.set(account, op.value);
       }
+      if (ops.length > 0) this.writeFailed = false;
       commitEvent(this.db, this.ledger, () => ({ event: build(), result: () => undefined }));
     } catch (err) {
+      if (err instanceof SecretStoreUnavailableError) this.writeFailed = true;
       for (const u of done.reverse()) {
         const undo = u.previous === undefined ? this.secrets.delete(u.account) : this.secrets.set(u.account, u.previous);
         await undo.catch(() => undefined);

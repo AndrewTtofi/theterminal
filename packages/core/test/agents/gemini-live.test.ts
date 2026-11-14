@@ -49,6 +49,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_GEMINI !== "1")("GeminiAdapter live
           timeline.push(`denied:${a.kind}:${reason}`);
         },
         clean: (s) => s,
+        credentials: {},
       });
       expect(r).toEqual({ status: "completed" });
       // The shell command asked (through session/request_permission) before any result was produced.

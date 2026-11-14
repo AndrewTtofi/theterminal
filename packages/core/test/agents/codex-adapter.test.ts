@@ -210,6 +210,7 @@ describe("CodexAdapter (fake app-server)", () => {
         denied.push([a, reason]);
       },
       clean: (t) => t,
+      credentials: {},
       ...o,
     });
     return { result, proposed, denied, events, usage };
@@ -629,6 +630,25 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
       expect(start.argv).toEqual(["app-server", "-c", "cli_auth_credentials_store=ephemeral"]);
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
+    });
+
+    it("api_key mode prefers the key the runner resolved from a connection over its own fallback", async () => {
+      script([]);
+      const connectionKey = "sk-TESTKEY-connection-0000000000";
+      const fallback = vi.fn(() => FAKE_KEY);
+      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey } });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).env).toMatchObject({ OPENAI_API_KEY: connectionKey, CODEX_API_KEY: connectionKey });
+      expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: connectionKey });
+      expect(fallback).not.toHaveBeenCalled();
+    });
+
+    it("chatgpt mode points CODEX_HOME at the connection's CLI home folder", async () => {
+      const cliHome = join(dir, "connection-codex-home");
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome } });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: cliHome });
     });
 
     it("api_key mode keeps a separate Codex home per project", async () => {

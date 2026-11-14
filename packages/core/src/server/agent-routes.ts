@@ -23,7 +23,11 @@ export type AgentRouteDeps = {
   adapters: AdapterId[];
   /** Whether a run can locate a provider's program (bundled, else on PATH). Asked on every listing. */
   available: (p: Provider) => boolean;
+  /** Where a run's API key would come from right now: a connection wins over the server's environment variable. */
+  apiKey: (p: Provider) => ApiKeySource;
 };
+
+export type ApiKeySource = "connection" | "environment" | "none";
 
 const actor = { kind: "human", id: "owner" } as const;
 
@@ -42,7 +46,7 @@ const providerAuthBody = z.object({
 
 /** Agent runs, decisions and the per-provider auth settings. Errors are mapped by the handler in routes.ts. */
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps): void {
-  const { db, runner, settings, adapters, available } = deps;
+  const { db, runner, settings, adapters, available, apiKey } = deps;
 
   const requireProject = (id: string) => {
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
@@ -50,10 +54,9 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.get("/api/agents", async () => ({
     adapters,
-    providers: Object.fromEntries(PROVIDERS.map((p) => [p, { mode: settings.getMode(p), available: available(p) }])) as Record<
-      Provider,
-      { mode: AuthMode; available: boolean }
-    >,
+    providers: Object.fromEntries(
+      PROVIDERS.map((p) => [p, { mode: settings.getMode(p), available: available(p), apiKey: apiKey(p) }]),
+    ) as Record<Provider, { mode: AuthMode; available: boolean; apiKey: ApiKeySource }>,
     acks: PROVIDER_ACKS,
   }));
 

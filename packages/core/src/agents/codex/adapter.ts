@@ -258,7 +258,7 @@ export class CodexAdapter implements AgentAdapter {
     }
     let apiKey: string | undefined;
     if (o.authMode === "api_key") {
-      apiKey = this.apiKey();
+      apiKey = o.credentials.apiKey ?? this.apiKey();
       if (!apiKey) return { status: "failed", error: NO_API_KEY };
     }
     // A test command first, then the bundled CLI, and PATH only when the bundled one is missing.
@@ -278,7 +278,7 @@ export class CodexAdapter implements AgentAdapter {
     }
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
-    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: undefined }), ...this.fakeEnv };
+    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome }), ...this.fakeEnv };
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };

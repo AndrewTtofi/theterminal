@@ -11,6 +11,12 @@ import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
+import { registerConnectionRoutes } from "./connection-routes.js";
+import { ConnectionService } from "../connections/service.js";
+import { CONNECTION_TESTERS } from "../connections/testers.js";
+import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
+import { KeychainSecretStore } from "../secrets/keychain-store.js";
+import { MemorySecretStore } from "../secrets/memory-store.js";
 import { ADAPTERS, PROVIDERS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
@@ -170,6 +176,46 @@ export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitco
   }
 }
 
+/**
+ * Where connection secrets live: the injected store, else the OS keychain. Under THETERMINAL_FAKE_AGENT=1 (tests and
+ * demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ */
+export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+  return new ChunkedSecretStore(new KeychainSecretStore());
+}
+
+/**
+ * Tests only: answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise. Never performs
+ * network I/O.
+ */
+const fakeHttp: typeof fetch = async (input, init) => {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+  let accepted = false;
+  headers.forEach((value) => {
+    if (value.includes("TESTKEY")) accepted = true;
+  });
+  return new Response(accepted ? "{}" : '{"error":"unauthorized"}', {
+    status: accepted ? 200 : 401,
+    headers: { "content-type": "application/json" },
+  });
+};
+
+/**
+ * The fetch connection tests use: the injected one, else the real fetch. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HTTP=1 selects a stub that never leaves the process; it is ignored otherwise.
+ */
+export function selectFetch(env: NodeJS.ProcessEnv = process.env, injected?: typeof fetch): typeof fetch {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeHttp;
+  return globalThis.fetch;
+}
+
+/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
+const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -181,6 +227,10 @@ export async function createServer(opts: {
   which?: Which;
   /** Tests only: replaces the bundled program lookups. Default: the packages installed with this one. */
   bundled?: Partial<BundledPrograms>;
+  /** Where connection secrets live. Default: the OS keychain (see selectSecretStore). */
+  secrets?: SecretStore;
+  /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
+  fetch?: typeof fetch;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -213,13 +263,25 @@ export async function createServer(opts: {
 
   repairSharedGitconfig(opts.dataDir);
 
+  const connections = new ConnectionService({
+    db,
+    ledger,
+    secrets: selectSecretStore(process.env, opts.secrets),
+    testers: CONNECTION_TESTERS,
+    fetch: selectFetch(process.env, opts.fetch),
+  });
+  await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+
   const runner = new AgentRunner({
     db,
     ledger,
     worktrees: new WorktreeManager(opts.dataDir),
     broker: new ApprovalBroker(),
     adapters,
-    extraSecrets: () => [token, ...secretEnvValues(process.env)], // read on every clean: secrets added later are redacted at once
+    // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
+    // connection's values stay in secretValues() until the process exits.
+    extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+    credentials: (p) => connections.credentialsFor(p),
     dataDir: opts.dataDir,
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });
@@ -238,7 +300,9 @@ export async function createServer(opts: {
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
       // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
       available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
+      apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
     });
+    registerConnectionRoutes(app, { db, connections });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 

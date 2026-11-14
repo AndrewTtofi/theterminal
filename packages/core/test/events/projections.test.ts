@@ -7,8 +7,28 @@ import { commitEvent } from "../../src/events/commit.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections,
+  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
+
+describe("workspaceCounts", () => {
+  it("sums cost only over runs started on the local calendar day", () => {
+    const d = openDatabase(":memory:");
+    const now = new Date(2026, 10, 14, 12, 0, 0);
+    const insert = d.prepare(
+      `INSERT INTO agent_runs (id, project_id, adapter, auth_mode, prompt, status, worktree, cost_usd, started_at)
+       VALUES (?, 'p1', 'fake', 'none', 'p', ?, 'wt', ?, ?)`,
+    );
+    insert.run("before", "completed", 1, new Date(2026, 10, 13, 23, 59, 59, 999).toISOString());
+    insert.run("start", "completed", 0.5, new Date(2026, 10, 14, 0, 0, 0).toISOString());
+    insert.run("late", "completed", 0.25, new Date(2026, 10, 14, 23, 59, 59, 999).toISOString());
+    insert.run("after", "completed", 2, new Date(2026, 10, 15, 0, 0, 0).toISOString());
+    insert.run("live", "running", null, new Date(2026, 10, 14, 9, 0, 0).toISOString());
+    expect(workspaceCounts(d, now)).toEqual({
+      runningAgents: 1, pendingDecisions: 0, todayCostUsd: 0.75, connections: { enabled: 0, failed: 0 },
+    });
+    d.close();
+  });
+});
 
 const human = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "claude" } as const;

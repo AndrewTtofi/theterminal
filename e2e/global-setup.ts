@@ -30,6 +30,9 @@ const AT_CREATE = {
   THETERMINAL_FAKE_SCRIPT: FAKE_SCRIPT,
   THETERMINAL_CODEX_BIN: fixture("fake-codex.mjs"),
   THETERMINAL_GEMINI_BIN: fixture("fake-gemini.mjs"),
+  // Connections: secrets in memory (never the real keychain) and connection tests answered without network I/O.
+  THETERMINAL_SECRET_STORE: "memory",
+  THETERMINAL_FAKE_HTTP: "1",
 };
 // Read at every run start (the API keys) or by the fake CLIs, which inherit the server's env: kept until teardown.
 // The fake OPENAI_API_KEY/GEMINI_API_KEY therefore stay in the Playwright main process env for the whole run.

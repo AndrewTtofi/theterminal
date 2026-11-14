@@ -17,6 +17,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderSettings, toolToAction as indexToolToAction } from "../../src/index.js";
 
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
+const CONNECTION_KEY = "sk-ant-TESTKEY-0000000000";
 const CWD = join("tmp", "worktree");
 
 describe("toolToAction", () => {
@@ -188,6 +189,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     emit: (e) => events.push(e),
     recordDenied: async () => {},
     clean: (t) => t,
+    credentials: {},
   };
   return { opts, proposed, events, abort };
 }
@@ -308,6 +310,15 @@ describe("ClaudeAdapter", () => {
     expect(Object.keys(env).filter((k) => /^ANTHROPIC_/i.test(k))).toEqual(["ANTHROPIC_API_KEY"]);
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000"); // a copy, not the real env
+  });
+
+  it("api_key mode prefers the key the runner resolved from a connection over its own fallback", async () => {
+    const q = fakeQuery([success(0)]);
+    const fallback = vi.fn(() => FAKE_KEY);
+    const h = harness();
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY } });
+    expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe(CONNECTION_KEY);
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it("api_key mode keeps the bundled Claude Code and never looks for one on PATH", async () => {

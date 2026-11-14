@@ -363,6 +363,40 @@ describe("review fixes", () => {
     expect(ledger.list()).toHaveLength(1);
   });
 
+  it("reports the keychain unavailable after a failed write, keeps cached credentials, and ok again after a good write", async () => {
+    await addClaude(make());
+    let failSet = false;
+    const flaky: SecretStore = {
+      get: (a) => store.get(a),
+      set: async (a, v) => {
+        if (failSet) throw new SecretStoreUnavailableError();
+        return store.set(a, v);
+      },
+      delete: (a) => store.delete(a),
+    };
+    const svc = make({ secrets: flaky });
+    await svc.load();
+    expect(svc.keychainState()).toBe("ok");
+    failSet = true;
+    await expect(
+      svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", config: {}, secrets: { apiKey: KEY2 } }),
+    ).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+    expect(svc.keychainState()).toBe("unavailable");
+    expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY); // the cache is still good
+    failSet = false;
+    await svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", config: {}, secrets: { apiKey: KEY2 } });
+    expect(svc.keychainState()).toBe("ok");
+  });
+
+  it("reports the keychain unavailable after a failed write on an empty workspace", async () => {
+    const svc = make({ secrets: new MemorySecretStore({ failOn: new Set(["get", "set", "delete"]) }) });
+    await svc.load();
+    expect(svc.keychainState()).toBe("ok"); // nothing was read yet
+    await expect(addClaude(svc)).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+    expect(svc.keychainState()).toBe("unavailable");
+    expect(ledger.list()).toEqual([]);
+  });
+
   it("reloads once the keychain is back: state ok and loaded values redactable", async () => {
     const c = await addClaude(make());
     let down = true;

@@ -5,7 +5,7 @@ import { chmod, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
+import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
@@ -266,7 +266,7 @@ export class GeminiAdapter implements AgentAdapter {
     // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
     if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
     if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: "invalid projectId" };
-    const env = this.env(o.authMode);
+    const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
     let base: string[];
@@ -320,12 +320,13 @@ export class GeminiAdapter implements AgentAdapter {
   }
 
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
-  private env(mode: AuthMode): NodeJS.ProcessEnv | string {
+  private env(mode: AuthMode, credentials: RunCredentials): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome: undefined, googleCloudProject: undefined }), ...this.fakeEnv }; // the user's own login, untouched
-    const key = this.apiKey();
+    const { cliHome, googleCloudProject } = credentials;
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject }), ...this.fakeEnv }; // the user's own login, untouched
+    const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject: undefined }), ...this.fakeEnv };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject }), ...this.fakeEnv };
   }
 }
 

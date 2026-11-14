@@ -1,0 +1,236 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CONNECTION_CATALOG, type AgentAction, type AgentRun, type Connection } from "@theterminal/shared";
+import type { FakeStep as FakeStepLike } from "../../src/agents/fake-adapter.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { createServer, type RunningServer } from "../../src/server/server.js";
+
+const ENV_KEYS = [
+  "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_HTTP", "THETERMINAL_SECRET_STORE",
+  "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+] as const;
+const KEY = "sk-ant-TESTKEY-0000000000";
+const NEW_KEY = "sk-ant-TESTKEY-1111111111";
+const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
+const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+const running: RunningServer[] = [];
+const dirs: string[] = [];
+
+afterEach(async () => {
+  while (running.length) await running.pop()!.close().catch(() => undefined);
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+async function start(opts: Partial<Parameters<typeof createServer>[0]> = {}) {
+  for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]) delete process.env[k];
+  const dataDir = mkdtempSync(join(tmpdir(), "tt-conn-"));
+  dirs.push(dataDir);
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), ...opts });
+  running.push(s);
+  return s;
+}
+
+const base = (s: RunningServer) => `http://127.0.0.1:${s.port}`;
+const auth = (s: RunningServer) => ({ authorization: `Bearer ${s.token}` });
+const send = (s: RunningServer, method: string, path: string, body?: unknown) =>
+  fetch(base(s) + path, {
+    method,
+    headers: { ...auth(s), ...(body !== undefined && { "content-type": "application/json" }) },
+    ...(body !== undefined && { body: JSON.stringify(body) }),
+  });
+const get = (s: RunningServer, path: string) => send(s, "GET", path);
+const json = async <T>(res: Response | Promise<Response>): Promise<T> => (await res).json() as Promise<T>;
+const addClaude = (s: RunningServer, extra: Record<string, unknown> = {}) =>
+  send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: KEY }, ...extra });
+
+describe("connections API", { timeout: 15000 }, () => {
+  it("GET /api/connections/catalog returns the catalog", async () => {
+    const s = await start();
+    expect(await json(get(s, "/api/connections/catalog"))).toEqual(CONNECTION_CATALOG);
+  });
+
+  it("adds, lists, updates and removes a connection without ever returning a secret value", async () => {
+    const s = await start();
+    expect(await json(get(s, "/api/connections"))).toEqual([]);
+
+    const res = await addClaude(s);
+    expect(res.status).toBe(201);
+    const text = await res.text();
+    expect(text).not.toContain(KEY);
+    const added = JSON.parse(text) as Connection;
+    expect(added).toMatchObject({ kind: "llm", provider: "claude", name: "Claude", enabled: true, secretFields: ["apiKey"] });
+
+    const listText = await (await get(s, "/api/connections")).text();
+    expect(listText).not.toContain(KEY);
+    expect(JSON.parse(listText)).toEqual([added]);
+
+    const patched = await send(s, "PATCH", `/api/connections/${added.id}`, { name: "Work", enabled: false, secrets: { apiKey: NEW_KEY } });
+    expect(patched.status).toBe(200);
+    const patchText = await patched.text();
+    expect(patchText).not.toContain(NEW_KEY);
+    expect(JSON.parse(patchText)).toMatchObject({ id: added.id, name: "Work", enabled: false, secretFields: ["apiKey"] });
+
+    const ledgerText = await (await get(s, "/api/ledger")).text();
+    expect(ledgerText).toContain("connection.added");
+    expect(ledgerText).toContain("connection.updated");
+    expect(ledgerText).not.toContain(KEY);
+    expect(ledgerText).not.toContain(NEW_KEY);
+
+    const del = await send(s, "DELETE", `/api/connections/${added.id}`);
+    expect(del.status).toBe(204);
+    expect((await send(s, "DELETE", `/api/connections/${added.id}`)).status).toBe(404);
+    expect(await json(get(s, "/api/connections"))).toEqual([]);
+  });
+
+  it("refuses a second Claude connection with 409 conflict", async () => {
+    const s = await start();
+    expect((await addClaude(s)).status).toBe(201);
+    const res = await addClaude(s, { name: "Second" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "conflict" });
+  });
+
+  it("answers 404 not_found for an unknown id on PATCH, DELETE and test", async () => {
+    const s = await start();
+    for (const [method, path, body] of [
+      ["PATCH", "/api/connections/nope", { name: "x" }],
+      ["DELETE", "/api/connections/nope", undefined],
+      ["POST", "/api/connections/nope/test", undefined],
+    ] as const) {
+      const res = await send(s, method, path, body);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "not_found" });
+    }
+  });
+
+  it("refuses a config value that looks like a secret with 400 secret_in_config, without echoing it", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", {
+      kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: KEY },
+    });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: "secret_in_config" });
+    expect(text).not.toContain(KEY);
+    expect(await (await get(s, "/api/ledger")).text()).not.toContain(KEY);
+  });
+
+  it("refuses an unknown field with 400 invalid_input", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "C", secrets: { token: KEY } });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: "invalid_input" });
+    expect(text).not.toContain(KEY);
+  });
+
+  it("reports zod failures as { path, code, message } only, never the received value", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "C", secrets: { apiKey: 42 } });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; issues: Record<string, unknown>[] };
+    expect(body.error).toBe("invalid_input");
+    expect(body.issues.length).toBeGreaterThan(0);
+    for (const issue of body.issues) expect(Object.keys(issue).sort()).toEqual(["code", "message", "path"]);
+    expect(body.issues[0]!.path).toEqual(["secrets", "apiKey"]);
+  });
+
+  it("never echoes an input value in an issue, even for an enum or an unknown key", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: KEY, provider: "claude", name: "C", [KEY]: "x" });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text).not.toContain(KEY);
+    expect((JSON.parse(text) as { issues: unknown[] }).issues.length).toBeGreaterThan(0);
+  });
+
+  it("tests a connection with a bare POST (no body, no content-type) through the fake HTTP stub", async () => {
+    process.env.THETERMINAL_FAKE_AGENT = "1";
+    process.env.THETERMINAL_FAKE_HTTP = "1";
+    const s = await start();
+    const added = await json<Connection>(addClaude(s));
+    const res = await fetch(`${base(s)}/api/connections/${added.id}/test`, { method: "POST", headers: auth(s) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, message: "Connected" });
+    const [listed] = await json<Connection[]>(get(s, "/api/connections"));
+    expect(listed!.status).toMatchObject({ state: "ok", message: "Connected" });
+  });
+
+  it("uses an injected fetch for tests and reports a rejected key", async () => {
+    const stub = vi.fn(async () => new Response("{}", { status: 401 }));
+    const s = await start({ fetch: stub as unknown as typeof fetch });
+    const added = await json<Connection>(addClaude(s));
+    expect(await json(send(s, "POST", `/api/connections/${added.id}/test`))).toEqual({
+      ok: false, message: "Rejected by the provider (HTTP 401)",
+    });
+    expect(stub).toHaveBeenCalledOnce();
+    const st = await json<{ connections: unknown }>(get(s, "/api/status"));
+    expect(st.connections).toEqual({ enabled: 1, failed: 1, keychain: "ok" });
+  });
+
+  it("starts with an unavailable keychain, refuses writes with 503 and reports it in /api/status", async () => {
+    const failing = new MemorySecretStore({ failOn: new Set(["get", "set", "delete"]) });
+    const s = await start({ secrets: failing });
+    expect((await get(s, "/api/connections")).status).toBe(200);
+    const res = await addClaude(s);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "keychain_unavailable" });
+    expect(await json(get(s, "/api/connections"))).toEqual([]);
+    expect(await (await get(s, "/api/ledger")).text()).not.toContain("connection.added");
+    const st = await json<{ connections: unknown }>(get(s, "/api/status"));
+    expect(st.connections).toEqual({ enabled: 0, failed: 0, keychain: "unavailable" });
+  });
+
+  it("GET /api/agents reports where each provider's API key comes from", async () => {
+    const s = await start();
+    const sources = async () =>
+      Object.fromEntries(
+        Object.entries((await json<{ providers: Record<string, { apiKey: string }> }>(get(s, "/api/agents"))).providers).map(
+          ([p, v]) => [p, v.apiKey],
+        ),
+      );
+    expect(await sources()).toEqual({ claude: "none", codex: "none", gemini: "none" });
+    process.env.OPENAI_API_KEY = "sk-TESTKEY-openai-0000000000000000";
+    expect((await addClaude(s)).status).toBe(201);
+    expect(await sources()).toEqual({ claude: "connection", codex: "environment", gemini: "none" });
+    process.env.ANTHROPIC_API_KEY = "sk-ant-TESTKEY-environment-000000";
+    expect((await sources()).claude).toBe("connection"); // a connection wins over the environment
+  });
+});
+
+describe("GET /api/status", { timeout: 15000 }, () => {
+  const shell = { tool: "Bash", kind: "shell", summary: "run tests", input: { command: "npm test" }, paths: [] };
+  const script: FakeStepLike[] = [{ usage: { costUsd: 0.25 } }, { propose: shell, result: { ok: true, output: "ok" } }];
+
+  it("counts running agents, pending decisions and today's cost", async () => {
+    process.env.THETERMINAL_FAKE_AGENT = "1";
+    process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
+    const s = await start();
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null };
+    expect(await json(get(s, "/api/status"))).toEqual(empty);
+
+    const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
+    const run = await json<AgentRun>(send(s, "POST", `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" }));
+    let pending: AgentAction[] = [];
+    await vi.waitFor(async () => {
+      pending = await json<AgentAction[]>(get(s, "/api/pending-actions"));
+      expect(pending).toHaveLength(1);
+    }, { timeout: 5000, interval: 25 });
+    expect(await json(get(s, "/api/status"))).toMatchObject({ runningAgents: 1, pendingDecisions: 1, todayCostUsd: 0 });
+
+    await send(s, "POST", `/api/actions/${pending[0]!.id}/decision`, { decision: "allow" });
+    await vi.waitFor(async () => {
+      expect((await json<{ run: AgentRun }>(get(s, `/api/runs/${run.id}`))).run.status).toBe("completed");
+    }, { timeout: 5000, interval: 25 });
+    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25 });
+
+    await addClaude(s);
+    expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+  });
+});

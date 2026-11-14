@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { query as sdkQuery, type HookCallback, type HookJSONOutput, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ActionKind } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
+import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "./adapter.js";
 import { redact } from "./redact.js";
 import { buildChildEnv } from "./child-env.js";
 import { bundledClaude } from "./bundled.js";
@@ -159,7 +159,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
-    const env = this.env(o.authMode);
+    const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
     // Subscription mode names the Claude Code bundled with the SDK (PATH only when it is missing); Claude Code reads
     // the user's own login itself, never we. api_key mode leaves the choice to the SDK, which uses the same binary.
@@ -271,10 +271,10 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
-  private env(mode: AdapterStartOptions["authMode"]): Record<string, string | undefined> | string {
+  private env(mode: AdapterStartOptions["authMode"], credentials: RunCredentials): Record<string, string | undefined> | string {
     if (mode !== "subscription" && mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
-    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: undefined }); // the user's own login, untouched
-    const key = this.apiKey();
+    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome }); // the user's own login, untouched
+    const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
     return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir });
   }

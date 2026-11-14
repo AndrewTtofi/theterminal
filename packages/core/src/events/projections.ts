@@ -200,3 +200,31 @@ export function listPendingActions(db: Db, projectId: string): AgentAction[] {
     .all(projectId) as ActionRow[];
   return rows.map(toAction);
 }
+
+export type WorkspaceCounts = {
+  runningAgents: number;
+  pendingDecisions: number;
+  /** Sum of cost over runs started on the local calendar day of `now`; a running run has no cost yet. */
+  todayCostUsd: number;
+  /** Enabled connections, and those of them whose last test failed. */
+  connections: { enabled: number; failed: number };
+};
+
+/** Counts for the status bar. */
+export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts {
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const nextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  const cost = db
+    .prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM agent_runs WHERE started_at >= ? AND started_at < ?")
+    .get(dayStart.toISOString(), nextDay.toISOString()) as { total: number };
+  return {
+    runningAgents: count("SELECT COUNT(*) AS n FROM agent_runs WHERE status = 'running'"),
+    pendingDecisions: count("SELECT COUNT(*) AS n FROM agent_actions WHERE status = 'pending'"),
+    todayCostUsd: cost.total,
+    connections: {
+      enabled: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1"),
+      failed: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1 AND status_state = 'failed'"),
+    },
+  };
+}
