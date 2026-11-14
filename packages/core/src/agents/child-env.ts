@@ -50,15 +50,11 @@ export function fakeAgentEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
 }
 
 /**
- * The child-process environment for a provider CLI, built from an allowlist: a copy of the allowlisted
- * variables in `base` (default process.env), which is never changed. Every GIT_*, provider variable,
- * NODE_OPTIONS and the like is dropped. Then git is pinned to the empty global config, and in api_key mode
- * only the given key is added. Login modes pass no key, so the CLI's own stored login is used untouched.
- * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
+ * A copy of the allowlisted variables in `base` (never changed): the exact names above, every LC_*, and the Windows
+ * names on win32. Everything else (NODE_OPTIONS, ELECTRON_*, provider keys, GIT_*) is dropped.
  */
-export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
-  const base = opts.base ?? process.env;
-  const win = (opts.platform ?? process.platform) === "win32";
+export function allowlistedEnv(base: NodeJS.ProcessEnv, platform: NodeJS.Platform): NodeJS.ProcessEnv {
+  const win = platform === "win32";
   // Windows environment names are case-insensitive (`Path`, MSYS's `SYSTEMROOT`): compare upper-cased, keep the
   // original spelling, and keep only the first spelling of a name.
   const fold = (k: string) => (win ? k.toUpperCase() : k);
@@ -75,6 +71,18 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
       seen.add(f);
     }
   }
+  return env;
+}
+
+/**
+ * The child-process environment for a provider CLI, built from an allowlist: a copy of the allowlisted
+ * variables in `base` (default process.env), which is never changed. Every GIT_*, provider variable,
+ * NODE_OPTIONS and the like is dropped. Then git is pinned to the empty global config, and in api_key mode
+ * only the given key is added. Login modes pass no key, so the CLI's own stored login is used untouched.
+ * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
+ */
+export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
+  const env = allowlistedEnv(opts.base ?? process.env, opts.platform ?? process.platform);
   env.GIT_CONFIG_GLOBAL = join(opts.dataDir, EMPTY_GITCONFIG);
   env.GIT_CONFIG_NOSYSTEM = "1";
   env.GIT_TERMINAL_PROMPT = "0";
