@@ -13,6 +13,16 @@ function isSecretKey(key: string): boolean {
   return SECRET_KEY.test(key) && !NOT_SECRET_KEY.test(key);
 }
 
+/** Shorter values (flags such as "1" or "true") would redact ordinary text everywhere. */
+const MIN_ENV_SECRET = 8;
+
+/** The values of environment variables whose name looks secret, to pass to `redact` as extra secrets. */
+export function secretEnvValues(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter(([k, v]) => isSecretKey(k) && typeof v === "string" && v.length >= MIN_ENV_SECRET)
+    .map(([, v]) => v!);
+}
+
 const TOKEN_PATTERNS: RegExp[] = [
   // PEM/PGP private keys; an unterminated block is redacted to the end of the string.
   /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g,

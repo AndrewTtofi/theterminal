@@ -17,7 +17,7 @@ import { listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
-const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT"] as const;
+const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN"] as const;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const running: RunningServer[] = [];
 const dirs: string[] = [];
@@ -287,6 +287,16 @@ describe("agent API", { timeout: 15000 }, () => {
       await app.close();
       db.close();
     }
+  });
+
+  it("redacts the values of secret-named environment variables from everything recorded", async () => {
+    process.env.FAKE_SERVICE_TOKEN = "fake-service-value-0003";
+    const { s, projectId } = await start([{ message: "the value is fake-service-value-0003" }]);
+    const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" }));
+    await untilFinished(s, run.id);
+    const entries = await json<{ type: string; payload: { text?: string } }[]>(get(s, `/api/ledger?projectId=${projectId}`));
+    const text = entries.find((e) => e.type === "agent.message")!.payload.text;
+    expect(text).toBe("the value is [REDACTED]");
   });
 
   it("at startup, denies actions left pending and fails runs left running by a crash", async () => {

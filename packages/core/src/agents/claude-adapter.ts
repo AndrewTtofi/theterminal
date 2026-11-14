@@ -4,10 +4,14 @@ import { query as sdkQuery, type HookCallback, type HookJSONOutput, type Options
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "./adapter.js";
 import { redact } from "./redact.js";
+import { which } from "./which.js";
 
 type StartResult = { status: "completed" | "failed"; error?: string };
 
 const NO_API_KEY = "No Anthropic API key configured";
+const NO_CLAUDE_CODE = "Claude Code is not installed or not on PATH";
+/** Inherited variables that could send requests elsewhere, pick another provider or authenticate differently. */
+const INHERITED_CLAUDE_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_USE_)/i;
 const STOPPED = "run stopped";
 const MAX_COMMAND = 150;
 const MAX_DESCRIPTION = 120;
@@ -131,16 +135,31 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly id = "claude" as const;
   private readonly query: typeof sdkQuery;
   private readonly apiKey: () => string | undefined;
+  private readonly findClaude: () => string | null;
 
-  constructor(opts: { query?: typeof sdkQuery; apiKey?: () => string | undefined } = {}) {
+  constructor(
+    opts: {
+      query?: typeof sdkQuery;
+      apiKey?: () => string | undefined;
+      /** Locates the user's own Claude Code for subscription mode. Default: `claude` on PATH. */
+      findClaude?: () => string | null;
+    } = {},
+  ) {
     this.query = opts.query ?? sdkQuery;
     this.apiKey = opts.apiKey ?? (() => process.env.ANTHROPIC_API_KEY);
+    this.findClaude = opts.findClaude ?? (() => which("claude"));
   }
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
     const env = this.env(o.authMode);
     if (typeof env === "string") return { status: "failed", error: env };
+    // Subscription mode runs the user's own installed Claude Code with its own login; api_key mode the bundled one.
+    let executable: string | null = null;
+    if (o.authMode === "subscription") {
+      executable = this.findClaude();
+      if (executable === null) return { status: "failed", error: NO_CLAUDE_CODE };
+    }
 
     const controller = new AbortController();
     const actionIds = new Map<string, string>(); // tool-use id -> allowed action id
@@ -189,6 +208,7 @@ export class ClaudeAdapter implements AgentAdapter {
       settingSources: [],
       strictMcpConfig: true, // only our (empty) MCP config: no user, project or plugin servers
       persistSession: false, // no transcripts written under the user's Claude config dir
+      ...(executable !== null && { pathToClaudeCodeExecutable: executable }),
       hooks: {
         PreToolUse: [{ hooks: [pre], onFailure: "block", timeout: GATE_TIMEOUT_S }],
         PostToolUse: [{ hooks: [post] }],
@@ -239,8 +259,8 @@ export class ClaudeAdapter implements AgentAdapter {
   private env(mode: AdapterStartOptions["authMode"]): Record<string, string | undefined> | string {
     const env: Record<string, string | undefined> = { ...process.env };
     // Inherited settings that could send requests elsewhere or authenticate with something other than our choice.
-    for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) {
-      delete env[k];
+    for (const k of Object.keys(env)) {
+      if (INHERITED_CLAUDE_ENV.test(k)) delete env[k];
     }
     // Keep the shell in the worktree root after every command, so relative paths resolve where the gate judged them.
     env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";

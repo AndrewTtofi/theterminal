@@ -196,7 +196,12 @@ describe("ClaudeAdapter", () => {
     CLAUDE_CODE_USE_BEDROCK: "1",
     CLAUDE_CODE_USE_VERTEX: "1",
     CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+    ANTHROPIC_MODEL: "fake-model",
+    ANTHROPIC_CUSTOM_HEADERS: "x-fake: 1",
+    CLAUDE_CODE_USE_FOUNDRY: "1",
   };
+  const STRIPPED = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+  const CLAUDE_BIN = "/opt/fake/bin/claude";
   const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
     for (const [k, v] of Object.entries(FAKE_ENV)) {
@@ -289,11 +294,33 @@ describe("ClaudeAdapter", () => {
     await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
     const env = q.calls[0]!.options.env!;
     expect(env.ANTHROPIC_API_KEY).toBe(FAKE_KEY);
-    for (const k of ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) {
-      expect(env).not.toHaveProperty(k);
-    }
+    for (const k of [...STRIPPED, "CLAUDE_CODE_OAUTH_TOKEN"]) expect(env).not.toHaveProperty(k);
+    expect(Object.keys(env).filter((k) => /^ANTHROPIC_/i.test(k))).toEqual(["ANTHROPIC_API_KEY"]);
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-TESTKEYfromprocessenv0000"); // a copy, not the real env
+  });
+
+  it("api_key mode keeps the bundled Claude Code and never looks for one on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const findClaude = vi.fn(() => CLAUDE_BIN);
+    await new ClaudeAdapter({ query: q.fn, apiKey: () => FAKE_KEY, findClaude }).start(harness().opts);
+    expect(q.calls[0]!.options).not.toHaveProperty("pathToClaudeCodeExecutable");
+    expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("subscription mode runs the user's own Claude Code found on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    await new ClaudeAdapter({ query: q.fn, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(CLAUDE_BIN);
+  });
+
+  it("subscription mode fails without starting Claude when Claude Code is not on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    const r = await new ClaudeAdapter({ query: q.fn, findClaude: () => null }).start({ ...h.opts, authMode: "subscription" });
+    expect(r).toEqual({ status: "failed", error: "Claude Code is not installed or not on PATH" });
+    expect(q.calls).toHaveLength(0);
   });
 
   it("api_key mode with no key fails with the exact message without starting Claude", async () => {
@@ -307,11 +334,11 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     const apiKey = vi.fn(() => FAKE_KEY);
     const h = harness();
-    await new ClaudeAdapter({ query: q.fn, apiKey }).start({ ...h.opts, authMode: "subscription" });
+    await new ClaudeAdapter({ query: q.fn, apiKey, findClaude: () => CLAUDE_BIN }).start({ ...h.opts, authMode: "subscription" });
     const env = q.calls[0]!.options.env!;
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
-    expect(env).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
-    for (const k of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]) expect(env).not.toHaveProperty(k);
+    for (const k of STRIPPED) expect(env).not.toHaveProperty(k);
+    expect(Object.keys(env).filter((k) => /^ANTHROPIC_/i.test(k))).toEqual([]);
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("fake-oauth-token-value"); // the user's own CLI login is left alone
     expect(env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe("1");
     expect(apiKey).not.toHaveBeenCalled();

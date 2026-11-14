@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redact, truncate } from "../../src/index.js";
+import { secretEnvValues } from "../../src/agents/redact.js";
 
 describe("redact", () => {
   it("redacts bearer tokens and sk-ant keys", () => {
@@ -263,5 +264,25 @@ describe("truncate", () => {
     const out = truncate("x".repeat(100), 40);
     expect(out).toHaveLength(40);
     expect(out.endsWith("…[truncated]")).toBe(true);
+  });
+});
+
+describe("secretEnvValues", () => {
+  it("returns the values of variables whose name looks secret", () => {
+    const env = {
+      FAKE_SERVICE_TOKEN: "fake-token-value-0001",
+      MY_PASSWORD: "fake-password-0002",
+      OTHER_API_KEY: "sk-ant-TESTKEY0123456789abcdef",
+      PATH: "/usr/bin",
+      HOME: "/Users/a",
+      MAX_TOKENS: "4096000000",
+      EMPTY_SECRET: "",
+      UNSET_SECRET: undefined,
+    };
+    expect(secretEnvValues(env).sort()).toEqual(["fake-password-0002", "fake-token-value-0001", "sk-ant-TESTKEY0123456789abcdef"]);
+  });
+
+  it("ignores values too short to redact safely", () => {
+    expect(secretEnvValues({ SOME_TOKEN: "1", DEBUG_AUTH: "true", X_SECRET: "1234567" })).toEqual([]);
   });
 });

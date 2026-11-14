@@ -16,6 +16,7 @@ import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
+import { secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ClaudeSettings } from "../agents/settings.js";
 import { WorktreeManager } from "../agents/worktrees.js";
@@ -129,7 +130,7 @@ export async function createServer(opts: {
     worktrees: new WorktreeManager(opts.dataDir),
     broker: new ApprovalBroker(),
     adapters,
-    extraSecrets: [token],
+    extraSecrets: [token, ...secretEnvValues(process.env)],
     dataDir: opts.dataDir,
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });
