@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import type { Connection } from "@theterminal/shared";
-import { MCP_SERVER_NAME, mcpServerName, parsePairs, toMcpSpec } from "../../src/connections/mcp.js";
+import { MCP_SERVER_NAME, mcpServerName, pairsKind, parsePairs, toMcpSpec } from "../../src/connections/mcp.js";
 
 const conn = (over: Partial<Connection>): Connection => ({
   id: "3f9a2c1e-0000-4000-8000-000000000000", kind: "mcp", provider: "mcp_http", name: "Docs", enabled: true,
@@ -49,6 +49,13 @@ describe("parsePairs", () => {
     expect(parsePairs("X-Token=abc", "headers")).toEqual({ "X-Token": "abc" });
     expect(issuePath(() => parsePairs("Bad Name=1", "headers"))).toEqual(["headers", 1]);
     expect(() => parsePairs("X-Token=abc", "env")).toThrow(ZodError);
+  });
+});
+
+describe("pairsKind", () => {
+  it("uses header names for a remote server and variable names otherwise", () => {
+    expect(pairsKind("mcp_http")).toBe("headers");
+    expect(pairsKind("mcp_stdio")).toBe("env");
   });
 });
 

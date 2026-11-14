@@ -151,7 +151,7 @@ export const CONNECTION_CATALOG: readonly CatalogEntry[] = [
       { name: "args", label: "Arguments", storage: "private", required: false, input: "multiline", help: "One argument per line." },
       {
         name: "env", label: "Environment variables", storage: "secret", required: false, input: "multiline", format: "pairs",
-        help: "NAME=value, one per line. Stored in your keychain.",
+        help: "NAME=value, one per line. Stored in your keychain. Values of 8 or more characters are also redacted from agent output, so avoid common words as values.",
       },
     ],
     single: false, available: true,

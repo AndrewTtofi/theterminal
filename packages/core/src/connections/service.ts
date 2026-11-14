@@ -22,7 +22,7 @@ import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
-import { parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
+import { pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -172,26 +172,36 @@ function invalid(path: (string | number)[], message: string): never {
 const catalogFor = (provider: ConnectionProvider): CatalogEntry | undefined =>
   CONNECTION_CATALOG.find((e) => e.provider === provider);
 
-/** An https URL, or http to this computer only. */
-function isAllowedUrl(value: string): boolean {
+/**
+ * Why a URL is refused, or null: it must be https, or http to this computer only. A URL is config and reaches the
+ * ledger, so one carrying a user name, a password or a query string (where tokens tend to go) is refused too.
+ */
+function urlProblem(value: string): string | null {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    return false;
+    return "must be an https URL, or http on localhost";
   }
-  return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+  if (!(url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)))) {
+    return "must be an https URL, or http on localhost";
+  }
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.href.includes("?")) {
+    return "Put credentials in Headers, not in the URL.";
+  }
+  return null;
 }
 
 /**
  * Checks a value against its field's input type and catalog pattern. Failures name the field's path, never the value.
  * A "pairs" field is parsed, so a bad line is refused at [field, line] before anything is stored.
  */
-function checkFormat(field: ConnectionField, value: string, path: (string | number)[]): void {
+function checkFormat(provider: ConnectionProvider, field: ConnectionField, value: string, path: (string | number)[]): void {
   if (field.input === "number" && !NUMBER_VALUE.test(value)) invalid(path, "must be a number with at most 2 decimals");
-  if (field.input === "url" && !isAllowedUrl(value)) invalid(path, "must be an https URL, or http on localhost");
+  const badUrl = field.input === "url" ? urlProblem(value) : null;
+  if (badUrl !== null) invalid(path, badUrl);
   if (field.pattern !== undefined && !new RegExp(field.pattern).test(value)) invalid(path, "is not in the expected format");
-  if (field.format === "pairs") parsePairs(value, field.name === "headers" ? "headers" : "env");
+  if (field.format === "pairs") parsePairs(value, pairsKind(provider));
 }
 
 /**
@@ -498,6 +508,11 @@ export class ConnectionService {
       if (row.enabled !== 1) throw new ConnectionDisabledError();
     }
     if (rows.length > 0 && this.keychainState() !== "ok") throw new SecretStoreUnavailableError();
+    // Every field the projection lists must be in the cache: a run never gets an incomplete source.
+    for (const row of rows) {
+      const values = this.cache.get(row.id) ?? {};
+      if (this.storedFields(row).some(([f]) => values[f] === undefined)) throw new SecretStoreUnavailableError();
+    }
     const selection: RunSelection = { cloud: [], mcp: [] };
     for (const row of rows) {
       const values = this.cache.get(row.id) ?? {};
@@ -548,7 +563,7 @@ export class ConnectionService {
     const def = catalogFor(provider)?.fields.find((f) => f.name === field);
     if (def?.format !== "pairs") return;
     try {
-      for (const v of Object.values(parsePairs(value, field === "headers" ? "headers" : "env"))) {
+      for (const v of Object.values(parsePairs(value, pairsKind(provider)))) {
         if (v.length >= MIN_SECRET_LENGTH) this.seen.add(v);
       }
     } catch {
@@ -690,7 +705,7 @@ export class ConnectionService {
   private checkConfig(entry: CatalogEntry, input: Record<string, string>, same: string[]): Record<string, string> {
     const config = connectionConfigSchema.parse(input);
     this.checkFields(entry, "config", Object.keys(config));
-    for (const [name, value] of Object.entries(config)) checkFormat(entry.fields.find((f) => f.name === name)!, value, ["config", name]);
+    for (const [name, value] of Object.entries(config)) checkFormat(entry.provider, entry.fields.find((f) => f.name === name)!, value, ["config", name]);
     const secrets = [...this.secretValues(), ...same];
     if (JSON.stringify(redact(config, secrets)) !== JSON.stringify(config)) throw new SecretInConfigError();
     return config;
@@ -707,7 +722,7 @@ export class ConnectionService {
       if (field.input !== "multiline" && /[\r\n]/.test(value)) invalid([...path, name], "must be a single line");
       // A relative folder would resolve against wherever the CLI happens to start (the run's worktree).
       if (field.input === "path" && !isAbsolute(value)) invalid([...path, name], "must be an absolute path");
-      checkFormat(field, value, [...path, name]);
+      checkFormat(entry.provider, field, value, [...path, name]);
     }
   }
 

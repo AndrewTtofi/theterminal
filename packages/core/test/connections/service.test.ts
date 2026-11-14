@@ -809,6 +809,21 @@ describe("cloud, MCP and hardware connections", () => {
     expect(await pathOf(mcp("not a url"))).toEqual(["config", "url"]);
     expect(await pathOf(mcp("http://mcp.example.com/mcp"))).toEqual(["config", "url"]);
     expect(await pathOf(mcp("ftp://localhost/x"))).toEqual(["config", "url"]);
+    for (const url of [
+      "https://user:TESTKEY-pass-0000000000@mcp.example.com/mcp",
+      "https://TESTKEY-user-0000000000@mcp.example.com/mcp",
+      "https://:TESTKEY-pass-0000000000@mcp.example.com/mcp",
+      "https://mcp.example.com/mcp?token=TESTKEY-query-0000000000",
+      "https://mcp.example.com/mcp?",
+    ]) {
+      const err = await mcp(url).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      const issue = (err as ZodError).issues[0]!;
+      expect(issue.path).toEqual(["config", "url"]);
+      expect(issue.message).toBe("Put credentials in Headers, not in the URL.");
+      expect(JSON.stringify((err as ZodError).issues)).not.toContain("TESTKEY");
+    }
+    expect(JSON.stringify(ledger.list())).not.toContain("TESTKEY");
     await mcp("http://localhost:3000/mcp");
     await mcp("http://127.0.0.1:3000/mcp");
 
@@ -896,6 +911,20 @@ describe("cloud, MCP and hardware connections", () => {
     expect(() => svc.selectForRun([aws.id])).toThrow(ConnectionDisabledError);
     expect(() => svc.selectForRun([aws.id])).toThrow("connection is disabled");
     await svc.update(owner, aws.id, { enabled: true });
+
+    // A stored field missing from the keychain would give the run an incomplete source.
+    await store.delete(`connection/${aws.id}/secretAccessKey`);
+    const partial = makeU();
+    await partial.load();
+    expect(partial.keychainState()).toBe("ok");
+    expect(() => partial.selectForRun([aws.id])).toThrow(SecretStoreUnavailableError);
+    const stdio = await svc.add(owner, { kind: "mcp", provider: "mcp_stdio", name: "Files", private: { command: "npx" } });
+    await store.delete(`connection/${stdio.id}/command`);
+    const partial2 = makeU();
+    await partial2.load();
+    expect(() => partial2.selectForRun([stdio.id])).toThrow(SecretStoreUnavailableError);
+    await store.set(`connection/${aws.id}/secretAccessKey`, SECRET_KEY);
+    await store.set(`connection/${stdio.id}/command`, "npx");
 
     const down = makeU(new MemorySecretStore({ failOn: new Set(["get"]) }));
     await down.load();

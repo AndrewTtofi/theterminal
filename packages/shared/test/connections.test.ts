@@ -92,6 +92,9 @@ describe("connection catalog", () => {
       ["cpu", "cores", "memoryGb", "gpu", "gpuMemoryGb", "platform", "wsl", "detectedAt"].map((n) => [n, "config", false, "text"]),
     );
     expect(entry("mcp_stdio").fields[2]!.format).toBe("pairs");
+    expect(entry("mcp_stdio").fields[2]!.help).toBe(
+      "NAME=value, one per line. Stored in your keychain. Values of 8 or more characters are also redacted from agent output, so avoid common words as values.",
+    );
     expect(entry("mcp_http").fields[1]!.format).toBe("pairs");
     expect([entry("aws").kind, entry("gcp").kind, entry("azure").kind]).toEqual(["cloud", "cloud", "cloud"]);
     expect([entry("mcp_stdio").kind, entry("mcp_http").kind, entry("local_hardware").kind]).toEqual(["mcp", "mcp", "hardware"]);
