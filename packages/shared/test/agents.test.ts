@@ -88,3 +88,11 @@ describe("settings.claude_auth_changed", () => {
     bad("settings.claude_auth_changed", { mode: "subscription", acknowledgement: "" });
   });
 });
+
+describe("string bounds", () => {
+  it("rejects oversize ids and acknowledgement", () => {
+    bad("agent.message", { runId: "r".repeat(201), text: "" });
+    bad("agent.started", { ...started, cardId: "c".repeat(201) });
+    bad("settings.claude_auth_changed", { mode: "api_key", acknowledgement: "x".repeat(1001) });
+  });
+});

@@ -52,7 +52,82 @@ describe("redact", () => {
   });
 });
 
+describe("redact: leak fixes", () => {
+  const r = (s: string) => redact(s);
+  it("redacts quoted values, keeping the quotes", () => {
+    expect(r('export DB_PASSWORD="hunter2 with space"')).toBe(`export DB_PASSWORD="${REDACTED}"`);
+    expect(r("export OPENAI_API_KEY='shortsecretval'")).toBe(`export OPENAI_API_KEY='${REDACTED}'`);
+  });
+  it("redacts an unterminated PEM block and PGP blocks", () => {
+    const out = r("x -----BEGIN PRIVATE KEY-----\nFAKEBODYFAKEBODY\nmore");
+    expect(out).toBe(`x ${REDACTED}`);
+    expect(r("-----BEGIN PGP PRIVATE KEY BLOCK-----\nFAKE\n-----END PGP PRIVATE KEY BLOCK-----!")).toBe(`${REDACTED}!`);
+  });
+  it("handles case-insensitive Bearer and Basic", () => {
+    expect(r("authorization: bearer abcdef123456")).toBe(`authorization: bearer ${REDACTED}`);
+    expect(r("Authorization: Basic dXNlcjpwYXNzd29yZA==")).toBe(`Authorization: Basic ${REDACTED}`);
+  });
+  it("redacts header, JSON and YAML key syntaxes", () => {
+    expect(r("x-api-key: FAKEVALUE1")).toBe(`x-api-key: ${REDACTED}`);
+    expect(r("anthropic-api-key: FAKEVALUE1")).toBe(`anthropic-api-key: ${REDACTED}`);
+    expect(r('{"password": "pw with space", "user": "bob"}')).toBe(`{"password": "${REDACTED}", "user": "bob"}`);
+    expect(r("client_secret: FAKEVALUE1\nname: x")).toBe(`client_secret: ${REDACTED}\nname: x`);
+    expect(r("Cookie: a=1; b=2\nHost: example.com")).toBe(`Cookie: ${REDACTED}\nHost: example.com`);
+    expect(r("Set-Cookie: sid=FAKE; Path=/")).toBe(`Set-Cookie: ${REDACTED}`);
+    expect(r("AWS_SECRET_ACCESS_KEY=FAKEFAKE")).toBe(`AWS_SECRET_ACCESS_KEY=${REDACTED}`);
+  });
+  it("redacts URL userinfo", () => {
+    expect(r("git clone https://user:FAKEPASS@example.com/x.git")).toBe(
+      `git clone https://user:${REDACTED}@example.com/x.git`,
+    );
+    expect(r("https://x-access-token:ghs_" + "F".repeat(24) + "@example.com/x")).toBe(
+      `https://x-access-token:${REDACTED}@example.com/x`,
+    );
+  });
+  it("redacts more token shapes", () => {
+    const samples = [
+      "github_pat_" + "F".repeat(25),
+      "npm_" + "F".repeat(25),
+      "sk_live_" + "F".repeat(12),
+      "rk_test_" + "F".repeat(12),
+      "ASIA" + "F".repeat(16),
+      "eyJhbGciOiJGQUtF.eyJzdWIiOiJGQUtF.FAKESIG",
+      "https://hooks.slack.com/services/TFAKE/BFAKE/FAKEFAKE",
+    ];
+    for (const s of samples) expect(r(`a ${s} b`)).toBe(`a ${REDACTED} b`);
+  });
+  it("keeps ordinary words and counters", () => {
+    expect(r("task-management-system-name-here")).toBe("task-management-system-name-here");
+    expect(redact({ max_tokens: 5, author: "x" })).toEqual({ max_tokens: 5, author: "x" });
+  });
+  it("redacts whole non-string values under secret keys", () => {
+    expect(redact({ password: 12345678, token: ["abc"], secret: { v: "plain" } })).toEqual({
+      password: REDACTED,
+      token: REDACTED,
+      secret: REDACTED,
+    });
+  });
+  it("is linear on large input", () => {
+    const inputs = [
+      "a".repeat(1_000_000),
+      "some words here key=value and more text sk-notasecret ".repeat(20_000),
+      'k="'.repeat(300_000),
+      " ".repeat(1_000_000) + "a",
+    ];
+    for (const input of inputs) {
+      const t = performance.now();
+      redact(input);
+      expect(performance.now() - t).toBeLessThan(200);
+    }
+  });
+});
+
 describe("truncate", () => {
+  it("never exceeds max, even below the marker length", () => {
+    expect(truncate("x".repeat(50), 0)).toBe("");
+    expect(truncate("x".repeat(50), 5)).toHaveLength(5);
+    expect(truncate("x".repeat(50), 12)).toBe("…[truncated]");
+  });
   it("returns short strings unchanged", () => expect(truncate("abc", 3)).toBe("abc"));
   it("cuts to exactly max with a marker", () => {
     const out = truncate("x".repeat(100), 40);

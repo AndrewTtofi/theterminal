@@ -42,7 +42,7 @@ export type AgentAction = {
 export const CLAUDE_SUBSCRIPTION_ACK =
   "I understand that running Claude on my own Claude subscription through The Terminal may violate Anthropic's terms and could put my account at risk. I choose to do this at my own risk.";
 
-const id = z.string().min(1);
+const id = z.string().min(1).max(200);
 
 const isJsonValue = (v: unknown): boolean => {
   try {
@@ -66,7 +66,7 @@ export const agentPayloadSchemas = {
       adapter: z.enum(ADAPTERS),
       authMode: z.enum(["api_key", "subscription", "none"]),
       prompt: z.string().min(1).max(20000),
-      cardId: z.string().nullable(),
+      cardId: z.string().max(200).nullable(),
       worktree: relativeWorktree,
     })
     .strict(),
@@ -97,12 +97,12 @@ export const agentPayloadSchemas = {
     .object({
       runId: id,
       status: z.enum(["completed", "failed", "stopped"]),
-      costUsd: z.number().nullable(),
+      costUsd: z.number().finite().nullable(),
       error: z.string().max(1000).nullable(),
     })
     .strict(),
   "settings.claude_auth_changed": z
-    .object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string() })
+    .object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().max(1000) })
     .strict()
     .refine((p) => p.mode !== "subscription" || p.acknowledgement === CLAUDE_SUBSCRIPTION_ACK, {
       message: "subscription mode requires the exact acknowledgement",
