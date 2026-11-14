@@ -7,12 +7,15 @@ import { openDatabase } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
-import { registerAuth } from "./auth.js";
+import { registerAuth, APP_HOST } from "./auth.js";
 import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 
 export type RunningServer = {
+  /** Where to open the workspace: the app hostname, with the bootstrap token. */
   url: string;
+  /** Token-free loopback address, for local clients. */
+  loopbackUrl: string;
   port: number;
   token: string;
   integrity: VerifyResult;
@@ -108,7 +111,8 @@ export async function createServer(opts: {
   }
 
   return {
-    url: `http://127.0.0.1:${boundPort}/?token=${token}`,
+    url: `http://${APP_HOST}:${boundPort}/?token=${token}`,
+    loopbackUrl: `http://127.0.0.1:${boundPort}/`,
     port: boundPort,
     token,
     integrity,

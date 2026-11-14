@@ -7,7 +7,7 @@ export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent } from "./board/projections.js";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
-export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE } from "./server/auth.js";
+export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "./server/auth.js";
 export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export type { RunningServer } from "./server/server.js";

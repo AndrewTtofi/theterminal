@@ -3,6 +3,11 @@ import cookie from "@fastify/cookie";
 import type { FastifyInstance } from "fastify";
 
 export const TOKEN_COOKIE = "tt_token";
+/**
+ * The workspace's own hostname. Browsers do not separate cookies by port, so the session cookie
+ * lives on this host-only name and is never sent to other local servers on 127.0.0.1 or localhost.
+ */
+export const APP_HOST = "theterminal.localhost";
 /** Route config marking a route as reachable without a token: `{ config: PUBLIC_ROUTE }`. */
 export const PUBLIC_ROUTE = { public: true } as const;
 type PublicConfig = { public?: boolean };
@@ -33,7 +38,10 @@ export function registerAuth(app: FastifyInstance, opts: { token: string; port: 
 
     const port = opts.port();
     const host = (request.headers.host ?? "").toLowerCase();
-    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return reject(403, "bad_host");
+    const appHost = `${APP_HOST}:${port}`;
+    if (host !== appHost && host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+      return reject(403, "bad_host");
+    }
 
     // Default-deny, keyed on the matched route (find-my-way matches the decoded path, so the raw
     // URL cannot be trusted). Only routes registered with config.public skip the token.
@@ -46,6 +54,8 @@ export function registerAuth(app: FastifyInstance, opts: { token: string; port: 
       const given = new URL(request.url, "http://localhost").searchParams.get("token");
       if (given !== null) {
         if (!tokenMatches(expected, given)) return reject(401, "unauthorized");
+        // Only the app hostname may receive the cookie; loopback hosts are bounced there.
+        if (host !== appHost) return reply.redirect(`http://${appHost}/?token=${encodeURIComponent(given)}`, 302);
         return reply
           .setCookie(TOKEN_COOKIE, opts.token, { httpOnly: true, sameSite: "strict", path: "/" })
           .redirect("/", 302);
@@ -58,7 +68,9 @@ export function registerAuth(app: FastifyInstance, opts: { token: string; port: 
     const origin = request.headers.origin;
     if (origin !== undefined) {
       const o = origin.toLowerCase();
-      if (o !== `http://127.0.0.1:${port}` && o !== `http://localhost:${port}`) return reject(403, "bad_origin");
+      if (o !== `http://${appHost}` && o !== `http://127.0.0.1:${port}` && o !== `http://localhost:${port}`) {
+        return reject(403, "bad_origin");
+      }
     }
 
     const auth = request.headers.authorization;

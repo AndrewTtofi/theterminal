@@ -32,12 +32,12 @@ const post = (s: RunningServer, path: string, body: unknown) =>
   });
 
 /** Raw GET so the path is sent exactly as written (fetch would normalise "/../"). */
-const rawGet = (port: number, path: string) =>
-  new Promise<{ status: number; body: string }>((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, headers: { host: `127.0.0.1:${port}` } }, (res) => {
+const rawGet = (port: number, path: string, host = `127.0.0.1:${port}`) =>
+  new Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path, headers: { host } }, (res) => {
       let body = "";
       res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode!, body }));
+      res.on("end", () => resolve({ status: res.statusCode!, body, headers: res.headers }));
     });
     req.on("error", reject);
     req.end();
@@ -50,7 +50,8 @@ describe("createServer", () => {
     const res = await post(a, "/api/projects", { name: "P", pitch: "pitch" });
     expect(res.status).toBe(201);
     const token = a.token;
-    expect(a.url).toBe(`http://127.0.0.1:${a.port}/?token=${token}`);
+    expect(a.url).toBe(`http://theterminal.localhost:${a.port}/?token=${token}`);
+    expect(a.loopbackUrl).toBe(`http://127.0.0.1:${a.port}/`);
     await stop(a);
 
     const b = await start({ dataDir, port: 0 });
@@ -249,9 +250,13 @@ describe("createServer", () => {
       expect(await index.text()).toContain("ui");
       expect(await (await fetch(base(s) + "/assets/app.js")).text()).toBe("console.log(1)");
 
-      const boot = await fetch(`${base(s)}/?token=${s.token}`, { redirect: "manual" });
+      const loopback = await rawGet(s.port, `/?token=${s.token}`);
+      expect(loopback.status).toBe(302);
+      expect(loopback.headers.location).toBe(s.url);
+      expect(loopback.headers["set-cookie"]).toBeUndefined();
+      const boot = await rawGet(s.port, `/?token=${s.token}`, `theterminal.localhost:${s.port}`);
       expect(boot.status).toBe(302);
-      expect(boot.headers.get("set-cookie")).toContain("tt_token=");
+      expect(String(boot.headers["set-cookie"])).toContain("tt_token=");
       expect((await fetch(`${base(s)}/?token=wrong`, { redirect: "manual" })).status).toBe(401);
       expect((await fetch(base(s) + "/api/projects")).status).toBe(401);
     });

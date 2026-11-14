@@ -5,11 +5,12 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { registerRoutes } from "../../src/server/routes.js";
 import net from "node:net";
-import { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE } from "../../src/server/auth.js";
+import { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "../../src/server/auth.js";
 
 const TOKEN = "secret-token-123";
 const PORT = 4321;
 const HOST = `127.0.0.1:${PORT}`;
+const APP = `${APP_HOST}:${PORT}`;
 let app: FastifyInstance;
 
 beforeEach(async () => {
@@ -70,7 +71,7 @@ describe("auth guard", () => {
   });
 
   it("GET /?token= sets an HttpOnly SameSite=Strict cookie, redirects, and the cookie then authenticates", async () => {
-    const res = await app.inject({ url: `/?token=${TOKEN}`, headers: { host: HOST } });
+    const res = await app.inject({ url: `/?token=${TOKEN}`, headers: { host: APP } });
     expect(res.statusCode).toBe(302);
     expect(res.headers.location).toBe("/");
     const setCookie = String(res.headers["set-cookie"]);
@@ -79,12 +80,41 @@ describe("auth guard", () => {
     expect(setCookie).toContain("SameSite=Strict");
     expect(setCookie).toContain("Path=/");
     expect(setCookie).not.toContain("Secure");
+    expect(setCookie).not.toContain("Domain");
 
     const follow = await app.inject({
       url: "/api/projects",
-      headers: { host: HOST, cookie: `${TOKEN_COOKIE}=${TOKEN}` },
+      headers: { host: APP, cookie: `${TOKEN_COOKIE}=${TOKEN}` },
     });
     expect(follow.statusCode).toBe(200);
+  });
+
+  it("GET /?token= on a loopback Host redirects to the app hostname and sets no cookie", async () => {
+    for (const host of [HOST, `localhost:${PORT}`]) {
+      const res = await app.inject({ url: `/?token=${TOKEN}`, headers: { host } });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe(`http://${APP}/?token=${TOKEN}`);
+      expect(res.headers["set-cookie"]).toBeUndefined();
+    }
+  });
+
+  it("accepts the app hostname, case-insensitively, and rejects look-alikes", async () => {
+    for (const host of [APP, `TheTerminal.LocalHost:${PORT}`]) {
+      expect((await app.inject({ url: "/api/projects", headers: { ...bearer, host } })).statusCode).toBe(200);
+    }
+    for (const host of [`evil.${APP}`, APP_HOST, `${APP_HOST}:9999`]) {
+      const res = await app.inject({ url: "/api/projects", headers: { ...bearer, host } });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ error: "bad_host" });
+    }
+  });
+
+  it("accepts the app origin with the cookie", async () => {
+    const res = await app.inject({
+      url: "/api/projects",
+      headers: { host: APP, origin: `http://${APP}`, cookie: `${TOKEN_COOKIE}=${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(200);
   });
 
   it("wrong token in the query on / is not accepted and sets no cookie", async () => {
