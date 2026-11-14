@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONNECTION_CATALOG, type AgentAction, type AgentRun, type Connection } from "@theterminal/shared";
 import type { FakeStep as FakeStepLike } from "../../src/agents/fake-adapter.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = [
@@ -260,5 +261,56 @@ describe("GET /api/status", { timeout: 15000 }, () => {
 
     await addClaude(s);
     expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+  });
+});
+
+describe("final fix wave", () => {
+  it("refuses a secret shorter than 8 characters with 400 and a message that never echoes it", async () => {
+    const s = await start();
+    const res = await addClaude(s, { secrets: { apiKey: "shrt-7" } });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({
+      error: "invalid_input", issues: [{ path: ["secrets", "apiKey"], code: "custom", message: "must be at least 8 characters" }],
+    });
+    expect(text).not.toContain("shrt-7");
+    expect(await json(get(s, "/api/connections"))).toEqual([]);
+  });
+
+  it("answers 401 without a token for the sign-in routes", async () => {
+    const s = await start();
+    const requests: [string, string][] = [
+      ["GET", "/api/connections/signin-status"], ["POST", "/api/connections/signin/codex"],
+      ["GET", "/api/connections/signin/some-id"], ["DELETE", "/api/connections/signin/some-id"],
+    ];
+    for (const [method, path] of requests) {
+      const res = await fetch(base(s) + path, { method });
+      expect(res.status, `${method} ${path}`).toBe(401);
+    }
+  });
+
+  it("GET /api/status retries the keychain load while it is unavailable, so the state recovers without a write", async () => {
+    const memory = new MemorySecretStore();
+    let down = true;
+    const flaky = {
+      get: async (a: string) => {
+        if (down) throw new SecretStoreUnavailableError();
+        return memory.get(a);
+      },
+      set: (a: string, v: string) => memory.set(a, v),
+      delete: (a: string) => memory.delete(a),
+    };
+    // A connection stored while the keychain was up; the server then restarts with it down.
+    const first = await start({ secrets: memory });
+    const dataDir = dirs.at(-1)!;
+    const added = await json<Connection>(addClaude(first));
+    await running.pop()!.close();
+    const s = await start({ dataDir, secrets: flaky });
+    // The startup load failed: a write is refused and nothing is written.
+    expect((await send(s, "PATCH", `/api/connections/${added.id}`, { secrets: { apiKey: NEW_KEY } })).status).toBe(503);
+    expect(await memory.get(`connection/${added.id}/apiKey`)).toBe(KEY);
+    down = false;
+    const st = await json<{ connections: { keychain: string } }>(get(s, "/api/status"));
+    expect(st.connections.keychain).toBe("ok");
   });
 });

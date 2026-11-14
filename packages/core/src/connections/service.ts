@@ -106,6 +106,15 @@ const accountFor = (connectionId: string, field: string): string => `connection/
 
 /** Caller-supplied field names are echoed in errors only when they have this plain shape. */
 const PLAIN_FIELD_NAME = /^[a-z][A-Za-z0-9]{0,40}$/;
+/** Shorter secrets (flags, short words) would redact ordinary text everywhere once stored. */
+const MIN_SECRET_LENGTH = 8;
+/** How long after a failed load the next read-driven retry (a test, a status read) may try again. */
+const RETRY_LOAD_MS = 30_000;
+
+/** The non-null string values of a request's secret and private fields, so names and config are checked against them too. */
+function requestValues(...groups: Record<string, string | null>[]): string[] {
+  return groups.flatMap((g) => Object.values(g)).filter((v): v is string => typeof v === "string");
+}
 
 /** Writes and deletes for the given secret and private values, secrets first. */
 function toOps(secrets: Record<string, string | null>, priv: Record<string, string | null>): KeychainOp[] {
@@ -144,6 +153,8 @@ export class ConnectionService {
   /** Whether a `load()` has succeeded since the process started. */
   private loaded = false;
   private loading: Promise<void> | null = null;
+  /** When `retryIfUnavailable` last loaded. */
+  private lastRetryAt = 0;
   /** Per-connection tail of the operation chain; operations on one id run one at a time. */
   private readonly locks = new Map<string, Promise<unknown>>();
   /** Bumped when a cache-changing operation on a connection starts and ends; lets a load keep newer entries. */
@@ -169,11 +180,13 @@ export class ConnectionService {
   async load(): Promise<void> {
     const startVersions = new Map(this.versions);
     const next = new Map<string, Record<string, string>>();
+    let read = false; // whether the keychain answered at least one read, which shows it is back after a failed write
     try {
       for (const row of this.rows()) {
         const values: Record<string, string> = {};
         for (const [field, storage] of this.storedFields(row)) {
           const value = await this.secrets.get(accountFor(row.id, field));
+          read = true;
           if (value === null) continue;
           values[field] = value;
           if (storage === "secret") this.seen.add(value);
@@ -193,12 +206,25 @@ export class ConnectionService {
     }
     this.cache = merged;
     this.state = "ok";
+    if (read) this.writeFailed = false;
     this.loaded = true;
   }
 
-  /** "unavailable" after a failed load, or after a failed write until a later write succeeds. */
+  /** "unavailable" after a failed load, or after a failed write until a later write or load succeeds. */
   keychainState(): "ok" | "unavailable" {
     return this.state === "ok" && !this.writeFailed ? "ok" : "unavailable";
+  }
+
+  /**
+   * While the keychain is unavailable, loads it again, at most once per RETRY_LOAD_MS: a read (a connection test, a
+   * status read) is enough for the state to recover once the keychain is back. Never throws.
+   */
+  async retryIfUnavailable(): Promise<void> {
+    if (this.keychainState() === "ok") return;
+    const now = Date.now();
+    if (now - this.lastRetryAt < RETRY_LOAD_MS) return;
+    this.lastRetryAt = now;
+    await this.reload();
   }
 
   list(): Connection[] {
@@ -211,14 +237,15 @@ export class ConnectionService {
 
   async add(actor: Actor, input: AddConnectionInput): Promise<Connection> {
     await this.tryLoad();
-    const name = this.checkName(input.name);
     const entry = this.availableEntry(input.provider);
     if (entry.kind !== input.kind) invalid(["provider"], "provider does not belong to this kind");
-    const config = this.checkConfig(entry, input.config ?? {});
     const secrets = input.secrets ?? {};
     const priv = input.private ?? {};
     this.checkValues(entry, "secret", secrets, ["secrets"]);
     this.checkValues(entry, "private", priv, ["private"]);
+    const same = requestValues(secrets, priv);
+    const name = this.checkName(input.name, same);
+    const config = this.checkConfig(entry, input.config ?? {}, same);
     for (const f of entry.fields) {
       const given = f.storage === "secret" ? secrets : f.storage === "private" ? priv : config;
       if (f.required && given[f.name] === undefined) invalid([f.storage === "secret" ? "secrets" : f.storage, f.name], "required");
@@ -249,13 +276,14 @@ export class ConnectionService {
     await this.tryLoad();
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
-    if (patch.name !== undefined) changes.name = this.checkName(patch.name);
-    if (patch.config !== undefined) changes.config = this.checkConfig(entry, patch.config);
-    if (patch.enabled !== undefined) changes.enabled = z.boolean().parse(patch.enabled);
     const secrets = patch.secrets ?? {};
     const priv = patch.private ?? {};
     this.checkValues(entry, "secret", secrets, ["secrets"]);
     this.checkValues(entry, "private", priv, ["private"]);
+    const same = requestValues(secrets, priv);
+    if (patch.name !== undefined) changes.name = this.checkName(patch.name, same);
+    if (patch.config !== undefined) changes.config = this.checkConfig(entry, patch.config, same);
+    if (patch.enabled !== undefined) changes.enabled = z.boolean().parse(patch.enabled);
     for (const f of entry.fields) {
       const given = f.storage === "secret" ? secrets : f.storage === "private" ? priv : {};
       if (f.required && given[f.name] === null) invalid([f.storage === "secret" ? "secrets" : f.storage, f.name], "required");
@@ -308,6 +336,7 @@ export class ConnectionService {
 
   private async testNow(actor: Actor, id: string): Promise<{ ok: boolean; message: string }> {
     const row = this.requireRow(id);
+    await this.retryIfUnavailable();
     const tester = catalogFor(row.provider)?.available ? this.testers[row.provider] : undefined;
     let result: { ok: boolean; message: string };
     if (!tester) {
@@ -425,10 +454,15 @@ export class ConnectionService {
    */
   private async tryLoad(): Promise<void> {
     if (this.loaded && this.state === "ok") return;
+    await this.reload();
+  }
+
+  /** One `load()` at a time: concurrent callers share the one under way. */
+  private reload(): Promise<void> {
     this.loading ??= this.load().finally(() => {
       this.loading = null;
     });
-    await this.loading;
+    return this.loading;
   }
 
   /** Marks a cache-changing operation on `id` for the duration of `fn`, so a concurrent `load()` keeps its result. */
@@ -458,10 +492,13 @@ export class ConnectionService {
     return run;
   }
 
-  /** Names reach the ledger too, so a name that `redact` would change is refused like a config value. */
-  private checkName(input: string): string {
+  /**
+   * Names reach the ledger too, so a name that `redact` would change is refused like a config value. `same` holds the
+   * secret and private values of the request itself, which are not stored yet when the name is checked.
+   */
+  private checkName(input: string, same: string[]): string {
     const name = connectionNameSchema.parse(input);
-    if (redact(name, this.secretValues()) !== name) throw new SecretInConfigError();
+    if (redact(name, [...this.secretValues(), ...same]) !== name) throw new SecretInConfigError();
     return name;
   }
 
@@ -487,11 +524,12 @@ export class ConnectionService {
     }
   }
 
-  /** Config goes to the ledger, so a value that `redact` would change is refused outright. */
-  private checkConfig(entry: CatalogEntry, input: Record<string, string>): Record<string, string> {
+  /** Config goes to the ledger, so a value that `redact` would change is refused outright (`same`: see `checkName`). */
+  private checkConfig(entry: CatalogEntry, input: Record<string, string>, same: string[]): Record<string, string> {
     const config = connectionConfigSchema.parse(input);
     this.checkFields(entry, "config", Object.keys(config));
-    if (JSON.stringify(redact(config, this.secretValues())) !== JSON.stringify(config)) throw new SecretInConfigError();
+    const secrets = [...this.secretValues(), ...same];
+    if (JSON.stringify(redact(config, secrets)) !== JSON.stringify(config)) throw new SecretInConfigError();
     return config;
   }
 
@@ -501,6 +539,7 @@ export class ConnectionService {
       if (value === null) continue;
       const field = entry.fields.find((f) => f.name === name)!;
       if (typeof value !== "string" || value.length === 0) invalid([...path, name], "must be a non-empty string");
+      if (storage === "secret" && value.length < MIN_SECRET_LENGTH) invalid([...path, name], `must be at least ${MIN_SECRET_LENGTH} characters`);
       if (Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES) invalid([...path, name], `must be at most ${MAX_SECRET_BYTES} bytes`);
       if (field.input !== "multiline" && /[\r\n]/.test(value)) invalid([...path, name], "must be a single line");
       // A relative folder would resolve against wherever the CLI happens to start (the run's worktree).

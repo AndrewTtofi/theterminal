@@ -584,3 +584,100 @@ describe("re-review fixes", () => {
     expect(svc.credentialsFor("claude")).toEqual({ connectionId: again.id, name: "Claude" });
   });
 });
+
+describe("final fix wave", () => {
+  // Matches no token pattern: only the value given in the same request can catch it.
+  const OPAQUE = "zq0RS6kd83JWnB2yT5pe7MaV4cUx9hLf1Gt";
+
+  it("refuses a name or config value that holds a secret or private value from the same request, on add", async () => {
+    const svc = make();
+    await expect(
+      svc.add(owner, { kind: "llm", provider: "claude", name: OPAQUE, config: {}, secrets: { apiKey: OPAQUE } }),
+    ).rejects.toBeInstanceOf(SecretInConfigError);
+    await expect(
+      svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", config: { googleCloudProject: `p-${OPAQUE}` }, secrets: { apiKey: OPAQUE } }),
+    ).rejects.toBeInstanceOf(SecretInConfigError);
+    await expect(
+      svc.add(owner, { kind: "llm", provider: "gemini", name: `home ${GEM_HOME}`, config: {}, private: { cliHome: GEM_HOME } }),
+    ).rejects.toBeInstanceOf(SecretInConfigError);
+    expect(ledger.list()).toHaveLength(0);
+    expect(store.size()).toBe(0);
+    expect(svc.list()).toEqual([]);
+  });
+
+  it("refuses a name or config value that holds a secret or private value from the same request, on update", async () => {
+    const svc = make();
+    const g = await svc.add(owner, { kind: "llm", provider: "gemini", name: "Gemini", config: {}, secrets: { apiKey: "AIzaTESTKEY" } });
+    await expect(svc.update(owner, g.id, { name: OPAQUE, secrets: { apiKey: OPAQUE } })).rejects.toBeInstanceOf(SecretInConfigError);
+    await expect(
+      svc.update(owner, g.id, { config: { googleCloudProject: GEM_HOME }, private: { cliHome: GEM_HOME } }),
+    ).rejects.toBeInstanceOf(SecretInConfigError);
+    expect(types()).toEqual(["connection.added"]);
+    expect(store.size()).toBe(1);
+    expect(await store.get("connection/conn1/apiKey")).toBe("AIzaTESTKEY");
+    expect(svc.get(g.id)).toMatchObject({ name: "Gemini", config: {}, private: {} });
+  });
+
+  it("requires a secret of at least 8 characters, without echoing it, on add and on update", async () => {
+    const svc = make();
+    for (const value of ["short-7", "1234567"]) {
+      const err = await addClaude(svc, value).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      const issues = (err as ZodError).issues;
+      expect(issues).toEqual([{ code: "custom", path: ["secrets", "apiKey"], message: "must be at least 8 characters" }]);
+      expect(JSON.stringify(issues)).not.toMatch(/short-7|1234567/);
+    }
+    const c = await addClaude(svc, "12345678");
+    await expect(svc.update(owner, c.id, { secrets: { apiKey: "abcdefg" } })).rejects.toBeInstanceOf(ZodError);
+    expect(await store.get("connection/conn1/apiKey")).toBe("12345678");
+    expect(types()).toEqual(["connection.added"]);
+  });
+
+  /** A store that is down until `up()` is called. */
+  function flakyStore() {
+    let down = true;
+    const flaky: SecretStore = {
+      get: async (a) => {
+        if (down) throw new SecretStoreUnavailableError();
+        return store.get(a);
+      },
+      set: async (a, v) => {
+        if (down) throw new SecretStoreUnavailableError();
+        return store.set(a, v);
+      },
+      delete: (a) => store.delete(a),
+    };
+    return { flaky, up: () => (down = false), downAgain: () => (down = true) };
+  }
+
+  it("test() retries the load while the keychain is unavailable, at most once per 30 s, so the state recovers without a write", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const c = await addClaude(make(), KEY);
+      const { flaky, up, downAgain } = flakyStore();
+      const seen: string[] = [];
+      const svc = make({ secrets: flaky, testers: { claude: async (i) => (seen.push(i.secrets.apiKey ?? "(none)"), { ok: true, message: "Connected" }) } });
+      await svc.load();
+      expect(svc.keychainState()).toBe("unavailable");
+      up();
+      await svc.test(owner, c.id);
+      expect(svc.keychainState()).toBe("ok");
+      expect(seen).toEqual([KEY]);
+
+      // A failed write marks it unavailable again; the next retry waits 30 s from the last one.
+      downAgain();
+      await expect(svc.update(owner, c.id, { secrets: { apiKey: KEY2 } })).rejects.toBeInstanceOf(SecretStoreUnavailableError);
+      expect(svc.keychainState()).toBe("unavailable");
+      up();
+      vi.advanceTimersByTime(29_000);
+      await svc.test(owner, c.id);
+      expect(svc.keychainState()).toBe("unavailable");
+      vi.advanceTimersByTime(1_000);
+      await svc.test(owner, c.id);
+      expect(svc.keychainState()).toBe("ok");
+      expect(svc.credentialsFor("claude")!.apiKey).toBe(KEY);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

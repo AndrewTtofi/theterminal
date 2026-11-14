@@ -106,6 +106,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
   );
 
   app.get("/api/status", async () => {
+    await connections.retryIfUnavailable();
     const counts = workspaceCounts(db);
     return {
       runningAgents: counts.runningAgents,
