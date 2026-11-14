@@ -28,18 +28,23 @@ const ledgerQuery = z.object({
 /** A path segment shown as given only when it has the shape of one of our own field names. */
 const PLAIN_SEGMENT = /^[a-z][A-Za-z0-9]{0,40}$/;
 
+/** Codes whose zod default message names only the schema's own limits, types or patterns, never the input. */
+const SCHEMA_ONLY_MESSAGE = new Set(["invalid_type", "too_big", "too_small", "invalid_format", "not_multiple_of"]);
+
 /**
  * A zod issue as the client sees it: path, code and message only. Nothing the request sent is echoed: no
- * `input` and no nested issues, record keys that are not plain field names (and symbols) become "*", and the
- * default messages that quote the input (unknown keys) are replaced. An enum message is rebuilt from the
- * schema's own options.
+ * `input` and no nested issues, and record keys that are not plain field names (and symbols) become "*".
+ * Messages are an allowlist by code: our own refinement messages, defaults that hold only schema values,
+ * and messages rebuilt from the schema (enum options) or fixed (unknown keys). Any other code, such as
+ * `invalid_union`, gets "Invalid input".
  */
 function publicIssue(issue: z.core.$ZodIssue): { path: (string | number)[]; code: string; message: string } {
   const path = issue.path.map((p) =>
     typeof p === "number" || (typeof p === "string" && PLAIN_SEGMENT.test(p) && redact(p) === p) ? p : "*",
   );
-  let message = issue.message;
-  if (issue.code === "invalid_value") message = `Invalid option: expected one of ${issue.values.map((o) => `'${String(o)}'`).join(" | ")}`;
+  let message = "Invalid input";
+  if (issue.code === "custom" || SCHEMA_ONLY_MESSAGE.has(issue.code)) message = issue.message;
+  else if (issue.code === "invalid_value") message = `Invalid option: expected one of ${issue.values.map((o) => `'${String(o)}'`).join(" | ")}`;
   else if (issue.code === "unrecognized_keys") message = "Unrecognized key(s) in object";
   // A record key that fails our own refinement: show that refinement's fixed message, as zod 3 did.
   else if (issue.code === "invalid_key") message = issue.issues.find((i) => i.code === "custom")?.message ?? message;
