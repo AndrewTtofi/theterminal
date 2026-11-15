@@ -1,0 +1,17 @@
+# Not apps/desktop: the frozen lockfile needs its package.json (the Dockerfile's --filter keeps it out of the install).
+node_modules
+**/node_modules
+**/dist
+.git
+.github
+.claude
+.superpowers
+e2e
+docs
+test-results
+playwright-report
+.tmp-data
+apps/desktop/stage
+apps/desktop/release
+apps/desktop/.cache
+**/*.db
