@@ -378,3 +378,13 @@ details.override input, details.override textarea { width: 100%; }
 .override-confirm:focus { outline: 1px solid var(--focus); outline-offset: 1px; }
 .override-error { color: var(--override); font-weight: 600; }
 details.override [role="status"]:empty { margin: 0; }
+
+.learn-side { display: flex; flex-direction: column; gap: 4px; }
+.learn-side input[type="search"] { width: 100%; margin-bottom: 4px; }
+.learn-side h3 { margin: 12px 0 4px; font-size: 12px; }
+.learn-side h4 { margin: 8px 0 2px; font-size: 11px; color: var(--muted); font-weight: 600; }
+.learn-topic { padding: 2px 0; }
+.learn-topic > summary { cursor: pointer; }
+.learn-topic > p { margin: 4px 0 6px 12px; font-size: 12px; line-height: 1.5; }
+.learn-topic.read > summary { color: var(--muted); }
+.learn-footer { font-size: 11px; margin-top: 12px; }

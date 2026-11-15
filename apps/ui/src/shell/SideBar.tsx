@@ -6,8 +6,8 @@ import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
 import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
+import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
-import { PlaceholderSideBar } from "./placeholders";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
 
@@ -25,7 +25,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   connections: ConnectionsSideBar,
   github: GitHubSideBar,
   capacity: CapacitySideBar,
-  learn: PlaceholderSideBar,
+  learn: LearnSideBar,
 };
 
 export const clampWidth = (w: number) => Math.min(SIDE_BAR_MAX, Math.max(SIDE_BAR_MIN, Math.round(w)));
