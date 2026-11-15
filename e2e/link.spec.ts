@@ -104,11 +104,17 @@ async function startRemoteRun(page: Page, machine: string, prompt: string) {
 
 /** The decision card of the remote shell step. */
 const shellCard = (page: Page) => page.getByRole("article", { name: "Decision: Run: nvidia-smi" });
+/** What no response or frame of either computer may ever carry: a stored key, or a link identity's private key. */
+const LEAK_SECRETS = ["TESTKEY", "PRIVATE KEY"];
 
 test("two computers pair with a one-time code typed once, and each shows the other's fingerprint to compare", async ({ page, browser }) => {
   test.setTimeout(120_000);
   const peer = await openPeer(browser);
+  const peerWatch = watchForLeaks(peer, LEAK_SECRETS);
+  const peerSince = await latestSeq(peer);
+  const watch = watchForLeaks(page, LEAK_SECRETS);
   await page.goto(AGENT_URL());
+  const since = await latestSeq(page);
   await operatorLayout(page);
   await expect(statusBar(page)).toContainText("Machines: 0 linked");
 
@@ -166,13 +172,18 @@ test("two computers pair with a one-time code typed once, and each shows the oth
   await expect(machineRow(page, "GPU box").locator(".machine-dot")).toHaveText("online");
   await expect(machineRow(page, "GPU box").locator(".machine-fingerprint code")).toHaveText(peerFingerprint);
   await expect(statusBar(page)).toContainText("Machines: 1 linked, 1 online");
+  // Pairing carried the public keys and fingerprints, never a private key, to either screen.
+  await watch.check(since);
+  await peerWatch.check(peerSince);
   await peer.context().close();
 });
 
 test("the Capacity view shows the linked machine's hardware and local models", async ({ page }) => {
   test.setTimeout(60_000);
+  const watch = watchForLeaks(page, LEAK_SECRETS);
   // The peer detected its hardware before pairing, so this computer's first ask (its answer is kept 30 s) has it.
   await page.goto(AGENT_URL());
+  const since = await latestSeq(page);
   await openView(page, "Capacity");
   const side = page.locator(".capacity-side");
   const gpuBox = side.getByRole("region", { name: /^GPU box · / });
@@ -191,6 +202,8 @@ test("the Capacity view shows the linked machine's hardware and local models", a
   await expect(cells.nth(3)).toHaveText("32 GB");
   await expect(cells.nth(4)).toContainText("Fake GPU, 24 GB");
   await expect(cells.nth(5)).toHaveText("1");
+  // What the machine reported about itself carried no secret of either side.
+  await watch.check(since);
 });
 
 test("a run started here runs on the linked machine, is decided here, and its changes arrive for review", async ({ page, browser }) => {
@@ -252,8 +265,10 @@ test("a run started here runs on the linked machine, is decided here, and its ch
 
 test("unlinking a machine ends the runs this computer had on it", async ({ page, browser }) => {
   test.setTimeout(120_000);
+  const watch = watchForLeaks(page, LEAK_SECRETS);
   const project = "Unlinked Project";
   await openProject(page, project);
+  const since = await latestSeq(page);
   await startRemoteRun(page, "GPU box", "Wait for me");
   await expect(shellCard(page)).toBeVisible();
 
@@ -280,6 +295,8 @@ test("unlinking a machine ends the runs this computer had on it", async ({ page,
   // Before this computer forgot it, the peer was asked to stop the run: nothing waits there for a decision that will
   // not come, and its ledger records the stop as any stop.
   const peer = await openPeer(browser);
+  const peerWatch = watchForLeaks(peer, LEAK_SECRETS);
+  const peerSince = await latestSeq(peer);
   await expect(shellCard(peer)).toHaveCount(0);
   await expect.poll(() => runStatuses(peer, project)).toEqual(["stopped"]);
   await showAllProjects(peer);
@@ -291,6 +308,8 @@ test("unlinking a machine ends the runs this computer had on it", async ({ page,
   await expect(machinesSide(peer).getByText("No machines linked yet.")).toBeVisible();
   await thisComputer(peer).getByRole("switch", { name: "Allow linking" }).click();
   await expect(thisComputer(peer).getByRole("switch", { name: "Allow linking" })).toHaveAttribute("aria-checked", "false");
+  await watch.check(since);
+  await peerWatch.check(peerSince);
   await peer.context().close();
 });
 
