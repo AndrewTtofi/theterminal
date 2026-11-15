@@ -496,8 +496,26 @@ describe("RemoteListener", () => {
     }
   });
 
-  it("an idle TLS connection is closed after the idle timeout", async () => {
-    const h = await harness({ idleTimeoutMs: 200 });
+  it("a TLS connection whose request has started but goes idle is closed after the idle timeout", async () => {
+    const h = await harness({ idleTimeoutMs: 200 }); // the first-byte timeout stays at its 10 s default
+    const { port } = await enabled(h);
+    const closedAfter = await new Promise<number>((resolve, reject) => {
+      const started = Date.now();
+      const s = tls.connect({ host: "127.0.0.1", port, rejectUnauthorized: false, ALPNProtocols: ["http/1.1"] });
+      // The headers arrive, the body never does: the request has started and the connection then goes silent.
+      s.once("secureConnect", () =>
+        s.write(`PUT /api/remote HTTP/1.1\r\nhost: 127.0.0.1:${port}\r\nx-test-as: owner\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"enabled`),
+      );
+      s.on("data", () => undefined);
+      s.on("close", () => resolve(Date.now() - started));
+      s.on("error", reject);
+      setTimeout(() => reject(new Error("still open")), 5000).unref();
+    });
+    expect(closedAfter).toBeLessThan(3000);
+  });
+
+  it("a TLS connection that sends no request within the first-byte timeout is closed, well before the idle timeout", async () => {
+    const h = await harness({ firstByteTimeoutMs: 200 }); // the idle timeout stays at its 5 minute default
     const { port } = await enabled(h);
     const closedAfter = await new Promise<number>((resolve, reject) => {
       const started = Date.now();
@@ -507,6 +525,29 @@ describe("RemoteListener", () => {
       setTimeout(() => reject(new Error("still open")), 5000).unref();
     });
     expect(closedAfter).toBeLessThan(3000);
+  });
+
+  it("a connection that has sent a request is kept past the first-byte timeout, under the idle timeout", async () => {
+    const h = await harness({ firstByteTimeoutMs: 200, idleTimeoutMs: 10_000 });
+    const { port } = await enabled(h);
+    const s = tls.connect({ host: "127.0.0.1", port, rejectUnauthorized: false, ALPNProtocols: ["http/1.1"] });
+    let closed = false;
+    s.on("close", () => (closed = true));
+    s.on("error", () => undefined);
+    const body = await new Promise<string>((resolve, reject) => {
+      let data = "";
+      s.setEncoding("utf8");
+      s.on("data", (c: string) => {
+        data += c;
+        if (/\r\n\r\n[\s\S]*whoami|"listener"/.test(data)) resolve(data);
+      });
+      s.once("secureConnect", () => s.write(`GET /whoami HTTP/1.1\r\nhost: 127.0.0.1:${port}\r\nconnection: keep-alive\r\n\r\n`));
+      setTimeout(() => reject(new Error("no response")), 5000).unref();
+    });
+    expect(body).toContain('"listener":"remote"');
+    await new Promise((r) => setTimeout(r, 700));
+    expect(closed).toBe(false);
+    s.destroy();
   });
 
   it("close stops listening without recording anything", async () => {

@@ -76,6 +76,8 @@ export async function harness(
     localAddresses?: () => { hostnames: string[]; addresses: string[] };
     /** Milliseconds an idle TLS connection may stay open; default the listener's own. */
     idleTimeoutMs?: number;
+    /** Milliseconds a TLS connection has to send its first request byte; default the listener's own. */
+    firstByteTimeoutMs?: number;
   } = {},
 ): Promise<Harness> {
   const root = opts.root ?? mkdtempSync(join(tmpdir(), "tt-remote-"));
@@ -123,6 +125,7 @@ export async function harness(
     now: opts.now,
     localAddresses: opts.localAddresses ?? (() => TEST_ADDRESSES),
     ...(opts.idleTimeoutMs !== undefined && { idleTimeoutMs: opts.idleTimeoutMs }),
+    ...(opts.firstByteTimeoutMs !== undefined && { firstByteTimeoutMs: opts.firstByteTimeoutMs }),
     ...(acme ? { acme, acmePort: 0 } : {}),
   });
   const h: Harness = {
@@ -140,7 +143,10 @@ export async function harness(
     async restart() {
       await h.close();
       open.splice(open.indexOf(h), 1);
-      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient, auth: opts.auth, localAddresses: opts.localAddresses, idleTimeoutMs: opts.idleTimeoutMs });
+      return harness({
+        root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient, auth: opts.auth, localAddresses: opts.localAddresses,
+        idleTimeoutMs: opts.idleTimeoutMs, firstByteTimeoutMs: opts.firstByteTimeoutMs,
+      });
     },
     async close() {
       await remote!.close();

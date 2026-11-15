@@ -33,8 +33,15 @@ export const REMOTE_HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Concurrent TCP connections the TLS listener accepts. */
 export const REMOTE_MAX_CONNECTIONS = 256;
 /**
- * Milliseconds of silence after which a TLS connection is closed. Long enough for a slow request; the event stream's
- * ping (events-ws.ts) keeps a live WebSocket inside it, and a peer that stops answering pings is cut by that stream.
+ * Milliseconds a connection has, after the TLS handshake, to send the first byte of a request. Short, so that
+ * handshakes which then go silent cannot hold the connection slots: the http server's own header timeout starts
+ * only at the first byte.
+ */
+export const REMOTE_FIRST_BYTE_TIMEOUT_MS = 10_000;
+/**
+ * Milliseconds of silence after which a TLS connection that has sent a request is closed. Long enough for a slow
+ * request; the event stream's ping (events-ws.ts) keeps a live WebSocket inside it, and a peer that stops answering
+ * pings is cut by that stream.
  */
 export const REMOTE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 /** How long the machine's names and addresses are kept before os.networkInterfaces() and os.hostname() are read again. */
@@ -121,6 +128,8 @@ export type RemoteDeps = {
   localAddresses?: () => { hostnames: string[]; addresses: string[] };
   /** Tests only: a shorter idle timeout for TLS connections. Default REMOTE_IDLE_TIMEOUT_MS. */
   idleTimeoutMs?: number;
+  /** Tests only: a shorter wait for a connection's first request byte. Default REMOTE_FIRST_BYTE_TIMEOUT_MS. */
+  firstByteTimeoutMs?: number;
   /** The file secret store's key file, when there is one: denied to provided certificate files. */
   secretKeyFile?: string;
   /** Certificates from Let's Encrypt for `tls: "acme"`; without it that mode is refused (`acme_unavailable`). */
@@ -271,6 +280,8 @@ export class RemoteListener {
   private lastAcmeError: string | null = null;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly unsubscribe: () => void;
+  /** Stops listening to the http server's request events (see `requestStarted`). */
+  private readonly unhook: () => void;
 
   constructor(private readonly deps: RemoteDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -286,6 +297,14 @@ export class RemoteListener {
     this.unsubscribe = deps.ledger.onAppend((e) => {
       if (REMOTE_TYPES.has(e.type)) this.current = applyRemoteEntry(this.current, e);
     });
+    // The http parser consumes a connection's handle directly, so the first request is seen here, not as 'data'.
+    const started = (req: IncomingMessage) => this.requestStarted(req.socket);
+    deps.http.on("request", started);
+    deps.http.on("upgrade", started);
+    this.unhook = () => {
+      deps.http.off("request", started);
+      deps.http.off("upgrade", started);
+    };
   }
 
   state(): RemoteView {
@@ -421,6 +440,7 @@ export class RemoteListener {
   close(): Promise<void> {
     return this.serial(async () => {
       this.unsubscribe();
+      this.unhook();
       await this.stopServer();
       await this.stopAcme();
     });
@@ -771,9 +791,13 @@ export class RemoteListener {
           return;
         }
         this.track(socket);
-        // An idle network connection is closed. Reads and writes both count as activity, so a WebSocket kept alive by
-        // the stream's pings stays; the http server's own header, request and keep-alive timeouts apply as well.
-        socket.setTimeout(this.deps.idleTimeoutMs ?? REMOTE_IDLE_TIMEOUT_MS, () => socket.destroy());
+        // A connection that sends nothing after the handshake is closed within the first-byte timeout, so silent
+        // handshakes cannot hold the slots (the http server's own header timeout starts only at the first byte).
+        // Once a request has started (`requestStarted`) the longer idle timeout applies. Reads and writes both count
+        // as activity; a WebSocket kept alive by the stream's pings stays, and ws clears the timeout on upgrade anyway;
+        // the http server's header, request and keep-alive timeouts apply as well.
+        socket.on("timeout", () => socket.destroy());
+        socket.setTimeout(this.deps.firstByteTimeoutMs ?? REMOTE_FIRST_BYTE_TIMEOUT_MS);
         this.deps.http.emit("connection", socket);
       },
     );
@@ -798,6 +822,11 @@ export class RemoteListener {
     server.on("error", () => undefined);
     this.server = server;
     this.served = m;
+  }
+
+  /** A request (or upgrade) has arrived on one of this listener's connections: the idle timeout takes over. */
+  private requestStarted(socket: net.Socket): void {
+    if (this.sockets.has(socket)) socket.setTimeout(this.deps.idleTimeoutMs ?? REMOTE_IDLE_TIMEOUT_MS);
   }
 
   private track(socket: net.Socket): void {
