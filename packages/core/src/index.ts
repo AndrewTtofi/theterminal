@@ -1,7 +1,7 @@
 export { openDatabase } from "./db.js";
 export type { Db } from "./db.js";
 export { canonicalJson } from "./ledger/canonical.js";
-export { Ledger, LedgerReadOnlyError } from "./ledger/ledger.js";
+export { Ledger, LedgerReadOnlyError, MAX_RUN_IDS } from "./ledger/ledger.js";
 export type { VerifyResult } from "./ledger/ledger.js";
 export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent, rebuildAllProjections, getSetting } from "./events/projections.js";
@@ -32,6 +32,9 @@ export type { GateServiceDeps } from "./gates/service.js";
 export { gateFacts, evaluateConditions } from "./gates/conditions.js";
 export { registerIntakeRoutes } from "./server/intake-routes.js";
 export type { IntakeRouteDeps } from "./server/intake-routes.js";
+export { cardStory, narrationContext, ledgerExportLines } from "./story/story.js";
+export { registerStoryRoutes } from "./server/story-routes.js";
+export type { StoryRouteDeps } from "./server/story-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
 export { workspaceCounts } from "./events/projections.js";

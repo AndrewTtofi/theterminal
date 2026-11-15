@@ -17,6 +17,7 @@ import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerIntakeRoutes } from "./intake-routes.js";
+import { registerStoryRoutes } from "./story-routes.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
@@ -495,6 +496,7 @@ export async function createServer(opts: {
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
       });
       registerIntakeRoutes(app, { intake });
+      registerStoryRoutes(app, { db, ledger });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".

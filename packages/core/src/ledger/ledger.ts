@@ -6,6 +6,9 @@ import { canonicalJson } from "./canonical.js";
 
 export type VerifyResult = { ok: true; count: number } | { ok: false; brokenAtSeq: number };
 
+/** The most run ids one `list` call may filter by. */
+export const MAX_RUN_IDS = 200;
+
 export class LedgerReadOnlyError extends Error {
   constructor() {
     super("ledger is read-only");
@@ -122,12 +125,34 @@ export class Ledger {
     }
   }
 
-  list(q: { projectId?: string; afterSeq?: number; limit?: number } = {}): LedgerEntry[] {
+  /**
+   * Entries in seq order. `cardId` and `runIds` keep the entries whose payload names that card or one of those
+   * runs (their union when both are given); an empty `runIds` names no run. At most MAX_RUN_IDS run ids.
+   */
+  list(
+    q: { projectId?: string; afterSeq?: number; limit?: number; cardId?: string; runIds?: string[] } = {},
+  ): LedgerEntry[] {
     const where: string[] = ["seq > ?"];
     const params: unknown[] = [q.afterSeq ?? 0];
     if (q.projectId !== undefined) {
       where.push("project_id = ?");
       params.push(q.projectId);
+    }
+    if (q.cardId !== undefined || q.runIds !== undefined) {
+      if (q.runIds !== undefined && q.runIds.length > MAX_RUN_IDS) {
+        throw new RangeError(`at most ${MAX_RUN_IDS} run ids`);
+      }
+      const about: string[] = [];
+      if (q.cardId !== undefined) {
+        about.push("json_extract(payload, '$.cardId') = ?");
+        params.push(q.cardId);
+      }
+      if (q.runIds !== undefined && q.runIds.length > 0) {
+        about.push(`json_extract(payload, '$.runId') IN (${q.runIds.map(() => "?").join(", ")})`);
+        params.push(...q.runIds);
+      }
+      // CASE guarantees json_valid runs first: json_extract throws on a tampered, unparseable payload.
+      where.push(about.length > 0 ? `CASE WHEN json_valid(payload) THEN (${about.join(" OR ")}) ELSE 0 END` : "0");
     }
     params.push(q.limit ?? 500);
     const rows = this.db
