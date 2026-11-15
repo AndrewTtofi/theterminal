@@ -58,6 +58,18 @@ describe("registerStaticUi: the join and sign-in pages", () => {
     }
   });
 
+  it("never serves database files or their companions, dotfiles, the token or the secrets file, even from inside uiDir", async () => {
+    const app = await setup();
+    const names = ["ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "LEDGER.DB-JOURNAL", "x.DB", "token", "TOKEN", "secrets.enc.json", ".env"];
+    for (const name of names) writeFileSync(join(apps.length ? dirs[dirs.length - 1]! : "", "ui", name), "secret");
+    for (const name of names) {
+      const res = await app.inject({ method: "GET", url: `/${name}` });
+      expect(res.statusCode, name).toBe(404);
+      expect(res.body, name).not.toContain("secret");
+    }
+    expect((await app.inject({ method: "GET", url: "/assets/app.js" })).statusCode).toBe(200);
+  });
+
   it("leaves the API routes and the other files as they were", async () => {
     const app = await setup();
     expect((await app.inject({ method: "GET", url: "/api/join/abc" })).json()).toEqual({ api: true });

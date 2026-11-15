@@ -405,11 +405,11 @@ describe("createServer", { timeout: 30_000 }, () => {
       const uiDir = join(root, "ui");
       mkdirSync(join(uiDir, ".git"), { recursive: true });
       writeFileSync(join(uiDir, "index.html"), "<html>ui</html>");
-      for (const f of [".env", ".git/config", "token", "TOKEN", "ledger.db", "ledger.db-wal", "ledger.db-shm", "x.DB"]) {
+      for (const f of [".env", ".git/config", "token", "TOKEN", "ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "x.DB"]) {
         writeFileSync(join(uiDir, f), "secret");
       }
       const s = await start({ dataDir: join(root, "data"), uiDir, port: 0 });
-      for (const path of ["/.env", "/.git/config", "/token", "/TOKEN", "/ledger.db", "/ledger.db-wal", "/ledger.db-shm", "/x.DB"]) {
+      for (const path of ["/.env", "/.git/config", "/token", "/TOKEN", "/ledger.db", "/ledger.db-wal", "/ledger.db-shm", "/ledger.db-journal", "/x.DB"]) {
         const res = await rawGet(s.port, path);
         expect(res.status, path).toBe(404);
         expect(res.body, path).not.toContain("secret");

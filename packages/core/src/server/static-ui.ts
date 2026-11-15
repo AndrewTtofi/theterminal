@@ -1,4 +1,4 @@
-import { createReadStream, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, createReadStream, fstatSync, openSync, realpathSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { PUBLIC_ROUTE } from "./auth.js";
@@ -26,7 +26,7 @@ const TYPES: Record<string, string> = {
 function isDenied(relPath: string): boolean {
   const parts = relPath.split(sep);
   const name = (parts[parts.length - 1] ?? "").toLowerCase();
-  return parts.some((p) => p.startsWith(".")) || name === "token" || name === "secrets.enc.json" || /\.db(-wal|-shm)?$/.test(name);
+  return parts.some((p) => p.startsWith(".")) || name === "token" || name === "secrets.enc.json" || /\.db(-wal|-shm|-journal)?$/.test(name);
 }
 
 /** The file as given and as resolved through links, for an exact comparison with a served file's real path. */
@@ -72,15 +72,26 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
     secure(reply);
     if (rel.includes("\0")) return reply.code(404).send({ error: "not_found" });
     let file: string;
+    let fd: number;
     try {
       file = realpathSync(resolve(root, rel)); // resolves symlinks too
       if (file !== root && !file.startsWith(root + sep)) throw new Error("outside");
       if (deniedFiles.has(file) || isDenied(file.slice(root.length + 1))) throw new Error("denied");
-      if (!statSync(file).isFile()) throw new Error("not a file");
+      // Open first, then judge what was opened: a swap between a check and the open cannot change what is served.
+      // O_NONBLOCK and O_NOFOLLOW are POSIX-only (undefined on Windows): a FIFO must not block the open, nor a link
+      // placed after the realpath be followed.
+      fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
     } catch {
       return reply.code(404).send({ error: "not_found" });
     }
-    return reply.type(TYPES[extname(file).toLowerCase()] ?? "application/octet-stream").send(createReadStream(file));
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("not a file");
+    } catch {
+      closeSync(fd);
+      return reply.code(404).send({ error: "not_found" });
+    }
+    // The stream owns the descriptor and closes it (autoClose) when the response ends or fails.
+    return reply.type(TYPES[extname(file).toLowerCase()] ?? "application/octet-stream").send(createReadStream(file, { fd }));
   };
 
   app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
