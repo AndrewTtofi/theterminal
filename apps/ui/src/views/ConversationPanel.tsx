@@ -168,7 +168,7 @@ export function ConversationPanel() {
             submitLabel="Ask"
             startedMessage={(name) => `Asked ${name}.`}
             onStart={model.onStartRun}
-            machines={model.machines?.overview?.machines ?? []}
+            machines={model.machines?.paired ?? []}
             {...(model.machines?.capacity !== undefined && { machineCapacity: model.machines?.capacity })}
           />
         ) : (

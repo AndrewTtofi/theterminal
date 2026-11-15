@@ -73,7 +73,7 @@ export function DecisionCard({ action, projectName, onDecide, onMore, readOnly =
     <article className="decision-card" aria-label={`Decision: ${visibleControls(action.summary)}`}>
       {projectName !== undefined && <p className="project-name">{visibleControls(projectName)}</p>}
       <h3 id={headingId}>Agent wants to {actionPhrase(action)}</h3>
-      {machine !== null && <p className="machine-note">This agent runs on {machine}. Your decision is sent there.</p>}
+      {machine !== null && <p className="machine-note" role="status">This agent runs on {machine}. Your decision is sent there.</p>}
       <h4>What this means</h4>
       <p className="means">{ACTION_KIND_MEANS[action.kind] ?? ACTION_KIND_MEANS.other}</p>
       {(openLearn || onMore) && (

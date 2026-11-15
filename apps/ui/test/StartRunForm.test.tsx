@@ -169,6 +169,12 @@ describe("StartRunForm", () => {
         ["Old laptop (offline)", true],
       ]);
       expect(picker.value).toBe("");
+      // A machine not checked yet (online null) can be chosen: only one that failed its last check is offline.
+      rerender(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[machine({ id: "m4", name: "New box", online: null })]} onStart={vi.fn()} />);
+      expect([...(screen.getByLabelText("Run on") as HTMLSelectElement).options].map((o) => [o.textContent, o.disabled])).toEqual([
+        ["This computer", false],
+        ["New box", false],
+      ]);
       rerender(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[]} onStart={vi.fn()} />);
       expect(screen.queryByLabelText("Run on")).toBeNull();
     });
@@ -238,7 +244,7 @@ describe("StartRunForm", () => {
         <StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[gpu]} machineCapacity={vi.fn().mockRejectedValue(new Error("x"))} onStart={onStart} />,
       );
       await userEvent.selectOptions(screen.getByLabelText("Run on"), "m1");
-      expect(await screen.findByText("Could not ask GPU box what it offers.")).toBeTruthy();
+      expect((await screen.findByText("Could not ask GPU box what it offers.")).getAttribute("role")).toBe("status");
       await userEvent.type(screen.getByLabelText("Prompt"), "Go");
       await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
       expect(onStart).toHaveBeenCalledWith("fake", "Go", [], undefined, "m1");

@@ -41,6 +41,8 @@ vi.mock("../src/api", () => ({
     testConnection: vi.fn(),
     getGitHubOverview: vi.fn(),
     getLink: vi.fn(),
+    getMachines: vi.fn(),
+    getMachineCapacity: vi.fn(),
     getIntake: vi.fn(),
     startIntake: vi.fn(),
     answerIntake: vi.fn(),
@@ -63,6 +65,8 @@ vi.mock("../src/api", () => ({
   },
   errorMessage: vi.fn(() => "err"),
   LIVE_RUN_CHANGES: "Changes show when the run is stopped or finished.",
+  remoteChangesNote: (machine: string) => `The changes arrive when the run finishes on ${machine}.`,
+  refusedChangesNote: (machine: string, reason: string) => `The changes from ${machine} were refused: ${reason}.`,
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
@@ -676,6 +680,21 @@ describe("App Machines view", () => {
     await waitFor(() => expect(m.getLink.mock.calls.length).toBe(calls + 1));
   });
 
+  it("with a machine paired, names come from the paired list: no machine is asked and the network is not browsed", async () => {
+    m.getStatus.mockResolvedValue({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 0 },
+      network: { state: "unknown", basis: "inferred", since: null, lastError: null },
+    });
+    m.getMachines.mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(m.getMachines).toHaveBeenCalled());
+    await userEvent.click(within(views()).getByRole("button", { name: "Agents" }));
+    await act(async () => h.onEntry?.(entry(8, "machine.paired")));
+    await waitFor(() => expect(m.getMachines.mock.calls.length).toBeGreaterThan(1));
+    expect(m.getLink).not.toHaveBeenCalled();
+  });
+
   it("says it could not load", async () => {
     m.getLink.mockRejectedValue(new ApiError(500, "internal"));
     render(<App />);
@@ -946,6 +965,28 @@ describe("App Changes view", () => {
     expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
     expect(m.getRunChanges).toHaveBeenCalledWith("run2");
     expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+  });
+
+  it("a run on a linked machine: its changes are awaited, then refused changes say why in fixed words", async () => {
+    const remote = { ...run2, machineId: "m1", status: "completed" as const };
+    m.getStatus.mockResolvedValue({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 1 },
+      network: { state: "unknown", basis: "inferred", since: null, lastError: null },
+    });
+    m.getMachines.mockResolvedValue([{ id: "m1", name: "GPU box" } as never]);
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, remote]);
+    m.getRunChanges.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    m.listRunDir.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await waitFor(() => expect(m.getMachines).toHaveBeenCalled());
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("The changes arrive when the run finishes on GPU box.")).toBeTruthy();
+    act(() => h.onEntry!({ ...runEntry("link.changes_refused", "run2"), seq: 20, projectId: "A", payload: { runId: "run2", machineId: "m1", reason: "bad_bundle" } }));
+    expect(await screen.findByText("The changes from GPU box were refused: bad_bundle.")).toBeTruthy();
   });
 
   it("discards through the override route, shows a refusal inside the form and the server's count after", async () => {

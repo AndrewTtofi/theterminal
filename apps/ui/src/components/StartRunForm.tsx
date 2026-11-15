@@ -133,9 +133,9 @@ export function StartRunForm({
           >
             <option value="">This computer</option>
             {machines.map((m) => (
-              <option key={m.id} value={m.id} disabled={m.online !== true}>
+              <option key={m.id} value={m.id} disabled={m.online === false}>
                 {visibleControls(m.name)}
-                {m.online === true ? "" : " (offline)"}
+                {m.online === false ? " (offline)" : ""}
               </option>
             ))}
           </select>
@@ -209,7 +209,7 @@ export function StartRunForm({
         </fieldset>
       )}
       {target !== null && offer?.machineId === target.id && offer.failed && (
-        <p className="note">Could not ask {targetName} what it offers.</p>
+        <p className="note" role="status">Could not ask {targetName} what it offers.</p>
       )}
       {offlineNote && <p className="note offline-note">{OFFLINE_NOTE}</p>}
       <button type="submit" disabled={!chosen || !prompt.trim() || starting}>

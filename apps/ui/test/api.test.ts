@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -52,6 +52,15 @@ describe("error detail", () => {
     );
     expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU\u202Ebox" }), "run")).not.toContain("\u202E");
     expect(errorMessage(new ApiError(400, "remote_refused", { code: "conflict" }), "run")).toBe("A linked machine refused: it already has a project or run with that id.");
+  });
+
+  it("words refused changes of a run on a linked machine in fixed words", () => {
+    expect(refusedChangesNote("GPU box", "bad_bundle")).toBe("The changes from GPU box were refused: what it sent could not be read.");
+    expect(refusedChangesNote("GPU box", "not_from_base")).toBe(
+      "The changes from GPU box were refused: they do not start from the project as it was sent.",
+    );
+    expect(refusedChangesNote("GPU box", "<b>sk-TESTKEY</b>")).toBe("The changes from GPU box were refused.");
+    expect(refusedChangesNote("GPU\u202Ebox", "conflict")).not.toContain("\u202E");
     expect(LOCAL_MODEL_NOTE).toBe("Only Codex can run on a local model in The Terminal yet.");
   });
 

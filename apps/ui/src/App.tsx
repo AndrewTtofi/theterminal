@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
-  NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
+  MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, remoteChangesNote, subscribeLedger } from "./api";
+import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, LinkOverview, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
@@ -178,6 +178,7 @@ export function App() {
         if (usage && capacityWanted.current) refreshCapacityRef.current();
         // Names, the linking switch, pairings and unlinks change the Machines view.
         if (e.type.startsWith("machine.") && machinesWanted.current) refreshMachinesRef.current();
+        if (e.type.startsWith("machine.") && pairedWanted.current) refreshPairedRef.current();
         const g = gateRef.current;
         if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
         for (const listener of [...entryListeners.current]) listener(e);
@@ -242,15 +243,31 @@ export function App() {
   refreshMachinesRef.current = refreshMachines;
   // What a linked machine offers a run, for the Run on picker: the server's 30 s cache is enough to choose.
   const [machineCapacity] = useState(() => (machineId: string) => api.getMachineCapacity(machineId, true));
-  // With any machine paired, its name is wanted wherever its runs show (narration, run lists, decision cards).
-  const anyLinked = (status?.machines.linked ?? 0) > 0;
+  // With any machine paired, its name is wanted wherever its runs show (narration, run lists, decision cards) and in
+  // the Run on picker: the paired list only, which asks no machine and browses nothing (the Machines view does that).
+  const [paired, setPaired] = useState<MachinePresence[]>([]);
+  const pairedWanted = useRef(false);
+  const refreshPairedRef = useRef<() => void>(() => {});
+  const [refreshPaired] = useState(() => {
+    const load = coalesced(async () => {
+      try {
+        const list = await api.getMachines();
+        if (mounted.current) setPaired(list);
+      } catch {
+        // Names fall back to "a linked machine"; the picker keeps what it had.
+      }
+    }, () => !mounted.current);
+    return () => {
+      pairedWanted.current = true;
+      load();
+    };
+  });
+  refreshPairedRef.current = refreshPaired;
+  const anyLinked = (status?.machines?.linked ?? 0) > 0;
   useEffect(() => {
-    if (anyLinked && !machinesWanted.current) refreshMachines();
-  }, [anyLinked, refreshMachines]);
-  const machineNames = useMemo(
-    () => new Map((machines.overview?.machines ?? []).map((m) => [m.id, m.name] as const)),
-    [machines.overview],
-  );
+    if (anyLinked) refreshPaired();
+  }, [anyLinked, refreshPaired]);
+  const machineNames = useMemo(() => new Map(paired.map((m) => [m.id, m.name] as const)), [paired]);
   // The open gate's checklist, read again; made once, like refreshGitHub.
   const [refreshGate] = useState(() =>
     coalesced(async () => {
@@ -493,6 +510,13 @@ export function App() {
   /** The linked machine the Changes run ran on (its name), or null for a run of this computer. */
   const changesRun = runs.find((r) => r.id === changesRunId);
   const changesMachine = changesRun?.machineId ? (machineNames.get(changesRun.machineId) ?? "a linked machine") : null;
+  // This computer refused the run's returned changes: why, from the project's stream (null when it did not).
+  const changesRefused = useMemo(() => {
+    if (changesMachine === null) return null;
+    const refused = entries.findLast((e) => e.type === "link.changes_refused" && (e.payload as { runId?: unknown }).runId === changesRunId);
+    const reason = (refused?.payload as { reason?: unknown } | undefined)?.reason;
+    return typeof reason === "string" ? reason : null;
+  }, [entries, changesRunId, changesMachine]);
   useEffect(() => {
     if (changesRunId === null) {
       setChanges(null);
@@ -516,7 +540,8 @@ export function App() {
       } catch (e) {
         // A run on a linked machine has no working copy here until its changes arrive.
         const pending = changesMachine !== null && e instanceof ApiError && e.code === "worktree_missing";
-        const error = pending ? remoteChangesNote(changesMachine) : errorMessage(e, "changes");
+        const error = !pending ? errorMessage(e, "changes")
+          : changesRefused !== null ? refusedChangesNote(changesMachine, changesRefused) : remoteChangesNote(changesMachine);
         if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error }));
       }
     }, () => cancelled);
@@ -530,7 +555,7 @@ export function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [changesRunId, changesLive, changesMachine, runChanges, subscribeEntries]);
+  }, [changesRunId, changesLive, changesMachine, changesRefused, runChanges, subscribeEntries]);
 
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
@@ -713,7 +738,7 @@ export function App() {
     status,
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
-    machines: { ...machines, refresh: refreshMachines, capacity: machineCapacity },
+    machines: { ...machines, refresh: refreshMachines, capacity: machineCapacity, paired, refreshPaired },
     intake: selectedId ? intake : undefined,
     intakeError: selectedId ? intakeError : null,
     onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),

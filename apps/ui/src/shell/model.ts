@@ -9,6 +9,7 @@ import type {
   CardStory,
   DecisionId,
   MachineCapacity,
+  MachinePresence,
   DirListing,
   FileContent,
   FileDiff,
@@ -172,6 +173,12 @@ export type WorkbenchModel = {
     refresh: () => void;
     /** What one linked machine offers a run (its agents and connections), from the server's 30 s cache. */
     capacity?: (machineId: string) => Promise<MachineCapacity>;
+    /**
+     * The paired machines as last seen, loaded while any is paired without asking them or browsing the network (names
+     * and the Run on picker); `refreshPaired` reads them again.
+     */
+    paired?: MachinePresence[];
+    refreshPaired?: () => void;
   };
 
   /**

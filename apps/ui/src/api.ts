@@ -33,7 +33,7 @@ import type {
   RunChanges,
   Stage,
 } from "@theterminal/shared";
-import { visibleControls } from "@theterminal/shared";
+import { CHANGES_REFUSED_PHRASES, visibleControls } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -245,6 +245,8 @@ export const api = {
   getCapacity: () => request<CapacityReport>("/api/capacity"),
   detectHardware: () => request<HardwareInfo>("/api/capacity/detect", { method: "POST" }),
   getLink: () => request<LinkOverview>("/api/link"),
+  /** The paired machines as last seen: no machine is asked and the network is not browsed (names, the Run on picker). */
+  getMachines: () => request<MachinePresence[]>("/api/link/machines"),
   renameMachine: (name: string) => request<LinkSelf>("/api/link/name", { method: "POST", body: { name } }),
   /** `acknowledgement` must be LINKING_ACK verbatim; 409 `linking_disabled` never applies here, 503 `identity_unavailable` does. */
   enableLinking: (acknowledgement: string) => request<LinkSelf>("/api/link/enable", { method: "POST", body: { acknowledgement } }),
@@ -333,6 +335,14 @@ export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finishe
 
 /** What the Changes view says of a run on a linked machine before its changes have arrived. */
 export const remoteChangesNote = (machine: string): string => `The changes arrive when the run finishes on ${visibleControls(machine)}.`;
+
+/** What the Changes view says when this computer refused a linked machine's changes (`link.changes_refused`). */
+export function refusedChangesNote(machine: string, reason: string): string {
+  const why = Object.prototype.hasOwnProperty.call(CHANGES_REFUSED_PHRASES, reason)
+    ? CHANGES_REFUSED_PHRASES[reason as keyof typeof CHANGES_REFUSED_PHRASES]
+    : null;
+  return `The changes from ${visibleControls(machine)} were refused${why === null ? "" : `: ${why}`}.`;
+}
 
 /**
  * What a linked machine's refusal codes mean, in fixed words: the code is the machine's say, so only a code listed here
