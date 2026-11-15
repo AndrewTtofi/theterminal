@@ -30,10 +30,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Changed
 - The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
+- Runs recorded before this version show no Changes list or diffs, because the commit they started from was not kept. Their files can still be browsed under Files, and the emergency override still works for them.
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
 - Streamed agent text is held back just enough to redact secrets that arrive split across chunks, including private key blocks, YAML secret blocks and partial markers around tool calls.
 
 ### Security
+- Git hardening for the Changes view, diffs and the emergency override's discard: git never recurses into submodules, ignores replacement objects (`git replace`), and compares a run's changes with the commit it started from, recorded when its working copy was created, rather than a branch the agent could move. Git is not run at all if The Terminal's own empty git configuration or hooks folder was modified.
 - Upgraded zod to 4.6.6 (memory exhaustion on oversized constrained collections) and Vitest to 4.1.12 (code injection and path traversal in Vitest and `@vitest/mocker`; Vitest no longer depends on the vulnerable tinypool). Existing ledger entries still parse, and API validation errors still never echo the request.
 
 ### Added (project)

@@ -30,10 +30,14 @@ Open **Changes** in the activity bar to see what an agent changed in a run.
 
 ### What you see
 
-- The changes are compared with the commit the run started from. Both files the agent changed that git already tracks and new files it created are listed, as added, modified or deleted.
+- The changes are compared with the commit the run started from, recorded when its working copy was created. The Terminal does not work it out later from branches, because an agent can move a branch (or replace a commit) in the repository it shares, and the view would then hide or invent changes. Both files the agent changed that git already tracks and new files it created are listed, as added, modified or deleted.
 - Click a file to open its diff. Click a name in the file tree to open the file itself.
 - Binary files are listed but their contents are not shown.
 - Names that look like a secret (or a private path) are hidden and marked as such.
+
+### Runs from before this version
+
+A run recorded before The Terminal kept the commit it started from has no Changes list or diffs. You see "What this run changed cannot be shown…" instead of a guess. The same happens if that commit is no longer in the repository. Its files can still be browsed under **Files**, and the emergency override still works for it.
 
 ### While a run is in progress
 
@@ -55,7 +59,9 @@ When something is over a limit, the view says so and tells you what was left out
 
 ### Viewing never runs the repository's code
 
-A repository can contain settings that make git run programs. Looking at changes does not allow that. Git hooks, filters, attributes and included git settings are all switched off while The Terminal reads a run's files. A repository whose git settings include other files is refused, with a message, rather than read.
+A repository can contain settings that make git run programs. Looking at changes does not allow that. Git hooks, filters, attributes and included git settings are all switched off while The Terminal reads a run's files. A repository whose git settings include other files is refused, with a message, rather than read. Git never goes into submodules (a nested repository's own settings are never checked, so it is never entered), and replacement objects (`git replace`) are ignored.
+
+The Terminal also gives git an empty configuration file and an empty hooks folder of its own. If something has written to either, git is not run at all and you see a message: "The Terminal's shared git configuration was modified…" (restart The Terminal to repair it) or "The Terminal's empty hooks folder was modified…" (empty it and try again).
 
 ## Terminal tab
 
