@@ -28,7 +28,7 @@ const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
 const CLAUDE_KEY_SHAPE = "sk-ant-TESTKEY";
 const NAME = "Book Club";
 // A card title with a right-to-left override, which would reorder what follows it on the page if it were not escaped.
-const HOSTILE_TITLE = "Sign‮up";
+const HOSTILE_TITLE = "Sign\u202Eup";
 const HOSTILE_SHOWN = "Sign\\u202eup";
 
 /** Creates the project (with a pitch, which the side bar's form does not take) and its cards, then selects it. */
@@ -102,7 +102,7 @@ test("a share page is previewed, confirmed, downloaded and shared on this comput
   // Hidden characters are shown as escapes, never written raw.
   await expect(body).toContainText(HOSTILE_SHOWN);
   let html = await previewHtml(page);
-  expect(html).not.toContain("‮");
+  expect(html).not.toContain("\u202E");
   for (const absent of [KEY, "TESTKEY", "Build the login page", CLAUDE_KEY_SHAPE, "someone@example.test", "<script"]) {
     expect(html, absent).not.toContain(absent);
   }
@@ -183,12 +183,30 @@ test("a share page is previewed, confirmed, downloaded and shared on this comput
 });
 
 test("twenty wrong tokens revoke a link", async ({ page }) => {
+  // Its own project and confirmed snapshot (previewed and confirmed through the API), so it runs alone too.
   await page.goto(process.env.TT_E2E_AGENT_URL!);
-  const id = await projectId(page, NAME);
-  const [snapshot] = await page.evaluate(async (pid) => {
-    const res = await fetch(`/api/projects/${encodeURIComponent(pid)}/share/snapshots`);
-    return (await res.json()) as { id: string }[];
-  }, id);
+  const confirmed = await page.evaluate(async () => {
+    const json = { "content-type": "application/json" };
+    const project = await fetch("/api/projects", { method: "POST", headers: json, body: JSON.stringify({ name: "Guessing Club" }) });
+    if (!project.ok) return { status: project.status, id: "" };
+    const { id } = (await project.json()) as { id: string };
+    const preview = await fetch(`/api/projects/${encodeURIComponent(id)}/share/preview`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ includePrompts: false, includeHardware: false, digestDays: 7 }),
+    });
+    if (!preview.ok) return { status: preview.status, id: "" };
+    const { previewId, contentHash } = (await preview.json()) as { previewId: string; contentHash: string };
+    const confirm = await fetch(`/api/projects/${encodeURIComponent(id)}/share/confirm`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ previewId, contentHash }),
+    });
+    if (!confirm.ok) return { status: confirm.status, id: "" };
+    return { status: confirm.status, id: ((await confirm.json()) as { id: string }).id };
+  });
+  expect(confirmed.status).toBe(201);
+  const snapshot = { id: confirmed.id };
   const created = await page.evaluate(async (sid) => {
     const res = await fetch(`/api/share/snapshots/${encodeURIComponent(sid)}/links`, {
       method: "POST",
@@ -196,7 +214,7 @@ test("twenty wrong tokens revoke a link", async ({ page }) => {
       body: JSON.stringify({ address: "127.0.0.1", ttlMinutes: 60 }),
     });
     return { status: res.status, body: (await res.json()) as { url: string; link: { id: string } } };
-  }, snapshot!.id);
+  }, snapshot.id);
   expect(created.status).toBe(201);
   expect(JSON.stringify(created.body)).not.toContain("TESTKEY");
   const { url, link } = created.body;
