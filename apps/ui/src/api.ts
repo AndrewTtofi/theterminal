@@ -21,6 +21,8 @@ import type {
   FileDiff,
   GateDecisionInput,
   GateEvaluation,
+  GateId,
+  GateRequirement,
   HardwareInfo,
   IntakeAnswer,
   IntakeView,
@@ -40,7 +42,7 @@ import type {
   ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
-import { CHANGES_REFUSED_PHRASES, visibleControls } from "@theterminal/shared";
+import { CHANGES_REFUSED_PHRASES, ROLE_LABELS, requirementLabel, visibleControls, type Role } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -65,7 +67,7 @@ export class ApiError extends Error {
 
 async function request<T>(
   path: string,
-  init?: { method: "POST" | "PATCH"; body: unknown } | { method: "POST" | "DELETE" },
+  init?: { method: "POST" | "PATCH" | "PUT"; body: unknown } | { method: "POST" | "DELETE" },
 ): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -199,6 +201,11 @@ export const api = {
   /** Moves through the gates; a gate left without a decision answers 409 `gate_blocked` with `{ gates }` (see blockedGates). */
   moveCard: (cardId: string, to: Stage, gates?: GateDecisionInput[]) =>
     request<Card>(`/api/cards/${enc(cardId)}/move`, { method: "POST", body: gates ? { to, gates } : { to } }),
+  /** The Owner only: who may sign a project's gate; null restores the default. Answers the requirement now in force. */
+  setGateRequirement: (projectId: string, gateId: GateId, requirement: GateRequirement | null) =>
+    request<{ gateId: GateId; requirement: GateRequirement }>(
+      `/api/projects/${enc(projectId)}/gates/${enc(gateId)}/requirement`, { method: "PUT", body: { requirement } },
+    ),
   getCardStory: (cardId: string) => request<CardStory>(`/api/cards/${enc(cardId)}/story`),
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
@@ -510,11 +517,21 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
       return "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.";
     }
     if (e.code === "hooks_modified") return "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.";
+    // The gate's requirement as sent: a role in words, or (with no name to hand) the one person it names.
+    if (e.code === "gate_requires") return `You cannot sign this gate. It needs ${requiredWho(e)}.`;
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";
   }
   return "Something went wrong";
+}
+
+function requiredWho(e: ApiError): string {
+  const req = (e.detail as { requirement?: unknown } | undefined)?.requirement;
+  if (typeof req === "object" && req !== null && "role" in req && typeof req.role === "string" && req.role in ROLE_LABELS) {
+    return requirementLabel({ role: req.role as Role }, () => "");
+  }
+  return "the person it names";
 }
 
 /** Streams ledger entries with seq > afterSeq; reconnects with backoff 1s→10s, resuming from the last seq. */
