@@ -30,6 +30,7 @@ export function ProjectsSideBar() {
         selectedId={model.selectedId}
         onSelect={model.onSelectProject}
         onCreate={model.onCreateProject}
+        onCreated={model.onProjectCreated}
       />
       {model.selectedId !== null && (
         <div className="plan-state">

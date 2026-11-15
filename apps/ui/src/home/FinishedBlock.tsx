@@ -1,10 +1,14 @@
 import { useId } from "react";
 import { visibleControls } from "@theterminal/shared";
 import type { HomeRun, RunStatus } from "@theterminal/shared";
+import { AcceptChanges } from "../components/AcceptChanges";
 
 const OUTCOME: Record<Exclude<RunStatus, "running">, string> = { completed: "done", failed: "failed", stopped: "stopped" };
 
-/** Finished today: the title, the final summary and the outcome of each run that ended today. Never diffs or output. */
+/**
+ * Finished today: the title, the final summary and the outcome of each run that ended today, with Accept these changes
+ * (or Accepted) beside it. Never diffs or output.
+ */
 export function FinishedBlock({ runs, allProjects }: { runs: HomeRun[]; allProjects: boolean }) {
   const headingId = useId();
   return (
@@ -21,6 +25,9 @@ export function FinishedBlock({ runs, allProjects }: { runs: HomeRun[]; allProje
                 {allProjects && <span className="card-project">{visibleControls(h.projectName)}</span>}
                 <span className="finished-line">
                   {`${visibleControls(h.title)}${h.summary !== null ? ` — ${visibleControls(h.summary)}` : ""} — ${outcome}`}
+                </span>
+                <span className="finished-accept">
+                  <AcceptChanges run={h.run} />
                 </span>
               </li>
             );

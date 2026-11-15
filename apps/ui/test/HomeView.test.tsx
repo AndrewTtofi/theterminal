@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
+import type { ProjectFiles } from "@theterminal/shared";
+import { api } from "../src/api";
 import userEvent from "@testing-library/user-event";
 import { HOME_KEY } from "../src/home/home-store";
 import { HomeView } from "../src/views/HomeView";
@@ -162,5 +164,97 @@ describe("RunTimelinePanel", () => {
   it("says where older steps are when the start was not loaded", () => {
     renderInShell(<RunTimelinePanel id="timeline:r1" />, homeModel({ runs: [running.run], projectEntries: [message(2, "r1", "Later step")] }));
     expect(screen.getByText("Open the Agents view for older steps")).toBeTruthy();
+  });
+});
+
+describe("Home sources", () => {
+  const files = (source: ProjectFiles["source"]) => ({
+    data: { source, added: false, head: "h", truncated: false, entries: [{ name: "readme.md", kind: "file" as const, size: 3 }] },
+    error: null,
+    refresh: vi.fn(),
+  });
+  const result = { commit: "c".repeat(40), files: 2, bytes: 2, skipped: [], skippedCount: 0 };
+
+  it("adds chosen files to the project, showing how far it got, and cancels on request", async () => {
+    vi.spyOn(api, "openUpload").mockResolvedValue({ uploadId: "u1" });
+    let release: () => void = () => {};
+    const put = vi.spyOn(api, "putUploadFile").mockResolvedValueOnce(undefined).mockImplementationOnce(() => new Promise<void>((ok) => (release = ok)));
+    const cancel = vi.spyOn(api, "cancelUpload").mockResolvedValue(undefined);
+    const commit = vi.spyOn(api, "commitUpload").mockResolvedValue(result);
+    renderInShell(<HomeView />, homeModel({ me: asRole("maintainer"), projectFiles: files(null) }));
+    const block = screen.getByRole("region", { name: "Project files" });
+    await userEvent.upload(within(block).getByLabelText("Choose files"), [new File(["a"], "a.txt"), new File(["b"], "b.txt")]);
+    expect(await within(block).findByText("Sending 1 of 2 files")).toBeTruthy();
+    expect(within(block).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    await userEvent.click(within(block).getByRole("button", { name: "Cancel" }));
+    release();
+    expect(await within(block).findByText("Cancelled. Nothing was added.")).toBeTruthy();
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledWith("u1");
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("says what was added", async () => {
+    vi.spyOn(api, "openUpload").mockResolvedValue({ uploadId: "u1" });
+    vi.spyOn(api, "putUploadFile").mockResolvedValue(undefined);
+    vi.spyOn(api, "commitUpload").mockResolvedValue({ ...result, skippedCount: 1, skipped: [{ path: "CON.txt", reason: "unstorable" }] });
+    const model = homeModel({ me: asRole("maintainer"), projectFiles: files(null) });
+    renderInShell(<HomeView />, model);
+    const block = screen.getByRole("region", { name: "Project files" });
+    await userEvent.upload(within(block).getByLabelText("Choose files"), [new File(["a"], "a.txt"), new File(["b"], "b.txt")]);
+    expect(await within(block).findByText(/Added 2 files/)).toBeTruthy();
+    expect(within(block).getByText(/CON\.txt/)).toBeTruthy();
+    expect(model.projectFiles.refresh).toHaveBeenCalled();
+  });
+
+  it("names possible secrets before sending anything, and sends them once ticked", async () => {
+    const open = vi.spyOn(api, "openUpload").mockResolvedValue({ uploadId: "u1" });
+    vi.spyOn(api, "putUploadFile").mockResolvedValue(undefined);
+    vi.spyOn(api, "commitUpload").mockResolvedValue(result);
+    renderInShell(<HomeView />, homeModel({ me: asRole("maintainer"), projectFiles: files(null) }));
+    const block = screen.getByRole("region", { name: "Project files" });
+    await userEvent.upload(within(block).getByLabelText("Choose files"), [new File(["a"], "a.txt"), new File(["K=TESTKEY"], ".env")]);
+    expect(within(block).getByText(/These files may contain secrets: \.env/)).toBeTruthy();
+    expect(open).not.toHaveBeenCalled();
+    await userEvent.click(within(block).getByRole("checkbox", { name: "include files that may contain secrets" }));
+    await userEvent.click(within(block).getByRole("button", { name: "Add them" }));
+    expect(open).toHaveBeenCalledWith("p1", { files: 2, bytes: 10, includeSecrets: true });
+  });
+
+  it("offers no drop zone below maintainer", () => {
+    renderInShell(<HomeView />, homeModel({ me: asRole("reviewer"), projectFiles: files(null) }));
+    const block = screen.getByRole("region", { name: "Project files" });
+    expect(within(block).queryByLabelText("Choose files")).toBeNull();
+  });
+
+  it("offers the Owner Apply to my folder for a folder project, and Publish to GitHub for a GitHub one", async () => {
+    vi.spyOn(api, "writebackPreview").mockResolvedValue({ kind: "folder", head: "1".repeat(40), files: [{ path: "a.txt", change: "modify" }] });
+    const { unmount } = renderInShell(<HomeView />, homeModel({ projectFiles: files({ kind: "folder" }) }));
+    expect(screen.queryByRole("button", { name: "Publish to GitHub" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Apply to my folder…" }));
+    expect(await screen.findByText("Write this 1 file to your folder?")).toBeTruthy();
+    unmount();
+    renderInShell(<HomeView />, homeModel({ projectFiles: files({ kind: "github", repo: "you/site", branch: "main" }) }));
+    expect(screen.getByRole("button", { name: "Publish to GitHub…" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Apply to my folder…" })).toBeNull();
+  });
+
+  it("offers write-back to nobody but the Owner", () => {
+    renderInShell(<HomeView />, homeModel({ me: asRole("maintainer"), projectFiles: files({ kind: "github", repo: "you/site", branch: "main" }) }));
+    expect(screen.queryByRole("button", { name: "Publish to GitHub…" })).toBeNull();
+  });
+
+  it("offers Accept these changes on a finished run, and Accepted once accepted", async () => {
+    const done = homeRun("r2", { status: "completed", finishedAt: new Date().toISOString() }, { title: "Write the notes", summary: "Notes are in NOTES.md" });
+    const accepted = homeRun("r3", { status: "completed", finishedAt: new Date().toISOString(), acceptedCommit: "a".repeat(40) }, { title: "Tidy up" });
+    const onAcceptRun = vi.fn().mockResolvedValue(true);
+    const runChanges = vi.fn().mockResolvedValue({ runId: "r2", base: "b", head: "h", files: [{ path: "NOTES.md", status: "added", added: 3, deleted: 0, binary: false }], truncated: false });
+    renderInShell(<HomeView />, homeModel({ onAcceptRun, runChanges }, { working: [], finishedToday: [done, accepted] }));
+    const block = screen.getByRole("region", { name: "Finished today" });
+    await userEvent.click(within(block).getByRole("button", { name: "Accept these changes" }));
+    expect(await within(block).findByText("NOTES.md")).toBeTruthy();
+    await userEvent.click(within(block).getByRole("button", { name: "Accept" }));
+    expect(onAcceptRun).toHaveBeenCalledWith("r2");
+    await waitFor(() => expect(within(block).getAllByText("Accepted")).toHaveLength(2));
   });
 });

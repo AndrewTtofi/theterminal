@@ -2,11 +2,14 @@ import { useId, useRef, useState } from "react";
 import { adapterLabel } from "@theterminal/shared";
 import type { AdapterId } from "@theterminal/shared";
 import { atLeast } from "@theterminal/shared";
+import { UploadStatus, useUpload } from "../components/AddFiles";
 import { useShell, useViewerRole } from "../shell/model";
+import { filesFromInput } from "../upload";
+import type { PickedFile } from "../upload";
 
 /**
  * "Tell an agent what you want…": starts a run exactly as the Agents view does (same call, same rules). Not shown
- * below maintainer. Add files opens a file picker; adding the files is wired by the sources work.
+ * below maintainer. Add files picks files and adds them to the selected project at once, with a progress bar.
  */
 export function AskBox() {
   const { model } = useShell();
@@ -18,7 +21,15 @@ export function AskBox() {
   const fileRef = useRef<HTMLInputElement>(null);
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const agentId = useId();
+  const refreshFiles = model.projectFiles?.refresh;
+  const upload = useUpload(() => refreshFiles?.());
   if (!atLeast(role, "maintainer")) return null;
+
+  const projectId = model.selectedId;
+  const sending = upload.state.phase === "sending";
+  const send = (files: PickedFile[], includeSecrets = false) => {
+    if (projectId !== null) void upload.start(projectId, files, includeSecrets);
+  };
 
   const info = model.agentsInfo;
   const adapters = info?.adapters ?? [];
@@ -73,10 +84,28 @@ export function AskBox() {
           />
           {focused && prompt === "" && <span className="cursor" aria-hidden="true" />}
         </span>
-        <button type="button" className="chip" onClick={() => fileRef.current?.click()}>
+        <button
+          type="button"
+          className="chip"
+          disabled={projectId === null || sending}
+          title={projectId === null ? "Choose a project first" : undefined}
+          onClick={() => fileRef.current?.click()}
+        >
           Add files
         </button>
-        <input ref={fileRef} type="file" multiple hidden tabIndex={-1} aria-hidden="true" />
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          hidden
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(e) => {
+            const input = e.currentTarget;
+            if (input.files && input.files.length > 0) send(filesFromInput(input.files));
+            input.value = "";
+          }}
+        />
         {/* "Ask with", not "Agent": the Agents view's run form keeps its own "Agent" picker unambiguous. */}
         <label className="visually-hidden" htmlFor={agentId}>
           Ask with
@@ -93,6 +122,11 @@ export function AskBox() {
           Go
         </button>
       </form>
+      {upload.state.phase !== "idle" && (
+        <div className="ask-upload">
+          <UploadStatus upload={upload} onRetry={send} />
+        </div>
+      )}
     </section>
   );
 }
