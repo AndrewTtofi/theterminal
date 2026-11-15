@@ -11,4 +11,8 @@ describe("resourcesDir", () => {
   it("is the resources folder beside the Windows executable", () => {
     expect(resourcesDir("C:\\Programs\\The Terminal\\The Terminal.exe", "win32")).toBe("C:\\Programs\\The Terminal\\resources");
   });
+
+  it("refuses a platform the app is not built for", () => {
+    expect(() => resourcesDir("/opt/the-terminal/the-terminal", "linux")).toThrow("Unsupported platform: linux");
+  });
 });
