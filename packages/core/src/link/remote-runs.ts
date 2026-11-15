@@ -157,15 +157,16 @@ export class RemoteRunService {
 
   /**
    * The machine was unlinked: its key is gone, so nothing from it can be checked any more. Each run this computer
-   * asked of it stops being followed and ends here (`machine_unpaired`); nothing more is sent to the machine (the
-   * stops went before the unpair, see stopRunsOn).
+   * asked of it stops being followed; one still going ends here (`machine_unpaired`), while one that had already
+   * ended (its changes still to come) is left as it is, with nothing recorded about it. Nothing more is sent to the
+   * machine (the stops went before the unpair, see stopRunsOn).
    */
   private unpaired(machineId: string): void {
     for (const r of listLinkRuns(this.deps.db)) {
       if (r.direction !== "requested" || r.machineId !== machineId) continue;
       if (r.state !== "requested" && r.state !== "running" && r.state !== "finished") continue;
       this.following.get(r.runId)?.abort.abort();
-      this.recordFailed(r.projectId, r.runId, machineId, "machine_unpaired");
+      if (r.state !== "finished") this.recordFailed(r.projectId, r.runId, machineId, "machine_unpaired");
     }
   }
 
@@ -366,8 +367,9 @@ export class RemoteRunService {
       if (!current || current.direction !== "requested") return;
       if (current.state === "failed" || current.state === "imported") return;
       if (!getMachine(db, current.machineId)) {
-        // Unpaired: its key is gone, so nothing from it can be checked any more.
-        this.recordFailed(current.projectId, runId, current.machineId, "machine_unpaired");
+        // Unpaired: its key is gone, so nothing from it can be checked any more. A run that had already ended is left
+        // as it is (nothing to end).
+        if (current.state !== "finished") this.recordFailed(current.projectId, runId, current.machineId, "machine_unpaired");
         return;
       }
       if (current.state === "finished") return this.importLoop(runId, signal);
@@ -428,7 +430,9 @@ export class RemoteRunService {
 
   /**
    * Downloads and imports the run's snapshot, retrying a worker that is away or still settling with the backoff. A
-   * worker whose replies cannot be read MAX_BAD_REPLIES times in a row has its changes refused (`bad_bundle`).
+   * worker whose replies cannot be read MAX_BAD_REPLIES times in a row has its changes refused (`bad_bundle`); one
+   * that refuses them for good (its working copy is gone) has them refused as `machine_refused`, so the Owner is told
+   * and nothing asks again. A machine unpaired meanwhile ends the asking with nothing recorded.
    */
   private async importLoop(runId: string, signal: AbortSignal): Promise<void> {
     let attempt = 0;
@@ -444,7 +448,10 @@ export class RemoteRunService {
       if (!badReply) badReplies = 0;
       const retry = badReply || outcome instanceof MachineUnreachableError || outcome instanceof BundleGitLimitError ||
         (outcome instanceof RemoteRefusedError && transientRefusal(outcome));
-      if (!retry) return; // a permanent refusal by the worker: left as it is, tried again after a restart
+      if (!retry) {
+        if (outcome instanceof RemoteRefusedError) this.refuseChanges(runId, "machine_refused");
+        return;
+      }
       await sleep(this.backoff(attempt++), signal);
     }
   }

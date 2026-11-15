@@ -321,6 +321,46 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
   });
 
+  it("a worker that refuses the changes for good (its working copy is gone) has them recorded as refused, and is not asked again", async () => {
+    const started = remote.started();
+    const finished = remote.finished();
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/changes")) return res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "worktree_missing" }));
+      ndjson(res);
+      res.write(`${remote.line(started)}\n${remote.line(finished)}\n`);
+      res.end();
+    });
+    await vi.waitFor(() => expect(ledger.list().filter((e) => e.type === "link.changes_refused")).toHaveLength(1), { timeout: 10_000 });
+    expect(ledger.list().find((e) => e.type === "link.changes_refused")!.payload).toEqual({ runId: remote.runId, machineId: remote.machineId, reason: "machine_refused" });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_refused" });
+    expect(getRun(db, remote.runId)!.status).toBe("completed"); // the run itself ended as the worker said
+    await sleep(300);
+    expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(1);
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
+  });
+
+  it("unlinking the machine after a run ended records nothing about that run, and stops asking for its changes", async () => {
+    const started = remote.started();
+    const finished = remote.finished();
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/changes")) return res.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "shutting_down" }));
+      ndjson(res);
+      res.write(`${remote.line(started)}\n${remote.line(finished)}\n`);
+      res.end();
+    });
+    await vi.waitFor(() => expect(fixture.requests.filter((r) => r.includes("/changes")).length).toBeGreaterThanOrEqual(2), { timeout: 5000 });
+    expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
+    const head = ledger.headSeq();
+    await link.unpair(owner, remote.machineId);
+    expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["machine.unpaired"]);
+    const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
+    await sleep(300);
+    expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
+    expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["machine.unpaired"]);
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "finished", error: null });
+    expect(getRun(db, remote.runId)!.status).toBe("completed");
+  });
+
   it("another key at the machine's address ends the run (machine_key_mismatch) instead of retrying quietly", async () => {
     const impostor = await remoteRun(remote.runId, projectId);
     const fixture = await fixtureWorker(impostor.identity, (_req, res) => res.writeHead(500).end());

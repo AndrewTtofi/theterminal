@@ -9,6 +9,9 @@ import type { Ledger } from "../ledger/ledger.js";
 
 type Payload = Record<string, any>;
 
+/** The reason on a pending action of a remote run that ended here before anyone decided it. */
+const RUN_ENDED_REASON = "The run ended before a decision was made.";
+
 /** Projection reducer: applies one ledger entry to the read tables. Unknown types are ignored. */
 export function applyEvent(db: Db, e: LedgerEntry): void {
   const p = e.payload as Payload;
@@ -173,6 +176,11 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       db.prepare(
         "UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'running' AND machine_id = ?",
       ).run(p.error, e.ts, p.runId, p.machineId);
+      // Nothing can settle its pending actions any more: closed as denied by nobody, so no view lists them as waiting.
+      db.prepare(
+        `UPDATE agent_actions SET status = 'denied', decided_by = NULL, reason = ?, decided_at = ? WHERE status = 'pending'
+         AND run_id IN (SELECT id FROM agent_runs WHERE id = ? AND machine_id = ?)`,
+      ).run(RUN_ENDED_REASON, e.ts, p.runId, p.machineId);
       break;
     case "link.changes_imported":
       db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);

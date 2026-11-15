@@ -718,19 +718,32 @@ describe("mirrored remote runs (applyMirrored)", () => {
     expect(dump()).toEqual(live);
   });
 
-  it("a pending action of a mirrored run that link.run_failed ended is no longer pending anywhere", () => {
+  it("a pending action of a mirrored run that link.run_failed ended is closed: denied by nobody, with the run's end as the reason", () => {
     mirror(remote.started());
     mirror(remote.requested("act-1"));
-    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["act-1"]);
+    mirror(remote.requested("act-2"));
+    mirror(remote.decided("act-2", "allow"));
+    // A running local run with a pending action of its own.
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "do it", cardId: null, worktree: "wt/r2" });
+    emit("agent.action.requested", { runId: "r2", actionId: "a-local", kind: "shell", tool: "Bash", summary: "ls", input: {} });
+    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["act-1", "a-local"]);
+    expect(countPendingActions(db, PROJECT)).toBe(2);
+    const failed = emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "machine_unpaired" }, link, PROJECT);
+    // Nothing from that machine can be checked any more, so nothing can settle it: no one is asked to decide it, and
+    // the record says so, so the run's page never lists it as waiting.
+    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["a-local"]);
+    expect(listPendingActions(db, PROJECT).map((a) => a.id)).toEqual(["a-local"]);
     expect(countPendingActions(db, PROJECT)).toBe(1);
-    emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "machine_unpaired" }, link, PROJECT);
-    // Nothing from that machine can be checked any more, so nothing can settle it: no one is asked to decide it.
-    expect(listAllPendingActions(db)).toEqual([]);
-    expect(listPendingActions(db, PROJECT)).toEqual([]);
-    expect(countPendingActions(db, PROJECT)).toBe(0);
-    expect(workspaceCounts(db).pendingDecisions).toBe(0);
-    // The record itself is kept as it was.
-    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "act-1", status: "pending" })]);
+    expect(workspaceCounts(db).pendingDecisions).toBe(1);
+    expect(listActions(db, remote.runId)).toEqual([
+      expect.objectContaining({ id: "act-1", status: "denied", decidedBy: null, reason: "The run ended before a decision was made.", decidedAt: failed.ts }),
+      expect.objectContaining({ id: "act-2", status: "allowed", decidedBy: "human" }),
+    ]);
+    // This machine's own run is never touched by a link entry.
+    expect(listActions(db, "r2")).toEqual([expect.objectContaining({ id: "a-local", status: "pending" })]);
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
   });
 
   it("rebuild with mirrored entries equals the live tables", () => {
