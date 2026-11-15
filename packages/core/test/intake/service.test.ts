@@ -234,6 +234,68 @@ describe("IntakeService", () => {
     expect(() => svc.start(human, projectId, "see club-session-token-123456")).toThrow(SecretInTextError);
   });
 
+  it("refuses a secret that the scrubber would rewrite (it contains the username or a home path)", () => {
+    const bearing = "clubuser!Hunter2Pass";
+    const pathy = `${homedir()}/Hunter2Pass`;
+    const svc = new IntakeService({ db, ledger, username: "clubuser", secrets: () => [bearing, pathy] });
+    const before = ledger.headSeq();
+    expect(() => svc.start(human, projectId, `the club password is ${bearing}`)).toThrow(SecretInTextError);
+    expect(() => svc.start(human, projectId, `keep ${pathy} safe`)).toThrow(SecretInTextError);
+    expect(ledger.headSeq()).toBe(before);
+    svc.start(human, projectId, IDEA);
+    const started = ledger.headSeq();
+    expect(() => svc.answer(human, projectId, "existing", `login ${bearing}`)).toThrow(SecretInTextError);
+    expect(ledger.headSeq()).toBe(started);
+    expect(JSON.stringify(ledger.list())).not.toContain("Hunter2Pass");
+  });
+
+  it("trims a text answer before it is validated and recorded", () => {
+    intake.start(human, projectId, IDEA);
+    intake.answer(human, projectId, "audience", "   Members of a book club \n");
+    expect(intake.get(projectId)!.questions[0]!.answer).toBe("Members of a book club");
+    // The length limit applies to the trimmed text.
+    const full = "x".repeat(2000);
+    intake.answer(human, projectId, "outcome", `  ${full}  `);
+    expect(intake.get(projectId)!.questions[1]!.answer).toBe(full);
+  });
+
+  it("explains in the approve view, and on completion, when the project name looks like a secret", () => {
+    const named = board.createProject(human, { name: "Club sk-ant-TESTKEY-0000000000" }).id;
+    intake.start(human, named, IDEA);
+    for (const [q, a] of Object.entries(ANSWERS)) intake.answer(human, named, q as never, a);
+    intake.decide(human, named, "first_version", "smallest");
+    intake.decide(human, named, "hosting", "local");
+    const view = intake.get(named)!;
+    const message = "The project name looks like it contains a secret. Rename the project to continue.";
+    expect(view.step).toBe("approve");
+    expect(view.plan!.problem).toBe(message);
+    expect(view.plan!.summary).not.toContain("TESTKEY");
+    const before = ledger.headSeq();
+    try {
+      intake.complete(human, named);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(SecretInTextError);
+      expect((e as SecretInTextError).explanation).toBe(message);
+      expect((e as Error).message).not.toContain("TESTKEY");
+    }
+    expect(ledger.headSeq()).toBe(before);
+  });
+
+  it("names the answer when a recorded answer later matches a secret", () => {
+    let secrets: string[] = [];
+    const svc = new IntakeService({ db, ledger, secrets: () => secrets });
+    svc.start(human, projectId, IDEA);
+    for (const [q, a] of Object.entries(ANSWERS)) svc.answer(human, projectId, q as never, a);
+    svc.decide(human, projectId, "first_version", "smallest");
+    svc.decide(human, projectId, "hosting", "local");
+    expect(svc.get(projectId)!.plan!.problem).toBeNull();
+    secrets = ["Keep a shared reading list"];
+    const message = 'The answer to "What should it do for them?" looks like it contains a secret. Change the answer to continue.';
+    expect(svc.get(projectId)!.plan!.problem).toBe(message);
+    expect(() => svc.complete(human, projectId)).toThrow(message);
+  });
+
   it("scrubs the home directory and the username from every text before it is recorded", () => {
     intake.start(human, projectId, `Notes in ${homedir()}/club/notes.md by clubuser`);
     expect(intake.get(projectId)!.intake.idea).toBe("Notes in ~/club/notes.md by <user>");

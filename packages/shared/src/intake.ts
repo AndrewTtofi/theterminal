@@ -452,7 +452,8 @@ export type IntakeView = {
   step: IntakeStep;
   questions: IntakeQuestionView[];
   decisions: IntakeDecisionView[];
-  plan: { summary: string; cards: ProposedCard[] } | null;
+  /** `problem`: why the plan cannot be approved yet (a fixed sentence naming the field to change), else null. */
+  plan: { summary: string; cards: ProposedCard[]; problem: string | null } | null;
 };
 
 // Defined here rather than imported from events.ts, which imports this module.

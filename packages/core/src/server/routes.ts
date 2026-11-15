@@ -83,7 +83,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
     if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
     if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
-    if (err instanceof SecretInTextError) return reply.code(400).send({ error: "secret_in_text" });
+    // The explanation is a fixed sentence naming a field, never the text.
+    if (err instanceof SecretInTextError) {
+      return reply.code(400).send({ error: "secret_in_text", ...(err.explanation !== undefined && { message: err.explanation }) });
+    }
     if (err instanceof IntakeCompletedError) return reply.code(409).send({ error: "intake_completed" });
     if (err instanceof IntakeIncompleteError) return reply.code(409).send({ error: "intake_incomplete", missing: err.missing });
     if (err instanceof DecisionNotApplicableError) return reply.code(409).send({ error: "decision_not_applicable" });

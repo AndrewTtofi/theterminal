@@ -22,13 +22,20 @@ export class HumanRequiredError extends Error {
   }
 }
 
-/** Never carries the text: the message is fixed. */
+/**
+ * Never carries the text. `explanation` is a fixed sentence naming the field to change, set when the secret sits in
+ * something already recorded (the project name, an earlier answer) rather than in the text just sent.
+ */
 export class SecretInTextError extends Error {
-  constructor() {
-    super("text contains a secret");
+  constructor(public readonly explanation?: string) {
+    super(explanation ?? "text contains a secret");
     this.name = "SecretInTextError";
   }
 }
+
+const NAME_SECRET = "The project name looks like it contains a secret. Rename the project to continue.";
+const answerSecret = (label: string) => `The answer to "${label}" looks like it contains a secret. Change the answer to continue.`;
+const SUMMARY_SECRET = "The plan summary looks like it contains a secret. Change the answers to continue.";
 
 export class IntakeCompletedError extends Error {
   constructor() {
@@ -136,7 +143,8 @@ export class IntakeService {
     requireHuman(actor);
     const qid = z.object({ questionId: z.enum(QUESTION_IDS) }).parse({ questionId }).questionId;
     const q = INTAKE_QUESTIONS.find((x) => x.id === qid)!;
-    let value = validateAnswer(q, answer);
+    const given = q.kind === "text" && typeof answer === "string" ? answer.trim() : answer;
+    let value = validateAnswer(q, given);
     if (typeof value === "string" && q.kind === "text") value = validateAnswer(q, this.clean(value));
     return this.commit(() => {
       const state = this.requireOpen(projectId);
@@ -190,8 +198,10 @@ export class IntakeService {
         created.push({ projectId, actor, type: "card.created", payload: { cardId, title: c.title, stage: c.stage } });
         return { cardId, title: c.title, stage: c.stage, outcome: "created" as const };
       });
-      // Built from the answers as recorded (already cleaned); the project name passes the same check.
-      const summary = truncate(this.clean(planSummary(name, answers, decisions)), SUMMARY_MAX);
+      // Built from the answers as recorded (already cleaned); refused, naming the field, if anything in it is a secret.
+      const problem = this.planProblem(name, answers, decisions);
+      if (problem !== null) throw new SecretInTextError(problem);
+      const summary = this.summaryOf(name, answers, decisions);
       return [
         { projectId, actor, type: "intake.completed", payload: { intakeId: state.intake.id, summary, cards } },
         ...created,
@@ -236,9 +246,32 @@ export class IntakeService {
 
   /** Scrubbed, then refused when redaction would change it. The error never carries the text. */
   private clean(text: string): string {
+    if (!this.passes(text)) throw new SecretInTextError();
+    return this.scrub(text);
+  }
+
+  /**
+   * True when neither the text as given nor its scrubbed form holds a secret. Both are checked, as the runner does:
+   * a secret containing the username or a home path would be rewritten by the scrubber and then miss the exact match.
+   */
+  private passes(text: string): boolean {
+    const secrets = this.secrets();
     const scrubbed = this.scrub(text);
-    if (redact(scrubbed, this.secrets()) !== scrubbed) throw new SecretInTextError();
-    return scrubbed;
+    return redact(text, secrets) === text && redact(scrubbed, secrets) === scrubbed;
+  }
+
+  private summaryOf(name: string, answers: Answers, decisions: Decisions): string {
+    return truncate(this.scrub(planSummary(name, answers, decisions)), SUMMARY_MAX);
+  }
+
+  /** Why the plan summary cannot be recorded, naming the field to change; null when it can. */
+  private planProblem(name: string, answers: Answers, decisions: Decisions): string | null {
+    if (!this.passes(name)) return NAME_SECRET;
+    for (const q of INTAKE_QUESTIONS) {
+      const a = answers[q.id];
+      if (typeof a === "string" && q.kind === "text" && !this.passes(a)) return answerSecret(q.label);
+    }
+    return this.passes(planSummary(name, answers, decisions)) ? null : SUMMARY_SECRET;
   }
 
   /** A free text trimmed, length-checked as given, then cleaned and checked again (a placeholder may lengthen it). */
@@ -295,11 +328,12 @@ export class IntakeService {
     });
     let plan: IntakeView["plan"] = null;
     if (step === "approve") {
-      // As complete() will record it.
-      const summary = truncate(this.scrub(planSummary(projectName, answers, decisions)), SUMMARY_MAX);
-      plan = { summary, cards: proposedCards(answers, decisions) };
+      // As complete() will record it; when it cannot be, the reason, and the summary with the secret removed.
+      const problem = this.planProblem(projectName, answers, decisions);
+      const summary = this.summaryOf(projectName, answers, decisions);
+      plan = { summary: problem === null ? summary : redact(summary, this.secrets()), cards: proposedCards(answers, decisions), problem };
     } else if (step === "completed") {
-      plan = { summary: state.intake.summary ?? "", cards: proposedCards(answers, decisions) };
+      plan = { summary: state.intake.summary ?? "", cards: proposedCards(answers, decisions), problem: null };
     }
     return { intake: state.intake, step, questions, decisions: decisionViews, plan };
   }
