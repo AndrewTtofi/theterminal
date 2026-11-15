@@ -17,6 +17,7 @@ import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
 import { CONNECTION_TESTERS, cloudTesters } from "../connections/testers.js";
 import { fakeSts, realSts, type StsCaller } from "../connections/cloud/aws.js";
+import { mintCloudGrant } from "../connections/cloud/grant.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
@@ -326,12 +327,13 @@ export async function createServer(opts: {
   repairSharedGitconfig(opts.dataDir);
 
   const sts = selectSts(process.env, opts.sts);
+  const fetchFn = selectFetch(process.env, opts.fetch);
   const connections = new ConnectionService({
     db,
     ledger,
     secrets: selectSecretStore(process.env, opts.secrets),
     testers: { ...CONNECTION_TESTERS, ...cloudTesters(sts) },
-    fetch: selectFetch(process.env, opts.fetch),
+    fetch: fetchFn,
   });
   await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
 
@@ -358,6 +360,8 @@ export async function createServer(opts: {
     // connection's values stay in secretValues() until the process exits.
     extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
     credentials: (p) => connections.credentialsFor(p),
+    selectConnections: (ids) => connections.selectForRun(ids),
+    mintCloud: (source, signal) => mintCloudGrant(source, { sts, fetch: fetchFn, signal }),
     dataDir: opts.dataDir,
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });

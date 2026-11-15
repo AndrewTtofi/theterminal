@@ -273,9 +273,12 @@ export class ClaudeAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AdapterStartOptions["authMode"], credentials: RunCredentials): Record<string, string | undefined> | string {
     if (mode !== "subscription" && mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
-    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome }); // the user's own login, untouched
+    // The run's cloud grant goes into Claude Code's env, which its Bash tool hands to every command (subprocess
+    // scrubbing is off: neither CLAUDE_CODE_SUBPROCESS_ENV_SCRUB nor GITHUB_ACTIONS is ever allowlisted).
+    const extraEnv = credentials.env;
+    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome, extraEnv }); // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir });
+    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir, extraEnv });
   }
 }

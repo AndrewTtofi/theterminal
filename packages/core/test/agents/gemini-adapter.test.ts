@@ -162,7 +162,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
       denied.push([a, reason]);
     },
     clean: (t) => t,
-    credentials: {},
+    credentials: { env: {}, mcpServers: [] },
   };
   return { opts, proposed, decisions, denied, events, abort, gated, emitted };
 }
@@ -299,7 +299,7 @@ describe("GeminiAdapter", () => {
     const connectionKey = "AIzaTESTKEYconnection000000000000000000";
     const apiKey = vi.fn(() => FAKE_KEY);
     const h = harness();
-    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project" } });
+    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project", env: {}, mcpServers: [] } });
     expect(r).toEqual({ status: "completed" });
     expect(apiKey).not.toHaveBeenCalled();
     const snap = readLog().find((e) => e.initialize)!.initialize;
@@ -312,7 +312,7 @@ describe("GeminiAdapter", () => {
     script([]);
     const cliHome = join(outside, "connection-gemini-home");
     const h = harness(policyGate(), "google");
-    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project" } });
+    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project", env: {}, mcpServers: [] } });
     expect(r).toEqual({ status: "completed" });
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.env.GEMINI_CLI_HOME).toBe(cliHome);
@@ -690,6 +690,35 @@ describe("GeminiAdapter", () => {
     expect(logged("terminal/wait_for_exit")[0]!.result).toEqual({ exitCode: 0, signal: null });
     expect(logged("terminal/release")[0]!.result).toEqual({});
     expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: out.output }]);
+  });
+
+  it.each(["api_key", "google"] as const)("%s mode: the run's cloud grant reaches Gemini", async (authMode) => {
+    script([]);
+    const envs: NodeJS.ProcessEnv[] = [];
+    const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+      envs.push(opts.env);
+      return nodeSpawn(file, args, opts as never);
+    }) as unknown as typeof nodeSpawn;
+    const h = harness(policyGate(), authMode);
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    expect(await adapter({ spawn }).start({ ...h.opts, credentials })).toEqual({ status: "completed" });
+    expect(envs[0]!.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
+  });
+
+  it("a terminal command keeps the grant's Google Cloud variables and still never sees a provider key", async () => {
+    const probe = "process.stdout.write(JSON.stringify({ token: process.env.CLOUDSDK_AUTH_ACCESS_TOKEN ?? null, oauth: process.env.GOOGLE_OAUTH_ACCESS_TOKEN ?? null, project: process.env.GOOGLE_CLOUD_PROJECT ?? null, core: process.env.CLOUDSDK_CORE_PROJECT ?? null, key: process.env.GEMINI_API_KEY ?? null }))";
+    script([{ type: "terminal", command: process.execPath, args: ["-e", probe] }]);
+    const h = harness();
+    const credentials = {
+      googleCloudProject: "gemini-project", mcpServers: [],
+      env: { CLOUDSDK_AUTH_ACCESS_TOKEN: "TESTKEY-gcp-token", GOOGLE_OAUTH_ACCESS_TOKEN: "TESTKEY-gcp-token", CLOUDSDK_CORE_PROJECT: "grant-project", GOOGLE_CLOUD_PROJECT: "grant-project" },
+    };
+    expect(await adapter().start({ ...h.opts, credentials })).toEqual({ status: "completed" });
+    // Gemini itself keeps its own project; the command gets the grant's.
+    expect(readLog().find((e) => e.initialize)!.initialize.env.GOOGLE_CLOUD_PROJECT).toBe("gemini-project");
+    expect(JSON.parse(logged("terminal/output")[0]!.result.output)).toEqual({
+      token: "TESTKEY-gcp-token", oauth: "TESTKEY-gcp-token", project: "grant-project", core: "grant-project", key: null,
+    });
   });
 
   it("a terminal with a cwd outside the worktree is denied and never runs", async () => {

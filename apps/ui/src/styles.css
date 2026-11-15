@@ -87,6 +87,10 @@ legend { color: var(--muted); padding: 0 4px; }
 .agent-panel label { display: block; margin-bottom: 8px; }
 .agent-panel select { display: block; width: 100%; margin-top: 2px; }
 .agent-panel textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
+.run-connections { border: 1px solid var(--line-strong); margin: 0 0 8px; padding: 4px 8px; }
+.run-connections legend { color: var(--muted); padding: 0 4px; }
+.run-connections label { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+.run-connections .note { color: var(--muted); margin: 4px 0 0; }
 .runs { margin-top: 12px; }
 .runs li { display: flex; gap: 4px; padding: 1px 0; }
 .runs li button:first-child { flex: 1; min-width: 0; text-align: left; background: none; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; }

@@ -214,16 +214,16 @@ export function App() {
     runs,
     selectedRunId,
     runActions,
-    onStartRun: async (adapter, prompt) => {
+    onStartRun: async (adapter, prompt, connectionIds) => {
       if (!selectedId) return false;
       try {
         setError(null);
-        const started = await api.startRun(selectedId, { adapter, prompt });
+        const started = await api.startRun(selectedId, { adapter, prompt, ...(connectionIds.length > 0 && { connectionIds }) });
         setSelectedRunId(started.id);
         refreshAgents.current();
         return true;
       } catch (e) {
-        setError(errorMessage(e));
+        setError(errorMessage(e, "run"));
         return false;
       }
     },

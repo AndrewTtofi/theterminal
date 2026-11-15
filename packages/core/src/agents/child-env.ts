@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { AuthMode, Provider } from "@theterminal/shared";
+import { CLOUD_ENV_ALLOWLIST } from "../connections/cloud/env.js";
 import { EMPTY_GITCONFIG, assertEmptyGitconfig } from "./worktrees.js";
 
 /** Throws SharedGitconfigModifiedError when the shared empty git config has content (see worktrees.ts). */
@@ -15,6 +16,11 @@ export type ChildEnvOptions = {
   cliHome?: string;
   /** Gemini only: GOOGLE_CLOUD_PROJECT. */
   googleCloudProject?: string;
+  /**
+   * A cloud grant's variables. Every name must be in CLOUD_ENV_ALLOWLIST, else a TypeError is thrown before anything
+   * is built. A variable this function already set (the Gemini connection's GOOGLE_CLOUD_PROJECT) is never replaced.
+   */
+  extraEnv?: Record<string, string>;
   /** Test-only: the platform whose variables are allowlisted. Default process.platform. */
   platform?: NodeJS.Platform;
 };
@@ -53,11 +59,15 @@ export function fakeAgentEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
  * The child-process environment for a provider CLI, built from an allowlist: a copy of the allowlisted
  * variables in `base` (default process.env), which is never changed. Every GIT_*, provider variable,
  * NODE_OPTIONS and the like is dropped. Then git is pinned to the empty global config, and in api_key mode
- * only the given key is added. Login modes pass no key, so the CLI's own stored login is used untouched.
+ * only the given key is added, then a cloud grant's allowlisted variables (`extraEnv`). Login modes pass no key, so the CLI's own stored login is used untouched.
  * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
  */
 export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
   const base = opts.base ?? process.env;
+  const extra = Object.entries(opts.extraEnv ?? {});
+  for (const [k] of extra) {
+    if (!CLOUD_ENV_ALLOWLIST.includes(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
+  }
   const win = (opts.platform ?? process.platform) === "win32";
   // Windows environment names are case-insensitive (`Path`, MSYS's `SYSTEMROOT`): compare upper-cased, keep the
   // original spelling, and keep only the first spelling of a name.
@@ -90,6 +100,8 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
     else if (provider === "gemini" && mode === "google") env.GEMINI_CLI_HOME = opts.cliHome;
   }
   if (provider === "gemini" && opts.googleCloudProject) env.GOOGLE_CLOUD_PROJECT = opts.googleCloudProject;
+  // Cloud variables never come from `base`, only from a grant; what the CLI itself needs is never moved.
+  for (const [k, v] of extra) if (env[k] === undefined) env[k] = v;
   assertEmptyGitconfig(opts.dataDir); // a modified shared config fails the run before the CLI starts
   return env;
 }

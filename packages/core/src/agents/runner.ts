@@ -2,7 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
-import type { Credentials } from "../connections/service.js";
+import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
+import type { McpServerSpec } from "../connections/mcp.js";
+import { UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
@@ -30,6 +32,19 @@ export class ShuttingDownError extends Error {
   }
 }
 
+/** A Codex run was given an MCP server: Codex gives no approval step for MCP tool calls under its strict policy. */
+export class McpUnsupportedError extends Error {
+  constructor() {
+    super("Codex cannot use MCP servers in The Terminal yet");
+    this.name = "McpUnsupportedError";
+  }
+}
+
+/** How long all of a run's cloud grants together may take to mint, by default. */
+export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
+/** An MCP env or header value this long or longer is redacted from the run's output. */
+const MIN_MCP_SECRET = 8;
+
 /** How long the gate waits for a human by default: less than the Claude hook's 24h, so a timeout is recorded. */
 export const DEFAULT_GATE_TIMEOUT_MS = 23 * 60 * 60 * 1000;
 
@@ -55,7 +70,27 @@ export type AgentRunnerDeps = {
   username?: string;
   /** The provider's connection credentials, looked up at each run start. Default: none. */
   credentials?: (provider: Provider) => Credentials | null;
+  /**
+   * What a run is given for the connection ids the Owner selected; throws for an unknown, disabled or wrong-kind id.
+   * Default: no id is accepted (UnsupportedConnectionError), and none means nothing.
+   */
+  selectConnections?: (ids: string[]) => RunSelection;
+  /** Mints one cloud grant; rejects with CloudCredentialError when it cannot. Default: none (cloud ids are refused). */
+  mintCloud?: (source: CloudSource, signal: AbortSignal) => Promise<CloudGrant>;
+  /** One deadline for minting all of a run's cloud grants. Default DEFAULT_GRANT_TIMEOUT_MS. */
+  grantTimeoutMs?: number;
 };
+
+function defaultSelect(ids: string[]): RunSelection {
+  if (ids.length > 0) throw new UnsupportedConnectionError();
+  return { cloud: [], mcp: [] };
+}
+
+/** The MCP env and header values long enough to be secrets: redacted from everything the run reports. */
+function mcpSecrets(specs: McpServerSpec[]): string[] {
+  const values = specs.flatMap((m) => Object.values(m.transport === "stdio" ? m.env : m.headers));
+  return values.filter((v) => v.length >= MIN_MCP_SECRET);
+}
 
 function osUsername(): string {
   try {
@@ -78,6 +113,8 @@ type Session = {
   outputTokens: number | null;
   /** Set when the runner itself failed during the run (e.g. a commit failed); fails the run. */
   failure: string | null;
+  /** This run's own secrets (minted cloud values, MCP env and header values), redacted with the global ones. */
+  secrets: string[];
 };
 type Payload = Record<string, unknown>;
 type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string };
@@ -175,7 +212,7 @@ export class AgentRunner {
 
   async start(
     actor: Actor,
-    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null },
+    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[] },
   ): Promise<AgentRun> {
     const { db, ledger, worktrees } = this.deps;
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(input.projectId)) {
@@ -190,11 +227,18 @@ export class AgentRunner {
     if (cardId !== null && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
       throw new NotFoundError("card", cardId);
     }
+    // Every selected connection is checked before anything is minted or created; errors propagate as they are.
+    const selection = (this.deps.selectConnections ?? defaultSelect)(input.connectionIds ?? []);
+    if (input.adapter === "codex" && selection.mcp.length > 0) throw new McpUnsupportedError();
+    const grants = await this.mintAll(selection.cloud);
+    const runSecrets = [...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp)];
+
     const authMode: AuthMode =
       input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
     const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
-    const credentials: RunCredentials = {};
+    const env: Record<string, string> = Object.assign({}, ...grants.map((g) => g.env));
+    const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
@@ -211,28 +255,71 @@ export class AgentRunner {
         actor,
         type: "agent.started",
         payload: {
-          runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub),
+          runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub, runSecrets),
           cardId, worktree: wt.relPath,
         },
       },
       result: () => getRun(db, runId)!,
     }));
-    if (creds && purpose) {
-      try {
+    // What the run was given: which connection, for what, which kind of credential and when it expires; never a value.
+    const uses: Payload[] = [];
+    if (creds && purpose) uses.push({ connectionId: creds.connectionId, name: creds.name, runId, purpose });
+    selection.cloud.forEach((source, i) => {
+      const { credential, expiresAt } = grants[i]!;
+      uses.push({ connectionId: source.connectionId, name: source.name, runId, purpose: "cloud_credentials", credential, expiresAt });
+    });
+    for (const m of selection.mcp) uses.push({ connectionId: m.connectionId, name: m.name, runId, purpose: "mcp_server" });
+    try {
+      for (const payload of uses) {
         commitEvent(db, ledger, () => ({
-          event: {
-            projectId: null, actor: RUNNER, type: "connection.used",
-            payload: { connectionId: creds.connectionId, name: creds.name, runId, purpose },
-          },
+          event: { projectId: null, actor: RUNNER, type: "connection.used", payload },
           result: () => undefined,
         }));
-      } catch (e) {
-        this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
-        throw e;
       }
+    } catch (e) {
+      this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
+      throw e;
     }
-    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials);
+    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials, runSecrets);
     return run;
+  }
+
+  /**
+   * Mints every grant in order against one shared deadline: when it passes, the signal is aborted and the start fails
+   * with CloudCredentialError, even if a minter ignores its signal. The first failure ends the start.
+   */
+  private async mintAll(sources: CloudSource[]): Promise<CloudGrant[]> {
+    if (sources.length === 0) return [];
+    const mint = this.deps.mintCloud;
+    if (!mint) throw new UnsupportedConnectionError();
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), this.deps.grantTimeoutMs ?? DEFAULT_GRANT_TIMEOUT_MS);
+    try {
+      const grants: CloudGrant[] = [];
+      for (const source of sources) {
+        const timedOut = () =>
+          new CloudCredentialError(source.name, `Could not get credentials for the connection "${source.name}": timed out`);
+        if (deadline.signal.aborted) throw timedOut();
+        let onAbort = () => {};
+        const expired = new Promise<never>((_, reject) => {
+          onAbort = () => reject(timedOut());
+          deadline.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        const minting = mint(source, deadline.signal);
+        minting.catch(() => {}); // a late rejection after the deadline is not unhandled
+        try {
+          grants.push(await Promise.race([minting, expired]));
+        } catch (e) {
+          // A minter that rejects because its signal was aborted reports the deadline, not its own reason.
+          throw deadline.signal.aborted && !(e instanceof CloudCredentialError) ? timedOut() : e;
+        } finally {
+          deadline.signal.removeEventListener("abort", onAbort);
+        }
+      }
+      return grants;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A human decision on a pending action. The check and the commit share one transaction. */
@@ -243,7 +330,8 @@ export class AgentRunner {
       const row = this.actionRow(actionId);
       if (!row) throw new NotFoundError("action", actionId);
       if (row.status !== "pending" || !broker.pendingIds().includes(actionId)) throw new AlreadyDecidedError(actionId);
-      why = this.clean(reason, MAX.reason, this.sessions.get(row.run_id)?.scrub ?? this.scrub);
+      const s = this.sessions.get(row.run_id);
+      why = this.clean(reason, MAX.reason, s?.scrub ?? this.scrub, s?.secrets);
       return {
         event: {
           projectId: row.project_id, actor, type: "agent.action.decided",
@@ -314,10 +402,12 @@ export class AgentRunner {
 
   private launch(
     run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode, credentials: RunCredentials,
+    secrets: string[],
   ): void {
     const abort = new AbortController();
     const session: Session = {
       projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, inputTokens: null, outputTokens: null, failure: null,
+      secrets,
     };
     this.sessions.set(run.id, session);
     session.done = (async () => {
@@ -329,7 +419,7 @@ export class AgentRunner {
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
-          clean: (s) => this.clean(asText(s), Infinity, scrub),
+          clean: (s) => this.clean(asText(s), Infinity, scrub, secrets),
           credentials,
         });
         status = r.status;
@@ -355,11 +445,11 @@ export class AgentRunner {
   /** Records a proposal through the same snapshot, redaction and scrub as every action; returns what was recorded. */
   private recordProposal(runId: string, s: Session, actionId: string, proposed: ProposedAction) {
     const a = snapshot(proposed); // recording and classify see only this copy
-    const input = this.cleanInput(a.input, s.scrub);
+    const input = this.cleanInput(a.input, s.scrub, s.secrets);
     this.recordRequest(s, runId, {
       runId, actionId, kind: a.kind,
-      tool: this.clean(a.tool, MAX.tool, s.scrub) || "unknown",
-      summary: this.clean(a.summary, MAX.summary, s.scrub) || "(no summary)",
+      tool: this.clean(a.tool, MAX.tool, s.scrub, s.secrets) || "unknown",
+      summary: this.clean(a.summary, MAX.summary, s.scrub, s.secrets) || "(no summary)",
       input,
     });
     return { a, input };
@@ -372,7 +462,7 @@ export class AgentRunner {
     try {
       this.recordProposal(runId, s, actionId, proposed);
       recorded = true;
-      this.settle(s.projectId, runId, actionId, "deny", this.clean(reason, MAX.reason, s.scrub) || "denied");
+      this.settle(s.projectId, runId, actionId, "deny", this.clean(reason, MAX.reason, s.scrub, s.secrets) || "denied");
     } catch {
       s.failure ??= INTERNAL_ERROR;
       try {
@@ -470,13 +560,13 @@ export class AgentRunner {
     };
     try {
       if (e.type === "message") {
-        const text = this.clean(asText(e.text), MAX.text, s.scrub);
+        const text = this.clean(asText(e.text), MAX.text, s.scrub, s.secrets);
         commitEvent(db, ledger, () => ({
           event: { projectId: s.projectId, actor: agent, type: "agent.message", payload: { runId, text } },
           result: () => undefined,
         }));
       } else if (e.type === "action_result") {
-        const output = this.clean(asText(e.output), MAX.output, s.scrub);
+        const output = this.clean(asText(e.output), MAX.output, s.scrub, s.secrets);
         const committed = commitEvent(db, ledger, () => {
           const row = this.actionRow(e.actionId);
           if (!row || row.run_id !== runId || row.status !== "allowed") return { result: () => false };
@@ -519,7 +609,7 @@ export class AgentRunner {
           projectId: cur.projectId, actor: RUNNER, type: "agent.finished",
           payload: {
             runId, status, costUsd: s?.costUsd ?? null, inputTokens: s?.inputTokens ?? null, outputTokens: s?.outputTokens ?? null,
-            error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub),
+            error: error === null ? null : this.clean(error, MAX.error, s?.scrub ?? this.scrub, s?.secrets),
           },
         },
         result: () => undefined,
@@ -537,11 +627,11 @@ export class AgentRunner {
   }
 
   /**
-   * Redact the configured secrets, scrub paths, redact again, then truncate (never truncate first). The first
+   * Redact the configured secrets and the run's own, scrub paths, redact again, then truncate (never truncate first). The first
    * pass runs before scrubbing so a secret that contains the username or a path is still matched whole.
    */
-  private clean(s: string, max: number, scrub: Scrub): string {
-    const secrets = this.secrets();
+  private clean(s: string, max: number, scrub: Scrub, runSecrets: string[] = []): string {
+    const secrets = [...this.secrets(), ...runSecrets];
     return truncate(redact(scrub(redact(s, secrets)), secrets), max);
   }
 
@@ -557,10 +647,10 @@ export class AgentRunner {
    * can see into); a value that cannot be serialised throws and is denied by the gate. An input over
    * the cap is recorded as its hash, length and a preview, so what was approved can still be checked.
    */
-  private cleanInput(input: unknown, scrub: Scrub): unknown {
+  private cleanInput(input: unknown, scrub: Scrub, runSecrets: string[] = []): unknown {
     const json = JSON.stringify(input ?? null);
     const plain: unknown = json === undefined ? null : JSON.parse(json);
-    const secrets = this.secrets();
+    const secrets = [...this.secrets(), ...runSecrets];
     const value = redact(scrubJson(redact(plain, secrets), scrub), secrets);
     const out = JSON.stringify(value);
     if (out.length <= MAX.input) return value;

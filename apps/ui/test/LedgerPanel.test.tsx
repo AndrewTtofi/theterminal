@@ -38,6 +38,24 @@ describe("describeEntry connections", () => {
     ).toBe('Agent abcdef12 was given access to "Work key"');
   });
 
+  it("describes what a run was given: the kind of cloud credential, or an MCP server, never a value", () => {
+    const used = (purpose: string, extra: Record<string, unknown> = {}) =>
+      describeEntry(entry(20, "connection.used", { connectionId: "c1", name: "Ops", runId: "abcdef1234567890", purpose, ...extra }, { kind: "system", id: "runner" }));
+    expect(used("cloud_credentials", { credential: "aws_session_token", expiresAt: "2026-11-16T00:00:00.000Z" })).toBe(
+      'Agent abcdef12 was given a 12-hour AWS session token from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "aws_static_keys", expiresAt: null })).toBe(
+      'Agent abcdef12 was given the AWS access keys (no session token available) from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "gcp_access_token", expiresAt: "2026-11-16T00:00:00.000Z" })).toBe(
+      'Agent abcdef12 was given a 1-hour Google Cloud token from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "azure_client_secret", expiresAt: null })).toBe(
+      'Agent abcdef12 was given the Azure client secret from "Ops"',
+    );
+    expect(used("mcp_server")).toBe('Agent abcdef12 was given the MCP server "Ops"');
+  });
+
   it("describes a sign-in with only the provider and the outcome", () => {
     expect(describeEntry(entry(11, "connection.signin", { provider: "codex", ok: true }))).toBe("Owner signed in to Codex");
     expect(describeEntry(entry(12, "connection.signin", { provider: "claude", ok: false }))).toBe("Sign-in to Claude failed");

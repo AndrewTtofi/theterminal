@@ -39,7 +39,7 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
       emit: (e) => events.push(e),
       recordDenied: async () => {},
       clean: (s) => s,
-      credentials: {},
+      credentials: { env: {}, mcpServers: [] },
     });
     expect(r).toEqual({ status: "completed" });
     expect(proposed.some((a) => a.tool === "Read")).toBe(true);

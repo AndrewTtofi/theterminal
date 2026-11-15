@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
-import { CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
+import { CODEX_COMMAND_EXCLUDES, CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
 import { AgentRunner } from "../../src/agents/runner.js";
@@ -214,7 +214,7 @@ describe("CodexAdapter (fake app-server)", () => {
         denied.push([a, reason]);
       },
       clean: (t) => t,
-      credentials: {},
+      credentials: { env: {}, mcpServers: [] },
       ...o,
     });
     return { result, proposed, denied, events, usage };
@@ -702,7 +702,7 @@ describe("CodexAdapter (fake app-server)", () => {
       script([]);
       const connectionKey = "sk-TESTKEY-connection-0000000000";
       const fallback = vi.fn(() => FAKE_KEY);
-      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey } });
+      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey, env: {}, mcpServers: [] } });
       expect(await result).toEqual({ status: "completed" });
       expect(fakeLog().find((e) => e.start).env).toMatchObject({ OPENAI_API_KEY: connectionKey, CODEX_API_KEY: connectionKey });
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: connectionKey });
@@ -712,9 +712,34 @@ describe("CodexAdapter (fake app-server)", () => {
     it("chatgpt mode points CODEX_HOME at the connection's CLI home folder", async () => {
       const cliHome = join(dir, "connection-codex-home");
       script([]);
-      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome } });
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome, env: {}, mcpServers: [] } });
       expect(await result).toEqual({ status: "completed" });
       expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: cliHome });
+    });
+
+    it.each(["api_key", "chatgpt"] as const)("%s mode: the run's cloud grant reaches Codex and, through its env policy, its commands", async (authMode) => {
+      script([]);
+      const envs: NodeJS.ProcessEnv[] = [];
+      const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        envs.push(opts.env);
+        return nodeSpawn(file, args, opts as never);
+      }) as unknown as typeof nodeSpawn;
+      const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+      const { result } = run(make({ spawn }), undefined, { authMode, credentials });
+      expect(await result).toEqual({ status: "completed" });
+      expect(envs[0]!.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
+      // Codex drops *KEY*, *SECRET* and *TOKEN* names from its commands' env by default: keep them, but never a provider key.
+      const argv: string[] = fakeLog().find((e) => e.start).argv;
+      expect(argv).toContain("shell_environment_policy.ignore_default_excludes=true");
+      expect(argv).toContain(`shell_environment_policy.exclude=${JSON.stringify(CODEX_COMMAND_EXCLUDES)}`);
+      expect(CODEX_COMMAND_EXCLUDES).toEqual(expect.arrayContaining(["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]));
+    });
+
+    it("without a cloud grant leaves Codex's command env policy alone", async () => {
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "chatgpt" });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server"]);
     });
 
     it("api_key mode keeps a separate Codex home per project", async () => {
