@@ -48,7 +48,6 @@ export type GatePrompt = {
   refreshing: boolean;
 };
 
-/** Every narration topic, in the order the ledger's filter lists them. */
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
 export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
 
@@ -148,6 +147,12 @@ export type WorkbenchModel = {
   dir: (runId: string, path: string) => Promise<DirListing>;
   file: (runId: string, path: string) => Promise<FileContent>;
   diff: (runId: string, path: string) => Promise<FileDiff>;
+  /**
+   * Emergency override: runs a program as the Owner in the run's working copy, or drops its uncommitted changes.
+   * Each resolves true when the server recorded it, and false when it was refused, with the refusal shown.
+   */
+  onOverrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) => Promise<boolean>;
+  onOverrideDiscard: (runId: string, reason: string) => Promise<boolean>;
   /** Opens (or shows) the diff tab of one file of a run. */
   onOpenDiff: (runId: string, path: string) => void;
   /** Opens (or shows) the read-only tab of one file of a run. */

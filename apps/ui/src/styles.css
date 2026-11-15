@@ -23,6 +23,7 @@
   --badge: #0078d4;
   --danger: #c74e39;
   --ok: #2ea043;
+  --override: #f14c4c;      /* emergency overrides, always with an OVERRIDE label too */
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -325,3 +326,18 @@ pre.diff .hunk { color: var(--accent); background: rgba(0, 120, 212, 0.08); }
 pre.diff .meta { color: var(--muted); }
 .changes .cleaned, .changes span.row.cleaned { display: block; padding: 2px 4px; color: var(--muted); font-style: italic; cursor: default; }
 pre.diff .line, pre.file .line { content-visibility: auto; contain-intrinsic-size: auto 18px; }
+
+/* Emergency override: red wherever the ledger is shown, after .attention so the red wins on an override line. */
+.override { border-left: 3px solid var(--override); }
+.override .headline, .override > summary { color: var(--override); }
+.ledger li.override, .story li.override { border-left-color: var(--override); padding-left: 6px; }
+.story li.override .headline { color: var(--override); }
+.override-tag { color: var(--override); font-weight: 700; }
+details.override { padding: 4px 0 4px 8px; margin-top: 12px; }
+details.override > summary { cursor: pointer; font-weight: 600; }
+details.override label { display: block; margin-top: 6px; font-size: 12px; }
+details.override input, details.override textarea { width: 100%; }
+.override-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.override-confirm { border: 1px solid var(--override); padding: 6px; margin-top: 6px; }
+.override-confirm ol { margin: 0; padding-left: 20px; }
+.override-confirm code { white-space: pre-wrap; word-break: break-all; }

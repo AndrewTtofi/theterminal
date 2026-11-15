@@ -98,6 +98,24 @@ describe("StoryPanel", () => {
     expect(items[1]).toContain("a demo for the book club");
   });
 
+  it("lists an override under Decisions and why, in red, with its reason", async () => {
+    const s = story();
+    const discard = entry("override.discard", { overrideId: "o1", runId: "r1", reason: "The agent broke the build", files: 2 });
+    setup(() => Promise.resolve({ ...s, entries: [...s.entries, discard] }));
+    const panel = await screen.findByRole("region", { name: "Story: Login" });
+    const decisions = within(panel).getByRole("list", { name: "Decisions and why" });
+    const items = within(decisions).getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    const last = items[2];
+    expect(last.classList.contains("override")).toBe(true);
+    expect(last.querySelector(".headline")!.textContent).toMatch(/^OVERRIDE: Owner discarded 2 changed file\(s\)/);
+    expect(last.textContent).toContain("Why: The agent broke the build");
+    expect(items[0].classList.contains("override")).toBe(false);
+    const happened = within(panel).getByRole("list", { name: "What happened" });
+    const lines = within(happened).getAllByRole("listitem");
+    expect(lines[lines.length - 1].classList.contains("override")).toBe(true);
+  });
+
   it("says nothing has happened when only the card was created, and shows no cost", async () => {
     const s = story({ runs: [], costUsd: null });
     setup(() => Promise.resolve({ ...s, entries: s.entries.slice(0, 1) }));

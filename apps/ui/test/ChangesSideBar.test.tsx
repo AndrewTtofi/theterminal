@@ -27,6 +27,7 @@ function setup(over: Partial<WorkbenchModel> = {}) {
       return () => listeners.delete(cb);
     },
     selectedId: "p1",
+    entries: [],
     runs: [run1, run2],
     changesRunId: "run1",
     onSelectChangesRun: vi.fn(),
@@ -75,8 +76,8 @@ describe("ChangesSideBar", () => {
       }),
     });
     expect(screen.getByText("4 files changed · +1 −3")).toBeTruthy();
-    expect(screen.getByText(/Read-only\. Agents change code; you review it\./)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Learn more" }));
+    const readOnly = screen.getByText(/Read-only\. Agents change code; you review it\./);
+    fireEvent.click(within(readOnly).getByRole("button", { name: "Learn more" }));
     expect(shell.openLearn).toHaveBeenCalledWith("reading_a_diff");
 
     const list = screen.getByRole("list", { name: "Changed files" });
@@ -198,6 +199,23 @@ describe("ChangesSideBar", () => {
     emit(runEntry("override.completed", "run1"));
     await waitFor(() => expect(model.dir).toHaveBeenCalledTimes(4));
     expect(within(files).getByRole("button", { name: "a.ts" })).toBeTruthy();
+  });
+
+  it("offers the emergency override for the run it shows", () => {
+    const { model } = setup({ onOverrideDiscard: vi.fn(async () => true), onOverrideCommand: vi.fn(async () => true) });
+    expect(screen.getByText("Emergency override").tagName).toBe("SUMMARY");
+    expect(screen.queryByText("Stop the agent first.")).toBeNull();
+    expect(model.onOverrideDiscard).not.toHaveBeenCalled();
+  });
+
+  it("disables the override while the run it shows is running", () => {
+    setup({ changesRunId: "run2" });
+    expect(screen.getByText("Stop the agent first.")).toBeTruthy();
+  });
+
+  it("shows no override when no run is picked", () => {
+    setup({ runs: [], changesRunId: null, changes: null });
+    expect(screen.queryByText("Emergency override")).toBeNull();
   });
 
   it("offers a retry when a listing fails", async () => {

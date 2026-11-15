@@ -308,6 +308,18 @@ export function App() {
     }
   };
 
+  /** Sends an emergency override; false when the server refused it, with the refusal shown. */
+  const overrideAction = async (send: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      setError(null);
+      await send();
+      return true;
+    } catch (e) {
+      setError(errorMessage(e));
+      return false;
+    }
+  };
+
   // The "All projects" ledger scope loads and streams every project's entries while it is chosen.
   useEffect(() => {
     if (ledgerScope !== "all") return;
@@ -561,6 +573,8 @@ export function App() {
     changes: changes?.runId === changesRunId ? changes.changes : null,
     changesError: changes?.runId === changesRunId ? changes.error : null,
     runChanges,
+    onOverrideCommand: (runId, i) => overrideAction(() => api.overrideCommand(runId, i)),
+    onOverrideDiscard: (runId, reason) => overrideAction(() => api.overrideDiscard(runId, reason)),
     dir: api.listRunDir,
     file: api.getRunFile,
     diff: api.getRunDiff,

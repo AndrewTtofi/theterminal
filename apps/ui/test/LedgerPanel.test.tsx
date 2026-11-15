@@ -262,6 +262,26 @@ describe("LedgerPanel narration and raw record", () => {
     expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
   });
 
+  it("paints override entries red with a text label, and strips terminal codes from their output", () => {
+    const run = { overrideId: "o1", runId: "r1" };
+    const command = entry(1, "override.command", { ...run, program: "git", args: ["status"], cwd: ".", reason: "The agent broke the build" });
+    const done = entry(2, "override.completed", {
+      ...run, ok: true, exitCode: 0, signal: null, timedOut: false, durationMs: 5, output: "\u001b[31mclean\u001b[0m",
+    });
+    const card = entry(3, "card.created", { title: "Detect GPU", stage: "plan" });
+    render(<LedgerPanel entries={[command, done, card]} />);
+    const items = within(screen.getByRole("complementary", { name: "Ledger" })).getAllByRole("listitem");
+    const [cardItem, doneItem, commandItem] = items;
+    expect(commandItem.classList.contains("override")).toBe(true);
+    expect(commandItem.querySelector(".headline")!.textContent).toMatch(/^OVERRIDE: Owner ran "git status"/);
+    expect(commandItem.querySelector(".override-tag")).toBeNull();
+    expect(doneItem.classList.contains("override")).toBe(true);
+    expect(doneItem.querySelector(".override-tag")!.textContent).toBe("OVERRIDE");
+    expect(doneItem.querySelector("pre")!.textContent).toMatch(/^clean\n/);
+    expect(cardItem.classList.contains("override")).toBe(false);
+    expect(cardItem.querySelector(".override-tag")).toBeNull();
+  });
+
   it("labels each Raw summary with its headline", () => {
     render(<LedgerPanel entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" })]} />);
     const summary = screen.getByRole("listitem").querySelector("summary")!;

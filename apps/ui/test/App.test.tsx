@@ -52,6 +52,8 @@ vi.mock("../src/api", () => ({
     getRunDiff: vi.fn(),
     listRunDir: vi.fn(),
     getRunFile: vi.fn(),
+    overrideCommand: vi.fn(),
+    overrideDiscard: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     constructor(readonly status: number, readonly code: string, readonly detail?: unknown) {
@@ -707,6 +709,41 @@ describe("App Changes view", () => {
     m.getRunChanges.mockResolvedValueOnce(changes({ runId: "run2", files: [] }));
     act(() => h.onEntry!(runEntry("override.completed", "run2")));
     expect(await screen.findByText("0 files changed · +0 −0")).toBeTruthy();
+  });
+
+  it("discards through the override route and shows a refusal's message, keeping the reason", async () => {
+    vi.mocked(errorMessage).mockImplementation(() => "Stop the agent first: it is still working in this run");
+    const refusal = new ApiError(409, "run_active");
+    m.overrideDiscard.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ overrideId: "o1", files: 1 });
+    await openChanges();
+    await screen.findByText("1 file changed · +1 −0");
+    await userEvent.click(screen.getByText("Emergency override"));
+    const form = screen.getByRole("group", { name: "Discard this run's changes" });
+    await userEvent.click(within(form).getByRole("button", { name: "Discard…" }));
+    await userEvent.type(within(form).getByLabelText("Why? (required, at least 10 characters)"), "The agent broke the build");
+    await userEvent.click(within(form).getByRole("button", { name: /^Discard / }));
+    expect(await screen.findByText("Stop the agent first: it is still working in this run")).toBeTruthy();
+    expect(m.overrideDiscard).toHaveBeenCalledWith("run2", "The agent broke the build");
+    expect(errorMessage).toHaveBeenCalledWith(refusal);
+    expect((within(form).getByLabelText("Why? (required, at least 10 characters)") as HTMLInputElement).value).toBe("The agent broke the build");
+    await userEvent.click(within(form).getByRole("button", { name: /^Discard / }));
+    expect(await screen.findByText("Recorded. Watch the Ledger or the Terminal for the result.")).toBeTruthy();
+    expect(screen.queryByText("Stop the agent first: it is still working in this run")).toBeNull();
+  });
+
+  it("runs a command through the override route", async () => {
+    m.overrideCommand.mockResolvedValue({ overrideId: "o1" });
+    await openChanges();
+    await userEvent.click(screen.getByText("Emergency override"));
+    const form = screen.getByRole("group", { name: "Run a command in this run's working copy" });
+    await userEvent.type(within(form).getByLabelText("Program"), "git");
+    await userEvent.type(within(form).getByLabelText("Arguments (one per line)"), "status");
+    await userEvent.type(within(form).getByLabelText("Why? (required, at least 10 characters)"), "The agent broke the build");
+    await userEvent.click(within(form).getByRole("button", { name: "Run as override" }));
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm and run" }));
+    await waitFor(() =>
+      expect(m.overrideCommand).toHaveBeenCalledWith("run2", { program: "git", args: ["status"], reason: "The agent broke the build" }),
+    );
   });
 
   it("words a failed load", async () => {

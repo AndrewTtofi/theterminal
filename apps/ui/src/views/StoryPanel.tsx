@@ -3,7 +3,7 @@ import { formatUsd, narrate, visibleControls } from "@theterminal/shared";
 import type { CardStory, LedgerEntry, NarrationContext } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../components/AgentPanel";
 import { stageLabel } from "../components/Board";
-import { RawRecord } from "../components/LedgerPanel";
+import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
 import { useShell } from "../shell/model";
 
 /** The entries that record a human decision, and the reason given with it. */
@@ -19,6 +19,9 @@ function decisionReason(e: LedgerEntry): { reason: string } | null {
       return { reason: "" };
     case "intake.decided":
       return { reason: text(p.rationale) };
+    case "override.command":
+    case "override.discard":
+      return { reason: text(p.reason) };
     default:
       return null;
   }
@@ -131,9 +134,10 @@ export function StoryPanel({ id }: { id: string }) {
       {nothingYet && <p className="empty">Nothing has happened on this card yet.</p>}
       <ol aria-labelledby={`${headingId}-happened`}>
         {narrated.map(({ e, n }) => (
-          <li key={e.seq} className={n.attention ? "attention" : undefined}>
-            <time dateTime={e.ts}>{new Date(e.ts).toLocaleString()}</time> · <span className="headline">{n.headline}</span>
-            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} />
+          <li key={e.seq} className={entryClass(e, n.attention)}>
+            <time dateTime={e.ts}>{new Date(e.ts).toLocaleString()}</time> · <OverrideTag entry={e} headline={n.headline} />
+            <span className="headline">{n.headline}</span>
+            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} override={isOverride(e)} />
           </li>
         ))}
       </ol>
@@ -143,7 +147,8 @@ export function StoryPanel({ id }: { id: string }) {
       ) : (
         <ul aria-labelledby={`${headingId}-decisions`}>
           {decisions.map(({ e, n, reason }) => (
-            <li key={e.seq}>
+            <li key={e.seq} className={isOverride(e) ? "override" : undefined}>
+              <OverrideTag entry={e} headline={n.headline} />
               <span className="headline">{n.headline}</span>
               {reason !== "" && <p className="reason">Why: {visibleControls(reason)}</p>}
             </li>

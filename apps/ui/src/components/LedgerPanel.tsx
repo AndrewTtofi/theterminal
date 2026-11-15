@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { narrate, plural, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, NarrationContext, NarrationTopic } from "@theterminal/shared";
+import { stripAnsi } from "./text";
 
 /** The plain-language headline of one entry; kept for callers and tests. */
 export const describeEntry = (e: LedgerEntry, ctx?: NarrationContext): string => narrate(e, ctx).headline;
@@ -26,18 +27,55 @@ export function canonicalPayload(payload: unknown): string {
   }
 }
 
-/** The raw record under a headline: the narration's detail, when it has one, then the payload. Text only. */
-function rawRecord(detail: string | null, payload: unknown): string {
+/** True for an override.* entry: painted red, with a text label, in every list of ledger entries. */
+export const isOverride = (e: LedgerEntry): boolean => e.type.startsWith("override.");
+
+/** The class of an entry's line: `attention` when it needs the Owner's eye, `override` for an override. */
+export function entryClass(e: LedgerEntry, attention: boolean): string | undefined {
+  const names = [attention && "attention", isOverride(e) && "override"].filter(Boolean);
+  return names.length > 0 ? names.join(" ") : undefined;
+}
+
+/**
+ * The text label that says an override is one without relying on its colour: shown before the headline of an
+ * override entry whose headline does not already start with `OVERRIDE`.
+ */
+export function OverrideTag({ entry, headline }: { entry: LedgerEntry; headline: string }) {
+  if (!isOverride(entry) || headline.startsWith("OVERRIDE")) return null;
+  return (
+    <>
+      <span className="override-tag">OVERRIDE</span>{" "}
+    </>
+  );
+}
+
+/**
+ * The raw record under a headline: the narration's detail, when it has one, then the payload. Text only; an
+ * override's detail is a program's output, so its terminal codes are stripped first.
+ */
+function rawRecord(detail: string | null, payload: unknown, override: boolean): string {
   const json = canonicalPayload(payload);
-  return visibleControls(detail === null ? json : `${detail}\n\n${json}`);
+  const shown = detail !== null && override ? stripAnsi(detail) : detail;
+  return visibleControls(shown === null ? json : `${shown}\n\n${json}`);
 }
 
 /** An entry's raw record, folded under its headline; the summary's accessible name says which entry it belongs to. */
-export function RawRecord({ headline, detail, payload }: { headline: string; detail: string | null; payload: unknown }) {
+export function RawRecord({
+  headline,
+  detail,
+  payload,
+  override = false,
+}: {
+  headline: string;
+  detail: string | null;
+  payload: unknown;
+  /** True for an override entry, whose detail is program output. */
+  override?: boolean;
+}) {
   return (
     <details className="raw">
       <summary aria-label={`Raw record: ${headline}`}>Raw</summary>
-      <pre>{rawRecord(detail, payload)}</pre>
+      <pre>{rawRecord(detail, payload, override)}</pre>
     </details>
   );
 }
@@ -63,9 +101,10 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
       )}
       <ul>
         {shown.map(({ e, n }) => (
-          <li key={e.seq} className={n.attention ? "attention" : undefined}>
-            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <span className="headline">{n.headline}</span>
-            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} />
+          <li key={e.seq} className={entryClass(e, n.attention)}>
+            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <OverrideTag entry={e} headline={n.headline} />
+            <span className="headline">{n.headline}</span>
+            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} override={isOverride(e)} />
           </li>
         ))}
       </ul>

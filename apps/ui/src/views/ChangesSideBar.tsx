@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { MAX_CHANGED_FILES, MAX_DIR_ENTRIES, plural, visibleControls } from "@theterminal/shared";
 import type { AgentRun, ChangeStatus, ChangedFile, DirEntry, DirListing } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../components/AgentPanel";
+import { OverrideSection } from "../components/OverrideSection";
 import { errorMessage } from "../api";
 import { namesRun, useShell } from "../shell/model";
 
@@ -128,13 +129,17 @@ function DirNode({ runId, path, name }: { runId: string; path: string; name: str
   );
 }
 
-/** The Changes view: pick a run, see the files it changed, and browse its working copy. Nothing here edits code. */
+/**
+ * The Changes view: pick a run, see the files it changed, and browse its working copy. Nothing here edits code; the
+ * emergency override at the bottom is the one exception, and it is recorded in red.
+ */
 export function ChangesSideBar() {
   const { model, openLearn } = useShell();
   if (!model.selectedId) return <p className="empty">Select a project to see what its agents changed.</p>;
 
   const runs = [...model.runs].sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
   const runId = model.changesRunId;
+  const run = runs.find((r) => r.id === runId);
   const c = model.changes;
   /** Never opens a file whose name was hidden: its path is not a real one. */
   const openDiff = (f: ChangedFile) => {
@@ -206,6 +211,7 @@ export function ChangesSideBar() {
           )}
           <h2>Files</h2>
           <DirList key={runId} runId={runId} path="" label="Files" />
+          {run && <OverrideSection key={runId} run={run} />}
         </>
       )}
     </div>

@@ -169,6 +169,15 @@ export const api = {
   listRunDir: (runId: string, path: string) => request<DirListing>(`/api/runs/${enc(runId)}/files?path=${enc(path)}`),
   /** One file's text from the run's working copy. */
   getRunFile: (runId: string, path: string) => request<FileContent>(`/api/runs/${enc(runId)}/file?path=${enc(path)}`),
+  /**
+   * Runs a program as the Owner in the run's working copy (emergency override); resolves once it has started and
+   * been recorded. 409 `run_active` / `override_busy`, 400 `program_not_found` / `program_not_allowed` / `secret_in_text`.
+   */
+  overrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) =>
+    request<{ overrideId: string }>(`/api/runs/${enc(runId)}/override/command`, { method: "POST", body: i }),
+  /** Drops the run's uncommitted changes (emergency override); `files` is how many uncommitted files there were. */
+  overrideDiscard: (runId: string, reason: string) =>
+    request<{ overrideId: string; files: number }>(`/api/runs/${enc(runId)}/override/discard`, { method: "POST", body: { reason } }),
   stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
   listPendingActions: (projectId: string) =>
     request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),
@@ -293,6 +302,10 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
+    if (e.code === "run_active") return "Stop the agent first: it is still working in this run";
+    if (e.code === "override_busy") return "An override is already running for this run";
+    if (e.code === "program_not_found") return "That program was not found on this computer's PATH";
+    if (e.code === "program_not_allowed") return "Programs inside the project folder, and Windows batch files, cannot be run as an override";
     if (e.code === "worktree_missing") return "This run's working copy no longer exists on this computer";
     if (e.code === "no_base") return "Could not work out what this run changed";
     if (e.status === 401 || e.status === 403) return "Not authorised";

@@ -109,6 +109,30 @@ describe("connections api", () => {
   });
 });
 
+describe("override api", () => {
+  it("posts a command and a discard to the run's override routes", async () => {
+    const f = respond(201, { overrideId: "o1" });
+    expect(await api.overrideCommand("r/1", { program: "git", args: ["status"], reason: "The agent broke the build" })).toEqual({ overrideId: "o1" });
+    expect(call(f, 0)[0]).toBe("/api/runs/r%2F1/override/command");
+    expect(call(f, 0)[1].method).toBe("POST");
+    expect(JSON.parse(String(call(f, 0)[1].body))).toEqual({ program: "git", args: ["status"], reason: "The agent broke the build" });
+    const g = respond(200, { overrideId: "o2", files: 2 });
+    expect(await api.overrideDiscard("r1", "The agent broke the build")).toEqual({ overrideId: "o2", files: 2 });
+    expect(call(g, 0)[0]).toBe("/api/runs/r1/override/discard");
+    expect(JSON.parse(String(call(g, 0)[1].body))).toEqual({ reason: "The agent broke the build" });
+  });
+
+  it("words the override refusals", () => {
+    expect(errorMessage(new ApiError(409, "run_active"))).toBe("Stop the agent first: it is still working in this run");
+    expect(errorMessage(new ApiError(409, "override_busy"))).toBe("An override is already running for this run");
+    expect(errorMessage(new ApiError(400, "program_not_found"))).toBe("That program was not found on this computer's PATH");
+    expect(errorMessage(new ApiError(400, "program_not_allowed"))).toBe(
+      "Programs inside the project folder, and Windows batch files, cannot be run as an override",
+    );
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
+  });
+});
+
 describe("errorMessage", () => {
   it("maps the connection errors", () => {
     expect(errorMessage(new ApiError(409, "conflict"))).toBe("Already connected");
