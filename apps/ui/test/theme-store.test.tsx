@@ -102,6 +102,22 @@ describe("useTheme", () => {
     expect(loadChosenThemeId()).toBe("amber");
     expect(document.documentElement.style.getPropertyValue("--bg")).toBe(resolveColors(BUILTIN_THEMES.find((t) => t.id === "amber")!).bg);
   });
+  it("does not re-parse or re-apply the theme on a re-render when nothing changed", () => {
+    saveUserThemes([user("mine")]);
+    localStorage.setItem(THEME_KEY, "mine");
+    expect(currentTheme()).toBe(currentTheme());
+    expect(allThemes()).toBe(allThemes());
+    const { result, rerender } = renderHook(() => useTheme());
+    const first = result.current.theme;
+    const set = vi.spyOn(CSSStyleDeclaration.prototype, "setProperty");
+    rerender();
+    rerender();
+    expect(result.current.theme).toBe(first);
+    expect(set).not.toHaveBeenCalled();
+    // A change to what is stored is still picked up.
+    localStorage.setItem(THEMES_KEY, JSON.stringify([user("mine", { name: "Renamed" })]));
+    expect(currentTheme().name).toBe("Renamed");
+  });
   it("saves and deletes user themes", () => {
     const { result } = renderHook(() => useTheme());
     act(() => result.current.saveUserTheme(user("mine")));

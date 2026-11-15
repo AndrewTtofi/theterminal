@@ -40,24 +40,46 @@ export function saveChosenThemeId(id: string): void {
   changed();
 }
 
-/** The stored user themes that still pass the schema; invalid ones are dropped. The in-memory list wins when set. */
-export function loadUserThemes(): Theme[] {
-  if (memUsers !== null) return [...memUsers];
+// Parsed once per stored string, so a re-render gets the same objects back and does not re-apply the theme.
+const NONE: readonly Theme[] = [];
+let parsedRaw: string | null = null;
+let parsedUsers: Theme[] = [];
+
+function parseUserThemes(raw: string): Theme[] {
+  if (raw === parsedRaw) return parsedUsers;
   let parsed: unknown;
   try {
-    const raw = localStorage.getItem(THEMES_KEY);
-    if (raw === null) return [];
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    parsed = null;
   }
-  if (!Array.isArray(parsed)) return [];
   const out: Theme[] = [];
-  for (const e of parsed) {
-    const r = themeSchema.safeParse(e);
-    if (r.success) out.push(r.data as Theme);
+  if (Array.isArray(parsed)) {
+    for (const e of parsed) {
+      const r = themeSchema.safeParse(e);
+      if (r.success) out.push(r.data as Theme);
+    }
   }
-  return out.slice(0, MAX_USER_THEMES);
+  parsedRaw = raw;
+  parsedUsers = out.slice(0, MAX_USER_THEMES);
+  return parsedUsers;
+}
+
+/** The stored user themes that still pass the schema; invalid ones are dropped. The in-memory list wins when set. */
+function userThemes(): readonly Theme[] {
+  if (memUsers !== null) return memUsers;
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(THEMES_KEY);
+  } catch {
+    return NONE;
+  }
+  return raw === null ? NONE : parseUserThemes(raw);
+}
+
+/** A copy the caller may change. */
+export function loadUserThemes(): Theme[] {
+  return [...userThemes()];
 }
 
 export function saveUserThemes(ts: Theme[]): void {
@@ -71,8 +93,17 @@ export function saveUserThemes(ts: Theme[]): void {
   changed();
 }
 
+let allFor: readonly Theme[] | null = null;
+let all: Theme[] = [];
+
+/** Built-ins then the person's own; the same array while the stored themes are unchanged. */
 export function allThemes(): Theme[] {
-  return [...BUILTIN_THEMES, ...loadUserThemes()];
+  const users = userThemes();
+  if (users !== allFor) {
+    allFor = users;
+    all = [...BUILTIN_THEMES, ...users];
+  }
+  return all;
 }
 
 const ice = () => BUILTIN_THEMES.find((t) => t.id === DEFAULT_THEME_ID) ?? BUILTIN_THEMES[0]!;
