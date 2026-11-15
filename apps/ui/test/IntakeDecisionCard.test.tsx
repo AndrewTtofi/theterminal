@@ -46,7 +46,7 @@ describe("IntakeDecisionCard", () => {
   });
 
   it("shows hidden characters in a recorded answer and rationale as escapes", () => {
-    const d = { ...firstVersion(true), because: [{ label: "Who is this for?", answer: "a‮b" }], rationale: "x​y" };
+    const d = { ...firstVersion(true), because: [{ label: "Who is this for?", answer: "a\u202Eb" }], rationale: "x\u200By" };
     render(<IntakeDecisionCard decision={d} onDecide={vi.fn()} />);
     const card = screen.getByRole("article");
     expect(card.textContent).toContain("a\\u202eb");

@@ -6,11 +6,11 @@ The record is the ledger: an append-only list of events where each entry include
 
 ## Plain-language lines (narration)
 
-Next to the raw ledger entries, the Ledger panel and each card's story show a one-line headline such as "Wants to run a shell command". These lines have three properties.
+Next to the raw ledger entries, the Ledger panel and each card's story show a one-line headline such as `Wants to run the command "npm test"`. The agent feed uses the same lines for each action, and a decision card asks in the same words ("Agent wants to run the command …"). These lines have three properties.
 
 - **Local and deterministic.** A headline is built from a fixed template and the entry's own fields, on your computer. No model is involved, and the same entry always gives the same headline.
 - **Never stored.** Headlines are computed whenever they are shown or exported. They are not written to the ledger, so they can never disagree with, or replace, what the ledger holds.
-- **Honest.** A headline is not allowed to hide anything. A long command is cut with "(and n more lines)" so you know there is more. Characters that are invisible or that reverse the direction of text are shown as visible escapes (for example `‮`) instead of being applied. The raw entry is always one click away.
+- **Honest.** A headline is not allowed to hide anything. A long command is cut with "(and n more lines)" so you know there is more. Characters that are invisible or that reverse the direction of text are shown as visible escapes (for example `\u202e`) instead of being applied. The raw entry is always one click away.
 
 If a model-written summary is ever added, it will be opt-in and clearly labelled, and it will never be the source of truth.
 
@@ -29,7 +29,7 @@ When you describe an idea for a project, The Terminal asks a short series of que
 What you should know:
 
 - **The record is permanent.** Text you type becomes part of the ledger and cannot be edited or deleted later. If you change your mind, you reopen the plan and answer again; the earlier answers stay in the history.
-- **Secrets are refused, never stored.** Everything you type is checked for secrets, such as API keys and tokens. The check runs on the text as you wrote it and again after paths are cleaned up, so a secret that contains a path or your username is still caught. If something looks like a secret, the step is refused, nothing is recorded, and the message names the field to change without repeating the text.
+- **Secrets are refused, never stored.** Everything you type is checked for secrets, such as API keys and tokens. The check runs on the text as you wrote it and again after paths are cleaned up, so a secret that contains a path or your username is still caught. If something looks like a secret, the step is refused, nothing is recorded, and the message names the field to change without repeating the text. Project names and card titles get the same check and the same path rewriting.
 - **Paths are rewritten.** Your home folder is recorded as `~` and your username as `<user>`, so the ledger carries no personal paths.
 - **Re-planning reuses cards.** Approving a plan creates its cards. If you reopen and approve again, a card whose title already exists in the project is reused instead of duplicated.
 - **A human decides.** Agents cannot answer, decide, approve or reopen a plan.
@@ -57,7 +57,7 @@ Gates are evaluated at the moment of the move, from the current ledger, inside t
 
 **Blocked attempts are recorded.** If you try a move and a gate has no decision, the card does not move and the ledger records a `gate.blocked` event listing the gates and what was unmet. Only a human can clear a gate; an agent's move that would raise one is refused.
 
-**Where cards can be created.** You cannot create a card directly in Ship or Operate, because that would skip the gates. Create it earlier and move it. The exception is the cards created by approving a plan, since approving the plan is itself your decision.
+**Where cards can be created.** You can add a card directly to Plan, Design or Build. Only Ship and Operate are gated at creation: a card created there would skip the gates a move runs, so create it earlier and move it. The exception is the cards created by approving a plan, since approving the plan is itself your decision.
 
 ## Card story
 

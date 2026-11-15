@@ -101,7 +101,7 @@ describe("GateCards", () => {
 
   it("shows the refresh note and renders hostile card titles as visible text", () => {
     const { container } = setup([shipMet()], {
-      cardTitle: "Lo‮gin<img src=x>",
+      cardTitle: "Lo\u202Egin<img src=x>",
       note: "Something changed: a condition is no longer met. The checklist was refreshed.",
     });
     expect(screen.getByRole("status").textContent).toBe("Something changed: a condition is no longer met. The checklist was refreshed.");

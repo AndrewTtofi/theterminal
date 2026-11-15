@@ -62,11 +62,11 @@ describe("AgentFeedPanel", () => {
   });
 
   it("renders hostile input and output as inert text with hidden characters visible", () => {
-    const evil = { ...shell, status: "completed" as const, input: { command: "<script>window.__pwned=1</script>" }, output: "ok‮ko" };
-    const { container } = renderFeed({ runActions: [evil], entries: [message(1, "run1", "<img src=x onerror=alert(1)>​")] });
+    const evil = { ...shell, status: "completed" as const, input: { command: "<script>window.__pwned=1</script>" }, output: "ok\u202Eko" };
+    const { container } = renderFeed({ runActions: [evil], entries: [message(1, "run1", "<img src=x onerror=alert(1)>\u200B")] });
     expect(container.querySelector("img, script")).toBeNull();
     expect(container.textContent).toContain("ok\\u202eko");
     expect(container.textContent).toContain("<img src=x onerror=alert(1)>\\u200b");
-    expect(container.textContent).not.toMatch(/[​‮]/);
+    expect(container.textContent).not.toMatch(/[\u200B\u202E]/);
   });
 });
