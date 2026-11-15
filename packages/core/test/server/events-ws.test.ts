@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import WebSocket from "ws";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
+import { SessionStore } from "../../src/people/sessions.js";
 import { registerAuth } from "../../src/server/auth.js";
 import { registerLedgerStream } from "../../src/server/events-ws.js";
 
@@ -24,9 +25,10 @@ function append(n: number) {
 }
 
 beforeEach(async () => {
-  ledger = new Ledger(openDatabase(":memory:"));
+  const db = openDatabase(":memory:");
+  ledger = new Ledger(db);
   app = Fastify();
-  await registerAuth(app, { token: TOKEN, port: () => port });
+  registerAuth(app, { token: TOKEN, port: () => port, hostRule: () => null, sessions: new SessionStore(db), person: () => null });
   await registerLedgerStream(app, ledger);
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as { port: number }).port;

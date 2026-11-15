@@ -9,7 +9,8 @@ import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { AcmeManager, type AcmeClientLike } from "../../src/server/acme.js";
-import { RemoteListener, checkRemoteHost, listenerOf } from "../../src/server/remote.js";
+import { PUBLIC_ROUTE } from "../../src/server/auth.js";
+import { RemoteListener, checkRemoteHost, listenerOf, type HostRule } from "../../src/server/remote.js";
 import { registerRemoteRoutes } from "../../src/server/remote-routes.js";
 
 /** The addresses every test machine claims to have, so certificates and labels do not depend on the host. */
@@ -55,8 +56,12 @@ export async function closeAll(): Promise<void> {
 
 /**
  * A real Fastify app on a plain loopback port, a RemoteListener feeding it TLS sockets, and a stand-in for the
- * auth hook's first two steps (Task 2b owns the real one): the remote Host check with the `/healthz` exemption.
- * The principal comes from an `x-test-as: <role>` header, so the routes' own checks can be exercised.
+ * auth hook's first two steps: the remote Host check with the `/healthz` exemption. The principal comes from an
+ * `x-test-as: <role>` header, so the routes' own checks can be exercised.
+ *
+ * With `auth`, the real hook replaces the stand-in: the callback registers it (and any routes it needs) on the app
+ * before it listens, given the listener's Host rule and the harness's db and ledger, and the principal is then the
+ * hook's `request.principal`.
  */
 export async function harness(
   opts: {
@@ -66,6 +71,7 @@ export async function harness(
     now?: () => Date;
     /** Gives the listener an AcmeManager over this client (never the real Let's Encrypt in tests). */
     acmeClient?: AcmeClientLike;
+    auth?: (app: FastifyInstance, ctx: { hostRule: () => HostRule; db: Db; ledger: Ledger }) => void;
   } = {},
 ): Promise<Harness> {
   const root = opts.root ?? mkdtempSync(join(tmpdir(), "tt-remote-"));
@@ -81,19 +87,24 @@ export async function harness(
 
   const app = Fastify();
   let remote: RemoteListener | null = null;
-  app.addHook("onRequest", async (request, reply) => {
-    if (listenerOf(request) === "remote" && !checkRemoteHost(request, remote!.hostRule())) {
-      return reply.code(403).send({ error: "bad_host" });
-    }
-  });
+  if (opts.auth) opts.auth(app, { hostRule: () => remote!.hostRule(), db, ledger });
+  else {
+    app.addHook("onRequest", async (request, reply) => {
+      if (listenerOf(request) === "remote" && !checkRemoteHost(request, remote!.hostRule())) {
+        return reply.code(403).send({ error: "bad_host" });
+      }
+    });
+  }
   registerRemoteRoutes(app, {
     remote: { state: () => remote!.state(), enable: (a, i) => remote!.enable(a, i), disable: (a, o) => remote!.disable(a, o) },
-    principalOf: (request) => {
-      const as = request.headers["x-test-as"];
-      return typeof as === "string" ? principal(as as Role, listenerOf(request)) : null;
-    },
+    principalOf: opts.auth
+      ? (request) => request.principal ?? null
+      : (request) => {
+          const as = request.headers["x-test-as"];
+          return typeof as === "string" ? principal(as as Role, listenerOf(request)) : null;
+        },
   });
-  app.get("/whoami", async (request) => ({ listener: listenerOf(request), ip: request.ip }));
+  app.get("/whoami", { config: PUBLIC_ROUTE }, async (request) => ({ listener: listenerOf(request), ip: request.ip }));
   await app.listen({ port: 0, host: "127.0.0.1" });
 
   const acme = opts.acmeClient ? new AcmeManager({ secrets, dataDir, client: opts.acmeClient, now: opts.now }) : null;
@@ -124,7 +135,7 @@ export async function harness(
     async restart() {
       await h.close();
       open.splice(open.indexOf(h), 1);
-      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient });
+      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient, auth: opts.auth });
     },
     async close() {
       await remote!.close();

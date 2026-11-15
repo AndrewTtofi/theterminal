@@ -13,7 +13,11 @@ export type { GateDecision, IntakeRow, IntakeState } from "./events/projections.
 export type { CardStory } from "@theterminal/shared";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
-export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "./server/auth.js";
+export {
+  registerAuth, TOKEN_COOKIE, SESSION_COOKIE, PUBLIC_ROUTE, PUBLIC_ROUTES, ROUTE_ROLES, APP_HOST, routeKey, requireRole, actorOf,
+  assertRoutesHaveRoles, sessionCookieOptions, clientKey, listenerOf, remoteHostAllowed,
+} from "./server/auth.js";
+export type { AuthDeps, HostRule, Principal } from "./server/auth.js";
 export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export { DataDirInUseError } from "./server/data-dir-lock.js";
