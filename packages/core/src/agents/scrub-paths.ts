@@ -96,10 +96,18 @@ const MIN_USERNAME = 3;
 /**
  * Replaces the OS username with `<user>` wherever it stands as a whole word (`ls -l` owners, `whoami`, an email
  * local part). Names shorter than three characters are left alone: they would match too much ordinary text.
+ * The placeholders in `keep` (its own `<user>` by default) are never rewritten, so scrubbing is idempotent even
+ * when the username is `user` itself: a scrubbed text scrubbed again is unchanged.
  */
-export function usernameScrubber(username: string, opts: { caseless?: boolean } = {}): Scrub {
+export function usernameScrubber(username: string, opts: { caseless?: boolean; keep?: readonly string[] } = {}): Scrub {
   if (username.length < MIN_USERNAME) return (s) => s;
   const caseless = opts.caseless ?? (process.platform === "darwin" || process.platform === "win32");
-  const re = new RegExp(`(?<![${WORD}])${escapeRegExp(username)}(?![${RIGHT_WORD}]|\\.[${RIGHT_WORD}])`, caseless ? "giu" : "gu");
-  return (s) => s.replace(re, "<user>");
+  // An empty placeholder would match everywhere and silently turn the scrubber off: keep only non-empty ones.
+  const kept = (opts.keep ?? ["<user>"]).filter((k) => k.length > 0).map(escapeRegExp).join("|");
+  const re = new RegExp(
+    `${kept === "" ? "" : `(${kept})|`}(?<![${WORD}])${escapeRegExp(username)}(?![${RIGHT_WORD}]|\\.[${RIGHT_WORD}])`,
+    caseless ? "giu" : "gu",
+  );
+  if (kept === "") return (s) => s.replace(re, "<user>");
+  return (s) => s.replace(re, (match: string, placeholder: string | undefined) => (placeholder === undefined ? "<user>" : match));
 }

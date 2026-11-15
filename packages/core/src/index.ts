@@ -80,3 +80,4 @@ export type {
   AddConnectionInput, ConnectionServiceDeps, ConnectionTester, Credentials, UpdateConnectionPatch,
 } from "./connections/service.js";
 export { CONNECTION_TESTERS } from "./connections/testers.js";
+export * from "./share/index.js";

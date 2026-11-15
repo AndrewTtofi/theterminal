@@ -428,6 +428,78 @@ describe("narrate: override", () => {
   });
 });
 
+describe("narrate: share", () => {
+  const confirmed = {
+    shareId: "s1",
+    contentHash: "a".repeat(64),
+    bytes: 48213,
+    sections: ["overview", "progress", "audit"],
+    options: { includePrompts: false, includeHardware: true, digestDays: 14 },
+    headSeq: 42,
+  };
+
+  it("narrates a confirmed share page with its options as detail", () => {
+    const out = n(entry("share.confirmed", confirmed));
+    expect(out.headline).toBe("Owner confirmed a share page (3 sections, 48213 bytes)");
+    expect(out.detail).toBe(JSON.stringify(confirmed.options));
+    expect(out.topic).toBe("share");
+    expect(out.attention).toBe(false);
+    expect(out.refs).toEqual({ shareId: "s1" });
+  });
+
+  it("narrates a link for this computer or the local network, with attention", () => {
+    const link = {
+      linkId: "l1",
+      shareId: "s1",
+      tokenDigest: "b".repeat(64),
+      expiresAt: "2026-11-15T18:00:00.000Z",
+      port: 8080,
+      scope: "this_computer",
+    };
+    const here = n(entry("share.link_created", link));
+    expect(here.headline).toBe("Owner created a share link for this computer only, valid until 2026-11-15T18:00:00.000Z");
+    expect(here.attention).toBe(true);
+    expect(here.topic).toBe("share");
+    expect(here.refs).toEqual({ shareId: "s1", linkId: "l1" });
+    expect(here.headline).not.toContain("b".repeat(12));
+    expect(h(entry("share.link_created", { ...link, scope: "local_network" }))).toBe(
+      "Owner created a share link for the local network, valid until 2026-11-15T18:00:00.000Z",
+    );
+  });
+
+  it("narrates revocation by the Owner and after too many wrong attempts", () => {
+    const owned = n(entry("share.revoked", { linkId: "l1", reason: "owner" }));
+    expect(owned.headline).toBe("Owner revoked a share link");
+    expect(owned.refs.linkId).toBe("l1");
+    const guessed = n(entry("share.revoked", { linkId: "l1", reason: "too_many_failures" }, { kind: "system", id: "share" }));
+    expect(guessed.headline).toBe("A share link was revoked after too many wrong attempts");
+    expect(guessed.attention).toBe(true);
+    expect(guessed.topic).toBe("share");
+  });
+
+  it("narrates expiry and stopping", () => {
+    const system: Actor = { kind: "system", id: "share" };
+    expect(h(entry("share.expired", { linkId: "l1" }, system))).toBe("A share link expired");
+    expect(h(entry("share.stopped", { linkId: "l1", reason: "shutdown" }, system))).toBe(
+      "A share link stopped: The Terminal closed",
+    );
+    expect(h(entry("share.stopped", { linkId: "l1", reason: "restart" }, system))).toBe(
+      "A share link stopped: The Terminal restarted",
+    );
+    expect(n(entry("share.expired", { linkId: "l1" }, system)).topic).toBe("share");
+  });
+
+  it("survives malformed share payloads", () => {
+    for (const type of ["share.confirmed", "share.link_created", "share.revoked", "share.expired", "share.stopped"]) {
+      for (const payload of [null, {}, { sections: "x", bytes: {}, scope: 5, reason: [] }]) {
+        const out = n(entry(type, payload));
+        expect(out.topic).toBe("share");
+        expect(typeof out.headline).toBe("string");
+      }
+    }
+  });
+});
+
 describe("narrate: robustness", () => {
   it("falls back for an unknown type", () => {
     const out = n(entry("future.event", { x: 1 }));
@@ -706,6 +778,7 @@ describe("narration.ts purity", () => {
         "./text.js",
         "./override.js",
         "./learn.js",
+        "./share.js",
       ]).toContain(spec);
     }
     expect(source).not.toMatch(/\bimport\s*\(/);

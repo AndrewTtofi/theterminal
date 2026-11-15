@@ -266,9 +266,9 @@ test("window: opens the workspace on theterminal.localhost with the session cook
     expect(new URL(page.url()).search).toBe("");
     // The activity bar shows every view of the shell (apps/ui/src/shell/views.ts), as e2e/shell.spec.ts checks too.
     const viewButtons = page.getByRole("navigation", { name: "Views" }).getByRole("button");
-    await expect(viewButtons).toHaveCount(9);
+    await expect(viewButtons).toHaveCount(10);
     expect(await viewButtons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")))).toEqual([
-      "Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Learn",
+      "Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Share", "Learn",
     ]);
 
     // Only the cookie's attributes are compared, never its value.

@@ -15,6 +15,7 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   ci: null,
   intakeDecisions: 0,
   intakeProjects: [],
+  shareLinks: 0,
 });
 const layout = (over: Partial<LayoutControls> = {}): LayoutControls => ({
   current: "Guided",
@@ -66,6 +67,22 @@ describe("StatusBar", () => {
       />,
     );
     expect(screen.getByText("Needs you: 3")).toBeTruthy();
+  });
+
+  it("says how many share links are live, marked for attention, and opens the Share view", async () => {
+    const onSelectView = vi.fn();
+    const { rerender } = render(<StatusBar status={{ ...status(), shareLinks: 2 }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    const item = screen.getByRole("button", { name: "Sharing: 2 links live" });
+    expect(item.className).toContain("attention");
+    await userEvent.click(item);
+    expect(onSelectView).toHaveBeenCalledWith("share");
+    rerender(<StatusBar status={{ ...status(), shareLinks: 1 }} running={0} pending={0} {...noop} />);
+    expect(screen.getByRole("button", { name: "Sharing: 1 link live" })).toBeTruthy();
+  });
+
+  it("shows no sharing item when no link is live", () => {
+    render(<StatusBar status={status()} running={0} pending={0} {...noop} />);
+    expect(screen.queryByText(/Sharing:/)).toBeNull();
   });
 
   it("leaves out the failed count when nothing failed", () => {

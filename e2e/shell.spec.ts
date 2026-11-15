@@ -10,13 +10,13 @@ async function createProject(page: Page, url: string, name: string) {
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
 }
 
-test("the activity bar shows the nine views and the Board is home with the five columns", async ({ page }) => {
+test("the activity bar shows the ten views and the Board is home with the five columns", async ({ page }) => {
   await page.goto(process.env.TT_E2E_URL!);
   const buttons = views(page).getByRole("button");
-  await expect(buttons).toHaveCount(9);
+  await expect(buttons).toHaveCount(10);
   // Icon buttons: their names are their aria-labels.
   const names = await buttons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
-  expect(names).toEqual(["Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Learn"]);
+  expect(names).toEqual(["Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Share", "Learn"]);
   await expect(views(page).getByRole("button", { name: "Board" })).toHaveAttribute("aria-pressed", "true");
   // The default layout is Guided: the Board and the Conversation, no bottom panel.
   const tabs = await page.getByRole("tab").allInnerTexts();

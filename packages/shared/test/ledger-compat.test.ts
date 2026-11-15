@@ -27,6 +27,11 @@ const ADDED_AFTER_ZOD_3: readonly EventType[] = [
   "override.command",
   "override.discard",
   "override.completed",
+  "share.confirmed",
+  "share.link_created",
+  "share.revoked",
+  "share.expired",
+  "share.stopped",
 ];
 
 describe("ledger payloads written by zod 3", () => {

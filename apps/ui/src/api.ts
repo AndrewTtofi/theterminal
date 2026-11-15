@@ -10,6 +10,8 @@ import type {
   CapacityReport,
   CiStatus,
   Connection,
+  DailyDigest,
+  DigestDays,
   ConnectionKind,
   ConnectionProvider,
   GitHubOverview,
@@ -28,6 +30,11 @@ import type {
   Provider,
   QuestionId,
   RunChanges,
+  ShareLink,
+  ShareOptions,
+  ShareScope,
+  ShareSnapshot,
+  ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
 
@@ -123,7 +130,25 @@ export type Status = {
   intakeDecisions: number;
   /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
   intakeProjects: { projectId: string; name: string; decisions: number }[];
+  /** Share links being served right now. */
+  shareLinks: number;
 };
+
+/**
+ * A share page generated for the Owner to read before confirming: the exact HTML, its sha256 and size, the
+ * snapshot it was rendered from (for the hidden list), and when the preview stops being confirmable.
+ */
+export type SharePreview = {
+  previewId: string;
+  contentHash: string;
+  bytes: number;
+  expiresAt: string;
+  html: string;
+  snapshot: ShareSnapshot;
+};
+
+/** An address a share link may listen on, as the server offers it; `label` is what the Owner picks by. */
+export type ShareAddress = { address: string; scope: ShareScope; label: string };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
 export type SignInView = { state: "running" | "succeeded" | "failed"; lines: string[] };
@@ -243,7 +268,33 @@ export const api = {
   completeIntake: (projectId: string) => request<IntakeView>(`/api/projects/${enc(projectId)}/intake/complete`, { method: "POST" }),
   reopenIntake: (projectId: string, reason: string) =>
     request<IntakeView>(`/api/projects/${enc(projectId)}/intake/reopen`, { method: "POST", body: { reason } }),
+  /** Generates the share page for the Owner to read; nothing is recorded or kept until it is confirmed. */
+  previewShare: (projectId: string, options: ShareOptions) =>
+    request<SharePreview>(`/api/projects/${enc(projectId)}/share/preview`, { method: "POST", body: options }),
+  /** Saves the previewed page and records it; 409 `preview_stale` when the page changed or the preview expired. */
+  confirmShare: (projectId: string, previewId: string, contentHash: string) =>
+    request<ShareSnapshotRecord>(`/api/projects/${enc(projectId)}/share/confirm`, { method: "POST", body: { previewId, contentHash } }),
+  listShareSnapshots: (projectId: string) => request<ShareSnapshotRecord[]>(`/api/projects/${enc(projectId)}/share/snapshots`),
+  listShareAddresses: () => request<ShareAddress[]>("/api/share/addresses"),
+  /** The url carries the link's one-time token: it is returned once, here, and never again. */
+  createShareLink: (shareId: string, address: string, ttlMinutes: number) =>
+    request<{ link: ShareLink; url: string }>(`/api/share/snapshots/${enc(shareId)}/links`, { method: "POST", body: { address, ttlMinutes } }),
+  listShareLinks: (projectId?: string) =>
+    request<ShareLink[]>(projectId === undefined ? "/api/share/links" : `/api/share/links?projectId=${enc(projectId)}`),
+  revokeShareLink: (id: string) => request<void>(`/api/share/links/${enc(id)}`, { method: "DELETE" }),
+  /** One plain-language account per UTC day of the project's ledger, newest first. */
+  getDigests: (projectId: string, days: DigestDays) => request<DailyDigest[]>(`/api/projects/${enc(projectId)}/digests?days=${days}`),
 };
+
+/** A saved share page, served inline: opened in a new tab to read, present or print. */
+export function shareSnapshotUrl(id: string): string {
+  return `/api/share/snapshots/${encodeURIComponent(id)}`;
+}
+
+/** The same page as a download. */
+export function shareDownloadUrl(id: string): string {
+  return `/api/share/snapshots/${encodeURIComponent(id)}/download`;
+}
 
 /** Why a Codex run cannot be given an MCP server; the picker and the MCP editors show it too. */
 export const CODEX_MCP_NOTE =
@@ -289,6 +340,16 @@ export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finishe
 export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    // The share view's refusals, before the generic 400, 404 and 409 wordings below.
+    if (e.code === "preview_stale" || e.code === "preview_not_found") {
+      return "The preview has changed or expired. Preview again before confirming.";
+    }
+    if (e.code === "share_not_clean") return "The page could not be cleaned of sensitive text and was not generated.";
+    if (e.code === "share_too_large") return "The page is too large to share. Choose fewer digest days.";
+    if (e.code === "share_link_active") return "A link is already live for this project. Revoke it first.";
+    if (e.code === "snapshot_tampered") return "This snapshot's file no longer matches the ledger. It will not be shared.";
+    if (e.code === "snapshot_missing") return "This snapshot's file is missing.";
+    if (e.code === "link_not_active") return "That link is no longer live.";
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
     if (e.code === "secret_in_text") return "That text looks like it contains a key or password. It was not saved.";
     if (e.code === "intake_completed") return "This plan is approved. Reopen it to change answers.";
