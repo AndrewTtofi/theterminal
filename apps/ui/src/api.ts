@@ -253,8 +253,12 @@ export const api = {
   /** Pairs with the machine showing `code` at `address`; see errorMessage(e, "pair") for its refusals. */
   pairMachine: (address: string, code: string) => request<Machine>("/api/link/pair", { method: "POST", body: { address, code } }),
   unpairMachine: (machineId: string) => request<void>(`/api/link/machines/${enc(machineId)}`, { method: "DELETE" }),
-  /** Asks the machine again now; one that does not answer is `online: false` with the values it last sent. */
-  getMachineCapacity: (machineId: string) => request<MachineCapacity>(`/api/link/machines/${enc(machineId)}/capacity`),
+  /**
+   * Asks the machine again now, or (`cached`) answers from the server's 30 s cache. One that does not answer is
+   * `online: false` with the values it last sent; 409 `machine_key_mismatch` when its address presented another key.
+   */
+  getMachineCapacity: (machineId: string, cached = false) =>
+    request<MachineCapacity>(`/api/link/machines/${enc(machineId)}/capacity${cached ? "?cached=1" : ""}`),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),

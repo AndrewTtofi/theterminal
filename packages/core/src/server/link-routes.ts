@@ -17,6 +17,7 @@ const nameBody = z.object({ name: z.string() }).strict();
 const enableBody = z.object({ acknowledgement: z.string() }).strict();
 const pairBody = z.object({ address: z.string(), code: z.string() }).strict();
 const idParams = z.object({ id: z.string().min(1).max(200) });
+const capacityQuery = z.object({ cached: z.literal("1").optional() }).strict();
 
 /**
  * Linked machines, for the Owner's workspace only: these sit behind registerAuth like every /api route (session and
@@ -86,10 +87,12 @@ export function registerLinkRoutes(app: FastifyInstance, deps: LinkRouteDeps): v
     return reply.code(204).send();
   });
 
-  // Asked again now, bypassing the 30 s cache. A machine that does not answer, refuses or sends something unreadable
-  // is `online: false` with the values it last sent; nothing from its reply reaches this answer.
+  // Asked again now, or with `?cached=1` from the 30 s cache (sharing a request in flight). A machine that does not
+  // answer, refuses or sends something unreadable is `online: false` with the values it last sent; nothing from its
+  // reply reaches this answer. Another key at its address is 409 machine_key_mismatch.
   app.get("/api/link/machines/:id/capacity", async (req) => {
     const { id } = idParams.parse(req.params);
-    return deps.capacity.capacityOf(id, { fresh: true });
+    const { cached } = capacityQuery.parse(req.query);
+    return deps.capacity.capacityOf(id, { fresh: cached !== "1" });
   });
 }

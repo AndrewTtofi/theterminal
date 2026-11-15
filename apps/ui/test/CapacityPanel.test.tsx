@@ -123,6 +123,17 @@ describe("CapacityPanel", () => {
     expect(row.querySelector("time")).toBeNull();
   });
 
+  it("says key changed for a machine whose address presented another key, with no last seen", () => {
+    const flagged = { ...machines[1]!, problem: "key_mismatch" as const, lastSeenAt: null, hardware: null };
+    renderPanel({ report: report({ machines: [flagged] }) });
+    const row = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    const cells = within(row).getAllByRole("cell").map((c) => c.textContent);
+    expect(cells[1]).toBe("key changed");
+    expect(cells.at(-1)).toBe(new Date(flagged.checkedAt).toLocaleString());
+    expect(row.textContent).not.toMatch(/last seen|never seen/);
+    expect(row.className).toContain("key-changed");
+  });
+
   it("shows a remote machine's hardware with hidden characters made visible", () => {
     const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9", gpu: "RTX\u200B4090" };
     renderPanel({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });

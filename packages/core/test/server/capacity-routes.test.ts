@@ -218,6 +218,39 @@ describe("linked machines in the capacity API", { timeout: 30_000 }, () => {
     expect(gone).toMatchObject({ machineId: workerId, name: "GPU box", online: false, lastSeenAt: one.checkedAt, hardware: { cpu: "Fake CPU" } });
   });
 
+  it("?cached=1 answers from the 30 s cache that GET /api/capacity filled; without it, the machine is asked again", async () => {
+    const requester = await start();
+    const worker = await start({ hardware: async () => fakeHardware });
+    const workerId = await pairServers(requester, worker);
+    const [listed] = (await json<CapacityReport>(send(requester, "GET", "/api/capacity"))).machines;
+    await new Promise((r) => setTimeout(r, 20));
+    const cached = await json<MachineCapacity>(send(requester, "GET", `/api/link/machines/${workerId}/capacity?cached=1`));
+    expect(cached.checkedAt).toBe(listed!.checkedAt);
+    const fresh = await json<MachineCapacity>(send(requester, "GET", `/api/link/machines/${workerId}/capacity`));
+    expect(fresh.checkedAt).not.toBe(listed!.checkedAt);
+    expect((await send(requester, "GET", `/api/link/machines/${workerId}/capacity?cached=yes`)).status).toBe(400);
+  });
+
+  it("a machine answering with another key: 409 machine_key_mismatch from the route, flagged in GET /api/capacity", async () => {
+    const requester = await start();
+    const worker = await start();
+    const workerId = await pairServers(requester, worker);
+    const { self } = await json<{ self: { linking: { port: number } } }>(send(worker, "GET", "/api/link"));
+    await running.splice(running.indexOf(worker), 1)[0]!.close();
+    // Another Terminal, with its own key, now listens at the paired address.
+    const impostor = await start({ linkPort: self.linking.port });
+    const on = await json<{ linking: { port: number } }>(send(impostor, "POST", "/api/link/enable", { acknowledgement: LINKING_ACK }));
+    expect(on.linking.port).toBe(self.linking.port);
+
+    for (const path of [`/api/link/machines/${workerId}/capacity`, `/api/link/machines/${workerId}/capacity?cached=1`]) {
+      const res = await send(requester, "GET", path);
+      expect(res.status, path).toBe(409);
+      expect(await res.json()).toEqual({ error: "machine_key_mismatch" });
+    }
+    const [row] = (await json<CapacityReport>(send(requester, "GET", "/api/capacity"))).machines;
+    expect(row).toMatchObject({ machineId: workerId, online: false, problem: "key_mismatch", lastSeenAt: null, hardware: null, connections: [] });
+  });
+
   it("GET /api/link/machines/:id/capacity: 404 for a machine that is not paired, 401 without the session", async () => {
     const s = await start();
     const missing = await send(s, "GET", `/api/link/machines/${"0".repeat(32)}/capacity`);

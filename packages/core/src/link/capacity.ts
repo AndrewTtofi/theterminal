@@ -1,5 +1,6 @@
 import { machineCapacityBodySchema, type MachineCapacity, type MachineCapacityBody } from "@theterminal/shared";
 import { NotFoundError } from "../board/board-service.js";
+import { MachineKeyMismatchError } from "./client.js";
 import type { LinkService } from "./service.js";
 
 export type LinkCapacityDeps = {
@@ -19,8 +20,9 @@ const NOTHING: MachineCapacityBody = { hardware: null, localModels: [], sources:
  * The linked machines' capacity, as this computer asks for it over the link (`GET /link/v1/capacity`, mTLS with the
  * paired key pinned). What a worker sends is untrusted: it is checked with the schema (bounded lengths and counts,
  * unknown fields dropped) and the machine's id and name are this computer's own records, never the worker's say.
- * A machine that does not answer, refuses, presents another key or sends something unreadable is offline, with the
- * last values it sent (kept in memory only) and when it last answered; nothing from a refusal is kept.
+ * A machine that does not answer, refuses or sends something unreadable is offline, with the last values it sent (kept
+ * in memory only) and when it last answered; nothing from a refusal is kept. One whose address presents another key
+ * is never just offline: capacityOf throws MachineKeyMismatchError (409 `machine_key_mismatch`) and all() flags it.
  */
 export class LinkCapacity {
   private readonly link: LinkService;
@@ -40,7 +42,8 @@ export class LinkCapacity {
 
   /**
    * One paired machine's capacity; reused for 30 s unless `fresh`. Concurrent asks share one request. NotFoundError
-   * for a machine that is not paired; never throws for a machine that does not answer.
+   * for a machine that is not paired, MachineKeyMismatchError for one presenting another key; never throws for a
+   * machine that does not answer.
    */
   async capacityOf(machineId: string, opts: { fresh?: boolean } = {}): Promise<MachineCapacity> {
     const machine = this.link.machines().find((m) => m.id === machineId);
@@ -69,7 +72,10 @@ export class LinkCapacity {
           timer = setTimeout(() => resolve(this.offline(m.id, m.name)), this.timeoutMs);
         });
         try {
-          return await Promise.race([this.capacityOf(m.id).catch(() => this.offline(m.id, m.name)), late]);
+          const asked = this.capacityOf(m.id).catch((err: unknown) =>
+            err instanceof MachineKeyMismatchError ? this.keyMismatch(m.id, m.name) : this.offline(m.id, m.name),
+          );
+          return await Promise.race([asked, late]);
         } finally {
           clearTimeout(timer);
         }
@@ -84,10 +90,12 @@ export class LinkCapacity {
       const body = await client.request(this.link.peerFor(machineId), "GET", "/link/v1/capacity", undefined, machineCapacityBodySchema);
       const at = this.now().toISOString();
       this.lastGood.set(machineId, { body, at });
-      value = { ...body, machineId, name, online: true, checkedAt: at, lastSeenAt: at };
+      value = { ...body, machineId, name, online: true, checkedAt: at, lastSeenAt: at, problem: null };
     } catch (err) {
       if (err instanceof NotFoundError) throw err; // unpaired while asking
-      // Unreachable, refused, another key, an unreadable reply, no identity: all the same to the reader, offline.
+      // Another key at the paired address is not "offline": the caller says so, and nothing is cached or kept.
+      if (err instanceof MachineKeyMismatchError) throw err;
+      // Unreachable, refused, an unreadable reply, no identity: all the same to the reader, offline.
       value = this.offline(machineId, name);
     }
     this.cached.set(machineId, { at: this.now().getTime(), value });
@@ -96,6 +104,13 @@ export class LinkCapacity {
 
   private offline(machineId: string, name: string): MachineCapacity {
     const last = this.lastGood.get(machineId);
-    return { ...(last?.body ?? NOTHING), machineId, name, online: false, checkedAt: this.now().toISOString(), lastSeenAt: last?.at ?? null };
+    return {
+      ...(last?.body ?? NOTHING), machineId, name, online: false, checkedAt: this.now().toISOString(), lastSeenAt: last?.at ?? null, problem: null,
+    };
+  }
+
+  /** A machine whose paired address presented another key: flagged, with none of the values the paired key sent. */
+  private keyMismatch(machineId: string, name: string): MachineCapacity {
+    return { ...NOTHING, machineId, name, online: false, checkedAt: this.now().toISOString(), lastSeenAt: null, problem: "key_mismatch" };
   }
 }

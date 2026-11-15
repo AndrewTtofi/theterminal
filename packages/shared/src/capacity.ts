@@ -59,6 +59,11 @@ export type MachineCapacity = {
   online: boolean;
   checkedAt: string;
   lastSeenAt: string | null;
+  /**
+   * Set by the requester only: `key_mismatch` when the machine at the paired address presented another key. Such a row
+   * carries none of the values the old key sent.
+   */
+  problem: "key_mismatch" | null;
   hardware: HardwareInfo | null;
   localModels: LocalEngine[];
   sources: CapacitySource[];

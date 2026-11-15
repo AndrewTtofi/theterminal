@@ -2,7 +2,9 @@ import { useEffect, useRef } from "react";
 import type { CapacitySource, Figure, HardwareInfo, LocalEngine, MachineCapacity } from "@theterminal/shared";
 import { OWN_LABEL, PROVIDER_NAMES } from "../components/ProviderAuthSettings";
 import { useShell } from "../shell/model";
-import { shownName } from "./MachinesSideBar";
+import { gb, hardwareSummary, machineState, shownName } from "./machine-text";
+
+export { hardwareSummary } from "./machine-text";
 
 const REFRESH_MS = 60_000;
 const ESTIMATE_TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -26,7 +28,6 @@ export const engineText = (e: LocalEngine) => `${e.engine === "ollama" ? "Ollama
 /** Decimal gigabytes, as Ollama lists model sizes. */
 const sizeText = (bytes: number | null) => (bytes === null ? "not reported" : `${(bytes / 1e9).toFixed(1)} GB`);
 
-const gb = (n: number) => `${n} GB`;
 /** The CPU with its core count when known. */
 export const cpuText = (hw: HardwareInfo) => (hw.cpu === null ? "not detected" : hw.cores === null ? hw.cpu : `${hw.cpu} (${hw.cores} cores)`);
 export const memoryText = (hw: HardwareInfo) => (hw.memoryGb === null ? "not detected" : gb(hw.memoryGb));
@@ -36,9 +37,6 @@ export function gpuText(hw: HardwareInfo): string {
   if (hw.gpuMemoryGb === null) return hw.gpu;
   return hw.platform === "darwin" ? `${hw.gpu}, ${gb(hw.gpuMemoryGb)} shared with the CPU` : `${hw.gpu}, ${gb(hw.gpuMemoryGb)}`;
 }
-/** A machine's hardware on one line: `cpu · memory · gpu`. */
-export const hardwareSummary = (hw: HardwareInfo) =>
-  `${hw.cpu ?? "CPU not detected"} · ${hw.memoryGb === null ? "memory not detected" : gb(hw.memoryGb)} · ${hw.gpu ?? "GPU not detected"}`;
 /** How many models a machine's servers list in all. */
 export const modelCount = (m: MachineCapacity) => m.localModels.reduce((n, e) => n + e.models.length, 0);
 
@@ -49,7 +47,8 @@ const at = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleString()
  * (`lastSeenAt`), or that it never has.
  */
 export function CheckedAt({ machine }: { machine: MachineCapacity }) {
-  if (machine.online) return at(machine.checkedAt);
+  // Another key at its address: nothing it sent is shown, so there is no "last seen" either.
+  if (machine.online || machine.problem !== null) return at(machine.checkedAt);
   return machine.lastSeenAt === null ? <>never seen</> : <>last seen {at(machine.lastSeenAt)}</>;
 }
 
@@ -71,9 +70,9 @@ function MachinesTable({ machines }: { machines: MachineCapacity[] }) {
       </thead>
       <tbody>
         {machines.map((m) => (
-          <tr key={m.machineId} className={m.online ? undefined : "offline"}>
+          <tr key={m.machineId} className={m.problem === "key_mismatch" ? "offline key-changed" : m.online ? undefined : "offline"}>
             <td>{shownName(m.name)}</td>
-            <td>{m.online ? "online" : "offline"}</td>
+            <td>{machineState(m)}</td>
             <td>{m.hardware === null ? "not reported" : shownName(cpuText(m.hardware))}</td>
             <td>{m.hardware === null ? "not reported" : memoryText(m.hardware)}</td>
             <td>{m.hardware === null ? "not reported" : shownName(gpuText(m.hardware))}</td>

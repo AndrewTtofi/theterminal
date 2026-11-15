@@ -1,11 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { LINKING_ACK, visibleControls } from "@theterminal/shared";
+import { LINKING_ACK } from "@theterminal/shared";
 import type { MachineCapacity, MachinePresence } from "@theterminal/shared";
-import { api, errorMessage } from "../api";
+import { ApiError, api, errorMessage } from "../api";
 import type { LinkSelf } from "../api";
 import { useShell } from "../shell/model";
-import { hardwareSummary } from "./CapacityPanel";
+import { KEY_CHANGED, hardwareSummary, shownName } from "./machine-text";
+
+export { shownName } from "./machine-text";
 
 const REFRESH_MS = 30_000;
 const NAME_HELP = 'Pick a short name such as "Mac" or "GPU desktop". It is recorded in the ledger of every machine you link.';
@@ -16,8 +18,6 @@ export function fingerprintGroups(fingerprint: string): string {
   return (fingerprint.slice(0, 16).match(/.{1,4}/g) ?? []).join(" ");
 }
 
-/** A name another machine chose (or this one, as recorded): plain text with hidden characters made visible. */
-export const shownName = (name: string) => visibleControls(name);
 
 /** Asks for the overview at once and every `ms` while mounted. */
 export function useMachinesRefresh(refresh: () => void, ms = REFRESH_MS): void {
@@ -194,21 +194,30 @@ function ThisComputer({ self, refresh }: { self: LinkSelf; refresh: () => void }
 
 /**
  * A linked machine's hardware on one line, as it last answered (asked when the row appears and whenever its presence
- * changes). Whatever went wrong, the row says one fixed sentence: nothing from a refusal is shown.
+ * changes). Whatever went wrong, the row says one fixed sentence: nothing from a refusal is shown. Another key at its
+ * address is an alert, never "unavailable".
  */
 function MachineHardware({ id, online }: { id: string; online: boolean | null }) {
-  const [capacity, setCapacity] = useState<MachineCapacity | "failed" | null>(null);
+  const [capacity, setCapacity] = useState<MachineCapacity | "failed" | "key_changed" | null>(null);
   useEffect(() => {
     let live = true;
-    api.getMachineCapacity(id).then(
+    // From the server's 30 s cache, sharing a request already in flight (the Capacity view may have asked).
+    api.getMachineCapacity(id, true).then(
       (c) => live && setCapacity(c),
-      () => live && setCapacity("failed"),
+      (e: unknown) => live && setCapacity(e instanceof ApiError && e.code === "machine_key_mismatch" ? "key_changed" : "failed"),
     );
     return () => {
       live = false;
     };
   }, [id, online]);
   if (capacity === null) return null;
+  if (capacity === "key_changed") {
+    return (
+      <p className="warning machine-key-changed" role="alert">
+        {KEY_CHANGED}
+      </p>
+    );
+  }
   const text =
     capacity === "failed" ? "Hardware unavailable" : capacity.hardware === null ? "Hardware not reported" : shownName(hardwareSummary(capacity.hardware));
   return <p className="machine-hardware">{text}</p>;

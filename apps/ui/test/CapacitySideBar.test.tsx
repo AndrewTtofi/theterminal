@@ -154,6 +154,12 @@ describe("CapacitySideBar", () => {
     expect(screen.queryByRole("region", { name: / · (online|offline)$/ })).toBeNull();
   });
 
+  it("says key changed for a machine whose address presented another key, with no last seen", () => {
+    renderSideBar({ report: report({ machines: [{ ...machines[1]!, name: "Laptop", problem: "key_mismatch", lastSeenAt: null, hardware: null }] }) });
+    const section = screen.getByRole("region", { name: "Laptop · key changed" });
+    expect(section.textContent).not.toMatch(/last seen|never seen/);
+  });
+
   it("shows a remote machine's hardware summary with hidden characters made visible", () => {
     const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9" };
     renderSideBar({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });

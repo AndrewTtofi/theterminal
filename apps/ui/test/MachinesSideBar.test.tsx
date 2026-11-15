@@ -217,7 +217,8 @@ describe("MachinesSideBar", () => {
     await waitFor(() => expect(rows[0]!.querySelector(".machine-hardware")?.textContent).toBe("AMD Ryzen 9 7950X · 64 GB · NVIDIA RTX 4090"));
     // Offline: the values it last sent.
     await waitFor(() => expect(rows[1]!.querySelector(".machine-hardware")?.textContent).toBe("Apple M1 · 16 GB · GPU not detected"));
-    expect(m.getMachineCapacity.mock.calls.map((c) => c[0]).sort()).toEqual(["22".repeat(16), "33".repeat(16)]);
+    // From the shared 30 s cache, not a fresh ask per row.
+    expect(m.getMachineCapacity.mock.calls.map((c) => c.join(" ")).sort()).toEqual([`${"22".repeat(16)} true`, `${"33".repeat(16)} true`]);
   });
 
   it("says when a machine sent no hardware, and a fixed sentence when its capacity could not be read", async () => {
@@ -239,5 +240,15 @@ describe("MachinesSideBar", () => {
     const row = within(screen.getByRole("list", { name: "Linked machines" })).getByRole("listitem");
     await waitFor(() => expect(row.querySelector(".machine-hardware")?.textContent).toBe("Ryzen\\u202e9 · 64 GB · NVIDIA RTX 4090"));
     expect(container.textContent).not.toMatch(/[\u202e]/);
+  });
+
+  it("says plainly, as an alert, when a machine's key has changed", async () => {
+    m.getMachineCapacity.mockRejectedValue(new ApiError(409, "machine_key_mismatch"));
+    renderSideBar({ overview: overview({ machines: [machine()] }) });
+    const row = within(screen.getByRole("list", { name: "Linked machines" })).getByRole("listitem");
+    const alert = await within(row).findByRole("alert");
+    expect(alert.textContent).toBe("This machine's key has changed. Unlink it and pair again.");
+    expect(alert.className).toContain("warning");
+    expect(row.querySelector(".machine-hardware")).toBeNull();
   });
 });

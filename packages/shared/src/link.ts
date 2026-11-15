@@ -238,6 +238,7 @@ export const machineCapacitySchema = z.object({
   online: z.boolean(),
   checkedAt: z.iso.datetime(),
   lastSeenAt: z.iso.datetime().nullable(),
+  problem: z.enum(["key_mismatch"]).nullable(),
   hardware: hardwareSchema.nullable(),
   localModels: z.array(localEngineSchema).max(10),
   sources: z.array(capacitySourceSchema).max(100),
@@ -256,10 +257,11 @@ export const machineCapacitySchema = z.object({
 
 /**
  * What a worker sends about itself (`GET /link/v1/capacity`): a `MachineCapacity` without the fields only the
- * requester knows (the machine's id and the name it recorded, whether and when it answered). Unknown keys are dropped.
+ * requester knows (the machine's id and the name it recorded, whether and when it answered, and any problem it found).
+ * Unknown keys are dropped.
  */
 export const machineCapacityBodySchema = machineCapacitySchema.omit({
-  machineId: true, name: true, online: true, checkedAt: true, lastSeenAt: true,
+  machineId: true, name: true, online: true, checkedAt: true, lastSeenAt: true, problem: true,
 });
 export type MachineCapacityBody = z.infer<typeof machineCapacityBodySchema>;
 

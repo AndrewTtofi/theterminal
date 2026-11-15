@@ -38,8 +38,8 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
     cached !== null && now() - cached.at < ttl ? cached.engines : detect();
 
   /** This computer's own report: what `/link/v1/capacity` tells a paired machine is built from it. */
-  const local = async (machines: MachineCapacity[] = []): Promise<CapacityReport> => {
-    const engines = await localEngines();
+  const local = async (machines: MachineCapacity[] = [], found?: LocalEngine[]): Promise<CapacityReport> => {
+    const engines = found ?? (await localEngines());
     return capacityReport(db, {
       budgets: () => connections.budgets(), modes, hardware: () => connections.hardware(), localModels: () => engines,
       machines: () => machines,
@@ -47,8 +47,8 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
   };
 
   app.get("/api/capacity", async (): Promise<CapacityReport> => {
-    const [machines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
-    return local(machines);
+    const [machines, engines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
+    return local(machines, engines);
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.

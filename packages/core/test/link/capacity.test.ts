@@ -12,7 +12,7 @@ import { NotFoundError } from "../../src/board/board-service.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { capacityReport } from "../../src/capacity/report.js";
 import { LinkListener } from "../../src/link/listener.js";
-import { LinkClient } from "../../src/link/client.js";
+import { LinkClient, MachineKeyMismatchError } from "../../src/link/client.js";
 import { LinkService } from "../../src/link/service.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { registerLinkProtocolRoutes, type LinkProtocolDeps } from "../../src/link/protocol-routes.js";
@@ -192,7 +192,7 @@ describe("LinkCapacity (the requester)", { timeout: 20_000 }, () => {
     const first = await capacity.capacityOf(bId.machineId);
     expect(machineCapacitySchema.safeParse(first).success).toBe(true);
     expect(first).toMatchObject({
-      machineId: bId.machineId, name: "GPU box", online: true, checkedAt: now.toISOString(), lastSeenAt: now.toISOString(), hardware: HARDWARE,
+      machineId: bId.machineId, name: "GPU box", online: true, checkedAt: now.toISOString(), lastSeenAt: now.toISOString(), problem: null, hardware: HARDWARE,
     });
     expect(counter.reports).toBe(1);
     now = new Date(now.getTime() + 29_000);
@@ -231,7 +231,7 @@ describe("LinkCapacity (the requester)", { timeout: 20_000 }, () => {
     const capacity = new LinkCapacity({ link: a.link });
     const row = await capacity.capacityOf(stranger.machineId);
     expect(row).toMatchObject({
-      machineId: stranger.machineId, name: "Spare", online: false, lastSeenAt: null,
+      machineId: stranger.machineId, name: "Spare", online: false, lastSeenAt: null, problem: null,
       hardware: null, localModels: [], sources: [], adapters: [], connections: [],
     });
     expect(machineCapacitySchema.safeParse(row).success).toBe(true);
@@ -274,13 +274,15 @@ describe("LinkCapacity (the requester)", { timeout: 20_000 }, () => {
     const a = makeService();
     await a.link.load();
     const worker = await newIdentity();
-    const extra = await fakeWorker(worker, http200(JSON.stringify({ ...validBody, machineId: "f".repeat(32), name: "Spoofed", online: true, apiKey: "TESTKEY-x" })));
+    const extra = await fakeWorker(
+      worker, http200(JSON.stringify({ ...validBody, machineId: "f".repeat(32), name: "Spoofed", online: true, problem: "key_mismatch", apiKey: "TESTKEY-x" })),
+    );
     recordPaired(a.db, a.ledger, worker, extra.port);
     const capacity = new LinkCapacity({ link: a.link });
     const row = await capacity.capacityOf(worker.machineId);
-    expect(row).toMatchObject({ machineId: worker.machineId, name: "GPU box", online: true });
+    expect(row).toMatchObject({ machineId: worker.machineId, name: "GPU box", online: true, problem: null });
     expect(Object.keys(row).sort()).toEqual(
-      ["adapters", "checkedAt", "connections", "hardware", "lastSeenAt", "localModels", "machineId", "name", "online", "sources"],
+      ["adapters", "checkedAt", "connections", "hardware", "lastSeenAt", "localModels", "machineId", "name", "online", "problem", "sources"],
     );
     expect(row.hardware).not.toHaveProperty("enabled");
     expect(JSON.stringify(row)).not.toContain("TESTKEY");
@@ -290,6 +292,34 @@ describe("LinkCapacity (the requester)", { timeout: 20_000 }, () => {
     const bad = await fakeWorker(other, http200(JSON.stringify(tooLong)));
     recordPaired(a.db, a.ledger, other, bad.port, "Bad");
     expect(await capacity.capacityOf(other.machineId)).toMatchObject({ online: false, hardware: null, connections: [] });
+  });
+
+  it("a machine presenting another key is never just offline: capacityOf rejects, all() flags it and shows no stale values", async () => {
+    const a = makeService();
+    await a.link.load();
+    const paired = await newIdentity();
+    const impostor = await newIdentity();
+    const real = await fakeWorker(paired, http200(JSON.stringify(validBody)));
+    recordPaired(a.db, a.ledger, paired, real.port);
+    let now = new Date("2026-11-15T12:00:00.000Z");
+    const capacity = new LinkCapacity({ link: a.link, now: () => now });
+    expect(await capacity.capacityOf(paired.machineId)).toMatchObject({ online: true, problem: null, hardware: HARDWARE });
+
+    // The paired address now answers with another key.
+    const other = await fakeWorker(impostor, http200(JSON.stringify(validBody)));
+    recordPaired(a.db, a.ledger, paired, other.port);
+    now = new Date(now.getTime() + 31_000);
+    await expect(capacity.capacityOf(paired.machineId)).rejects.toBeInstanceOf(MachineKeyMismatchError);
+    await expect(capacity.capacityOf(paired.machineId, { fresh: true })).rejects.toBeInstanceOf(MachineKeyMismatchError);
+    // Nothing was cached: asked again, it still rejects (no offline row with the old values).
+    await expect(capacity.capacityOf(paired.machineId)).rejects.toBeInstanceOf(MachineKeyMismatchError);
+
+    const [row] = await capacity.all();
+    expect(row).toEqual({
+      machineId: paired.machineId, name: "GPU box", online: false, checkedAt: now.toISOString(), lastSeenAt: null, problem: "key_mismatch",
+      hardware: null, localModels: [], sources: [], adapters: [], connections: [],
+    });
+    expect(machineCapacitySchema.safeParse(row).success).toBe(true);
   });
 
   it("all(): every paired machine at once, each within the timeout; one that never answers is offline", async () => {
