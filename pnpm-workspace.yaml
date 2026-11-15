@@ -21,3 +21,7 @@ overrides:
   # picks are old enough.
   "rolldown@~1.2": 1.2.16
   "@rolldown/pluginutils@^1": 1.0.1
+  # GHSA (Dependabot alert 10): minimatch before 11.0.1 can be slowed by crafted glob patterns. Only electron-builder
+  # and @electron/universal pull it in, with patterns from our own build config, so it is not reachable from input;
+  # the patched line is used anyway. 11.0.3 is the newest release at least 14 days old.
+  "minimatch@>=7 <11.0.1": 11.0.3
