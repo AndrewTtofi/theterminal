@@ -56,6 +56,8 @@ describe("LedgerSideBar", () => {
     expect(
       screen.getByText("Downloads every entry as one line of JSON with its hash chain and a plain-language headline."),
     ).toBeTruthy();
+    const note = document.getElementById(link.getAttribute("aria-describedby")!)!;
+    expect(note.textContent).toBe("Downloads every entry as one line of JSON with its hash chain and a plain-language headline.");
   });
 
   it("does not export when this project is chosen but none is selected", () => {
@@ -64,6 +66,11 @@ describe("LedgerSideBar", () => {
     const button = screen.getByRole("button", { name: "Export for audit" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(screen.getByText("Select a project")).toBeTruthy();
+    const described = button.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)!.textContent);
+    expect(described).toEqual([
+      "Select a project",
+      "Downloads every entry as one line of JSON with its hash chain and a plain-language headline.",
+    ]);
   });
 
   it("links the export of every project when all projects are shown", () => {

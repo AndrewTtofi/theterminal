@@ -5,6 +5,7 @@ import type {
   AuthMode,
   Board,
   Card,
+  CardStory,
   CatalogEntry,
   CapacityReport,
   CiStatus,
@@ -13,6 +14,8 @@ import type {
   ConnectionProvider,
   GitHubOverview,
   DecisionId,
+  GateDecisionInput,
+  GateEvaluation,
   HardwareInfo,
   IntakeAnswer,
   IntakeView,
@@ -131,8 +134,13 @@ export const api = {
   getBoard: (id: string) => request<Board>(`/api/projects/${encodeURIComponent(id)}/board`),
   addCard: (projectId: string, i: { title: string; stage: Stage }) =>
     request<Card>(`/api/projects/${encodeURIComponent(projectId)}/cards`, { method: "POST", body: i }),
-  moveCard: (cardId: string, to: Stage) =>
-    request<Card>(`/api/cards/${encodeURIComponent(cardId)}/move`, { method: "POST", body: { to } }),
+  /** Every gate a move to `to` would raise, evaluated now; nothing is recorded. */
+  getCardGates: (cardId: string, to: Stage) =>
+    request<GateEvaluation[]>(`/api/cards/${enc(cardId)}/gates?to=${enc(to)}`),
+  /** Moves through the gates; a gate left without a decision answers 409 `gate_blocked` with `{ gates }` (see blockedGates). */
+  moveCard: (cardId: string, to: Stage, gates?: GateDecisionInput[]) =>
+    request<Card>(`/api/cards/${enc(cardId)}/move`, { method: "POST", body: gates ? { to, gates } : { to } }),
+  getCardStory: (cardId: string) => request<CardStory>(`/api/cards/${enc(cardId)}/story`),
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
@@ -211,6 +219,15 @@ function detailString(e: ApiError, key: string): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+/** The gate evaluations a refused move (409 `gate_blocked`) sent back, or null for any other error. */
+export function blockedGates(e: unknown): GateEvaluation[] | null {
+  if (!(e instanceof ApiError) || e.code !== "gate_blocked") return null;
+  const d = e.detail;
+  if (typeof d !== "object" || d === null) return null;
+  const gates = (d as Record<string, unknown>).gates;
+  return Array.isArray(gates) ? (gates as GateEvaluation[]) : null;
+}
+
 /** Where the audit export downloads from: every project's entries, or one project's. */
 export function exportLedgerUrl(projectId: string | null): string {
   return projectId === null ? "/api/ledger/export" : `/api/ledger/export?projectId=${encodeURIComponent(projectId)}`;
@@ -226,6 +243,9 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
     if (e.code === "secret_in_text") return "That text looks like it contains a key or password. It was not saved.";
     if (e.code === "intake_completed") return "This plan is approved. Reopen it to change answers.";
+    if (e.code === "stage_gated") {
+      return detailString(e, "message") ?? "Add the card to an earlier stage, then move it, so its readiness checks run.";
+    }
     if (e.code === "decision_not_applicable") return "That decision no longer applies to your answers";
     if (context === "intake" && e.status === 409 && e.code === "conflict") return "This project already has a plan intake";
     if (context === "reopen" && e.status === 409 && e.code === "conflict") return "This plan is already open for changes.";

@@ -11,6 +11,7 @@ export function AgentsSideBar() {
       adapters={model.agentsInfo.adapters}
       providers={model.agentsInfo.providers}
       connections={model.connections.list}
+      cards={model.board ? Object.values(model.board.columns).flat() : []}
       runs={model.runs}
       selectedRunId={model.selectedRunId}
       onStart={model.onStartRun}

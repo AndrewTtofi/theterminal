@@ -35,19 +35,22 @@ export function AgentFeedPanel() {
         {cost(run)})
       </p>
       <ul className="run-actions" aria-label="Run actions">
-        {model.runActions.map((a) => (
-          <li key={a.id}>
-            <span aria-hidden="true">{KIND_ICON[a.kind]}</span> {narrateAction(a).headline}{" "}
-            <span className="action-status">
-              · {a.status}
-              {decidedBy(a)}
-            </span>
-            <details className="raw">
-              <summary>Raw</summary>
-              <pre>{rawAction(a)}</pre>
-            </details>
-          </li>
-        ))}
+        {model.runActions.map((a) => {
+          const headline = narrateAction(a).headline;
+          return (
+            <li key={a.id}>
+              <span aria-hidden="true">{KIND_ICON[a.kind]}</span> {headline}{" "}
+              <span className="action-status">
+                · {a.status}
+                {decidedBy(a)}
+              </span>
+              <details className="raw">
+                <summary aria-label={`Raw record: ${headline}`}>Raw</summary>
+                <pre>{rawAction(a)}</pre>
+              </details>
+            </li>
+          );
+        })}
       </ul>
       {messages.length > 0 && (
         <ul className="run-messages" aria-label="Agent messages">

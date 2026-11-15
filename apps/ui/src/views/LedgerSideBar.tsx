@@ -57,7 +57,7 @@ export function LedgerSideBar() {
       <p className="ledger-export">
         {exportFrom === undefined ? (
           <>
-            <button type="button" disabled aria-describedby="ledger-export-hint">
+            <button type="button" disabled aria-describedby="ledger-export-hint ledger-export-note">
               Export for audit
             </button>
             <span id="ledger-export-hint" className="hint">
@@ -65,11 +65,11 @@ export function LedgerSideBar() {
             </span>
           </>
         ) : (
-          <a download href={exportLedgerUrl(exportFrom)}>
+          <a download href={exportLedgerUrl(exportFrom)} aria-describedby="ledger-export-note">
             Export for audit
           </a>
         )}
-        <span className="note">Downloads every entry as one line of JSON with its hash chain and a plain-language headline.</span>
+        <span id="ledger-export-note" className="note">Downloads every entry as one line of JSON with its hash chain and a plain-language headline.</span>
       </p>
     </div>
   );

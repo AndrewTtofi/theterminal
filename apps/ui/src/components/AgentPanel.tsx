@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { KIND_LABELS } from "@theterminal/shared";
-import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Connection, Provider } from "@theterminal/shared";
+import { KIND_LABELS, visibleControls } from "@theterminal/shared";
+import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE } from "../api";
 
 export const KIND_ICON: Record<ActionKind, string> = {
@@ -21,12 +21,14 @@ type Props = {
   providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
   /** Every connection; the enabled cloud accounts and MCP servers are offered to the run. */
   connections?: Connection[];
+  /** The project's cards; the run can be tied to one of them. */
+  cards?: Card[];
   runs: AgentRun[];
   selectedRunId: string | null;
   /** The selected run's actions; omit them when another panel (the Agent feed) shows them. */
   actions?: AgentAction[];
-  /** Resolve false (or reject) when starting failed, so the prompt is kept. */
-  onStart: (adapter: AdapterId, prompt: string, connectionIds: string[]) => Promise<boolean | void> | void;
+  /** Resolve false (or reject) when starting failed, so the prompt is kept. `cardId` is passed only when a card is chosen. */
+  onStart: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string) => Promise<boolean | void> | void;
   onSelectRun: (runId: string | null) => void;
   onStop: (runId: string) => void;
 };
@@ -34,10 +36,11 @@ type Props = {
 export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
 export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
-export function AgentPanel({ adapters, providers, connections = [], runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
+export function AgentPanel({ adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
+  const [cardId, setCardId] = useState("");
   const [starting, setStarting] = useState(false);
   // Every provider's program ships with The Terminal, so an unavailable one means a broken install.
   const available = (a: AdapterId) => {
@@ -60,7 +63,10 @@ export function AgentPanel({ adapters, providers, connections = [], runs, select
           e.preventDefault();
           if (!chosen || !prompt.trim() || starting) return;
           setStarting(true);
-          void Promise.resolve(onStart(chosen, prompt.trim(), connectionIds))
+          // A card that left the project since it was chosen is not sent.
+          const card = cards.some((c) => c.id === cardId) ? cardId : "";
+          const started = card ? onStart(chosen, prompt.trim(), connectionIds, card) : onStart(chosen, prompt.trim(), connectionIds);
+          void Promise.resolve(started)
             .then((ok) => {
               if (ok !== false) setPrompt("");
             })
@@ -75,6 +81,17 @@ export function AgentPanel({ adapters, providers, connections = [], runs, select
               <option key={a} value={a} disabled={!available(a)}>
                 {ADAPTER_NAMES[a]}
                 {available(a) ? "" : " (unavailable)"}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Card (optional)
+          <select value={cardId} onChange={(e) => setCardId(e.target.value)}>
+            <option value="">No card</option>
+            {cards.map((c) => (
+              <option key={c.id} value={c.id}>
+                {visibleControls(c.title)}
               </option>
             ))}
           </select>

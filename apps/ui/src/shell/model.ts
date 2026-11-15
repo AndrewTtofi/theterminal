@@ -6,7 +6,10 @@ import type {
   AuthMode,
   Board,
   CapacityReport,
+  CardStory,
   DecisionId,
+  GateDecisionInput,
+  GateEvaluation,
   GitHubOverview,
   IntakeAnswer,
   IntakeView,
@@ -26,6 +29,12 @@ import type { ViewId } from "./views";
 
 export type LedgerScope = "project" | "all";
 
+/**
+ * A card move the readiness gates stopped, waiting on the Owner in the Needs-you strip. `note` explains a refresh
+ * after the server refused the decisions.
+ */
+export type GatePrompt = { cardId: string; cardTitle: string; to: Stage; evaluations: GateEvaluation[]; note: string | null };
+
 /** Every narration topic, in the order the ledger's filter lists them. */
 export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];
 
@@ -38,14 +47,27 @@ export type WorkbenchModel = {
 
   board: Board | null;
   onAddCard: (stage: Stage, title: string) => void;
-  onMoveCard: (cardId: string, to: Stage) => void;
+  /** Checks the move's gates first: moves at once when every gate passes, else sets `gate`. */
+  onMoveCard: (cardId: string, to: Stage) => Promise<void>;
+  /**
+   * The gated move waiting on the Owner, or null. Its evaluations are fetched again on any agent.*, card.*,
+   * intake.* or gate.* entry of the card's project while it is set.
+   */
+  gate: GatePrompt | null;
+  /** Moves with the decisions; true when moved. When the server refuses them, refreshes the evaluations and keeps the card. */
+  onResolveGate: (decisions: GateDecisionInput[]) => Promise<boolean>;
+  onCancelGate: () => void;
+  /** A card's story, read from the server each time. */
+  story: (cardId: string) => Promise<CardStory>;
+  /** Calls `onEntry` for every new ledger entry of any project until the returned function is called. */
+  subscribeEntries: (onEntry: (e: LedgerEntry) => void) => () => void;
 
   agentsInfo: AgentsInfo | null;
   runs: AgentRun[];
   selectedRunId: string | null;
   runActions: AgentAction[];
-  /** Resolves false when starting failed, so the prompt is kept. */
-  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[]) => Promise<boolean>;
+  /** Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card. */
+  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 

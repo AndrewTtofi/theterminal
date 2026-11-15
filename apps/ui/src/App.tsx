@@ -1,15 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, IntakeView, LedgerEntry, NarrationContext,
-  NarrationTopic, PendingAgentAction, Project,
+  AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
+  NarrationContext, NarrationTopic, PendingAgentAction, Project, Stage,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, api, errorMessage, subscribeLedger } from "./api";
+import { ApiError, api, blockedGates, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS } from "./shell/model";
-import type { LedgerScope, WorkbenchModel } from "./shell/model";
+import type { GatePrompt, LedgerScope, WorkbenchModel } from "./shell/model";
 import { useConnections } from "./use-connections";
+
+/** Shown in the strip when the server refused the gate decisions because the conditions changed. */
+const GATE_REFRESHED = "Something changed: a condition is no longer met. The checklist was refreshed.";
+
+/** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
+const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
 
 /** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
 function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
@@ -67,6 +73,13 @@ export function App() {
   /** Set once the Capacity view or tab has asked for the report: from then on, usage changes refresh it too. */
   const capacityWanted = useRef(false);
   const refreshCapacityRef = useRef<() => void>(() => {});
+  /** The gated move waiting on the Owner, with the project of its card. */
+  const [gate, setGate] = useState<(GatePrompt & { projectId: string }) | null>(null);
+  const gateRef = useRef(gate);
+  gateRef.current = gate;
+  const refreshGateRef = useRef<() => void>(() => {});
+  /** Listeners for every new ledger entry (the story tabs), fed by the stream from the ledger head. */
+  const entryListeners = useRef(new Set<(e: LedgerEntry) => void>());
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -107,6 +120,9 @@ export function App() {
         // Spend, rate limits, budgets and hardware change the Capacity report.
         const usage = e.type === "agent.finished" || e.type === "agent.rate_limited" || e.type.startsWith("connection.");
         if (usage && capacityWanted.current) refreshCapacityRef.current();
+        const g = gateRef.current;
+        if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
+        for (const listener of [...entryListeners.current]) listener(e);
       });
       refresh();
       refreshStatus();
@@ -150,6 +166,17 @@ export function App() {
     };
   });
   refreshCapacityRef.current = refreshCapacity;
+  // The open gate's checklist, read again; made once, like refreshGitHub.
+  const [refreshGate] = useState(() =>
+    coalesced(async () => {
+      const g = gateRef.current;
+      if (!g) return;
+      const evaluations = await api.getCardGates(g.cardId, g.to);
+      if (!mounted.current) return;
+      setGate((prev) => (prev && prev.cardId === g.cardId && prev.to === g.to ? { ...prev, evaluations } : prev));
+    }, () => !mounted.current),
+  );
+  refreshGateRef.current = refreshGate;
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -279,9 +306,19 @@ export function App() {
     };
   }, [ledgerScope, run]);
 
-  const titles = new Map(board ? Object.values(board.columns).flat().map((c) => [c.id, c.title] as const) : []);
-  const adapters = new Map(runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
-  const narration: NarrationContext = { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id) };
+  const titles = useMemo(
+    () => new Map(board ? Object.values(board.columns).flat().map((c) => [c.id, c.title] as const) : []),
+    [board],
+  );
+  // Kept stable while the board and runs are unchanged, so the ledger's narration is not redone every render.
+  const narration = useMemo<NarrationContext>(() => {
+    const adapters = new Map(runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
+    return { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id) };
+  }, [titles, runs]);
+
+  /** Applies `change` to the open gate when it is still the move for `cardId` and `to`. */
+  const updateGate = (cardId: string, to: Stage, change: Partial<GatePrompt>) =>
+    setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change } : prev));
 
   const model: WorkbenchModel = {
     projects,
@@ -300,20 +337,73 @@ export function App() {
         await api.addCard(selectedId, { title, stage });
         refreshRef.current();
       }),
-    onMoveCard: (cardId, to) =>
-      void run(async () => {
-        await api.moveCard(cardId, to);
+    onMoveCard: async (cardId, to) => {
+      const projectId = selectedId;
+      if (!projectId) return;
+      const open = (evaluations: GateEvaluation[]) =>
+        setGate({ projectId, cardId, cardTitle: titles.get(cardId) ?? "this card", to, evaluations, note: null });
+      try {
+        setError(null);
+        const evaluations = await api.getCardGates(cardId, to);
+        if (!evaluations.every((g) => g.outcome === "pass")) return open(evaluations);
+        try {
+          await api.moveCard(cardId, to);
+        } catch (e) {
+          // Something changed between the check and the move: the server sends the gates back.
+          const gates = blockedGates(e);
+          if (gates === null) throw e;
+          return open(gates);
+        }
         refreshRef.current();
-      }),
+      } catch (e) {
+        setError(errorMessage(e));
+      }
+    },
+    gate: gate && { cardId: gate.cardId, cardTitle: gate.cardTitle, to: gate.to, evaluations: gate.evaluations, note: gate.note },
+    onResolveGate: async (decisions) => {
+      const g = gateRef.current;
+      if (!g) return false;
+      try {
+        setError(null);
+        await api.moveCard(g.cardId, g.to, decisions);
+        setGate((prev) => (prev && prev.cardId === g.cardId && prev.to === g.to ? null : prev));
+        refreshRef.current();
+        return true;
+      } catch (e) {
+        const gates = blockedGates(e);
+        if (gates !== null) {
+          updateGate(g.cardId, g.to, { evaluations: gates, note: GATE_REFRESHED });
+        } else if (e instanceof ApiError && e.code === "gate_not_met") {
+          updateGate(g.cardId, g.to, { note: GATE_REFRESHED });
+          refreshGate();
+        } else {
+          setError(errorMessage(e));
+        }
+        return false;
+      }
+    },
+    onCancelGate: () => setGate(null),
+    story: (cardId) => api.getCardStory(cardId),
+    subscribeEntries: (onEntry) => {
+      entryListeners.current.add(onEntry);
+      return () => {
+        entryListeners.current.delete(onEntry);
+      };
+    },
     agentsInfo,
     runs,
     selectedRunId,
     runActions,
-    onStartRun: async (adapter, prompt, connectionIds) => {
+    onStartRun: async (adapter, prompt, connectionIds, cardId) => {
       if (!selectedId) return false;
       try {
         setError(null);
-        const started = await api.startRun(selectedId, { adapter, prompt, ...(connectionIds.length > 0 && { connectionIds }) });
+        const started = await api.startRun(selectedId, {
+          adapter,
+          prompt,
+          ...(cardId && { cardId }),
+          ...(connectionIds.length > 0 && { connectionIds }),
+        });
         setSelectedRunId(started.id);
         refreshAgents.current();
         return true;

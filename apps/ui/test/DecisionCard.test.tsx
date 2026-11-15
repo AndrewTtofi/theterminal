@@ -36,6 +36,11 @@ describe("DecisionCard", () => {
     expect(screen.getByRole("article", { name: "Decision: run npm test" })).toBeTruthy();
   });
 
+  it("makes hidden characters in its label visible", () => {
+    const { container } = render(<DecisionCard action={{ ...action, summary: "run a\u202eb" }} onDecide={vi.fn()} />);
+    expect(container.querySelector("article")!.getAttribute("aria-label")).toBe("Decision: run a\\u202eb");
+  });
+
   it("phrases other kinds from their input", () => {
     const read = { ...action, kind: "file_read" as const, tool: "Read", summary: "Read: a.md", input: { file_path: "docs/a.md" } };
     const { container } = render(<DecisionCard action={read} onDecide={vi.fn()} />);

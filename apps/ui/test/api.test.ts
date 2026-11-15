@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, errorMessage, exportLedgerUrl } from "../src/api";
+import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -204,5 +204,37 @@ describe("intake api", () => {
     expect(errorMessage(new ApiError(409, "conflict"), "intake")).toBe("This project already has a plan intake");
     expect(errorMessage(new ApiError(409, "conflict"), "reopen")).toBe("This plan is already open for changes.");
     expect(errorMessage(new ApiError(409, "decision_not_applicable"))).toBe("That decision no longer applies to your answers");
+  });
+});
+
+describe("gates and stories api", () => {
+  it("reads a move's gates, moves with or without decisions, and reads a card's story", async () => {
+    const f = respond(200, []);
+    await api.getCardGates("c/1", "ship");
+    expect(call(f, 0)[0]).toBe("/api/cards/c%2F1/gates?to=ship");
+    await api.moveCard("c1", "design");
+    expect(JSON.parse(String(call(f, 1)[1].body))).toEqual({ to: "design" });
+    const decision = { gateId: "ready_to_ship", decision: "sign_off", acknowledgement: "I agree." } as const;
+    await api.moveCard("c1", "ship", [decision]);
+    expect(call(f, 2)[0]).toBe("/api/cards/c1/move");
+    expect(JSON.parse(String(call(f, 2)[1].body))).toEqual({ to: "ship", gates: [decision] });
+    await api.getCardStory("c1");
+    expect(call(f, 3)[0]).toBe("/api/cards/c1/story");
+  });
+
+  it("reads the gates of a blocked move from the error, and nothing from any other error", () => {
+    const gates = [{ id: "payments" }];
+    expect(blockedGates(new ApiError(409, "gate_blocked", { gates }))).toEqual(gates);
+    expect(blockedGates(new ApiError(409, "gate_blocked", { gates: "x" }))).toBeNull();
+    expect(blockedGates(new ApiError(409, "gate_not_met", { gates }))).toBeNull();
+    expect(blockedGates(new Error("x"))).toBeNull();
+  });
+
+  it("shows the server's message for a card added straight into a gated stage", () => {
+    expect(errorMessage(new ApiError(409, "stage_gated", { message: "Add the card to an earlier stage, then move it." }))).toBe(
+      "Add the card to an earlier stage, then move it.",
+    );
+    expect(errorMessage(new ApiError(409, "stage_gated"))).toBe("Add the card to an earlier stage, then move it, so its readiness checks run.");
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
   });
 });

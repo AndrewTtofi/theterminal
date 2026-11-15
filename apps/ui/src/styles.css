@@ -251,3 +251,33 @@ abbr[title] { text-decoration: underline dotted; cursor: help; }
 .intake-plan .problem { color: var(--attention); }
 .plan-cards { padding-left: 18px; }
 .plan-cards .stage { color: var(--fg-strong); }
+
+/* Readiness gates in the Needs-you strip */
+.gate-card { background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; padding: 8px; margin-bottom: 6px; }
+.gate-card h3 { margin: 0 0 4px; }
+.gate-card h4 { margin: 8px 0 2px; font-size: 12px; }
+.gate-card .gate-move { margin: 0 0 4px; font-weight: 600; }
+.gate-card ul { margin: 0; padding-left: 18px; }
+.gate-checklist { list-style: none; padding-left: 0 !important; }
+.gate-checklist .met [role="img"] { color: var(--ok); }
+.gate-checklist .unmet [role="img"] { color: var(--danger); }
+.gate-card .muted, .gate-card .hint, .gate-card .note { font-size: 12px; color: var(--muted); }
+.gate-ack, .gate-reason { display: block; margin: 8px 0; }
+.gate-reason textarea { display: block; width: 100%; box-sizing: border-box; }
+.gate-passed { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
+.gate-footer { margin: 4px 0 8px; }
+.gate-prompt > .note { font-size: 12px; color: var(--attention); }
+
+/* A card's title opens its story */
+.card button.card-title { background: none; border: none; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.card button.card-title:hover, .card button.card-title:focus-visible { text-decoration: underline; }
+
+/* The story tab */
+.story { padding: 8px 16px; overflow: auto; height: 100%; box-sizing: border-box; }
+.story header p { margin: 2px 0; color: var(--muted); }
+.story ol, .story ul { padding-left: 20px; }
+.story li { margin-bottom: 4px; }
+.story li.attention .headline { color: var(--attention); }
+.story .reason { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.story time { font-size: 12px; color: var(--muted); }
+.ledger > .note { margin: 2px 0 4px; font-size: 12px; color: var(--attention); }

@@ -251,4 +251,23 @@ describe("LedgerPanel narration and raw record", () => {
     expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
     expect(aside.textContent).not.toContain("Detect GPU");
   });
+
+  it("labels each Raw summary with its headline", () => {
+    render(<LedgerPanel entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" })]} />);
+    const summary = screen.getByRole("listitem").querySelector("summary")!;
+    expect(summary.textContent).toBe("Raw");
+    expect(summary.getAttribute("aria-label")).toBe('Raw record: Owner added "Detect GPU" to Plan');
+  });
+
+  it("says how many entries needing attention the topic filter hides", () => {
+    const agent = { kind: "agent", id: "abcdef123456" } as const;
+    const requested = (seq: number) =>
+      entry(seq, "agent.action.requested", { runId: "r1", kind: "shell", tool: "Bash", summary: "Run: ls", input: { command: "ls" } }, agent);
+    const { rerender } = render(<LedgerPanel topics={["board"]} entries={[entry(1, "card.created", { title: "A", stage: "plan" }), requested(2), requested(3)]} />);
+    expect(screen.getByText("2 entries needing attention are hidden by the topic filter")).toBeTruthy();
+    rerender(<LedgerPanel topics={["board"]} entries={[requested(2)]} />);
+    expect(screen.getByText("1 entry needing attention is hidden by the topic filter")).toBeTruthy();
+    rerender(<LedgerPanel entries={[requested(2)]} />);
+    expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
+  });
 });

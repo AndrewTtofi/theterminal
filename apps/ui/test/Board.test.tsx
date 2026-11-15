@@ -38,4 +38,11 @@ describe("Board", () => {
     await userEvent.selectOptions(screen.getByLabelText("Move Existing to"), "Build");
     expect(onMoveCard).toHaveBeenCalledWith("c1", "build");
   });
+
+  it("opens a card's story from its title", async () => {
+    const onOpenStory = vi.fn();
+    render(<Board board={board} onAddCard={vi.fn()} onMoveCard={vi.fn()} onOpenStory={onOpenStory} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open the story of Existing" }));
+    expect(onOpenStory).toHaveBeenCalledWith("c1");
+  });
 });

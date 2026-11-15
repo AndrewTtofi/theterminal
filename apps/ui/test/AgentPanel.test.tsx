@@ -50,6 +50,25 @@ describe("AgentPanel", () => {
     expect(onStart).toHaveBeenCalledWith("fake", "hello", []);
   });
 
+  it("ties the run to the card chosen in the optional card select", async () => {
+    const onStart = vi.fn().mockResolvedValue(true);
+    const cards = [
+      { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" },
+      { id: "c2", projectId: "p1", title: "Search", stage: "plan", status: "todo", createdAt: "", updatedAt: "" },
+    ] as const;
+    render(
+      <AgentPanel adapters={["fake"]} cards={[...cards]} runs={[]} selectedRunId={null}
+        onStart={onStart} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+    );
+    const select = screen.getByLabelText("Card (optional)") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(["No card", "Login", "Search"]);
+    expect(select.value).toBe("");
+    await userEvent.selectOptions(select, "Search");
+    await userEvent.type(screen.getByLabelText("Prompt"), "find books");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(onStart).toHaveBeenCalledWith("fake", "find books", [], "c2");
+  });
+
   it("lists runs with status and cost and shows actions of the selected run", async () => {
     const onSelectRun = vi.fn();
     const { rerender } = render(

@@ -10,6 +10,7 @@ import { Workbench } from "../src/shell/Workbench";
 import type { WorkbenchModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
 import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
+import { planPassed, shipBlocked } from "./gate-fixtures";
 import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
 
@@ -95,6 +96,11 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onDecideIntake: vi.fn().mockResolvedValue(true),
     onCompleteIntake: vi.fn().mockResolvedValue(true),
     onReopenIntake: vi.fn().mockResolvedValue(true),
+    gate: null,
+    onResolveGate: vi.fn().mockResolvedValue(true),
+    onCancelGate: vi.fn(),
+    story: vi.fn().mockReturnValue(new Promise(() => {})),
+    subscribeEntries: () => () => {},
     ...over,
   };
 }
@@ -316,6 +322,40 @@ describe("Workbench", () => {
     expect(ledgerShown()).toBe(false);
     await userEvent.keyboard("{Control>}j{/Control}");
     expect(ledgerShown()).toBe(true);
+  });
+
+  it("keeps a gate card in the strip in the Connections view with the bottom panel closed, and badges it", async () => {
+    const m = model({ gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [planPassed(), shipBlocked()], note: null } });
+    const { container } = render(<Workbench model={m} />);
+    await userEvent.click(view("Connections"));
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    expect(within(strip).getByRole("article", { name: "Gate: Ready to ship" })).toBeTruthy();
+    expect(within(strip).getByText("Passed: Plan approved")).toBeTruthy();
+    expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+    await userEvent.click(within(strip).getByRole("button", { name: "Cancel" }));
+    expect(m.onCancelGate).toHaveBeenCalled();
+  });
+
+  it("opens a card's story tab from its title on the board", async () => {
+    const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
+    const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
+    const { container } = render(<Workbench model={m} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open the story of Login" }));
+    expect(container.querySelector('[data-panel="story:c1"]')?.getAttribute("data-active")).toBe("true");
+    expect(m.story).toHaveBeenCalledWith("c1");
+  });
+
+  it("offers the board's cards when starting a run and passes the chosen one", async () => {
+    const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
+    const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
+    render(<Workbench model={m} />);
+    await userEvent.click(view("Agents"));
+    await userEvent.selectOptions(screen.getByLabelText("Card (optional)"), "Login");
+    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", [], "c1");
   });
 
   it("does not show the strip when nothing is pending", () => {
