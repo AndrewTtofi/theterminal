@@ -173,7 +173,7 @@ describe("GitHubClient.overview", () => {
     await expect(gh.overview()).rejects.toBeInstanceOf(GitHubRepoNotFoundError);
   });
 
-  it.each(["../octo-org", "octo-org/..", "./x", "octo-org/.", "octo-org/example/extra"])(
+  it.each(["../octo-org", "octo-org/..", "./x", "octo-org/.", "octo-org/example/extra", "a/b?x=1", "a/b%2Fc", "a/b#x"])(
     "refuses the repository name %s without a request",
     async (repo) => {
       const { gh, f } = client({ repo: () => repo });
@@ -181,6 +181,33 @@ describe("GitHubClient.overview", () => {
       expect(f.calls).toHaveLength(0);
     },
   );
+
+  it.each([
+    ["the repository", API],
+    ["a pull request", `${API}/pulls?state=open&per_page=50`],
+    ["a CI run", `${API}/actions/runs?per_page=10`],
+  ])("treats a link to %s outside https://github.com/ as an invalid response", async (_what, target) => {
+    const handler: Handler = (url, headers) => {
+      if (url !== target) return ok(url, headers);
+      const swap = (v: unknown): unknown => JSON.parse(JSON.stringify(v).replaceAll("https://github.com/", "https://example.invalid/"));
+      return new Response(JSON.stringify(swap(bodies[url])), { status: 200 });
+    };
+    const { gh } = client({ handler });
+    await expect(gh.overview()).rejects.toBeInstanceOf(GitHubUnavailableError);
+  });
+
+  it.each([
+    ["a 401", 401, GitHubRejectedError],
+    ["a 404", 404, GitHubRepoNotFoundError],
+  ] as const)("drops the cached overview on %s after a good fetch", async (_what, status, error) => {
+    const { gh, f, c } = client();
+    await gh.overview();
+    c.advance(30_000);
+    f.set(() => new Response("{}", { status }));
+    await expect(gh.overview()).rejects.toBeInstanceOf(error);
+    expect((gh as unknown as { cache: { overview: unknown } }).cache.overview).toBeNull();
+    expect(gh.ciStatusNow()).toEqual({ state: "unknown", url: null, branch: null, updatedAt: null });
+  });
 
   it("throws GitHubRejectedError on a 401, and on a 403 without the rate limit", async () => {
     const a = client({ handler: () => new Response("{}", { status: 401 }) });
@@ -266,6 +293,19 @@ describe("GitHubClient.ciStatus and ciStatusNow", () => {
     c.advance(10_000);
     expect(gh.ciStatusNow()).toEqual(UNKNOWN);
     expect(f.calls).toHaveLength(4);
+  });
+
+  it("ciStatusNow answers unknown after a failed refresh, though the overview is still cached", async () => {
+    const { gh, f, c } = client();
+    await gh.overview();
+    c.advance(30_000);
+    f.set(() => new Response("{}", { status: 502 }));
+    await expect(gh.overview()).rejects.toBeInstanceOf(GitHubUnavailableError);
+    expect(gh.ciStatusNow()).toEqual({ state: "unknown", url: null, branch: null, updatedAt: null });
+    c.advance(30_000);
+    f.set(ok);
+    expect((await gh.overview()).ci.state).toBe("passing");
+    expect(gh.ciStatusNow().state).toBe("passing");
   });
 
   it("ciStatusNow answers unknown without a source", () => {

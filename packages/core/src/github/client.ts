@@ -33,8 +33,8 @@ const REPO_NAME = /^(?!\.\.?\/)[A-Za-z0-9_.-]{1,100}\/(?!\.\.?$)[A-Za-z0-9_.-]{1
 const UNKNOWN: CiStatus = { state: "unknown", url: null, branch: null, updatedAt: null };
 
 const text = z.string().transform((s) => s.slice(0, TEXT_MAX));
-/** Links are shown in the UI, so only https URLs are kept. */
-const httpsUrl = z.string().max(2000).regex(/^https:\/\//);
+/** Links are shown in the UI, so only links into github.com are kept; any other makes the response invalid. */
+const httpsUrl = z.string().max(2000).regex(/^https:\/\/github\.com\//);
 const maybeText = z.string().nullish().transform((s) => (s ?? "").slice(0, TEXT_MAX));
 
 // zod objects drop every key they do not name, so logins, emails and bodies never reach the cache.
@@ -197,9 +197,9 @@ export class GitHubClient {
   }
 
   /**
-   * The CI status without waiting on the network: the cached overview's, else unknown. Starts a fetch in the
-   * background when the cache is cold or expired, unless one is running, a rate limit holds, or the last one failed
-   * within the cache window.
+   * The CI status without waiting on the network: the cached overview's, else unknown (also after a failed refresh
+   * that was not a rate limit). Starts a fetch in the background when the cache is cold or expired, unless one is
+   * running, a rate limit holds, or the last one failed within the cache window.
    */
   ciStatusNow(): CiStatus {
     const source = this.deps.source();
@@ -209,7 +209,9 @@ export class GitHubClient {
     const fresh = cache.overview !== null && now - cache.fetchedAt < this.cacheMs;
     const recentlyFailed = cache.failedAt !== null && now - cache.failedAt < this.cacheMs;
     if (!fresh && !cache.inFlight && now >= cache.blockedUntil && !recentlyFailed) void this.overview().catch(() => undefined);
-    return cache.overview?.ci ?? UNKNOWN;
+    // After a failed refresh (a rate limit sets no failedAt while data is cached) the cached state is not vouched for.
+    const failedSinceGood = cache.failedAt !== null && cache.failedAt >= cache.fetchedAt;
+    return failedSinceGood ? UNKNOWN : (cache.overview?.ci ?? UNKNOWN);
   }
 
   private cacheFor(source: NonNullable<GitHubSource>): Cache {
@@ -238,6 +240,11 @@ export class GitHubClient {
     const failure = (kind: Outcome["kind"]) => outcomes.some((o) => o.kind === kind);
     if (!outcomes.every((o) => o.kind === "ok")) {
       cache.failedAt = now;
+      // The repository is gone or the token no longer sees it: its data must not be shown again.
+      if (failure("not_found") || failure("rejected")) {
+        cache.overview = null;
+        cache.entries = {};
+      }
       if (failure("not_found")) throw new GitHubRepoNotFoundError("Repository not found");
       if (failure("rejected")) throw new GitHubRejectedError("GitHub rejected the token");
       throw new GitHubUnavailableError("Could not reach GitHub");
