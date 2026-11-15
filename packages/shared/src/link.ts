@@ -147,7 +147,7 @@ export function runIdOf(e: LedgerEntry): string | undefined {
 }
 
 /** Why this computer refused a remote run's returned changes (`link.changes_refused`). */
-export const CHANGES_REFUSED_REASONS = ["bad_bundle", "conflict", "not_from_base", "wrong_path", "machine_refused"] as const;
+export const CHANGES_REFUSED_REASONS = ["bad_bundle", "conflict", "not_from_base", "wrong_path", "machine_refused", "machine_unpaired"] as const;
 export type ChangesRefusedReason = (typeof CHANGES_REFUSED_REASONS)[number];
 /** The fixed words for each reason, wherever a refusal is shown. */
 export const CHANGES_REFUSED_PHRASES: Record<ChangesRefusedReason, string> = {
@@ -156,6 +156,7 @@ export const CHANGES_REFUSED_PHRASES: Record<ChangesRefusedReason, string> = {
   not_from_base: "they do not start from the project as it was sent",
   wrong_path: "they name the wrong working copy",
   machine_refused: "the machine no longer has them",
+  machine_unpaired: "the machine was unlinked before they arrived",
 };
 
 export const linkPayloadSchemas = {

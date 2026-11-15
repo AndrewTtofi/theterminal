@@ -220,7 +220,9 @@ describe("link.* events", () => {
     ok("link.decision_received", { runId: "r1", actionId: "a1", machineId, decision: "allow" });
     ok("link.mirrored", { machineId, origin: origin(), signature: "c".repeat(128) });
     ok("link.changes_imported", { runId: "r1", machineId, commit: "d".repeat(40) });
-    for (const reason of ["bad_bundle", "conflict", "not_from_base", "wrong_path"]) ok("link.changes_refused", { runId: "r1", machineId, reason });
+    for (const reason of ["bad_bundle", "conflict", "not_from_base", "wrong_path", "machine_refused", "machine_unpaired"]) {
+      ok("link.changes_refused", { runId: "r1", machineId, reason });
+    }
     ok("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "go", cardId: null, connectionIds: [], base: "e".repeat(40) });
   });
 

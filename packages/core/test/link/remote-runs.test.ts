@@ -339,7 +339,7 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
   });
 
-  it("unlinking the machine after a run ended records nothing about that run, and stops asking for its changes", async () => {
+  it("unlinking the machine while an ended run's changes are still awaited refuses them (machine_unpaired), and stops asking", async () => {
     const started = remote.started();
     const finished = remote.finished();
     const fixture = await follow((req, res) => {
@@ -352,13 +352,45 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
     const head = ledger.headSeq();
     await link.unpair(owner, remote.machineId);
-    expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["machine.unpaired"]);
+    // The changes can never arrive now: the Changes view is told they were refused because the machine was unlinked.
+    await vi.waitFor(() => expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["machine.unpaired", "link.changes_refused"]), { timeout: 2000 });
+    expect(ledger.list({ afterSeq: head })[1]!.payload).toEqual({ runId: remote.runId, machineId: remote.machineId, reason: "machine_unpaired" });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" });
+    // The run itself ended as the worker said; no link.run_failed is recorded for a run that had already ended.
+    expect(getRun(db, remote.runId)!.status).toBe("completed");
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
     const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
     await sleep(300);
     expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
-    expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["machine.unpaired"]);
-    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "finished", error: null });
+    expect(ledger.list({ afterSeq: head })).toHaveLength(2);
+  });
+
+  it("an ended run whose machine was unlinked while this computer was closed has its changes refused (machine_unpaired) on resume", async () => {
+    const started = remote.started();
+    const finished = remote.finished();
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/changes")) return res.writeHead(503, { "content-type": "application/json" }).end(JSON.stringify({ error: "shutting_down" }));
+      ndjson(res);
+      res.write(`${remote.line(started)}\n${remote.line(finished)}\n`);
+      res.end();
+    });
+    await vi.waitFor(() => expect(fixture.requests.filter((r) => r.includes("/changes")).length).toBeGreaterThanOrEqual(1), { timeout: 5000 });
+    expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
+    // The service is gone (the workspace closed) when the machine is unlinked; the next start finds the row missing.
+    await service.shutdown();
+    await link.unpair(owner, remote.machineId);
+    const head = ledger.headSeq();
+    const again = new RemoteRunService({ db, ledger, link, worktrees: new WorktreeManager(dataDir), dataDir, backoffMs: [30, 60], streamIdleMs: 400 });
+    cleanups.push(() => again.shutdown());
+    const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
+    again.resume();
+    await vi.waitFor(() => expect(ledger.list({ afterSeq: head }).map((e) => e.type)).toEqual(["link.changes_refused"]), { timeout: 2000 });
+    expect(ledger.list({ afterSeq: head })[0]!.payload).toEqual({ runId: remote.runId, machineId: remote.machineId, reason: "machine_unpaired" });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" });
     expect(getRun(db, remote.runId)!.status).toBe("completed");
+    await sleep(300);
+    expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
   });
 
   it("another key at the machine's address ends the run (machine_key_mismatch) instead of retrying quietly", async () => {

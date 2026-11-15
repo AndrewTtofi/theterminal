@@ -479,6 +479,8 @@ describe("narrate: linked machines", () => {
     expect(refused("conflict").headline).toBe("The changes from GPU box were refused: they clash with records here");
     expect(refused("not_from_base").headline).toBe("The changes from GPU box were refused: they do not start from the project as it was sent");
     expect(refused("wrong_path").headline).toBe("The changes from GPU box were refused: they name the wrong working copy");
+    expect(refused("machine_refused").headline).toBe("The changes from GPU box were refused: the machine no longer has them");
+    expect(refused("machine_unpaired").headline).toBe("The changes from GPU box were refused: the machine was unlinked before they arrived");
     expect(refused("other").headline).toBe("The changes from GPU box were refused");
     expect(refused("bad_bundle")).toMatchObject({ attention: true, topic: "machine" });
   });

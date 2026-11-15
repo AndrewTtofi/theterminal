@@ -60,6 +60,7 @@ describe("error detail", () => {
     expect(refusedChangesNote("GPU box", "not_from_base")).toBe(
       "The changes from GPU box were refused: they do not start from the project as it was sent.",
     );
+    expect(refusedChangesNote("GPU box", "machine_unpaired")).toBe("The changes from GPU box were refused: the machine was unlinked before they arrived.");
     expect(refusedChangesNote("GPU box", "<b>sk-TESTKEY</b>")).toBe("The changes from GPU box were refused.");
     expect(refusedChangesNote("GPU\u202Ebox", "conflict")).not.toContain("\u202E");
     expect(LOCAL_MODEL_NOTE).toBe("Only Codex can run on a local model in The Terminal yet.");
