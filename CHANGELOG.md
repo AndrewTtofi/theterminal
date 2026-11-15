@@ -24,6 +24,9 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Card stories: everything that happened to a card, with its plan, gate decisions and estimated cost, plus the ledger's integrity check.
 - Audit export of the ledger as NDJSON, with an integrity header, gap lines for unreadable or missing entries, and a trailer.
 - Documentation: `docs/glass-box.md`.
+- Rich workspace: a read-only Changes view with diff and file tabs (limits shown plainly, secret-looking names hidden, nothing from the repository is ever run), agent feed, Terminal and Conversation tabs, Learn topics with context, Guided and Operator layouts with up to 10 saved layouts, and paging for the ledger.
+- Emergency override: run one program as you, outside the approval gate and sandbox, after a confirm step and a reason that is checked for secrets. It is always recorded, in red with an OVERRIDE label, and can discard a run's uncommitted work.
+- Documentation: `docs/workspace.md`.
 
 ### Changed
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
