@@ -283,26 +283,38 @@ describe("Ledger across connections", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "ledger-"));
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it("keeps a single gap-free chain with two concurrent writer threads", async () => {
     const file = join(dir, "t.db");
     openDatabase(file).close(); // create schema first
     const workerUrl = fileURLToPath(new URL("./worker.mjs", import.meta.url));
+    // Wait for each worker to exit, not just to report: its database handle
+    // must be released before the directory is removed (Windows refuses to
+    // unlink a file that is still open).
     const run = (tag: string) =>
       new Promise<void>((resolve, reject) => {
         const w = new Worker(workerUrl, { workerData: { file, count: 25, tag } });
-        w.once("message", () => resolve());
+        let done = false;
+        w.once("message", () => {
+          done = true;
+        });
         w.once("error", reject);
+        w.once("exit", (code) =>
+          done ? resolve() : reject(new Error(`worker ${tag} exited with ${code} before finishing`)),
+        );
       });
     await Promise.all([run("a"), run("b")]);
 
     const db = openDatabase(file);
-    const ledger = new Ledger(db);
-    const seqs = ledger.list({ limit: 1000 }).map((e) => e.seq);
-    expect(seqs).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
-    expect(ledger.verify()).toEqual({ ok: true, count: 50 });
-    db.close();
+    try {
+      const ledger = new Ledger(db);
+      const seqs = ledger.list({ limit: 1000 }).map((e) => e.seq);
+      expect(seqs).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+      expect(ledger.verify()).toEqual({ ok: true, count: 50 });
+    } finally {
+      db.close();
+    }
   });
 });
 

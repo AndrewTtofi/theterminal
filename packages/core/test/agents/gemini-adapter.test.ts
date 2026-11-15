@@ -218,6 +218,37 @@ function lateStderrSpawn(tail: string | null) {
   return { spawn, child };
 }
 
+/**
+ * An in-process ACP agent that answers initialize and then, at session/new, writes `tail` to stderr and exits with
+ * code 2 the way Node reports an exit whose stdin close is seen first: the exit code is set and stdin destroyed (as
+ * ChildProcess does on exit) before stdout's end is delivered. The OS gives no order between the two.
+ */
+function exitBeforeStdoutEndSpawn(tail: string) {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdin, stdout, stderr, pid: 4243, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+    kill: () => true,
+  });
+  createInterface({ input: stdin }).on("line", (line) => {
+    const msg = JSON.parse(line) as LogEntry;
+    if (msg.method === "initialize") stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }) + "\n");
+    else if (msg.method === "session/new") {
+      stderr.end(tail);
+      child.exitCode = 2;
+      child.emit("exit", 2, null);
+      stdin.destroy();
+      setImmediate(() => {
+        stdout.end();
+        setImmediate(() => child.emit("close", 2, null));
+      });
+    }
+  });
+  const spawn = (() => child) as unknown as typeof nodeSpawn;
+  return { spawn, child };
+}
+
 const exited = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
 const waitExit = (c: ChildProcess) => vi.waitFor(() => expect(exited(c)).toBe(true), { timeout: 10_000 });
 
@@ -382,6 +413,12 @@ describe("GeminiAdapter", () => {
     const r = await adapter({ spawn }).start(harness().opts);
     expect(r).toEqual({ status: "failed", error: "Gemini exited unexpectedly: fake gemini: died after exit" });
     expect(child.stdinLines.map((l) => l.method)).toEqual(["initialize", "session/new"]);
+  });
+
+  it("reports an exit as an exit when the closed stdin is seen before stdout's end", async () => {
+    const { spawn } = exitBeforeStdoutEndSpawn("fake gemini: exiting at session/new\n");
+    const r = await adapter({ spawn }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini exited unexpectedly: fake gemini: exiting at session/new" });
   });
 
   it("reports an early exit without a tail when stderr stays open past the grace period", async () => {

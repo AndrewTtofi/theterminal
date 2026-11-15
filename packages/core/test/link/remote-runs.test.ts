@@ -34,7 +34,13 @@ const owner = { kind: "human", id: "owner" } as const;
 const GIT_T = 120_000;
 
 type Handler = (req: IncomingMessage, res: ServerResponse, n: number) => void;
-type Fixture = { port: number; requests: string[]; close: () => Promise<void> };
+type Fixture = {
+  port: number;
+  requests: string[];
+  /** Connections not yet closed: while one is open, bytes the client already wrote may not have been read. */
+  openConnections: () => number;
+  close: () => Promise<void>;
+};
 
 /** An HTTPS server presenting `identity`'s certificate (TLS 1.3, client certificates asked for, not checked). */
 function fixtureWorker(identity: LinkIdentity, handle: Handler, port = 0): Promise<Fixture> {
@@ -57,6 +63,7 @@ function fixtureWorker(identity: LinkIdentity, handle: Handler, port = 0): Promi
       resolve({
         port: (server.address() as AddressInfo).port,
         requests,
+        openConnections: () => sockets.size,
         close: () =>
           new Promise((r) => {
             for (const s of sockets) s.destroy();
@@ -359,6 +366,9 @@ describe("RemoteRunService: following a worker's stream", () => {
     // The run itself ended as the worker said; no link.run_failed is recorded for a run that had already ended.
     expect(getRun(db, remote.runId)!.status).toBe("completed");
     expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
+    // A request already written when the unpair aborted it can still be on its way (a slow scheduler reads it late):
+    // count once the worker has seen every connection close, so it has read all that was sent before the unpair.
+    await vi.waitFor(() => expect(fixture.openConnections()).toBe(0), { timeout: 5000 });
     const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
     await sleep(300);
     expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
@@ -378,9 +388,19 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
     // The service is gone (the workspace closed) when the machine is unlinked; the next start finds the row missing.
     await service.shutdown();
+    // The closed service may have written a request just before it was shut down, and a slow scheduler reads it late:
+    // count once the worker has seen every connection close, so it has read all that was sent before the shutdown.
+    await vi.waitFor(() => expect(fixture.openConnections()).toBe(0), { timeout: 5000 });
     await link.unpair(owner, remote.machineId);
     const head = ledger.headSeq();
-    const again = new RemoteRunService({ db, ledger, link, worktrees: new WorktreeManager(dataDir), dataDir, backoffMs: [30, 60], streamIdleMs: 400 });
+    let clients = 0;
+    const again = new RemoteRunService({
+      db, ledger, link, worktrees: new WorktreeManager(dataDir), dataDir, backoffMs: [30, 60], streamIdleMs: 400,
+      client: (timeoutMs) => {
+        clients++;
+        return link.newClient(timeoutMs);
+      },
+    });
     cleanups.push(() => again.shutdown());
     const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
     again.resume();
@@ -390,6 +410,7 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(getRun(db, remote.runId)!.status).toBe("completed");
     await sleep(300);
     expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
+    expect(clients).toBe(0); // the new service never even opened a connection to the unlinked machine
     expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
   });
 
