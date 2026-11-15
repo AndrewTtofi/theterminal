@@ -56,12 +56,12 @@ describe("DigestPanel", () => {
   });
 
   it("renders hostile headlines and summaries as text", () => {
-    const hostile = '<img src=x onerror="alert(1)">‮';
+    const hostile = '<img src=x onerror="alert(1)">\u202e';
     renderShare(<DigestPanel id="digest" />, {
       digests: { list: [digest({ summary: hostile, items: [{ seq: 1, time: "10:00", headline: hostile, topic: "agent", attention: false }] })] },
     });
     expect(region().querySelector("img")).toBeNull();
     expect(region().textContent).toContain('<img src=x onerror="alert(1)">\\u202e');
-    expect(region().textContent).not.toContain("‮");
+    expect(region().textContent).not.toContain("\u202e");
   });
 });

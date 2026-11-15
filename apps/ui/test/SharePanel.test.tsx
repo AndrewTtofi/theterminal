@@ -32,12 +32,12 @@ describe("SharePanel", () => {
   });
 
   it("renders hostile text in the not-included list as text", () => {
-    const snapshot = { hidden: ['<img src=x onerror="alert(1)">', "a‮b"] } as unknown as ShareSnapshot;
+    const snapshot = { hidden: ['<img src=x onerror="alert(1)">', "a\u202eb"] } as unknown as ShareSnapshot;
     renderShare(<SharePanel id="share" />, { share: { preview: preview({ snapshot }) } });
     const aside = screen.getByRole("complementary", { name: "Not included" });
     expect(aside.querySelector("img")).toBeNull();
     expect(aside.textContent).toContain('<img src=x onerror="alert(1)">');
-    expect(aside.textContent).not.toContain("‮");
+    expect(aside.textContent).not.toContain("\u202e");
   });
 
   it("enables Confirm only once the acknowledgement is ticked, confirms, says so and resets the box", async () => {
