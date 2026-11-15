@@ -20,6 +20,7 @@ import { openDatabase } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
+import type { McpServerSpec } from "../../src/connections/mcp.js";
 import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyBodyWindows, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
@@ -380,6 +381,74 @@ describe("GeminiAdapter", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("MCP servers", () => {
+    const SPECS: McpServerSpec[] = [
+      {
+        serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "stdio",
+        command: "npx", args: ["-y", "example-server"], env: { API_TOKEN: "TESTKEY-mcp-env-0000000000" },
+      },
+      {
+        serverName: "tt-9f8e7d6c", connectionId: "9f8e7d6c-0000-4000-8000-000000000000", name: "Tracker", transport: "http",
+        url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer TESTKEY-mcp-header-0000000000" },
+      },
+    ];
+    const withMcp = (h: ReturnType<typeof harness>, mcpServers = SPECS) => ({ ...h.opts, credentials: { env: {}, mcpServers } });
+    const mcpRule = (name: string) => `[[rule]]\nmcpName = "${name}"\ntoolName = "*"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`;
+
+    it("hands the servers to session/new over stdin, allows exactly them, and asks for every one of their tools", async () => {
+      script([]);
+      expect(await adapter().start(withMcp(harness()))).toEqual({ status: "completed" });
+      const session = readLog().find((e) => e.method === "session/new")!;
+      expect(session.params).toEqual({
+        cwd: worktree,
+        mcpServers: [
+          { name: "tt-abc12345", command: "npx", args: ["-y", "example-server"], env: [{ name: "API_TOKEN", value: "TESTKEY-mcp-env-0000000000" }] },
+          { type: "http", name: "tt-9f8e7d6c", url: "https://mcp.example.com/mcp", headers: [{ name: "Authorization", value: "Bearer TESTKEY-mcp-header-0000000000" }] },
+        ],
+      });
+      const snap = readLog().find((e) => e.initialize)!.initialize;
+      const at = snap.argv.indexOf("--allowed-mcp-server-names");
+      expect(snap.argv.slice(at, at + 2)).toEqual(["--allowed-mcp-server-names", "tt-abc12345,tt-9f8e7d6c"]);
+      expect(snap.argv.join(" ")).not.toContain("TESTKEY");
+      const policy = CORE_TOOLS.map((t) => `[[rule]]\ntoolName = "${t}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`)
+        .concat([mcpRule("tt-abc12345"), mcpRule("tt-9f8e7d6c")]).join("\n") + `\n[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 998\n`;
+      expect(snap.policies).toEqual({ "theterminal.toml": policy });
+      expect(policy.indexOf('mcpName = "tt-9f8e7d6c"')).toBeLessThan(policy.indexOf('decision = "deny"'));
+    });
+
+    it("an MCP tool call that asks is gated as kind other and completes after Allow", async () => {
+      script([{ type: "mcpTool", tool: "list", permission: true }]);
+      const h = harness(policyGate(() => ({ decision: "allow", reason: "owner allowed" })));
+      expect(await adapter().start(withMcp(h))).toEqual({ status: "completed" });
+      expect(h.proposed).toMatchObject([{ kind: "other", summary: "mcp_tt-abc12345_list", paths: [] }]);
+      expect(h.events).toContainEqual({ type: "action_result", actionId: "act-1", ok: true, output: "done" });
+      expect(logged("mcpTool")).toMatchObject([{ name: "mcp_tt-abc12345_list", allowed: true }]);
+    });
+
+    it("an MCP tool call that runs without asking fails the run and is recorded denied", async () => {
+      script([{ type: "mcpTool", server: "tt-9f8e7d6c", tool: "create" }]);
+      const h = harness();
+      expect(await adapter().start(withMcp(h))).toEqual({ status: "failed", error: "agent executed an ungated tool" });
+      expect(h.denied).toMatchObject([[{ kind: "other", summary: "Ungated tool: mcp_tt-9f8e7d6c_create" }, "agent executed an ungated tool"]]);
+    });
+
+    it("the mcpTool step is skipped when session/new names no server", async () => {
+      script([{ type: "mcpTool", tool: "list", permission: true }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      expect(h.proposed).toEqual([]);
+      expect(logged("mcpTool")).toEqual([]);
+    });
+
+    it("fails before spawning gemini when an MCP server name is not one of ours", async () => {
+      script([]);
+      const { spawn, children } = fakeSpawn();
+      const bad = { ...SPECS[0]!, serverName: "tt_bad" } as McpServerSpec;
+      expect(await adapter({ spawn }).start(withMcp(harness(), [bad]))).toEqual({ status: "failed", error: "invalid MCP server name" });
+      expect(children).toEqual([]);
+    });
   });
 
   it("refuses a prompt that gemini would run as a slash or shell command, without starting it", async () => {

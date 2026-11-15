@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
+import { MCP_ENV_NAME, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
@@ -188,6 +188,29 @@ describe("buildChildEnv extraEnv", () => {
     expect(env.CLOUDSDK_CORE_PROJECT).toBe("grant-project");
     const plain = buildChildEnv("gemini", "google", { dataDir: DATA_DIR, base, extraEnv: { GOOGLE_CLOUD_PROJECT: "grant-project" } });
     expect(plain.GOOGLE_CLOUD_PROJECT).toBe("grant-project");
+  });
+});
+
+describe("buildChildEnv mcpEnv", () => {
+  it("adds Claude's MCP secret variables, named TT_MCP_<server>_<value>", () => {
+    const env = buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, mcpEnv: { TT_MCP_0_0: "v0", TT_MCP_1_2: "v1" } });
+    expect(env.TT_MCP_0_0).toBe("v0");
+    expect(env.TT_MCP_1_2).toBe("v1");
+    expect(MCP_ENV_NAME.test("TT_MCP_10_3")).toBe(true);
+  });
+
+  it.each(["PATH", "TT_MCP_0", "TT_MCP_a_0", "tt_mcp_0_0", "TT_MCP_0_0_X", "ANTHROPIC_API_KEY"])(
+    "throws for %s before anything is returned",
+    (name) => {
+      expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, mcpEnv: { [name]: "x" } })).toThrow(
+        new TypeError(`variable not allowed for a child: ${name}`),
+      );
+    },
+  );
+
+  it("never copies MCP variables from the base environment", () => {
+    const env = buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base: { ...base, TT_MCP_0_0: "from-base" } });
+    expect(env.TT_MCP_0_0).toBeUndefined();
   });
 });
 
