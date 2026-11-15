@@ -4,6 +4,9 @@ import { GENESIS_HASH, actorSchema, eventPayloadSchemas, type LedgerEntry, type 
 import type { Db } from "../db.js";
 import { canonicalJson } from "./canonical.js";
 
+/** A ledger row as read: the entry, or only its seq when its payload cannot be parsed. */
+export type LedgerRow = LedgerEntry | { seq: number; unreadable: true };
+
 export type VerifyResult = { ok: true; count: number } | { ok: false; brokenAtSeq: number };
 
 /** The most run ids one `list` call may filter by. */
@@ -169,6 +172,35 @@ export class Ledger {
       }
     }
     return entries;
+  }
+
+  /**
+   * Rows in seq order without stopping at an unreadable one: a row whose payload cannot be parsed comes back as
+   * `{ seq, unreadable: true }`. `toSeq` is inclusive; `seqs` reads exactly those rows (at most 500).
+   */
+  listRows(q: { afterSeq?: number; toSeq?: number; limit?: number; seqs?: number[] } = {}): LedgerRow[] {
+    const where: string[] = ["seq > ?"];
+    const params: unknown[] = [q.afterSeq ?? 0];
+    if (q.toSeq !== undefined) {
+      where.push("seq <= ?");
+      params.push(q.toSeq);
+    }
+    if (q.seqs !== undefined) {
+      if (q.seqs.length > 500) throw new RangeError("at most 500 seqs");
+      where.push(q.seqs.length > 0 ? `seq IN (${q.seqs.map(() => "?").join(", ")})` : "0");
+      params.push(...q.seqs);
+    }
+    params.push(q.limit ?? 500);
+    const rows = this.db
+      .prepare(`SELECT * FROM ledger WHERE ${where.join(" AND ")} ORDER BY seq ASC LIMIT ?`)
+      .all(...params) as Row[];
+    return rows.map((row) => {
+      try {
+        return rowToEntry(row);
+      } catch {
+        return { seq: row.seq, unreadable: true as const };
+      }
+    });
   }
 
   /** The highest seq in the ledger, or 0 when it is empty. */

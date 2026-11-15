@@ -142,6 +142,18 @@ describe("Ledger", () => {
     });
   });
 
+  it("listRows reads past an unparseable row, by range or by seqs", () => {
+    for (let n = 1; n <= 4; n++) ledger.append(created(n));
+    db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+    db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run("{not json");
+    const rows = ledger.listRows({ toSeq: 3 });
+    expect(rows.map((r) => ("unreadable" in r ? `gap ${r.seq}` : r.seq))).toEqual([1, "gap 2", 3]);
+    expect(ledger.listRows({ afterSeq: 1, limit: 2 }).map((r) => r.seq)).toEqual([2, 3]);
+    expect(ledger.listRows({ seqs: [4, 1] }).map((r) => r.seq)).toEqual([1, 4]);
+    expect(ledger.listRows({ seqs: [] })).toEqual([]);
+    expect(() => ledger.listRows({ seqs: Array.from({ length: 501 }, (_, i) => i) })).toThrow(RangeError);
+  });
+
   it("notifies listeners once per append; unsubscribe stops", () => {
     const seen: number[] = [];
     const off = ledger.onAppend((e) => seen.push(e.seq));

@@ -264,6 +264,8 @@ describe("shared story types", () => {
       entries: [],
       gateDecisions: [decision],
       costUsd: null,
+      integrity: { ok: false, brokenAtSeq: 3 },
+      unreadable: [{ seq: 3, unreadable: true }],
     };
     expect(story.gateDecisions[0]?.kind).toBe("waived");
   });

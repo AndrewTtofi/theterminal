@@ -2,7 +2,7 @@ export { openDatabase } from "./db.js";
 export type { Db } from "./db.js";
 export { canonicalJson } from "./ledger/canonical.js";
 export { Ledger, LedgerReadOnlyError, MAX_RUN_IDS } from "./ledger/ledger.js";
-export type { VerifyResult } from "./ledger/ledger.js";
+export type { LedgerRow, VerifyResult } from "./ledger/ledger.js";
 export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent, rebuildAllProjections, getSetting } from "./events/projections.js";
 export { commitEvent, commitEvents } from "./events/commit.js";

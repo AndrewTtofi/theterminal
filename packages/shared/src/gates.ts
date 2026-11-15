@@ -229,6 +229,11 @@ export type GateDecision = {
 };
 
 /** Everything that happened to one card: `GET /api/cards/:id/story`. */
+/** The ledger's hash-chain check when the story was read: `brokenAtSeq` is the first entry that fails it. */
+export type StoryIntegrity = { ok: true } | { ok: false; brokenAtSeq: number };
+/** A ledger row about the card whose payload can no longer be read (tampered or corrupted). */
+export type UnreadableEntry = { seq: number; unreadable: true };
+
 export type CardStory = {
   card: Card;
   runs: AgentRun[];
@@ -236,6 +241,9 @@ export type CardStory = {
   entries: LedgerEntry[];
   gateDecisions: GateDecision[];
   costUsd: number | null;
+  integrity: StoryIntegrity;
+  /** Rows attributed to this card or its runs that cannot be parsed, in seq order; never in `entries`. */
+  unreadable: UnreadableEntry[];
 };
 
 // Defined here rather than imported from events.ts, which imports this module.
