@@ -314,6 +314,18 @@ describe("gate projections", () => {
   });
 });
 
+describe("gate projection without a project", () => {
+  it("rejects a gate.signed_off with a null projectId and leaves the ledger empty", () => {
+    expect(() =>
+      emit("gate.signed_off", {
+        gateId: "plan_approved", cardId: "c1", from: "plan", to: "design", conditions: [], acknowledgement: ack("plan_approved"), signedBy: "owner",
+      }, human, null),
+    ).toThrow("gate event without a project");
+    expect(ledger.list()).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM gate_decisions").get()).toEqual({ n: 0 });
+  });
+});
+
 describe("intake and gate rebuild", () => {
   it("rebuild after start, three answers, a decision, a completion, a reopen and a waiver equals the live tables", () => {
     startIntake();

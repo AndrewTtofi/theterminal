@@ -119,6 +119,7 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "gate.signed_off":
     case "gate.waived": {
       // The payload carries no projectId: the entry's projectId is the project (the gate service always sets it).
+      if (e.projectId === null) throw new Error("gate event without a project");
       const waived = e.type === "gate.waived";
       db.prepare(
         `INSERT INTO gate_decisions (entry_id, gate_id, project_id, card_id, kind, from_stage, to_stage, reason, decided_by, at)
@@ -328,9 +329,9 @@ export function getIntake(db: Db, projectId: string): IntakeState | null {
   return { intake: toIntake(r), answers, decisions };
 }
 
-/** Open intakes across every project, oldest first. */
+/** Open intakes across every project, oldest first, at most 500. */
 export function listOpenIntakes(db: Db): IntakeSession[] {
-  const rows = db.prepare("SELECT * FROM intakes WHERE status = 'open' ORDER BY created_at, rowid").all() as IntakeTableRow[];
+  const rows = db.prepare("SELECT * FROM intakes WHERE status = 'open' ORDER BY created_at, rowid LIMIT 500").all() as IntakeTableRow[];
   return rows.map(toIntake);
 }
 

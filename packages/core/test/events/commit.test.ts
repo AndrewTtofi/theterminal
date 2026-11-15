@@ -57,9 +57,10 @@ describe("commitEvents", () => {
     ledger.onAppend((e) => seen.push({ seq: e.seq, inTx: db.inTransaction }));
     const out = commitEvents(db, ledger, () => ({
       events: [card("c1", "One"), card("c2", "Two")],
-      result: (entries) => entries.map((e) => e.seq),
+      result: (entries) => entries,
     }));
-    expect(out).toEqual([2, 3]);
+    expect(out.map((e) => e.seq)).toEqual([2, 3]);
+    expect(out[1]!.prevHash).toBe(out[0]!.hash);
     expect(seen).toEqual([{ seq: 2, inTx: false }, { seq: 3, inTx: false }]);
     expect(db.prepare("SELECT id FROM cards ORDER BY id").all()).toEqual([{ id: "c1" }, { id: "c2" }]);
     expect(ledger.verify().ok).toBe(true);
