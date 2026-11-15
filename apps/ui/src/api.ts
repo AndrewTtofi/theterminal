@@ -218,9 +218,9 @@ export function exportLedgerUrl(projectId: string | null): string {
 
 /**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
- * `context: "intake"` words a conflict as the project already having an intake.
+ * `"intake"` words a conflict as the project already having an intake, `"reopen"` as the plan being open already.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
@@ -228,6 +228,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake"): string {
     if (e.code === "intake_completed") return "This plan is approved. Reopen it to change answers.";
     if (e.code === "decision_not_applicable") return "That decision no longer applies to your answers";
     if (context === "intake" && e.status === 409 && e.code === "conflict") return "This project already has a plan intake";
+    if (context === "reopen" && e.status === 409 && e.code === "conflict") return "This plan is already open for changes.";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
     if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;

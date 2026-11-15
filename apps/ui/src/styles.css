@@ -246,7 +246,7 @@ abbr[title] { text-decoration: underline dotted; cursor: help; }
 .intake-decision .because ul { margin: 2px 0 6px; padding-left: 18px; }
 .intake-decision .decided { color: var(--ok); margin: 6px 0; }
 .intake-change { margin-top: 16px; }
-.intake-change > summary { cursor: pointer; margin-bottom: 8px; }
+.intake-change > button { margin-bottom: 8px; }
 .intake-plan .summary { color: var(--fg-strong); }
 .intake-plan .problem { color: var(--attention); }
 .plan-cards { padding-left: 18px; }

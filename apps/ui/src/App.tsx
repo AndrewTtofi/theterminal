@@ -243,7 +243,7 @@ export function App() {
   /** Runs an intake change for the selected project and shows the view the server returns; false when refused. */
   const intakeAction = async (
     change: (projectId: string) => Promise<IntakeView>,
-    context?: "intake",
+    context?: "intake" | "reopen",
   ): Promise<boolean> => {
     const projectId = selectedId;
     if (!projectId) return false;
@@ -369,7 +369,7 @@ export function App() {
     onAnswerIntake: (questionId, answer) => intakeAction((id) => api.answerIntake(id, questionId, answer)),
     onDecideIntake: (decisionId, chosen, rationale) => intakeAction((id) => api.decideIntake(id, decisionId, chosen, rationale)),
     onCompleteIntake: () => intakeAction((id) => api.completeIntake(id)),
-    onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason)),
+    onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason), "reopen"),
   };
 
   return (

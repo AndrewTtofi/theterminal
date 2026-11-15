@@ -388,6 +388,24 @@ describe("Workbench", () => {
       expect(within(side).getByRole("button", { name: "Open intake" })).toBeTruthy();
     });
 
+    it("shows the selected project's open decisions while questions are still unanswered", () => {
+      const { budget_usd: _b, ...answers } = ALL_ANSWERS;
+      const intake = intakeView({ ...answers, exposure: "internet" }, { hosting: "own_cloud", exposure_protection: "login" });
+      expect(intake.step).toBe("answer");
+      expect(intake.decisions.filter((d) => d.chosen === null)).toHaveLength(1);
+      render(<Workbench model={model({ intake, status: statusWith([{ projectId: "p1", name: "Local Model Hub", decisions: 1 }]) })} />);
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.querySelector("div.needs-you-item")?.textContent).toContain("Your plan needs 1 decision");
+      expect(screen.getByText("Needs you: 1")).toBeTruthy();
+    });
+
+    it("shows no plan notice for an approved plan", () => {
+      const intake = { ...intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }, { completed: true }) };
+      intake.decisions = intake.decisions.map((d) => ({ ...d, chosen: null }));
+      render(<Workbench model={model({ intake })} />);
+      expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    });
+
     it("does not show the strip once the plan's decisions are made", () => {
       render(<Workbench model={model({ intake: intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }) })} />);
       expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();

@@ -1,5 +1,6 @@
-import { useId, useState } from "react";
-import { STAGES, visibleControls } from "@theterminal/shared";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
+import { INTAKE_IDEA_MAX, STAGES, visibleControls } from "@theterminal/shared";
 import type { IntakeAnswer, IntakeQuestionView, IntakeView, ProposedCard } from "@theterminal/shared";
 import { IntakeDecisionCard, shortDate } from "../components/IntakeDecisionCard";
 import { useShell } from "../shell/model";
@@ -12,48 +13,86 @@ const stageLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 type Save = (answer: IntakeAnswer) => Promise<boolean>;
 
-/** The "Plan intake" dock tab: describe the idea, answer the questions, make the decisions, approve the plan. */
+/**
+ * The "Plan intake" dock tab: describe the idea, answer the questions, make the decisions, approve the plan.
+ * When the step changes, focus moves to the tab's heading, unless the Owner is in an answer field: then the
+ * answers stay open and the field keeps focus.
+ */
 export function IntakePanel(_props: { id: string }) {
   const { model } = useShell();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const answersRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const step = model.selectedId === null || model.intake === undefined ? undefined : (model.intake?.step ?? "describe");
+  const last = useRef({ project: model.selectedId, step });
+  useLayoutEffect(() => {
+    const prev = last.current;
+    last.current = { project: model.selectedId, step };
+    if (prev.project !== model.selectedId) {
+      setExpanded(false);
+      return;
+    }
+    // A first load is not a step change; nor is a change the Owner did not make here.
+    if (prev.step === undefined || step === undefined || prev.step === step) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && answersRef.current?.contains(active)) {
+      setExpanded(true);
+      return;
+    }
+    headingRef.current?.focus();
+  });
   return (
     <section className="intake-panel" aria-label="Plan intake">
-      <IntakeBody model={model} />
+      <h2 ref={headingRef} tabIndex={-1}>Plan intake</h2>
+      <IntakeBody model={model} answersRef={answersRef} expanded={expanded} onExpand={setExpanded} />
     </section>
   );
 }
 
-function IntakeBody({ model }: { model: WorkbenchModel }) {
+type BodyProps = {
+  model: WorkbenchModel;
+  answersRef: RefObject<HTMLDivElement>;
+  expanded: boolean;
+  onExpand: (expanded: boolean) => void;
+};
+
+function IntakeBody({ model, answersRef, expanded, onExpand }: BodyProps) {
   const intake = model.intake;
   if (model.selectedId === null) return <p className="empty">Choose a project to plan it.</p>;
   if (intake === undefined) return <p className="empty">Loading…</p>;
   if (intake === null) return <Describe onStart={model.onStartIntake} />;
   if (intake.step === "completed") return <Completed view={intake} onReopen={model.onReopenIntake} />;
 
-  const questions = <Questions view={intake} model={model} />;
+  const step = intake.step;
   const decisions = intake.decisions.map((d) => <IntakeDecisionCard key={d.id} decision={d} onDecide={model.onDecideIntake} />);
+  const shown = step === "answer" || expanded;
+  // The answers keep one place in the tree at every step, so a field the Owner is in survives a step change.
   return (
     <>
       <p className="notice">{PERMANENCE_NOTICE}</p>
       <p className="idea">Your idea: {visibleControls(intake.intake.idea)}</p>
-      {intake.step === "answer" && questions}
-      {intake.step === "decide" && (
+      {step === "decide" && (
         <>
           <h3>Decisions to make</h3>
           {decisions}
-          <details className="intake-change">
-            <summary>Change your answers</summary>
-            {questions}
-          </details>
         </>
       )}
-      {intake.step === "approve" && (
+      {step === "approve" && <Approve view={intake} onComplete={model.onCompleteIntake} />}
+      <div className="intake-change" ref={answersRef}>
+        {step !== "answer" && (
+          <button type="button" className="link" aria-expanded={expanded} onClick={() => onExpand(!expanded)}>
+            Change your answers
+          </button>
+        )}
+        <div hidden={!shown}>
+          <Questions view={intake} model={model} />
+          {step === "approve" && decisions}
+        </div>
+      </div>
+      {step === "answer" && decisions.length > 0 && (
         <>
-          <Approve view={intake} onComplete={model.onCompleteIntake} />
-          <details className="intake-change">
-            <summary>Change your answers</summary>
-            {questions}
-            {decisions}
-          </details>
+          <h3>Decisions to make</h3>
+          {decisions}
         </>
       )}
     </>
@@ -78,7 +117,7 @@ function Describe({ onStart }: { onStart: (idea: string) => Promise<boolean> }) 
     <>
       <p className="notice">{PERMANENCE_NOTICE}</p>
       <label htmlFor={id}>Describe your idea</label>
-      <textarea id={id} value={idea} maxLength={4000} onChange={(e) => setIdea(e.target.value)} />
+      <textarea id={id} value={idea} maxLength={INTAKE_IDEA_MAX} onChange={(e) => setIdea(e.target.value)} />
       <button type="button" disabled={busy || !idea.trim()} onClick={() => void begin()}>
         Begin
       </button>
@@ -92,8 +131,8 @@ function Questions({ view, model }: { view: IntakeView; model: WorkbenchModel })
     <div className="intake-questions">
       <p className="progress">{`${answered} of ${view.questions.length} answered`}</p>
       {view.questions.map((q) => (
-        // Remounted when the recorded answer changes, so each field starts from what the server holds.
-        <QuestionField key={`${q.id}:${JSON.stringify(q.answer)}`} q={q} onSave={(a) => model.onAnswerIntake(q.id, a)} />
+        // Keyed by question only: a field is never remounted under the Owner, it takes up the recorded answer instead.
+        <QuestionField key={q.id} q={q} onSave={(a) => model.onAnswerIntake(q.id, a)} />
       ))}
     </div>
   );
@@ -129,6 +168,8 @@ type InputProps = { id: string; helpId: string; q: IntakeQuestionView; onSave: S
 function TextInput({ id, helpId, q, onSave }: InputProps) {
   const recorded = typeof q.answer === "string" ? q.answer : "";
   const [draft, setDraft] = useState(recorded);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useTakeUp(recorded, ref, setDraft);
   const save = () => {
     const text = draft.trim();
     if (text === recorded.trim() || (q.required && text === "")) return;
@@ -136,7 +177,7 @@ function TextInput({ id, helpId, q, onSave }: InputProps) {
   };
   return (
     <>
-      <textarea id={id} aria-describedby={helpId} value={draft} maxLength={q.max} onChange={(e) => setDraft(e.target.value)} onBlur={save} />
+      <textarea ref={ref} id={id} aria-describedby={helpId} value={draft} maxLength={q.max} onChange={(e) => setDraft(e.target.value)} onBlur={save} />
       <button type="button" onClick={save}>Save answer</button>
     </>
   );
@@ -144,7 +185,10 @@ function TextInput({ id, helpId, q, onSave }: InputProps) {
 
 function NumberInput({ id, helpId, q, onSave }: InputProps) {
   const recorded = typeof q.answer === "number" ? q.answer : null;
-  const [draft, setDraft] = useState(recorded === null ? "" : String(recorded));
+  const shownRecorded = recorded === null ? "" : String(recorded);
+  const [draft, setDraft] = useState(shownRecorded);
+  const ref = useRef<HTMLInputElement>(null);
+  useTakeUp(shownRecorded, ref, setDraft);
   const save = () => {
     if (draft.trim() === "") return;
     const n = Number(draft);
@@ -154,7 +198,7 @@ function NumberInput({ id, helpId, q, onSave }: InputProps) {
   return (
     <>
       <input
-        id={id} type="number" min="0" step="0.01" aria-describedby={helpId}
+        ref={ref} id={id} type="number" min="0" step="0.01" aria-describedby={helpId}
         value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={save}
       />
       <button type="button" onClick={save}>Save answer</button>
@@ -162,9 +206,18 @@ function NumberInput({ id, helpId, q, onSave }: InputProps) {
   );
 }
 
+/** Takes up a newly recorded answer, unless the Owner is typing in the field. */
+function useTakeUp(recorded: string, ref: RefObject<HTMLElement>, setDraft: (v: string) => void): void {
+  useEffect(() => {
+    if (document.activeElement !== ref.current) setDraft(recorded);
+  }, [recorded]);
+}
+
 /** Radios for a choice, checkboxes for a list; each change is saved at once, and undone if the server refuses it. */
 function Options({ q, onSave }: { q: IntakeQuestionView; onSave: Save }) {
   const [value, setValue] = useState<IntakeAnswer | null>(q.answer);
+  const recorded = JSON.stringify(q.answer);
+  useEffect(() => setValue(JSON.parse(recorded) as IntakeAnswer | null), [recorded]);
   const options = q.options ?? [];
   const save = async (next: IntakeAnswer) => {
     const before = value;

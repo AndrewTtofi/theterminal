@@ -30,6 +30,8 @@ export type IntakeQuestion = {
 };
 
 const TEXT_MAX = 2000;
+/** The longest idea an intake records, after trimming; the UI caps its field at the same length. */
+export const INTAKE_IDEA_MAX = 4000;
 const BUDGET_MAX = 1_000_000;
 
 export const INTAKE_QUESTIONS: readonly IntakeQuestion[] = [
@@ -462,7 +464,7 @@ const id = z.string().min(1);
 
 export const intakePayloadSchemas = {
   "intake.started": z
-    .object({ intakeId: id, idea: z.string().min(1).max(4000), version: z.literal(INTAKE_VERSION) })
+    .object({ intakeId: id, idea: z.string().min(1).max(INTAKE_IDEA_MAX), version: z.literal(INTAKE_VERSION) })
     .strict(),
   "intake.answered": z
     .object({

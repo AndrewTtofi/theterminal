@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { INTAKE_IDEA_MAX } from "@theterminal/shared";
 import type { IntakeView } from "@theterminal/shared";
 import { IntakePanel } from "../src/views/IntakePanel";
 import { ShellContext } from "../src/shell/model";
@@ -21,13 +22,19 @@ function setup(intake: IntakeView | null | undefined, over: Partial<WorkbenchMod
     onReopenIntake: vi.fn().mockResolvedValue(true),
     ...over,
   } as unknown as WorkbenchModel;
-  render(
-    <ShellContext.Provider value={{ model, dock: () => null, selectView: vi.fn() }}>
+  const ui = (m: WorkbenchModel) => (
+    <ShellContext.Provider value={{ model: m, dock: () => null, selectView: vi.fn() }}>
       <IntakePanel id="intake" />
-    </ShellContext.Provider>,
+    </ShellContext.Provider>
   );
-  return { model, panel: screen.getByRole("region", { name: "Plan intake" }) };
+  const r = render(ui(model));
+  /** Shows a new intake view, as App does when the server answers. */
+  const show = (next: IntakeView | null | undefined, more: Partial<WorkbenchModel> = {}) =>
+    act(() => r.rerender(ui({ ...model, intake: next, ...more })));
+  return { model, show, panel: screen.getByRole("region", { name: "Plan intake" }) };
 }
+
+const heading = () => screen.getByRole("heading", { name: "Plan intake", level: 2 });
 
 describe("IntakePanel", () => {
   it("asks for a project while none is selected", () => {
@@ -114,6 +121,13 @@ describe("IntakePanel", () => {
     expect(model.onDecideIntake).toHaveBeenCalledWith("first_version", "full", "");
   });
 
+  it("in the answer step shows a decision that already applies below the questions", () => {
+    const { budget_usd: _b, ...answers } = ALL_ANSWERS;
+    const { panel } = setup(intakeView(answers));
+    expect(within(panel).getByText("7 of 9 answered")).toBeTruthy();
+    expect(within(panel).getByRole("article", { name: "Plan decision: How much should the first version include?" })).toBeTruthy();
+  });
+
   it("in the decide step keeps the answers available to change", async () => {
     const { model, panel } = setup(intakeView(ALL_ANSWERS));
     await userEvent.click(within(panel).getByText("Change your answers"));
@@ -167,5 +181,67 @@ describe("IntakePanel", () => {
     const { panel } = setup(view);
     expect(panel.textContent).toContain("Book\\u202eClub is for");
     expect(panel.textContent).not.toContain("‮");
+  });
+
+  it("caps the idea at the server's limit", () => {
+    const { panel } = setup(null);
+    expect(within(panel).getByLabelText("Describe your idea").getAttribute("maxlength")).toBe(String(INTAKE_IDEA_MAX));
+  });
+
+  describe("focus", () => {
+    it("moves to the panel heading when the step changes", () => {
+      const { show } = setup(null);
+      expect(document.activeElement).not.toBe(heading());
+      show(intakeView({}));
+      expect(document.activeElement).toBe(heading());
+      (document.activeElement as HTMLElement).blur();
+      show(intakeView(ALL_ANSWERS));
+      expect(document.activeElement).toBe(heading());
+      expect(heading().getAttribute("tabindex")).toBe("-1");
+    });
+
+    it("stays put when the intake first loads, when another project's loads, and when the step is unchanged", () => {
+      const { show } = setup(undefined);
+      show(intakeView({}));
+      expect(document.activeElement).not.toBe(heading());
+      show(undefined, { selectedId: "p2" });
+      show(intakeView(ALL_ANSWERS), { selectedId: "p2" });
+      expect(document.activeElement).not.toBe(heading());
+      show(intakeView(ALL_ANSWERS, { first_version: "smallest" }), { selectedId: "p2" });
+      expect(document.activeElement).not.toBe(heading());
+    });
+
+    it("keeps focus on the field the person moved to when the answer saved on blur comes back", async () => {
+      const { model, show, panel } = setup(intakeView({}));
+      await userEvent.type(within(panel).getByRole("textbox", { name: "Who is this for?" }), "book club members");
+      const outcome = within(panel).getByRole("textbox", { name: "What should it do for them?" });
+      await userEvent.click(outcome);
+      expect(document.activeElement).toBe(outcome);
+      expect(model.onAnswerIntake).toHaveBeenCalledWith("audience", "book club members");
+      show(intakeView({ audience: "book club members" }));
+      expect(document.activeElement).toBe(outcome);
+      expect((within(panel).getByRole("textbox", { name: "Who is this for?" }) as HTMLTextAreaElement).value).toBe("book club members");
+    });
+
+    it("keeps focus on Save answer when the saved answer comes back", async () => {
+      const { show, panel } = setup(intakeView({}));
+      await userEvent.type(within(panel).getByRole("textbox", { name: "Who is this for?" }), "book club members");
+      const save = within(panel).getAllByRole("button", { name: "Save answer" })[0]!;
+      await userEvent.click(save);
+      show(intakeView({ audience: "book club members" }));
+      expect(document.activeElement).toBe(save);
+    });
+
+    it("keeps focus on the field the person moved to when the last required answer moves the plan to decisions", async () => {
+      const { audience: _a, ...rest } = ALL_ANSWERS;
+      const { show, panel } = setup(intakeView(rest));
+      await userEvent.type(within(panel).getByRole("textbox", { name: "Who is this for?" }), "members of a book club");
+      await userEvent.click(within(panel).getByRole("textbox", { name: /Is there anything that already exists/ }));
+      const existing = document.activeElement;
+      show(intakeView(ALL_ANSWERS));
+      expect(within(panel).getByRole("article", { name: "Plan decision: How much should the first version include?" })).toBeTruthy();
+      expect(document.activeElement).toBe(existing);
+      expect(within(panel).getByRole("textbox", { name: /Is there anything that already exists/ })).toBe(existing);
+    });
   });
 });

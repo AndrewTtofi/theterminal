@@ -52,4 +52,9 @@ describe("IntakeDecisionCard", () => {
     expect(card.textContent).toContain("a\\u202eb");
     expect(card.textContent).toContain("x\\u200by");
   });
+
+  it("shows hidden characters in its accessible name as escapes", () => {
+    render(<IntakeDecisionCard decision={{ ...firstVersion(), question: "Ship\u202eit?" }} onDecide={vi.fn()} />);
+    expect(screen.getByRole("article").getAttribute("aria-label")).toBe("Plan decision: Ship\\u202eit?");
+  });
 });

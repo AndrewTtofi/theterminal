@@ -202,6 +202,7 @@ describe("intake api", () => {
     expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
     expect(errorMessage(new ApiError(409, "intake_completed"))).toBe("This plan is approved. Reopen it to change answers.");
     expect(errorMessage(new ApiError(409, "conflict"), "intake")).toBe("This project already has a plan intake");
+    expect(errorMessage(new ApiError(409, "conflict"), "reopen")).toBe("This plan is already open for changes.");
     expect(errorMessage(new ApiError(409, "decision_not_applicable"))).toBe("That decision no longer applies to your answers");
   });
 });

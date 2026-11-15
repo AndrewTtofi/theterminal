@@ -5,13 +5,14 @@ import type { WorkbenchModel } from "../shell/model";
 export type IntakeNotice = { projectId: string; decisions: number; text: string };
 
 /**
- * Plans waiting on the Owner: the selected project's from its loaded intake, every other project's from the
- * server's status. Each says how many decisions are open.
+ * Plans waiting on the Owner: the selected project's from its loaded intake (open decisions at any step before
+ * approval), every other project's from the server's status. Each says how many decisions are open.
  */
 export function intakeNotices(model: Pick<WorkbenchModel, "selectedId" | "intake" | "status">): IntakeNotice[] {
   const out: IntakeNotice[] = [];
   const intake = model.intake;
-  if (model.selectedId !== null && intake?.step === "decide") {
+  // Decisions can open before every question is answered, and the server's count includes them.
+  if (model.selectedId !== null && intake && intake.step !== "completed") {
     const n = intake.decisions.filter((d) => d.chosen === null).length;
     if (n > 0) out.push({ projectId: model.selectedId, decisions: n, text: `Your plan needs ${plural(n, "decision")}` });
   }

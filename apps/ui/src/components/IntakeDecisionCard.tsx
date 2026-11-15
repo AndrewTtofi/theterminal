@@ -38,8 +38,8 @@ export function IntakeDecisionCard({ decision: d, onDecide }: Props) {
   };
 
   return (
-    <article className="decision-card intake-decision" aria-label={`Plan decision: ${d.question}`}>
-      <h3>{d.question}</h3>
+    <article className="decision-card intake-decision" aria-label={`Plan decision: ${visibleControls(d.question)}`}>
+      <h3>{visibleControls(d.question)}</h3>
       {d.because.length > 0 && (
         <div className="because">
           <p>Because you answered:</p>
