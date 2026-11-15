@@ -65,4 +65,21 @@ describe("registerStaticUi: the join and sign-in pages", () => {
     expect((await app.inject({ method: "GET", url: "/" })).body).toBe("<html>ui</html>");
     expect((await app.inject({ method: "GET", url: "/sign-in/extra" })).statusCode).toBe(404);
   });
+
+  it("serves every page and file with a strict content security policy, nosniff and no referrer", async () => {
+    const app = await setup();
+    const CSP =
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+    for (const url of ["/", "/sign-in", "/join/abc", "/assets/app.js"]) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers["content-security-policy"], url).toBe(CSP);
+      expect(res.headers["x-content-type-options"], url).toBe("nosniff");
+      expect(res.headers["referrer-policy"], url).toBe("no-referrer");
+    }
+    // A refused path gets the same headers; the API routes are not this module's.
+    const missing = await app.inject({ method: "GET", url: "/join/../token" });
+    expect(missing.headers["x-content-type-options"]).toBe("nosniff");
+    expect((await app.inject({ method: "GET", url: "/api/join/abc" })).headers["content-security-policy"]).toBeUndefined();
+  });
 });

@@ -1,6 +1,6 @@
 import { createReadStream, realpathSync, statSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { PUBLIC_ROUTE } from "./auth.js";
 
 const TYPES: Record<string, string> = {
@@ -39,6 +39,21 @@ function forms(p: string): string[] {
   }
 }
 
+/**
+ * The page's content security policy: scripts, styles, images and connections from this origin only (the event stream
+ * is same-origin too), inline style attributes allowed (React and the docking library set them), never framed, no
+ * <base>, and forms post here only. The built UI has no inline script and no eval.
+ */
+export const UI_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+function secure(reply: FastifyReply): FastifyReply {
+  return reply
+    .header("content-security-policy", UI_CSP)
+    .header("x-content-type-options", "nosniff")
+    .header("referrer-policy", "no-referrer");
+}
+
 /** An invite code as the join page's path carries it: one plain segment, nothing a file path could use. */
 const JOIN_CODE = /^[A-Za-z0-9_-]{1,200}$/;
 
@@ -53,7 +68,8 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
   // Files that must never be served whatever their name: the secret store's key file, wherever the CLI put it.
   const deniedFiles = new Set((opts.deny ?? []).flatMap(forms));
 
-  const serve = (rel: string, reply: import("fastify").FastifyReply) => {
+  const serve = (rel: string, reply: FastifyReply) => {
+    secure(reply);
     if (rel.includes("\0")) return reply.code(404).send({ error: "not_found" });
     let file: string;
     try {
@@ -71,7 +87,7 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
   app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
   app.get("/join/*", { config: PUBLIC_ROUTE }, (req, reply) => {
     const code = (req.params as { "*": string })["*"];
-    return JOIN_CODE.test(code) ? serve("index.html", reply) : reply.code(404).send({ error: "not_found" });
+    return JOIN_CODE.test(code) ? serve("index.html", reply) : secure(reply).code(404).send({ error: "not_found" });
   });
   app.get("/*", { config: PUBLIC_ROUTE }, (req, reply) => serve((req.params as { "*": string })["*"], reply));
 }
