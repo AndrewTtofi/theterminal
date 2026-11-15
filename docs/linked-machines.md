@@ -49,7 +49,7 @@ The Terminal does not do this check for you. After pairing, both screens show a 
 
 ### When the network hides computers
 
-Computers find each other with mDNS, a way for devices on one network to announce themselves without a central server. Some networks and firewalls block it. Then no computer appears in the list, and you type the address shown under the code instead. Looking for computers happens only while the **Link a machine** panel is open, and stops about a minute after it closes. Other views, such as the Run on list, use only the machines you already paired and look at nothing on the network. The announcement carries only `TheTerminal-` and the first eight characters of the machine id, never your computer's name or your user name.
+Computers find each other with mDNS, a way for devices on one network to announce themselves without a central server. Some networks and firewalls block it. Then no computer appears in the list, and you type the address shown under the code instead. Looking for computers runs only when you open the **Machines** view or the **Link a machine** panel, which you do on purpose, and stops about a minute after you leave them. It never runs when the app loads or in the Agents view. The Run on list uses only the machines you already paired and looks at nothing on the network. The announcement carries only `TheTerminal-` and the first eight characters of the machine id, never your computer's name or your user name.
 
 ## How the link is protected
 
