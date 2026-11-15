@@ -37,7 +37,7 @@ Open **Changes** in the activity bar to see what an agent changed in a run.
 
 ### While a run is in progress
 
-You see "Changes show when the run is stopped or finished." Reading a working copy while an agent is changing it could be misleading, and it is not safe to do while the agent can still alter git's settings. The agent feed still shows what it is doing.
+You see "Changes show when the run is stopped or finished." Reading a working copy while an agent is changing it could be misleading, and it is not safe to do while the agent can still alter git's settings, so The Terminal refuses to read it until the run has stopped or finished. This applies to the changed-files list, the file tree, diff tabs and file tabs: none of them asks for anything while the run is live, and they load on their own once it ends. The agent feed and the Terminal tab still show what the agent is doing.
 
 ### Limits
 
@@ -76,6 +76,8 @@ Spend totals always say how they were worked out. "Estimate" means The Terminal 
 ## Needs you
 
 The Needs you list shows decisions waiting for you, each as a card showing the project and what is being asked, along with any notices from plan intake. Approving or denying is recorded in the ledger as before.
+
+The Needs you tab gives each decision of the open project more context: the change the agent proposes (the old and new text it sent, as `-` and `+` lines) and the last two things it said before asking. It does not show what the run has changed so far. A run waiting on a decision is still live, and The Terminal does not read a live run's working copy (see "While a run is in progress" above), so the card says "Changes show when the run is stopped or finished." Once the run has stopped or finished, its changes are in the Changes view.
 
 ## Learn
 

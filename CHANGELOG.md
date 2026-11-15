@@ -29,6 +29,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Documentation: `docs/workspace.md`.
 
 ### Changed
+- The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
 - Streamed agent text is held back just enough to redact secrets that arrive split across chunks, including private key blocks, YAML secret blocks and partial markers around tool calls.
 
