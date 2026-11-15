@@ -49,6 +49,11 @@ import { buildSnapshot } from "../share/snapshot.js";
 import { ShareService } from "../share/service.js";
 import { ShareLinkManager, shareAddresses } from "../share/link-server.js";
 import { GitHubClient } from "../github/client.js";
+import { GitHubRepos } from "../github/repos.js";
+import { SourceService } from "../sources/service.js";
+import { WritebackService } from "../sources/writeback.js";
+import { registerSourcesRoutes } from "./sources-routes.js";
+import { registerHomeRoutes } from "./home-routes.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
@@ -122,6 +127,8 @@ const HEADERS_TIMEOUT_MS = 30_000;
 const KEEP_ALIVE_TIMEOUT_MS = 30_000;
 
 const PORT_ATTEMPTS = 21; // the requested port plus 20 above it
+/** How often abandoned uploads and leftover staging folders are swept. */
+const UPLOAD_SWEEP_MS = 10 * 60_000;
 
 function loadToken(dataDir: string, given?: string): string {
   if (given) return given;
@@ -722,6 +729,21 @@ export async function createServer(opts: {
     };
 
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
+    // The person's repositories (listing, importing, publishing): the first enabled GitHub connection's token, whether
+    // or not it names a repository.
+    const repos = new GitHubRepos({ fetch: fetchFn, token: () => connections.githubToken() });
+    // Imported names are redacted of every secret the server knows, as everything else it shows.
+    const knownSecrets = (): string[] => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()];
+    const sources = new SourceService({
+      db, ledger, worktrees, board, github: repos, dataDir: opts.dataDir, recorded, redact: (s: string) => redact(s, knownSecrets()),
+    });
+    const writeback = new WritebackService({
+      db, ledger, worktrees, github: repos, dataDir: opts.dataDir, settling: (id: string) => runner.settling(id),
+    });
+    // Uploads left by an earlier server, and abandoned ones (an hour old), are removed at start and every ten minutes.
+    sources.sweep(new Date());
+    const uploadSweep = setInterval(() => sources.sweep(new Date()), UPLOAD_SWEEP_MS);
+    uploadSweep.unref();
 
     // Share: the share page's cleaner and service.
     // The cleaner reads every secret the server knows on each call, minted cloud values included, like every cleaner here.
@@ -814,6 +836,10 @@ export async function createServer(opts: {
         secretStore: () => secretStoreKind,
       });
       registerGitHubRoutes(app, { github });
+      registerHomeRoutes(app, { db, clean: cleanMirrored });
+      registerSourcesRoutes(app, {
+        db, sources, writeback, github: repos, ...(opts.pickFolder !== undefined && { pickFolder: opts.pickFolder }),
+      });
       registerShareRoutes(app, { db, ledger, share });
       registerShareLinkRoutes(app, { links, addresses: () => shareAddresses() });
       localCapacity = registerCapacityRoutes(app, {
@@ -870,6 +896,7 @@ export async function createServer(opts: {
         });
       }
     } catch (err) {
+      clearInterval(uploadSweep);
       stopBootstrapWatch();
       await remoteListener.close().catch(() => undefined);
       await remote.shutdown();
@@ -904,6 +931,7 @@ export async function createServer(opts: {
       },
       async close() {
         try {
+          clearInterval(uploadSweep);
           stopBootstrapWatch();
           await remoteListener.close(); // the network listener goes first: nothing from outside reaches the rest of the shutdown
           await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart

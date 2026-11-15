@@ -11,6 +11,8 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
 import { localFetch } from "../fixtures/local-fetch.js";
+import { openDatabase } from "../../src/db.js";
+import { tgz } from "../sources/tar-fixture.js";
 
 const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const;
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -218,5 +220,97 @@ describe("no secret reaches a collaborator", () => {
     expect(owners).toContain(TEST_MESSAGE);
     expect(owners).not.toContain(SECRET);
     expect(owners).not.toContain(NEW_SECRET);
+  });
+});
+
+describe("the GitHub token never leaves the Authorization header", () => {
+  const GH_TOKEN = "ghp_TESTKEY0123456789abcdefghijklmn";
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  /** api.github.com and codeload for `octo/site`, answering only a request that carries the token as a Bearer. */
+  const fakeGitHub: typeof fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const auth = new Headers(init?.headers).get("authorization");
+    if (url.startsWith("https://codeload.github.com/")) {
+      if (auth !== null) return json(400, {});
+      return new Response(tgz([{ name: "octo-site-0123456/README.md", body: "hello\n" }]), { status: 200 });
+    }
+    if (auth !== `Bearer ${GH_TOKEN}`) return json(401, { message: "Bad credentials" });
+    const at = "https://api.github.com/repos/octo/site";
+    if (method === "GET" && url === "https://api.github.com/user/repos?per_page=100&sort=updated") {
+      return json(200, [{ full_name: "octo/site", default_branch: "main", private: true }]);
+    }
+    if (method === "GET" && url === at) return json(200, { default_branch: "main" });
+    if (method === "GET" && url === `${at}/commits/main`) return json(200, { sha: SHA });
+    if (method === "GET" && url === `${at}/tarball/${SHA}`) {
+      return new Response(null, { status: 302, headers: { location: `https://codeload.github.com/octo/site/legacy.tar.gz/${SHA}` } });
+    }
+    if (method === "GET" && url === `${at}/git/commits/${SHA}`) return json(200, { tree: { sha: SHA } });
+    if (method === "POST" && [`${at}/git/blobs`, `${at}/git/trees`, `${at}/git/commits`].includes(url)) return json(201, { sha: SHA });
+    if (method === "POST" && url === `${at}/git/refs`) return json(201, {});
+    if (method === "POST" && url === `${at}/pulls`) return json(201, { html_url: "https://github.com/octo/site/pull/7" });
+    return json(404, { message: "Not Found" });
+  };
+
+  it("after an import and a publish, no response body, log line or ledger entry holds the token", async () => {
+    for (const k of ENV_KEYS) delete process.env[k];
+    const logged: string[] = [];
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" "))),
+    );
+    try {
+      const dataDir = mkdtempSync(join(tmpdir(), "tt-nosecrets-gh-"));
+      dirs.push(dataDir);
+      const cookies = seedPeople(dataDir);
+      const s = await createServer({
+        dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(),
+        linkBind: "127.0.0.1", linkPort: 0, fetch: fakeGitHub,
+      });
+      running.push(s);
+      const owner = { authorization: `Bearer ${s.token}` };
+      const maintainer = { cookie: cookies["p-maintainer"]! };
+      const bodies: string[] = [];
+      const call = async (method: string, path: string, headers: Record<string, string>, body?: unknown): Promise<Response> => {
+        const res = await send(s, method, path, headers, body);
+        const text = await res.clone().text();
+        bodies.push(text);
+        return res;
+      };
+      expect((await call("POST", "/api/connections", owner, { kind: "github", provider: "github", name: "GitHub", config: {}, secrets: { token: GH_TOKEN } })).status).toBe(201);
+      expect((await call("GET", "/api/github/repos", maintainer)).status).toBe(200);
+      const imported = await call("POST", "/api/projects/from-github", maintainer, { repo: "octo/site" });
+      expect(imported.status).toBe(201);
+      const { project } = (await imported.json()) as { project: { id: string } };
+      const { uploadId } = (await (await call("POST", `/api/projects/${project.id}/uploads`, maintainer, { files: 1, bytes: 4, includeSecrets: false })).json()) as { uploadId: string };
+      const putRes = await localFetch(`http://127.0.0.1:${s.port}/api/uploads/${uploadId}/file?path=new.txt`, {
+        method: "PUT", headers: { ...maintainer, "content-type": "application/octet-stream" }, body: "new\n",
+      });
+      expect(putRes.status).toBe(204);
+      expect((await call("POST", `/api/uploads/${uploadId}/commit`, maintainer, {})).status).toBe(200);
+      const preview = (await (await call("GET", `/api/projects/${project.id}/writeback`, owner)).json()) as { head: string };
+      const published = await call("POST", `/api/projects/${project.id}/publish`, owner, { head: preview.head });
+      expect(published.status).toBe(200);
+      for (const key of GETS) {
+        for (const headers of [owner, maintainer]) {
+          const path = key.slice("GET ".length).replace(":id", project.id).replace(/:[A-Za-z]+/g, "x");
+          bodies.push(await (await send(s, "GET", path, headers)).text());
+        }
+      }
+      bodies.push(await (await send(s, "GET", "/api/ledger/export", owner)).text());
+      const leaks = [...bodies.filter((b) => b.includes(GH_TOKEN)).map(() => "response"), ...logged.filter((l) => l.includes(GH_TOKEN)).map(() => "log")];
+      expect(leaks).toEqual([]);
+      const db = openDatabase(join(dataDir, "ledger.db"));
+      try {
+        const rows = db.prepare("SELECT payload FROM ledger").all() as { payload: string }[];
+        expect(rows.some((r) => r.payload.includes("project.published") || r.payload.includes("the-terminal/"))).toBe(true);
+        expect(rows.filter((r) => r.payload.includes(GH_TOKEN))).toEqual([]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

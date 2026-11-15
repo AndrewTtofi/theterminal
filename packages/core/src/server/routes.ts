@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
-import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
+import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema, visibleControls } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
@@ -44,6 +44,13 @@ import { RemoteInputError, RemoteStartError } from "./remote.js";
 import { AcmeError } from "./acme.js";
 import { CertificateError } from "./certs.js";
 import { trimmerFor } from "../ledger/trim.js";
+import { FolderRefusedError, FolderUnavailableError, ImportLimitError, PathRefusedError, PossibleSecretsError } from "../sources/staging.js";
+import { TarInvalidError, TarLimitError } from "../sources/tar.js";
+import { UploadBusyError, UploadNotFoundError } from "../sources/service.js";
+import {
+  AlreadyAcceptedError, MergeConflictError, NoSourceError, NotAcceptableError, NothingToWriteError, WritebackStaleError,
+} from "../sources/writeback.js";
+import { PickerBusyError } from "./folder-picker.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -114,9 +121,51 @@ export function sendGateError(err: unknown, reply: FastifyReply): FastifyReply |
  * The error reply for every route: a fixed code per known error, and nothing the request sent. Shared by the
  * workspace server and the link listener, so both answer the same way.
  */
+/** The refusal reasons a path may be answered with: fixed words of our own, never the path. */
+const PATH_REASONS: ReadonlySet<string> = new Set(["absolute", "dot_dot", "git", "unstorable", "empty", "too_long", "duplicate", "link"]);
+/** The most possible-secret names one refusal lists. */
+const MAX_SECRET_NAMES = 20;
+
+/**
+ * The errors of imports, uploads, accepting a run and writing back to a project's source: the contract's fixed codes.
+ * Only the limit's name, a fixed refusal reason, and the possible-secret names (each redacted and escaped again)
+ * are sent. Null for any other error.
+ */
+function sendSourcesError(err: unknown, reply: FastifyReply): FastifyReply | null {
+  if (err instanceof ImportLimitError) return reply.code(413).send({ error: "limit_exceeded", limit: err.limit });
+  if (err instanceof TarLimitError) {
+    const limit = err.limit === "entries" ? "files" : err.limit === "file_bytes" ? "file_bytes" : "bytes";
+    return reply.code(413).send({ error: "limit_exceeded", limit });
+  }
+  // The archive came from GitHub and could not be read: GitHub's fault as far as the person is concerned.
+  if (err instanceof TarInvalidError) return reply.code(503).send({ error: "github_unavailable" });
+  if (err instanceof PossibleSecretsError) {
+    const names = err.names.slice(0, MAX_SECRET_NAMES).map((n) => visibleControls(redact(String(n))));
+    return reply.code(409).send({ error: "possible_secrets", names });
+  }
+  if (err instanceof PathRefusedError) {
+    return reply.code(400).send({ error: "path_refused", reason: PATH_REASONS.has(err.reason) ? err.reason : "unstorable" });
+  }
+  if (err instanceof FolderRefusedError) return reply.code(400).send({ error: "folder_refused" });
+  if (err instanceof FolderUnavailableError) return reply.code(409).send({ error: "folder_unavailable" });
+  if (err instanceof MergeConflictError) return reply.code(409).send({ error: "merge_conflict" });
+  if (err instanceof AlreadyAcceptedError) return reply.code(409).send({ error: "already_accepted" });
+  // A run with no recorded fork point: what it changed is unknown, as for the Changes view.
+  if (err instanceof NotAcceptableError) return reply.code(409).send({ error: "no_base" });
+  if (err instanceof NothingToWriteError) return reply.code(409).send({ error: "nothing_to_write" });
+  if (err instanceof NoSourceError) return reply.code(404).send({ error: "no_source" });
+  if (err instanceof WritebackStaleError) return reply.code(409).send({ error: "preview_stale" });
+  if (err instanceof UploadNotFoundError) return reply.code(404).send({ error: "upload_not_found" });
+  if (err instanceof UploadBusyError) return reply.code(409).send({ error: "upload_busy" });
+  if (err instanceof PickerBusyError) return reply.code(409).send({ error: "picker_busy" });
+  return null;
+}
+
 export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLogger): FastifyReply {
   const gate = sendGateError(err, reply);
   if (gate !== null) return gate;
+  const sources = sendSourcesError(err, reply);
+  if (sources !== null) return sources;
   if (err instanceof ZodError) {
     return reply.code(400).send({ error: "invalid_input", issues: err.issues.map(publicIssue) });
   }
