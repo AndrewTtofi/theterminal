@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -17,9 +17,36 @@ const ICE: Record<string, string> = {
   "diff-add": "#3fb97f26", "diff-del": "#e5534b26", "diff-hunk": "#4fc3d914",
 };
 
+/** Colour literals (hex or rgb/rgba) found in a stylesheet's text; `:root` is exempt only for styles.css. */
+export function checkCss(text: string): string[] {
+  return text.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) ?? [];
+}
+
+function cssFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    d.isDirectory() ? cssFiles(join(dir, d.name)) : d.name.endsWith(".css") ? [join(dir, d.name)] : []);
+}
+
+describe("every stylesheet", () => {
+  it("flags a colour literal", () => {
+    expect(checkCss(".x { color: #fff; }")).toEqual(["#fff"]);
+    expect(checkCss(".x { color: rgba(0,0,0,.5); }")).toEqual(["rgba("]);
+    expect(checkCss(".x { color: var(--fg); }")).toEqual([]);
+  });
+  it("has no colour literals in any src css except styles.css's :root", () => {
+    const files = cssFiles(join(__dirname, "..", "src"));
+    expect(files.length).toBeGreaterThan(1);
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      const body = f === join(__dirname, "..", "src", "styles.css") ? text.replace(/:root\s*\{[^}]*\}/, "") : text;
+      expect(checkCss(body), f).toEqual([]);
+    }
+  });
+});
+
 describe("styles.css tokens", () => {
   it("has no colour literals outside :root", () => {
-    expect(rest.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) ?? []).toEqual([]);
+    expect(checkCss(rest)).toEqual([]);
     expect(rest).toMatch(/\.share-frame\s*\{[^}]*background: var\(--bg\)/);
   });
   it("defines every key in Ice's values", () => {

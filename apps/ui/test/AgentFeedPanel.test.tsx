@@ -283,3 +283,17 @@ describe("AgentFeedPanel", () => {
     });
   });
 });
+
+describe("AgentFeedPanel progress header", () => {
+  it("shows the followed run's bar and checklist with the current step", () => {
+    const withPlan = [feedRun("run1", { status: "running", progress: { steps: ["a", "b", "c"], done: [1], current: 2 } })];
+    renderFeed({ runs: withPlan, feedRunId: "run1" });
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
+    const cur = within(feed()).getAllByRole("listitem").find((li) => li.getAttribute("aria-current") === "step");
+    expect(cur?.textContent).toContain("b");
+  });
+  it("shows no header when the followed run has no plan", () => {
+    renderFeed({ feedRunId: "run1" });
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+});
