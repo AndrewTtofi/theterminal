@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../packages/core/dist/index.js";
+import { MemorySecretStore, createServer, fakeDiscovery } from "../packages/core/dist/index.js";
 
 const fixture = (name: string) => join(import.meta.dirname, "..", "packages", "core", "test", "fixtures", name);
 
@@ -91,7 +91,10 @@ export default async function globalSetup() {
   };
 
   try {
-    const board = await createServer({ dataDir: dirs[0]!, port: 47000, uiDir });
+    // Both servers: secrets in memory (the link identity is never written to the real keychain), the in-process
+    // discovery (no multicast), and a loopback link listener on a free port should a test enable linking.
+    const linkOpts = () => ({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), linkBind: "127.0.0.1", linkPort: 0 });
+    const board = await createServer({ dataDir: dirs[0]!, port: 47000, uiDir, ...linkOpts() });
     servers.push(board);
     process.env.TT_E2E_URL = board.url;
 
@@ -101,7 +104,7 @@ export default async function globalSetup() {
     process.env.TT_E2E_FAKE_LOG = fakeLog;
     const restoreCreateEnv = setEnv(AT_CREATE);
     try {
-      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir });
+      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir, ...linkOpts() });
       servers.push(agent);
       process.env.TT_E2E_AGENT_URL = agent.url;
     } finally {
