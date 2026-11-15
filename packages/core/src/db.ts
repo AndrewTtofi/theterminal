@@ -96,6 +96,45 @@ const MIGRATIONS = [
     retry_after_s INTEGER
   );
   CREATE INDEX rate_limits_at ON rate_limits (at);`,
+  `CREATE TABLE intakes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    idea TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+  CREATE TABLE intake_answers (
+    intake_id TEXT NOT NULL,
+    question_id TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    answered_at TEXT NOT NULL,
+    PRIMARY KEY (intake_id, question_id)
+  );
+  CREATE TABLE intake_decisions (
+    intake_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    chosen TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (intake_id, decision_id)
+  );
+  CREATE TABLE gate_decisions (
+    entry_id TEXT PRIMARY KEY,
+    gate_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    from_stage TEXT NOT NULL,
+    to_stage TEXT NOT NULL,
+    reason TEXT,
+    decided_by TEXT NOT NULL,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX gate_decisions_card ON gate_decisions (card_id);`,
 ];
 
 export type Db = Database.Database;

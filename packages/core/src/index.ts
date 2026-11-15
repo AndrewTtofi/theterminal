@@ -5,7 +5,12 @@ export { Ledger, LedgerReadOnlyError } from "./ledger/ledger.js";
 export type { VerifyResult } from "./ledger/ledger.js";
 export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent, rebuildAllProjections, getSetting } from "./events/projections.js";
-export { commitEvent } from "./events/commit.js";
+export { commitEvent, commitEvents } from "./events/commit.js";
+export {
+  getIntake, listOpenIntakes, listGateDecisions, projectSpendUsd, countPendingActions, countRunningRuns,
+} from "./events/projections.js";
+export type { GateDecision, IntakeRow, IntakeState } from "./events/projections.js";
+export type { CardStory } from "@theterminal/shared";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
 export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "./server/auth.js";
