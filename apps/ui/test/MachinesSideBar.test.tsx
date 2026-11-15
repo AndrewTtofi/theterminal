@@ -137,6 +137,24 @@ describe("MachinesSideBar", () => {
     expect(refresh).toHaveBeenCalled();
   });
 
+  it("sends one rename when Enter is pressed twice", async () => {
+    m.renameMachine.mockReturnValue(new Promise(() => {}));
+    renderSideBar({ overview: overview() });
+    await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const input = screen.getByRole("textbox", { name: "Computer name" });
+    await userEvent.type(input, "!{Enter}{Enter}");
+    expect(m.renameMachine).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves focus into the unlink confirmation, and back to Unlink on Keep", async () => {
+    renderSideBar({ overview: overview({ machines: [machine()] }) });
+    await userEvent.click(screen.getByRole("button", { name: 'Unlink "GPU box"' }));
+    const confirm = screen.getByRole("group", { name: 'Unlink "GPU box"?' });
+    expect(confirm.contains(document.activeElement)).toBe(true);
+    await userEvent.click(within(confirm).getByRole("button", { name: "Keep" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: 'Unlink "GPU box"' }));
+  });
+
   it("says when no machine is linked, and opens the Link a machine tab", async () => {
     const { dock } = renderSideBar({ overview: overview() });
     const section = screen.getByRole("region", { name: "Linked machines" });

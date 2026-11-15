@@ -79,11 +79,18 @@ function ThisComputer({ self, refresh }: { self: LinkSelf; refresh: () => void }
     if (await act(() => api.enableLinking(LINKING_ACK))) closeDialog();
   };
 
+  /** Set while a rename is being sent: a second Enter before the first answer sends nothing. */
+  const renamingNow = useRef(false);
   const rename = async (e: FormEvent) => {
     e.preventDefault();
     const next = name.trim();
-    if (next === "") return;
-    if (await act(() => api.renameMachine(next))) setRenaming(false);
+    if (next === "" || renamingNow.current) return;
+    renamingNow.current = true;
+    try {
+      if (await act(() => api.renameMachine(next))) setRenaming(false);
+    } finally {
+      renamingNow.current = false;
+    }
   };
 
   return (
@@ -191,6 +198,14 @@ function MachineRow({ m, refresh }: { m: MachinePresence; refresh: () => void })
   const [error, setError] = useState<string | null>(null);
   const name = shownName(m.name);
   const state = presence(m);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const unlinkRef = useRef<HTMLButtonElement>(null);
+  /** Where focus goes after the confirmation opens or closes; null leaves it alone (the first render). */
+  const [focusTo, setFocusTo] = useState<"confirm" | "unlink" | null>(null);
+  useEffect(() => {
+    if (focusTo === "confirm") keepRef.current?.focus();
+    else if (focusTo === "unlink") unlinkRef.current?.focus();
+  }, [focusTo]);
 
   const unlink = async () => {
     setBusy(true);
@@ -220,13 +235,28 @@ function MachineRow({ m, refresh }: { m: MachinePresence; refresh: () => void })
             <button type="button" className="danger" disabled={busy} onClick={() => void unlink()}>
               Unlink
             </button>
-            <button type="button" onClick={() => setConfirming(false)}>
+            <button
+              ref={keepRef}
+              type="button"
+              onClick={() => {
+                setConfirming(false);
+                setFocusTo("unlink");
+              }}
+            >
               Keep
             </button>
           </div>
         </div>
       ) : (
-        <button type="button" aria-label={`Unlink "${name}"`} onClick={() => setConfirming(true)}>
+        <button
+          ref={unlinkRef}
+          type="button"
+          aria-label={`Unlink "${name}"`}
+          onClick={() => {
+            setConfirming(true);
+            setFocusTo("confirm");
+          }}
+        >
           Unlink
         </button>
       )}

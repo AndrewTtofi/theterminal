@@ -109,6 +109,18 @@ describe("LinkMachinePanel", () => {
     expect(m.cancelPairingCode).toHaveBeenCalledTimes(1);
   });
 
+  it("withdraws a code that arrives after the tab closed", async () => {
+    let resolve!: (c: { code: string; expiresAt: string; addresses: string[] }) => void;
+    m.showPairingCode.mockReturnValue(new Promise((r) => (resolve = r)));
+    m.cancelPairingCode.mockResolvedValue(undefined);
+    const { unmount } = renderPanel(on);
+    await userEvent.click(screen.getByRole("button", { name: "Show a code" }));
+    unmount();
+    expect(m.cancelPairingCode).not.toHaveBeenCalled();
+    await act(async () => resolve({ code: OWN_CODE, expiresAt: new Date(Date.now() + 600_000).toISOString(), addresses: [] }));
+    expect(m.cancelPairingCode).toHaveBeenCalledTimes(1);
+  });
+
   it("drops an expired code and offers a new one", async () => {
     vi.useFakeTimers({ now: NOW, shouldAdvanceTime: true });
     m.showPairingCode.mockResolvedValue({ code: OWN_CODE, expiresAt: new Date(NOW.getTime() + 600_000).toISOString(), addresses: [] });
@@ -155,6 +167,30 @@ describe("LinkMachinePanel", () => {
     const list = screen.getByRole("listbox", { name: "Machines found on your network" });
     await userEvent.click(within(list).getByRole("option", { name: "GPU box · 192.168.1.20:4418" }));
     expect((screen.getByRole("textbox", { name: "Address" }) as HTMLInputElement).value).toBe("192.168.1.20:4418");
+  });
+
+  it("puts one found machine in the tab order, moving between them with the arrow keys", async () => {
+    renderPanel({
+      overview: overview({
+        discovered: [
+          { machineId: "22".repeat(16), name: "GPU box", address: "192.168.1.20:4418", seenAt: NOW.toISOString() },
+          { machineId: "33".repeat(16), name: "Laptop", address: "192.168.1.30:4418", seenAt: NOW.toISOString() },
+        ],
+      }),
+    });
+    await userEvent.click(tab("Enter a code"));
+    const [first, second] = screen.getAllByRole("option");
+    expect([first!.tabIndex, second!.tabIndex]).toEqual([0, -1]);
+    first!.focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(second);
+    expect([first!.tabIndex, second!.tabIndex]).toEqual([-1, 0]);
+    await userEvent.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(first);
+    await userEvent.keyboard("{End}");
+    expect(document.activeElement).toBe(second);
+    await userEvent.keyboard("{Enter}");
+    expect((screen.getByRole("textbox", { name: "Address" }) as HTMLInputElement).value).toBe("192.168.1.30:4418");
   });
 
   it("shows a found machine's name inert, hidden characters made visible", async () => {

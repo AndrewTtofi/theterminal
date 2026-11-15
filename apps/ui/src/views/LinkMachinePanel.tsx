@@ -46,6 +46,8 @@ function ShowCode({ fingerprint, enabled, onLinked }: { fingerprint: string; ena
   const [error, setError] = useState<string | null>(null);
   const shownRef = useRef(shown);
   shownRef.current = shown;
+  /** False once the tab has closed: a code that arrives after that is withdrawn at once, never left open unseen. */
+  const mountedRef = useRef(true);
 
   // Tick once a second while a code is shown; drop it once it has expired.
   useEffect(() => {
@@ -79,12 +81,13 @@ function ShowCode({ fingerprint, enabled, onLinked }: { fingerprint: string; ena
   );
 
   // Closing the tab withdraws a code still shown, so no window stays open unseen.
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       if (shownRef.current !== null) void api.cancelPairingCode().catch(() => {});
-    },
-    [],
-  );
+    };
+  }, []);
 
   const show = async () => {
     setBusy(true);
@@ -92,6 +95,10 @@ function ShowCode({ fingerprint, enabled, onLinked }: { fingerprint: string; ena
     setExpired(false);
     try {
       const code = await api.showPairingCode();
+      if (!mountedRef.current) {
+        void api.cancelPairingCode().catch(() => {});
+        return;
+      }
       setNow(Date.now());
       setShown(code);
     } catch (e) {
@@ -181,6 +188,24 @@ function EnterCode({ onLinked }: { onLinked: (l: Linked) => void }) {
   useMachinesRefresh(refresh, DISCOVERY_MS);
   const found = overview?.discovered ?? [];
   const ready = address.trim() !== "" && parsePairingCode(code) !== null;
+  /** Roving tab stop: the one option in the tab order; the arrow keys, Home and End move it. */
+  const [active, setActive] = useState(0);
+  const optionRefs = useRef<(HTMLLIElement | null)[]>([]);
+  const current = Math.min(active, Math.max(0, found.length - 1));
+  const moveTo = (i: number) => {
+    setActive(i);
+    optionRefs.current[i]?.focus();
+  };
+  const onOptionKey = (e: KeyboardEvent<HTMLLIElement>, i: number, address: string) => {
+    const last = found.length - 1;
+    if (e.key === "ArrowDown") moveTo(Math.min(last, i + 1));
+    else if (e.key === "ArrowUp") moveTo(Math.max(0, i - 1));
+    else if (e.key === "Home") moveTo(0);
+    else if (e.key === "End") moveTo(last);
+    else if (e.key === "Enter" || e.key === " ") setAddress(address);
+    else return;
+    e.preventDefault();
+  };
 
   const link = async (e: FormEvent) => {
     e.preventDefault();
@@ -206,22 +231,23 @@ function EnterCode({ onLinked }: { onLinked: (l: Linked) => void }) {
         <p className="empty">None found yet. Turn on linking on the other computer, or type its address.</p>
       ) : (
         <ul role="listbox" aria-labelledby={`${uid}-found`} className="link-found">
-          {found.map((d) => {
+          {found.map((d, i) => {
             const selected = d.address === address;
             return (
               <li
                 key={d.machineId}
+                ref={(el) => {
+                  optionRefs.current[i] = el;
+                }}
                 role="option"
                 aria-selected={selected}
-                tabIndex={0}
+                tabIndex={i === current ? 0 : -1}
                 className={selected ? "selected" : undefined}
-                onClick={() => setAddress(d.address)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setAddress(d.address);
-                  }
+                onClick={() => {
+                  setActive(i);
+                  setAddress(d.address);
                 }}
+                onKeyDown={(e) => onOptionKey(e, i, d.address)}
               >
                 {`${shownName(d.name)} · ${shownName(d.address)}`}
               </li>
