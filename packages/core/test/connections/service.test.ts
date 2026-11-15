@@ -1119,3 +1119,80 @@ describe("Google Cloud key redaction", () => {
     expect(reloaded.secretValues()).toEqual(expect.arrayContaining(expected));
   });
 });
+
+describe("publicConnections", () => {
+  const SECRETS = {
+    claude: "sk-ant-TESTKEY-pub-0000000000",
+    awsAccess: "AKIATESTKEYPUB00000",
+    awsSecret: "TESTKEY-aws-pub-secret-0000000000",
+    header: "Bearer TESTKEY-hdr-0000000000",
+    env: "TESTKEY-env-pub-0000000000",
+    local: "TESTKEY-local-pub-000000",
+    github: "ghp_TESTKEYpub000000000000000",
+  };
+  const uuidId = () => `${String(++ids).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  const COMMAND = join(tmpdir(), "bin", "files-mcp");
+
+  async function seedAll(svc: ConnectionService) {
+    const claude = await svc.add(owner, { kind: "llm", provider: "claude", name: "Claude", config: { plan: "Max 5x" }, secrets: { apiKey: SECRETS.claude } });
+    const codex = await svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", private: { cliHome: CODEX_HOME } });
+    const aws = await svc.add(owner, {
+      kind: "cloud", provider: "aws", name: "Work AWS", config: { region: "us-east-1" },
+      secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret },
+    });
+    const mcp = await svc.add(owner, {
+      kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" }, secrets: { headers: `Authorization=${SECRETS.header}` },
+    });
+    const stdio = await svc.add(owner, {
+      kind: "mcp", provider: "mcp_stdio", name: "Files", private: { command: COMMAND, args: "--verbose" }, secrets: { env: `FILES_TOKEN=${SECRETS.env}` },
+    });
+    const local = await svc.add(owner, {
+      kind: "llm", provider: "local_model", name: "Qwen on Ollama",
+      config: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b" }, secrets: { apiKey: SECRETS.local },
+    });
+    const github = await svc.add(owner, { kind: "github", provider: "github", name: "GitHub", config: { repo: "acme/widgets" }, secrets: { token: SECRETS.github } });
+    const off = await svc.add(owner, { kind: "cloud", provider: "aws", name: "Old AWS", config: { region: "eu-west-2" }, secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret } });
+    await svc.update(owner, off.id, { enabled: false });
+    await svc.writeHardware(owner, {
+      cpu: "Apple M2 Max", cores: 12, memoryGb: 32, gpu: "Apple M2 Max", gpuMemoryGb: 32, platform: "darwin", wsl: false,
+      detectedAt: "2026-11-15T12:00:00.000Z",
+    });
+    return { claude, codex, aws, mcp, stdio, local, github, off };
+  }
+
+  it("names the enabled cloud, MCP and local model connections: id, kind, provider and name only", async () => {
+    const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    const c = await seedAll(svc);
+    expect(svc.publicConnections()).toEqual([
+      { id: c.aws.id, kind: "cloud", provider: "aws", name: "Work AWS" },
+      { id: c.mcp.id, kind: "mcp", provider: "mcp_http", name: "Docs" },
+      { id: c.stdio.id, kind: "mcp", provider: "mcp_stdio", name: "Files" },
+      { id: c.local.id, kind: "llm", provider: "local_model", name: "Qwen on Ollama" },
+    ]);
+    for (const entry of svc.publicConnections()) expect(Object.keys(entry).sort()).toEqual(["id", "kind", "name", "provider"]);
+  });
+
+  it("carries no secret, config, private field, path, URL, plan or status, even after a reload from the keychain", async () => {
+    const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    await seedAll(svc);
+    const reloaded = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    await reloaded.load();
+    for (const s of [svc, reloaded]) {
+      const text = JSON.stringify(s.publicConnections());
+      expect(text).not.toContain("TESTKEY");
+      for (const value of [...Object.values(SECRETS), ...s.secretValues()]) expect(text).not.toContain(value);
+      for (const leak of [COMMAND, CODEX_HOME, "mcp.example.com", "127.0.0.1", "qwen2.5-coder", "us-east-1", "acme/widgets", "Max 5x", "Apple M2", "--verbose"]) {
+        expect(text).not.toContain(leak);
+      }
+      for (const key of ["apiKey", "secret", "token", "cliHome", "headers", "env", "config", "private", "status", "enabled", "secretFields"]) {
+        expect(text).not.toContain(`"${key}"`);
+      }
+    }
+  });
+
+  it("is empty when nothing public is enabled", async () => {
+    const svc = make();
+    await addClaude(svc);
+    expect(svc.publicConnections()).toEqual([]);
+  });
+});

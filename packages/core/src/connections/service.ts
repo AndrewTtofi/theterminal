@@ -15,6 +15,7 @@ import {
   type FieldStorage,
   type CapacityHardware,
   type HardwareInfo,
+  type MachineCapacity,
   type NewLedgerEntry,
   type Provider,
 } from "@theterminal/shared";
@@ -87,6 +88,8 @@ export type LocalModelSource = {
 };
 export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[]; localModel: LocalModelSource | null };
 export type GitHubSource = { connectionId: string; token: string; repo: string } | null;
+/** A connection as another machine may see it (see publicConnections). */
+export type PublicConnection = MachineCapacity["connections"][number];
 export type Budget = { connectionId: string; provider: Provider; name: string; plan: string | null; monthlyBudgetUsd: number | null };
 
 export type ConnectionTester = (
@@ -644,6 +647,17 @@ export class ConnectionService {
     const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
     const info = row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
     return row && info ? { ...info, enabled: row.enabled === 1 } : null;
+  }
+
+  /**
+   * What a linked machine may name when it asks this one to run: the enabled cloud, MCP and local model connections,
+   * by id, kind, provider and name only. Never config, private or secret fields, their names, or status: this list
+   * leaves the computer.
+   */
+  publicConnections(): PublicConnection[] {
+    return this.rows()
+      .filter((r) => r.enabled === 1 && (r.kind === "cloud" || r.kind === "mcp" || (r.kind === "llm" && r.provider === "local_model")))
+      .map((r) => ({ id: r.id, kind: r.kind, provider: r.provider, name: r.name }));
   }
 
   /** The plan and monthly budget of each enabled model connection. */

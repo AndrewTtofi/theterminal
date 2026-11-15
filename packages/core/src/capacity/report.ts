@@ -1,6 +1,6 @@
 import {
   PROVIDERS, type AuthMode, type Basis, type CapacityHardware, type CapacityReport, type CapacitySource, type Figure, type LocalEngine,
-  type Provider, type UsageWindow,
+  type MachineCapacity, type Provider, type UsageWindow,
 } from "@theterminal/shared";
 import type { Budget } from "../connections/service.js";
 import type { Db } from "../db.js";
@@ -11,6 +11,8 @@ export type CapacityDeps = {
   hardware: () => CapacityHardware | null;
   /** The model servers last detected on this computer. Default: none. */
   localModels?: () => LocalEngine[];
+  /** The linked machines as they last answered (see the link service's capacityOf). Default: none. */
+  machines?: () => MachineCapacity[];
   now?: () => Date;
 };
 
@@ -53,7 +55,8 @@ function rateLimits(db: Db, adapter: Provider, now: Date): CapacitySource["rateL
 
 /**
  * Usage per provider today and this month (the server's local calendar), the plan and budget the Owner set, the
- * rate limits observed in the last 24 hours, this computer's hardware and the model servers detected on it.
+ * rate limits observed in the last 24 hours, this computer's hardware and the model servers detected on it, and the
+ * linked machines.
  */
 export function capacityReport(db: Db, deps: CapacityDeps): CapacityReport {
   const now = (deps.now ?? (() => new Date()))();
@@ -76,7 +79,7 @@ export function capacityReport(db: Db, deps: CapacityDeps): CapacityReport {
       rateLimits: rateLimits(db, provider, now),
     };
   });
-  // Linked machines are filled in by a later Plan 6 task; until then there are none.
   const localModels = deps.localModels?.() ?? [];
-  return { sources, hardware: deps.hardware(), localModels, machines: [], generatedAt: now.toISOString() };
+  const machines = deps.machines?.() ?? [];
+  return { sources, hardware: deps.hardware(), localModels, machines, generatedAt: now.toISOString() };
 }

@@ -12,7 +12,7 @@ import { api } from "../src/api";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacitySideBar } from "../src/views/CapacitySideBar";
-import { hardware, localEngines, report } from "./capacity-fixtures";
+import { hardware, localEngines, machines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const m = vi.mocked(api);
@@ -123,5 +123,34 @@ describe("CapacitySideBar", () => {
   it("says when the report could not be loaded", () => {
     renderSideBar({ error: "request_failed" });
     expect(screen.getByText("Could not load capacity")).toBeTruthy();
+  });
+
+  it("adds a section per linked machine: its state, a one-line hardware summary and its local model count", () => {
+    renderSideBar({ report: report({ machines }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("AMD Ryzen 9 7950X · 64 GB · NVIDIA RTX 4090")).toBeTruthy();
+    expect(within(box).getByText("3 local models")).toBeTruthy();
+    expect(box.className).not.toContain("offline");
+
+    const off = screen.getByRole("region", { name: "<img src=x onerror=alert(1)> · offline" });
+    expect(off.className).toContain("offline");
+    expect(within(off).getByText("Apple M1 · 16 GB · GPU not detected")).toBeTruthy();
+    expect(within(off).getByText("0 local models")).toBeTruthy();
+    expect(within(off).getByText(/^last seen/).textContent).toBe(`last seen ${new Date("2026-11-15T09:30:00.000Z").toLocaleString()}`);
+    expect(within(box).queryByText(/^last seen/)).toBeNull();
+    expect(document.querySelector(".capacity-side img")).toBeNull();
+  });
+
+  it("says one local model, and hardware not reported, for a machine that sent none", () => {
+    const one = { ...localEngines[1]! };
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, hardware: null, localModels: [one] }] }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("Hardware not reported")).toBeTruthy();
+    expect(within(box).getByText("1 local model")).toBeTruthy();
+  });
+
+  it("has no machine sections without linked machines", () => {
+    renderSideBar({ report: report() });
+    expect(screen.queryByRole("region", { name: / · (online|offline)$/ })).toBeNull();
   });
 });

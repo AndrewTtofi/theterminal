@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import type { AuthMode, HardwareInfo, LocalEngine, Provider } from "@theterminal/shared";
+import { describe, expect, it, vi } from "vitest";
+import type { AuthMode, HardwareInfo, LocalEngine, MachineCapacity, Provider } from "@theterminal/shared";
 import { capacityReport } from "../../src/capacity/report.js";
 import type { Budget } from "../../src/connections/service.js";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -46,6 +46,20 @@ describe("capacityReport", () => {
     }];
     const r = capacityReport(db, { budgets: () => [], modes: (p) => MODES[p], hardware: () => null, localModels: () => engines, now: () => NOW });
     expect(r.localModels).toEqual(engines);
+  });
+
+  it("lists the linked machines it is given, and none without them", () => {
+    const { db } = seed();
+    expect(report(db).machines).toEqual([]);
+    const machines: MachineCapacity[] = [{
+      machineId: "m1", name: "GPU box", online: true, checkedAt: NOW.toISOString(),
+      hardware: { cpu: "AMD Ryzen 9", cores: 16, memoryGb: 64, gpu: "NVIDIA RTX 4090", gpuMemoryGb: 24, platform: "linux", wsl: false, detectedAt: NOW.toISOString() },
+      localModels: [], sources: [], adapters: ["codex"], connections: [{ id: "c9", kind: "cloud", provider: "aws", name: "Work AWS" }],
+    }];
+    const machinesDep = vi.fn(() => machines);
+    const r = capacityReport(db, { budgets: () => [], modes: (p) => MODES[p], hardware: () => null, machines: machinesDep, now: () => NOW });
+    expect(r.machines).toEqual(machines);
+    expect(machinesDep).toHaveBeenCalledTimes(1);
   });
 
   it("sums Claude's cost as an estimate over today and this month, excluding last month", () => {

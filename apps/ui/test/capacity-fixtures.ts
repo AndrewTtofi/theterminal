@@ -1,4 +1,4 @@
-import type { CapacityReport, CapacitySource, HardwareInfo, LocalEngine, Provider, UsageWindow } from "@theterminal/shared";
+import type { CapacityReport, CapacitySource, HardwareInfo, LocalEngine, MachineCapacity, Provider, UsageWindow } from "@theterminal/shared";
 
 const none: UsageWindow = {
   runs: 0,
@@ -39,6 +39,26 @@ export const localEngines: LocalEngine[] = [
   {
     engine: "llamacpp", baseUrl: "http://127.0.0.1:8080/v1", version: null, detectedAt: "2026-11-15T12:00:00.000Z",
     models: [{ id: "gpt-oss-20b", sizeBytes: null, parameters: null, quantization: null }],
+  },
+];
+
+/**
+ * Two linked machines: "GPU box" online with three local models; a machine whose name is markup, offline since its last
+ * check, with the hardware it last reported and no local models.
+ */
+export const machines: MachineCapacity[] = [
+  {
+    machineId: "m1", name: "GPU box", online: true, checkedAt: "2026-11-15T12:00:00.000Z",
+    hardware: {
+      cpu: "AMD Ryzen 9 7950X", cores: 16, memoryGb: 64, gpu: "NVIDIA RTX 4090", gpuMemoryGb: 24, platform: "linux", wsl: false,
+      detectedAt: "2026-11-15T11:00:00.000Z",
+    },
+    localModels: localEngines, sources: [], adapters: ["codex"], connections: [],
+  },
+  {
+    machineId: "m2", name: "<img src=x onerror=alert(1)>", online: false, checkedAt: "2026-11-15T09:30:00.000Z",
+    hardware: { cpu: "Apple M1", cores: 8, memoryGb: 16, gpu: null, gpuMemoryGb: null, platform: "darwin", wsl: false, detectedAt: "2026-11-14T08:00:00.000Z" },
+    localModels: [], sources: [], adapters: [], connections: [],
   },
 ];
 

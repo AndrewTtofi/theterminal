@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacityPanel } from "../src/views/CapacityPanel";
-import { localEngines, report } from "./capacity-fixtures";
+import { localEngines, machines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -84,5 +84,35 @@ describe("CapacityPanel", () => {
   it("has no Local models table without a detected server", () => {
     renderPanel({ report: report() });
     expect(screen.queryByRole("table", { name: "Local models" })).toBeNull();
+  });
+
+  it("adds a Machines table: one row per linked machine, the offline one greyed with when it was last seen", () => {
+    renderPanel({ report: report({ machines }) });
+    const table = screen.getByRole("table", { name: "Machines" });
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Machine", "State", "CPU", "Memory", "GPU", "Local models", "Checked",
+    ]);
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell").map((c) => c.textContent))).toEqual([
+      ["GPU box", "online", "AMD Ryzen 9 7950X (16 cores)", "64 GB", "NVIDIA RTX 4090, 24 GB", "3", new Date("2026-11-15T12:00:00.000Z").toLocaleString()],
+      [
+        "<img src=x onerror=alert(1)>", "offline", "Apple M1 (8 cores)", "16 GB", "not detected", "0",
+        `last seen ${new Date("2026-11-15T09:30:00.000Z").toLocaleString()}`,
+      ],
+    ]);
+    expect(rows[0]!.className).not.toContain("offline");
+    expect(rows[1]!.className).toContain("offline");
+    expect(within(rows[1]!).getByText(/^last seen/).querySelector("time")!.getAttribute("dateTime")).toBe("2026-11-15T09:30:00.000Z");
+    // A machine's name is text, never markup.
+    expect(table.querySelector("img")).toBeNull();
+  });
+
+  it("says not reported for a machine that sent no hardware, and has no Machines table without linked machines", () => {
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, hardware: null, localModels: [] }] }) });
+    const cellsText = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!.textContent;
+    expect(cellsText).toContain("not reported");
+    cleanup();
+    renderPanel({ report: report() });
+    expect(screen.queryByRole("table", { name: "Machines" })).toBeNull();
   });
 });
