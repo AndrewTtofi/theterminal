@@ -1,11 +1,57 @@
 import { execFile } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { allowlistedEnv } from "./env-allowlist.js";
 
 const execFileAsync = promisify(execFile);
 
-type GitRunner = (args: string[], cwd: string) => Promise<string>;
+/** How one git call is bounded; `env` replaces the default environment (gitEnv). */
+export type GitRunOptions = { timeoutMs?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv };
+export type GitRunner = (args: string[], cwd: string, opts?: GitRunOptions) => Promise<string>;
+
+/** A git call printed more than its buffer allows. */
+export class GitOutputTooLargeError extends Error {
+  constructor() {
+    super("git output too large");
+    this.name = "GitOutputTooLargeError";
+  }
+}
+
+/** A git call ran past its timeout and was killed. */
+export class GitTimeoutError extends Error {
+  constructor() {
+    super("git timed out");
+    this.name = "GitTimeoutError";
+  }
+}
+
+/** The repository configures a filter driver whose name cannot be neutralised on the command line. */
+export class UnsafeGitConfigError extends Error {
+  constructor() {
+    super("the repository configures a filter driver that cannot be disabled");
+    this.name = "UnsafeGitConfigError";
+  }
+}
+
+/** The empty hooks directory has something in it. */
+export class HooksDirModifiedError extends Error {
+  constructor() {
+    super("the empty hooks directory was modified");
+    this.name = "HooksDirModifiedError";
+  }
+}
+
+/** Given to every runGit call: no pager, no fsmonitor program, paths printed as they are. */
+export const GIT_COMMON_ARGS = ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"] as const;
+export const GIT_TIMEOUT_MS = 30_000;
+export const GIT_MAX_BUFFER = 2 * 1024 * 1024;
+/** An always-empty directory inside dataDir that runGit names as `core.hooksPath`, so no hook ever runs. */
+export const EMPTY_HOOKS_DIR = ".theterminal-empty-hooks";
+/** Attribute files read for filter driver names, beside the configuration's own `filter.*` sections. */
+const MAX_ATTRIBUTES_BYTES = 256 * 1024;
+/** `filter=<name>` in a gitattributes line. */
+const ATTR_FILTER = /(?:^|\s)filter=(\S+)/g;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 /** Repo-local config: every commit in the project repo and its worktrees (ours or the agent's) uses it. */
@@ -106,12 +152,56 @@ export function gitEnv(cwd: string, emptyGlobalConfig: string): NodeJS.ProcessEn
   };
 }
 
+/**
+ * The environment for git over a tree an agent controls: only the allowlisted variables (no provider keys, no
+ * GIT_*), pinned to the empty global config, no system config, no prompts, and no repository above `cwd`.
+ */
+export function safeGitEnv(cwd: string, emptyGlobalConfig: string): NodeJS.ProcessEnv {
+  return {
+    ...allowlistedEnv(process.env, process.platform),
+    GIT_CEILING_DIRECTORIES: dirname(resolve(cwd)),
+    GIT_CONFIG_GLOBAL: emptyGlobalConfig,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
 const gitRunner =
   (emptyGlobalConfig: string): GitRunner =>
-  async (args, cwd) => {
-    const { stdout } = await execFileAsync("git", args, { cwd, env: gitEnv(cwd, emptyGlobalConfig) });
-    return stdout;
+  async (args, cwd, opts = {}) => {
+    try {
+      const { stdout } = await execFileAsync("git", args, {
+        cwd,
+        env: opts.env ?? gitEnv(cwd, emptyGlobalConfig),
+        windowsHide: true,
+        ...(opts.timeoutMs !== undefined && { timeout: opts.timeoutMs, killSignal: "SIGKILL" as const }),
+        ...(opts.maxBuffer !== undefined && { maxBuffer: opts.maxBuffer }),
+      });
+      return stdout;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+      if (err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || err.code === "ENOBUFS") throw new GitOutputTooLargeError();
+      if (err.killed && opts.timeoutMs !== undefined) throw new GitTimeoutError();
+      throw e;
+    }
   };
+
+/** Reads at most `max` bytes of a regular file, never through a symlink; "" when it is missing or anything else. */
+function readSmallRegularFile(file: string, max: number): string {
+  try {
+    if (!lstatSync(file).isFile()) return "";
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const buf = Buffer.alloc(max);
+      const n = readSync(fd, buf, 0, max, 0);
+      return buf.subarray(0, n).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
 
 
 function assertId(kind: string, id: string): void {
@@ -124,6 +214,7 @@ const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
 export class WorktreeManager {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly emptyGlobalConfig: string;
+  private readonly emptyHooks: string;
   private readonly git: GitRunner;
 
   constructor(
@@ -131,6 +222,7 @@ export class WorktreeManager {
     git?: GitRunner,
   ) {
     this.emptyGlobalConfig = join(dataDir, EMPTY_GITCONFIG);
+    this.emptyHooks = join(dataDir, EMPTY_HOOKS_DIR);
     try {
       ensureEmptyGitconfig(dataDir);
     } catch (e) {
@@ -149,6 +241,76 @@ export class WorktreeManager {
       if (this.queues.get(projectId) === tail) this.queues.delete(projectId);
     });
     return next;
+  }
+
+  /** The project's own repository: `<dataDir>/projects/<projectId>/repo`. */
+  repoPath(projectId: string): string {
+    assertId("projectId", projectId);
+    return join(this.dataDir, "projects", projectId, "repo");
+  }
+
+  /**
+   * Runs git in `cwd`, which may be a tree an agent controlled, so nothing in it may make git run a program:
+   * GIT_COMMON_ARGS (no pager, no fsmonitor), `core.hooksPath` set to an always-empty directory, and every filter
+   * driver named in the repository's configuration or its attribute files set to empty commands and not required.
+   * The environment is the allowlisted one (safeGitEnv), never the server's. Diff callers add `--no-ext-diff
+   * --no-textconv`. Bounded by `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB,
+   * GitOutputTooLargeError).
+   */
+  async runGit(cwd: string, args: string[], opts: { timeoutMs?: number; maxBuffer?: number } = {}): Promise<string> {
+    assertEmptyGitconfig(this.dataDir);
+    this.assertEmptyHooks();
+    const run: GitRunOptions = {
+      timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
+      maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
+      env: safeGitEnv(cwd, this.emptyGlobalConfig),
+    };
+    const hardened = [...GIT_COMMON_ARGS, "-c", `core.hooksPath=${this.emptyHooks}`];
+    const names = await this.filterDrivers(cwd, hardened, run);
+    const filters = names.flatMap((n) =>
+      [`filter.${n}.clean=`, `filter.${n}.smudge=`, `filter.${n}.process=`, `filter.${n}.required=false`].flatMap((kv) => ["-c", kv]),
+    );
+    return this.git([...hardened, ...filters, ...args], cwd, run);
+  }
+
+  /**
+   * Every filter driver name the repository could apply: its configuration's `filter.<name>.*` keys (includes
+   * followed), and `filter=<name>` in the worktree's top-level .gitattributes and the repository's info/attributes.
+   * A name that `-c name=value` could not carry unambiguously is refused (UnsafeGitConfigError), never skipped.
+   */
+  private async filterDrivers(cwd: string, hardened: string[], run: GitRunOptions): Promise<string[]> {
+    const names = new Set<string>();
+    const keys = await this.git([...hardened, "config", "--null", "--name-only", "--get-regexp", "^filter\\."], cwd, run).catch(
+      (e: unknown) => {
+        if ((e as { code?: unknown }).code === 1) return ""; // no such key
+        throw e;
+      },
+    );
+    for (const key of keys.split("\0")) {
+      const k = key.trim();
+      const dot = k.lastIndexOf(".");
+      if (k.toLowerCase().startsWith("filter.") && dot > "filter.".length) names.add(k.slice("filter.".length, dot));
+    }
+    const attrFiles = [join(cwd, ".gitattributes")];
+    const common = await this.git([...hardened, "rev-parse", "--git-common-dir"], cwd, run).then(
+      (out) => resolve(cwd, out.trim()),
+      () => null,
+    );
+    if (common !== null) attrFiles.push(join(common, "info", "attributes"));
+    for (const file of attrFiles) {
+      for (const m of readSmallRegularFile(file, MAX_ATTRIBUTES_BYTES).matchAll(ATTR_FILTER)) names.add(m[1]!);
+    }
+    for (const n of names) {
+      if (n === "" || /[=\0\r\n]/.test(n)) throw new UnsafeGitConfigError();
+    }
+    return [...names].sort();
+  }
+
+  /** Creates the empty hooks directory if it is missing; throws HooksDirModifiedError if anything is in it. */
+  private assertEmptyHooks(): void {
+    mkdirSync(this.emptyHooks, { recursive: true });
+    const st = lstatSync(this.emptyHooks);
+    if (!st.isDirectory() || readdirSync(this.emptyHooks).length > 0) throw new HooksDirModifiedError();
   }
 
   async ensureProjectRepo(projectId: string): Promise<string> {

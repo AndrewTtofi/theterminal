@@ -86,6 +86,13 @@ describe("Ledger", () => {
     expect(ledger.list({ limit: 2 }).map((e) => e.seq)).toEqual([1, 2]);
   });
 
+  it("list with beforeSeq pages backwards: the newest `limit` before it, in ascending order", () => {
+    for (let i = 1; i <= 12; i++) ledger.append(created(i));
+    expect(ledger.list({ beforeSeq: 10, limit: 3 }).map((e) => e.seq)).toEqual([7, 8, 9]);
+    expect(ledger.list({ afterSeq: 2, beforeSeq: 5 }).map((e) => e.seq)).toEqual([3, 4]);
+    expect(ledger.list({ beforeSeq: 1 })).toEqual([]);
+  });
+
   describe("list by card and runs", () => {
     const ack = GATES.find((g) => g.id === "payments")!.acknowledgement;
     const entry = (type: string, payload: unknown): NewLedgerEntry => ({ projectId: "p", actor, type, payload } as NewLedgerEntry);

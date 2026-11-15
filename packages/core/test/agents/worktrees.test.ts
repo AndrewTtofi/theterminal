@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
-import { EMPTY_GITCONFIG, SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, gitEnv } from "../../src/agents/worktrees.js";
+import {
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, gitEnv,
+  type GitRunner,
+} from "../../src/agents/worktrees.js";
 
 const run = promisify(execFile);
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
@@ -310,6 +313,68 @@ describe("WorktreeManager", () => {
       expect(mgr.resolveInside(wt, "loopa")).toBeNull();
       expect(mgr.resolveInside(wt, "loopa/x")).toBeNull();
       expect(mgr.resolveInside(wt, "dlink/../x")).toBeNull();
+    });
+  });
+
+  describe("runGit and repoPath", () => {
+    it("prepends GIT_COMMON_ARGS and an empty hooks directory, with the timeout, buffer and an allowlisted env", async () => {
+      const calls: { args: string[]; cwd: string; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, cwd, opts) => {
+        calls.push({ args, cwd, opts });
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      process.env.TT_TEST_PLANTED_VAR = "planted-value";
+      try {
+        await m.runGit(outside, ["status", "--short"]);
+      } finally {
+        delete process.env.TT_TEST_PLANTED_VAR;
+      }
+      const last = calls.at(-1)!;
+      expect(last.cwd).toBe(outside);
+      expect(last.args.slice(0, GIT_COMMON_ARGS.length)).toEqual([...GIT_COMMON_ARGS]);
+      expect(last.args.slice(-2)).toEqual(["status", "--short"]);
+      expect(last.args).toContain(`core.hooksPath=${join(dataDir, ".theterminal-empty-hooks")}`);
+      expect(last.opts).toMatchObject({ timeoutMs: 30000, maxBuffer: 2 * 1024 * 1024 });
+      expect(last.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
+      expect(last.opts!.env!.GIT_CONFIG_GLOBAL).toBe(join(dataDir, EMPTY_GITCONFIG));
+      expect(last.opts!.env!.GIT_CONFIG_NOSYSTEM).toBe("1");
+    });
+
+    it("neutralises every filter driver the repository configures", async () => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        return args.includes("--get-regexp") ? "filter.lfs.clean\0filter.lfs.smudge\0filter.a.b.process\0" : "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      await m.runGit(outside, ["diff"]);
+      const last = calls.at(-1)!;
+      for (const name of ["lfs", "a.b"]) {
+        for (const kv of [`filter.${name}.clean=`, `filter.${name}.smudge=`, `filter.${name}.process=`, `filter.${name}.required=false`]) {
+          expect(last).toContain(kv);
+        }
+      }
+    });
+
+    it("the default runner maps a maxBuffer overflow to GitOutputTooLargeError", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      await expect(mgr.runGit(repo, ["log"], { maxBuffer: 4 })).rejects.toBeInstanceOf(GitOutputTooLargeError);
+      expect((await mgr.runGit(repo, ["rev-parse", "--verify", "HEAD"])).trim()).toMatch(/^[0-9a-f]{40,64}$/);
+    });
+
+    it("repoPath is the project repository, and refuses a bad id", () => {
+      expect(mgr.repoPath("proj1")).toBe(join(dataDir, "projects", "proj1", "repo"));
+      expect(() => mgr.repoPath("../x")).toThrow();
+    });
+
+    it.skipIf(process.platform === "win32")("never runs a hook the repository plants", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const marker = join(outside, "hook-ran");
+      writeFileSync(join(repo, ".git", "hooks", "pre-commit"), `#!/bin/sh\ntouch "${marker}"\n`);
+      chmodSync(join(repo, ".git", "hooks", "pre-commit"), 0o755);
+      await mgr.runGit(repo, ["commit", "--allow-empty", "-m", "x"]);
+      expect(existsSync(marker)).toBe(false);
     });
   });
 });

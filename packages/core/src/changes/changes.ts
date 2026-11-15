@@ -1,0 +1,306 @@
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { isAbsolute, join, sep } from "node:path";
+import {
+  MAX_CHANGED_FILES, MAX_DIFF_BYTES, MAX_DIFF_LINES, MAX_DIR_ENTRIES, MAX_FILE_BYTES,
+  type AgentRun, type ChangeStatus, type ChangedFile, type DirEntry, type DirListing, type FileContent, type FileDiff,
+  type RunChanges,
+} from "@theterminal/shared";
+import { NotFoundError } from "../board/board-service.js";
+import type { Db } from "../db.js";
+import { getRun } from "../events/projections.js";
+import {
+  GitOutputTooLargeError, GitTimeoutError, HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError,
+  type WorktreeManager,
+} from "../agents/worktrees.js";
+
+/**
+ * Read-only views of a run's working copy: what it changed compared with its fork point, one file's diff, a
+ * directory listing and a file's text. Every path goes through `resolveInside`, `.git` is never listed or served,
+ * every git call goes through `runGit` (no hooks, filters, textconv or external diff), and every string served
+ * passes the run's cleaning before any limit is applied. Limits are in bytes of UTF-8 where they say bytes.
+ */
+
+/** The run's working copy no longer exists on disk. */
+export class WorktreeMissingError extends Error {
+  constructor() {
+    super("the run's working copy no longer exists");
+    this.name = "WorktreeMissingError";
+  }
+}
+
+/** The fork point of the run's branch from the project repository's HEAD could not be found. */
+export class NoBaseError extends Error {
+  constructor() {
+    super("could not determine what this run changed");
+    this.name = "NoBaseError";
+  }
+}
+
+export type ChangesDeps = {
+  db: Db;
+  dataDir: string;
+  worktrees: WorktreeManager;
+  /** The run's cleaning: redact, scrub paths, redact, then truncate to `max` characters. */
+  clean: (runId: string, s: string, max: number) => string;
+};
+
+/** Bytes read to decide whether a file is binary (a NUL byte in them). */
+const SNIFF_BYTES = 8192;
+const NAME_MAX = 255;
+const PATH_MAX = 4096;
+const COMMIT_ID = /^[0-9a-f]{40,64}$/;
+const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all"];
+const STATUS: Record<string, ChangeStatus> = { A: "added", M: "modified", D: "deleted", T: "typechange" };
+
+const notFound = (): NotFoundError => new NotFoundError("path", "(given)");
+const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** A pathspec git matches as written, never as a glob or with magic. */
+const literal = (rel: string): string => `:(literal)${rel}`;
+const isGitName = (name: string): boolean => name.toLowerCase() === ".git";
+
+/** Errors that mean the workspace refused to run git at all; never reported as "no base". */
+const isRefusal = (e: unknown): boolean =>
+  e instanceof UnsafeGitConfigError || e instanceof HooksDirModifiedError || e instanceof SharedGitconfigModifiedError;
+
+export function runWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; abs: string } {
+  const run = getRun(deps.db, runId);
+  if (!run) throw new NotFoundError("run", runId);
+  const abs = join(deps.dataDir, run.worktree);
+  let isDir = false;
+  try {
+    isDir = statSync(abs).isDirectory();
+  } catch {
+    // missing or unreadable: the same answer
+  }
+  if (!isDir) throw new WorktreeMissingError();
+  return { run, abs };
+}
+
+/**
+ * The resolved path for `path` inside the worktree, and the path as git names it (relative, `/`-separated).
+ * Refuses (NotFoundError, with no detail) an absolute path, any `.git` segment, and anything resolveInside refuses.
+ */
+function confine(deps: ChangesDeps, abs: string, path: string): { resolved: string; rel: string } {
+  if (typeof path !== "string" || path.length > PATH_MAX) throw notFound();
+  if (isAbsolute(path) || /^[A-Za-z]:/.test(path) || path.startsWith("\\")) throw notFound();
+  if (path.split(/[\\/]/).some(isGitName)) throw notFound();
+  const resolved = deps.worktrees.resolveInside(abs, path);
+  if (resolved === null) throw notFound();
+  const rel = path
+    .split(sep === "\\" ? /[\\/]/ : "/")
+    .filter((s) => s !== "" && s !== ".")
+    .join("/");
+  return { resolved, rel };
+}
+
+/**
+ * Opens a regular file (never through a symlink) and reads it only if it is at most `max` bytes, reading at most
+ * `max + 1` bytes so a file that grows meanwhile is still caught. `buf` is null when it is over `max`; null overall
+ * when it is not a regular file.
+ */
+function readCapped(file: string, max: number): { size: number; buf: Buffer | null } | null {
+  let fd: number;
+  try {
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return null;
+    if (st.size > max) return { size: st.size, buf: null };
+    const buf = Buffer.alloc(max + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, n);
+      if (got === 0) break;
+      n += got;
+      if (n > max) return { size: Math.max(st.size, n), buf: null };
+    }
+    return { size: n, buf: buf.subarray(0, n) };
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const hasNul = (buf: Buffer): boolean => buf.subarray(0, SNIFF_BYTES).includes(0);
+
+/** Whether an untracked file looks binary, from its first 8 KiB; anything that is not a regular file inside is not. */
+function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
+  const resolved = deps.worktrees.resolveInside(abs, rel);
+  if (resolved === null) return false;
+  try {
+    if (!lstatSync(resolved).isFile()) return false;
+    const fd = openSync(resolved, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const buf = Buffer.alloc(SNIFF_BYTES);
+      return hasNul(buf.subarray(0, readSync(fd, buf, 0, SNIFF_BYTES, 0)));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** The fork point (`merge-base HEAD <repo HEAD>`) and the run's HEAD; NoBaseError when either cannot be found. */
+async function forkPoint(deps: ChangesDeps, run: AgentRun, abs: string): Promise<{ base: string; head: string }> {
+  try {
+    const repoHead = (await deps.worktrees.runGit(deps.worktrees.repoPath(run.projectId), ["rev-parse", "--verify", "HEAD"])).trim();
+    if (!COMMIT_ID.test(repoHead)) throw new NoBaseError();
+    const base = (await deps.worktrees.runGit(abs, ["merge-base", "HEAD", repoHead])).trim();
+    const head = (await deps.worktrees.runGit(abs, ["rev-parse", "--verify", "HEAD"])).trim();
+    if (!COMMIT_ID.test(base) || !COMMIT_ID.test(head)) throw new NoBaseError();
+    return { base, head };
+  } catch (e) {
+    if (isRefusal(e)) throw e;
+    throw new NoBaseError();
+  }
+}
+
+/** Tracked changes from `base` to the working tree, by path (optionally only those under one literal pathspec). */
+async function trackedChanges(deps: ChangesDeps, abs: string, base: string, only?: string): Promise<Map<string, ChangedFile>> {
+  const spec = ["--", ...(only === undefined ? [] : [literal(only)])];
+  const [numstat, names] = await Promise.all([
+    deps.worktrees.runGit(abs, ["diff", "--numstat", "-z", ...DIFF_FLAGS, base, ...spec]),
+    deps.worktrees.runGit(abs, ["diff", "--name-status", "-z", ...DIFF_FLAGS, base, ...spec]),
+  ]);
+  const files = new Map<string, ChangedFile>();
+  const tokens = names.split("\0");
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const code = tokens[i]!.charAt(0);
+    const path = tokens[i + 1]!;
+    if (path === "") continue;
+    files.set(path, { path, status: STATUS[code] ?? "modified", added: null, deleted: null, binary: false });
+  }
+  for (const record of numstat.split("\0")) {
+    const m = /^(-|\d+)\t(-|\d+)\t(.+)$/s.exec(record);
+    if (!m) continue;
+    const f = files.get(m[3]!);
+    if (!f) continue;
+    if (m[1] === "-" || m[2] === "-") f.binary = true;
+    else {
+      f.added = Number(m[1]);
+      f.deleted = Number(m[2]);
+    }
+  }
+  return files;
+}
+
+async function untrackedPaths(deps: ChangesDeps, abs: string, only?: string): Promise<string[]> {
+  const out = await deps.worktrees.runGit(abs, [
+    "ls-files", "--others", "--exclude-standard", "-z", ...(only === undefined ? [] : ["--", literal(only)]),
+  ]);
+  return out.split("\0").filter((p) => p !== "");
+}
+
+export async function listChanges(deps: ChangesDeps, runId: string): Promise<RunChanges> {
+  const { run, abs } = runWorktree(deps, runId);
+  const { base, head } = await forkPoint(deps, run, abs);
+  const tracked = await trackedChanges(deps, abs, base);
+  const untracked = await untrackedPaths(deps, abs);
+  const all: ChangedFile[] = [...tracked.values()];
+  for (const path of untracked) {
+    if (!tracked.has(path)) all.push({ path, status: "untracked", added: null, deleted: null, binary: false });
+  }
+  all.sort((a, b) => byName(a.path, b.path));
+  const kept = all.slice(0, MAX_CHANGED_FILES);
+  const files = kept.map((f) => ({
+    ...f,
+    path: deps.clean(runId, f.path, PATH_MAX),
+    ...(f.status === "untracked" && { binary: sniffBinary(deps, abs, f.path) }),
+  }));
+  return { runId, base, head, files, truncated: all.length > MAX_CHANGED_FILES };
+}
+
+export async function fileDiff(deps: ChangesDeps, runId: string, path: string): Promise<FileDiff> {
+  const { run, abs } = runWorktree(deps, runId);
+  const { resolved, rel } = confine(deps, abs, path);
+  if (rel === "") throw notFound();
+  const { base } = await forkPoint(deps, run, abs);
+  const shown = deps.clean(runId, rel, PATH_MAX);
+  const answer = (d: Omit<FileDiff, "runId" | "path">): FileDiff => ({ runId, path: shown, ...d });
+  /** Cleans first, then applies the byte cap: over it the diff is tooLarge with no text, never cut. */
+  const capped = (raw: string, d: Omit<FileDiff, "runId" | "path" | "text" | "tooLarge">): FileDiff => {
+    const text = deps.clean(runId, raw, Infinity);
+    const tooLarge = Buffer.byteLength(text, "utf8") > MAX_DIFF_BYTES;
+    return answer({ ...d, tooLarge, text: tooLarge ? null : text });
+  };
+
+  const t = (await trackedChanges(deps, abs, base, rel)).get(rel);
+  if (t) {
+    const counts = { status: t.status, binary: t.binary, added: t.added, deleted: t.deleted };
+    if (t.binary) return answer({ ...counts, tooLarge: false, text: null });
+    if ((t.added ?? 0) + (t.deleted ?? 0) > MAX_DIFF_LINES) return answer({ ...counts, tooLarge: true, text: null });
+    let raw: string;
+    try {
+      raw = await deps.worktrees.runGit(abs, ["diff", ...DIFF_FLAGS, "-U3", base, "--", literal(rel)]);
+    } catch (e) {
+      if (e instanceof GitOutputTooLargeError || e instanceof GitTimeoutError) return answer({ ...counts, tooLarge: true, text: null });
+      throw e;
+    }
+    return capped(raw, counts);
+  }
+
+  if ((await untrackedPaths(deps, abs, rel)).includes(rel)) {
+    const status = "untracked" as const;
+    const file = readCapped(resolved, MAX_FILE_BYTES);
+    if (file === null) return answer({ status, binary: false, tooLarge: false, added: null, deleted: null, text: null });
+    if (file.buf === null) return answer({ status, binary: false, tooLarge: true, added: null, deleted: null, text: null });
+    if (hasNul(file.buf)) return answer({ status, binary: true, tooLarge: false, added: null, deleted: null, text: null });
+    const lines = file.buf.toString("utf8").split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    const counts = { status, binary: false, added: lines.length, deleted: 0 };
+    if (lines.length > MAX_DIFF_LINES) return answer({ ...counts, tooLarge: true, text: null });
+    const header = `--- /dev/null\n+++ b/${rel}\n`;
+    const body = lines.length === 0 ? "" : `@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => `+${l}\n`).join("")}`;
+    return capped(header + body, counts);
+  }
+
+  return answer({ status: "unchanged", binary: false, tooLarge: false, added: 0, deleted: 0, text: "" });
+}
+
+export function listDir(deps: ChangesDeps, runId: string, path: string): DirListing {
+  const { abs } = runWorktree(deps, runId);
+  const { resolved, rel } = confine(deps, abs, path);
+  let dirents;
+  try {
+    if (!statSync(resolved).isDirectory()) throw notFound();
+    dirents = readdirSync(resolved, { withFileTypes: true });
+  } catch {
+    throw notFound();
+  }
+  const rank = { dir: 0, file: 1, other: 2 } as const;
+  const all = dirents
+    .filter((d) => !isGitName(d.name))
+    .map((d) => ({ name: d.name, kind: d.isDirectory() ? ("dir" as const) : d.isFile() ? ("file" as const) : ("other" as const) }))
+    .sort((a, b) => rank[a.kind] - rank[b.kind] || byName(a.name, b.name));
+  const entries: DirEntry[] = all.slice(0, MAX_DIR_ENTRIES).map(({ name, kind }) => {
+    let size: number | null = null;
+    if (kind === "file") {
+      try {
+        size = lstatSync(join(resolved, name)).size;
+      } catch {
+        size = null;
+      }
+    }
+    return { name: deps.clean(runId, name, NAME_MAX), kind, size };
+  });
+  return { runId, path: deps.clean(runId, rel, PATH_MAX), entries, truncated: all.length > MAX_DIR_ENTRIES };
+}
+
+export function readFile(deps: ChangesDeps, runId: string, path: string): FileContent {
+  const { abs } = runWorktree(deps, runId);
+  const { resolved, rel } = confine(deps, abs, path);
+  const file = readCapped(resolved, MAX_FILE_BYTES);
+  if (file === null) throw notFound();
+  const out = { runId, path: deps.clean(runId, rel, PATH_MAX), size: file.size };
+  if (file.buf === null) return { ...out, binary: false, tooLarge: true, text: null };
+  if (hasNul(file.buf)) return { ...out, binary: true, tooLarge: false, text: null };
+  // Clean first, then the byte cap: over it the file is tooLarge with no text, never cut.
+  const text = deps.clean(runId, file.buf.toString("utf8"), Infinity);
+  if (Buffer.byteLength(text, "utf8") > MAX_FILE_BYTES) return { ...out, binary: false, tooLarge: true, text: null };
+  return { ...out, binary: false, tooLarge: false, text };
+}

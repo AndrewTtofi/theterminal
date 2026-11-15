@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
@@ -402,6 +403,18 @@ export class AgentRunner {
     const run = getRun(this.deps.db, runId);
     if (!run) throw new NotFoundError("run", runId);
     return { run, actions: listActions(this.deps.db, runId) };
+  }
+
+  /**
+   * The cleaning this run's recorded text gets (redact, scrub paths, redact, then truncate to `max`), for text read
+   * from its working copy: the live session's scrubber and secrets while it runs, else a scrubber for its worktree.
+   */
+  cleanFor(runId: string): (s: string, max: number) => string {
+    const run = getRun(this.deps.db, runId);
+    if (!run) throw new NotFoundError("run", runId);
+    const s = this.sessions.get(runId);
+    const scrub = s?.scrub ?? this.runScrubber(join(this.deps.dataDir, run.worktree));
+    return (text, max) => this.clean(text, max, scrub, s?.secrets);
   }
 
   /** After a restart nothing is waiting any more: deny every pending action and fail every running run. */

@@ -6,6 +6,7 @@ import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
 import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
+import { NoBaseError, WorktreeMissingError } from "../changes/changes.js";
 import { redact } from "../agents/redact.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
@@ -36,6 +37,7 @@ const statusBody = z.object({ to: cardStatusSchema });
 const ledgerQuery = z.object({
   projectId: z.string().optional(),
   afterSeq: z.coerce.number().int().min(0).optional(),
+  beforeSeq: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
@@ -85,6 +87,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
     if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+    if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
+    if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
     if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
     if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
     // The explanation is a fixed sentence naming a field, never the text.
@@ -170,6 +174,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return ledger.list({
       ...(q.projectId !== undefined && { projectId: q.projectId }),
       ...(q.afterSeq !== undefined && { afterSeq: q.afterSeq }),
+      ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
       ...(q.limit !== undefined && { limit: q.limit }),
     });
   });

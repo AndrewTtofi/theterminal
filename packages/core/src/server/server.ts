@@ -18,6 +18,7 @@ import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerIntakeRoutes } from "./intake-routes.js";
 import { registerStoryRoutes } from "./story-routes.js";
+import { registerChangesRoutes } from "./changes-routes.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
@@ -452,10 +453,11 @@ export async function createServer(opts: {
         })),
     });
 
+    const worktrees = new WorktreeManager(opts.dataDir);
     const runner = new AgentRunner({
       db,
       ledger,
-      worktrees: new WorktreeManager(opts.dataDir),
+      worktrees,
       broker: new ApprovalBroker(),
       adapters,
       // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
@@ -492,6 +494,7 @@ export async function createServer(opts: {
       });
       registerIntakeRoutes(app, { intake });
       registerStoryRoutes(app, { db, ledger });
+      registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean: (runId, s, max) => runner.cleanFor(runId)(s, max) });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".

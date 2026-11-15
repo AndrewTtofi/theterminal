@@ -253,6 +253,16 @@ describe("AgentRunner with the FakeAdapter", () => {
     });
   });
 
+  it("cleanFor(runId) scrubs the run's worktree to '.' and redacts secrets after the run has finished", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const clean = runner.cleanFor(run.id);
+    const abs = join(dataDir, run.worktree);
+    expect(clean(`see ${join(abs, "notes.txt")} and ${EXTRA_SECRET}`, 1000)).toBe(`see .${sep}notes.txt and [REDACTED]`);
+    expect(() => runner.cleanFor("no-such-run")).toThrow(NotFoundError);
+  });
+
   it("records the worktree, dataDir and home directory as '.', '<data>' and '~'", async () => {
     const pathy: AgentAdapter = {
       id: "fake",

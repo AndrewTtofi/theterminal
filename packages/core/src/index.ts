@@ -20,7 +20,16 @@ export { DataDirInUseError } from "./server/data-dir-lock.js";
 export type { RunningServer } from "./server/server.js";
 export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
-export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
+export {
+  SharedGitconfigModifiedError, WorktreeManager, GitOutputTooLargeError, GitTimeoutError, GIT_COMMON_ARGS,
+} from "./agents/worktrees.js";
+export type { GitRunner } from "./agents/worktrees.js";
+export {
+  runWorktree, listChanges, fileDiff, listDir, readFile, WorktreeMissingError, NoBaseError,
+} from "./changes/changes.js";
+export type { ChangesDeps } from "./changes/changes.js";
+export { registerChangesRoutes } from "./server/changes-routes.js";
+export type { ChangesRouteDeps } from "./server/changes-routes.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
 export {
   IntakeService, RecordedText, HumanRequiredError, SecretInTextError, IntakeCompletedError, IntakeIncompleteError,
