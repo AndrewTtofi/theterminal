@@ -86,7 +86,7 @@ Headlines are computed during the export and are not part of the hash. Secrets a
 
 ### Verifying the chain
 
-For each entry line, rebuild the object `{seq, id, ts, projectId, actor, type, payload, prevHash}` and serialise it as canonical JSON: object keys sorted at every level, no whitespace. The SHA-256 of that text, in lowercase hex, must equal `hash`, and `prevHash` must equal the previous entry's `hash`. The first entry's `prevHash` is 64 zeros. In a whole-ledger export every `seq` is consecutive from 1; a project export skips other projects' entries, so check the link between entries only when their seq numbers are consecutive.
+For each entry line, rebuild the object `{seq, id, ts, projectId, actor, type, payload, prevHash}` and serialise it as canonical JSON: object keys sorted at every level, no whitespace. The SHA-256 of that text, in lowercase hex, must equal `hash`, and `prevHash` must equal the previous entry's `hash`. The first entry's `prevHash` is 64 zeros. Checking the chain end to end needs the whole-ledger export, where every `seq` is consecutive from 1. A project export leaves out other projects' entries, so the links between its entries cannot be checked on their own. For a project export, rely on the `integrity` result in the header, which The Terminal computed over the whole ledger.
 
 ## Roles
 
