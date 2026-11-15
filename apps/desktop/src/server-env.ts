@@ -1,3 +1,13 @@
+/**
+ * The server child's environment, and the macOS login-shell PATH that goes into it.
+ *
+ * The `run` function that the host passes to `loginShellPath` must:
+ * - call `execFile(file, args, { timeout: opts.timeout, encoding: "utf8", windowsHide: true })` with the given
+ *   argument array, never `shell: true`, so the 5 s timeout kills a shell that hangs in its rc files;
+ * - leave the shell no stdin: `execFile` ignores a `stdio` option, so end `child.stdin` right after the call
+ *   (or spawn with `stdio: ["ignore", "pipe", "pipe"]`), so an rc file that reads input gets EOF instead of waiting;
+ * - resolve with stdout only. Stderr and the exit code are ignored, and the markers decide what counts.
+ */
 import { posix } from "node:path";
 
 const MARKER = "__TT_PATH__";
