@@ -62,9 +62,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Whether `value` nests deeper than `max`, or holds an object with an own `__proto__` key, walked without recursion.
- * JSON.parse makes `__proto__` an own key, but the canonical encoding leaves it out of the signed bytes, so a frame
- * carrying one would store bytes its signature does not cover. `constructor` and `prototype` encode faithfully and stay.
+ * Whether `value` nests deeper than `max`, walked without recursion. Keys need no check: JSON.parse makes `__proto__`
+ * an own key (never a prototype), and the canonical encoding keeps every own key, `__proto__` included, so the signed
+ * bytes cover exactly what is stored.
  */
 function unsafeShape(value: unknown, max: number): boolean {
   const stack: [unknown, number][] = [[value, 1]];
@@ -72,7 +72,6 @@ function unsafeShape(value: unknown, max: number): boolean {
     const [v, depth] = stack.pop()!;
     if (typeof v !== "object" || v === null) continue;
     if (depth > max) return true;
-    if (!Array.isArray(v) && Object.hasOwn(v, "__proto__")) return true;
     for (const child of Array.isArray(v) ? v : Object.values(v)) stack.push([child, depth + 1]);
   }
   return false;

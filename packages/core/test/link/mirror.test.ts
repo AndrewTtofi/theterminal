@@ -195,24 +195,22 @@ describe("checkFrame (the requester's gate for an untrusted line)", () => {
     expect(checkFrame(`{"origin":${deep},"signature":"x"}`, expectation())).toEqual({ ok: false, reason: "invalid_payload" });
   });
 
-  it("refuses an own __proto__ key anywhere, which the canonical encoding would leave out of the signed bytes", () => {
+  it("signs and accepts an input with an own __proto__ key: the canonical encoding keeps it, so the signature covers it", () => {
     const entry = entryOf("agent.action.requested");
-    const input = JSON.parse('{"__proto__":{"x":1},"command":"ls"}') as unknown;
+    const input = JSON.parse('{"__proto__":{"x":1},"command":"ls","deep":[{"__proto__":null}]}') as unknown;
     expect(Object.hasOwn(input as object, "__proto__")).toBe(true);
-    const origin = {
-      seq: entry.seq, id: entry.id, ts: entry.ts, projectId: entry.projectId, actor: entry.actor, type: entry.type,
-      payload: { ...(entry.payload as object), input }, prevHash: entry.prevHash, hash: entry.hash,
-    };
-    // Signed by the worker's own key over the canonical bytes, which do not carry the key.
-    const frame = { origin, signature: worker.sign(Buffer.from(canonicalJson(origin))) };
+    // The worker's own entry, as its runner would record an agent's tool input.
+    const frame = signFrame(worker, { ...entry, payload: { ...(entry.payload as object), input } });
     const wire = line(frame);
     expect(wire).toContain('"__proto__":{"x":1}');
-    expect(checkFrame(wire, expectation())).toEqual({ ok: false, reason: "invalid_payload" });
-    // Nested deeper, and at the top level of the frame, too.
-    const nested = wire.replace('"command":"ls"', '"command":"ls","deep":[{"__proto__":null}]');
-    expect(checkFrame(nested, expectation())).toEqual({ ok: false, reason: "invalid_payload" });
-    // The worker never signs one either.
-    expect(() => signFrame(worker, { ...entry, payload: origin.payload })).toThrow(expect.objectContaining({ reason: "invalid_payload" }));
+    expect(canonicalJson(frame.origin)).toContain('"__proto__":{"x":1}');
+    expect(checkFrame(wire, expectation())).toMatchObject({ ok: true });
+    // The key stays an own key of the parsed frame, never a prototype: nothing is polluted.
+    const parsed = JSON.parse(wire) as { origin: { payload: { input: Record<string, unknown> } } };
+    expect(Object.hasOwn(parsed.origin.payload.input, "__proto__")).toBe(true);
+    expect(({} as Record<string, unknown>).x).toBeUndefined();
+    // Changing the value under that key breaks the signature, as any other change would.
+    expect(checkFrame(wire.replace('"__proto__":{"x":1}', '"__proto__":{"x":2}'), expectation())).toEqual({ ok: false, reason: "bad_signature" });
   });
 
   it("accepts constructor and prototype as ordinary keys of an input", () => {

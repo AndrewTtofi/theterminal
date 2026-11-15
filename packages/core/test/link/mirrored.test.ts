@@ -6,7 +6,7 @@ import { commitEvent } from "../../src/events/commit.js";
 import { canonicalJson } from "../../src/ledger/canonical.js";
 import { getLinkRun, getRun, listActions, listAllPendingActions } from "../../src/events/projections.js";
 import { BoardService } from "../../src/board/board-service.js";
-import { acceptMirroredLine, displayEntry, remoteDisplay } from "../../src/link/mirrored.js";
+import { acceptMirroredLine, displayEntry, remoteDisplay, verifyMirrored } from "../../src/link/mirrored.js";
 import { pairAndRequest, remoteRun, requestRun, type RemoteRun } from "./remote-fixtures.js";
 
 const owner = { kind: "human", id: "owner" } as const;
@@ -80,6 +80,23 @@ describe("acceptMirroredLine", () => {
     refused(remote.line(remote.message("after")), "run_failed");
     expect(getLinkRun(db, remote.runId)!.state).toBe("failed");
   }
+
+  it("stores a frame whose input has an own __proto__ key as sent, hash intact, and verifies it again later", () => {
+    accept(remote.line(remote.started()));
+    const input = JSON.parse('{"__proto__":{"x":1},"command":"ls"}') as Record<string, unknown>;
+    const requested = remote.record("agent.action.requested", {
+      runId: remote.runId, actionId: "act-proto", kind: "shell", tool: "Bash", summary: "Run: ls", input,
+    });
+    expect(accept(remote.line(requested))).toMatchObject({ ok: true });
+    const stored = mirroredEntries().at(-1)!;
+    const origin = (stored.payload as { origin: LedgerEntry }).origin;
+    expect(origin.hash).toBe(requested.hash);
+    expect(JSON.stringify(origin.payload)).toContain('"__proto__":{"x":1}');
+    expect(Object.hasOwn((origin.payload as { input: object }).input, "__proto__")).toBe(true);
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "act-proto", status: "pending" })]);
+    expect(verifyMirrored(db)).toMatchObject({ ok: true, checked: 2, badSeqs: [] });
+    expect(ledger.verify().ok).toBe(true);
+  });
 
   it("checks the signature with the key pinned in the machines row of the run's machine", async () => {
     const impostor = await remoteRun(remote.runId, projectId);
