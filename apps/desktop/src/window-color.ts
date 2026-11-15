@@ -30,3 +30,31 @@ export function saveWindowColor(file: string, c: string): void {
   writeFileSync(tmp, JSON.stringify({ backgroundColor: color }), { flag: "wx", mode: 0o600 });
   renameSync(tmp, file);
 }
+
+export interface ColorRecorder {
+  /** Reads the colour and saves it when valid and different from the last saved one. Never throws. */
+  record(): Promise<void>;
+}
+
+/** Remembers a colour at most once per change: a failed read, an invalid value or an unchanged colour writes nothing. */
+export function createColorRecorder(opts: { read: () => Promise<unknown>; save: (c: string) => void; initial?: string | null }): ColorRecorder {
+  let last: string | null = opts.initial ?? null;
+  let busy = false;
+  return {
+    async record() {
+      if (busy) return;
+      busy = true;
+      try {
+        const c = parseWindowColor(await opts.read());
+        if (c && c !== last) {
+          opts.save(c);
+          last = c;
+        }
+      } catch {
+        // keep the old colour
+      } finally {
+        busy = false;
+      }
+    },
+  };
+}

@@ -20,7 +20,7 @@ import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
-import { loadWindowColor, parseWindowColor, saveWindowColor } from "./window-color.js";
+import { createColorRecorder, loadWindowColor, saveWindowColor } from "./window-color.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
 import { writeReadyFile } from "./ready-file.js";
@@ -210,10 +210,15 @@ function run(args: DesktopArgs, dataDir: string): void {
     });
     w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
     w.once("ready-to-show", () => w.show());
-    // Best effort: remember the theme's background so the next window opens in it. A failure keeps the old colour.
-    // The main process reads it itself; no preload or IPC is added to the sandboxed window.
-    w.on("close", () => void rememberWindowColor(w));
+    // Remember the theme's background so the next window opens in it. The main process reads it itself (no preload
+    // or IPC). On close the renderer is usually gone too soon, so it is also saved on blur and every 30 s.
+    const initialColor = loadWindowColor(windowColorFile());
+    const recorder = createColorRecorder({ read: () => readWindowBg(w), save: (c) => saveWindowColor(windowColorFile(), c), initial: initialColor });
+    const timer = setInterval(() => void recorder.record(), 30_000);
+    w.on("blur", () => void recorder.record());
+    w.on("close", () => void recorder.record());
     w.on("closed", () => {
+      clearInterval(timer);
       if (win === w) win = null;
     });
     void w.loadURL(r.url);
@@ -225,21 +230,15 @@ function windowColorFile(): string {
   return join(app.getPath("userData"), "window.json");
 }
 
-/** Reads `--bg` from the page (500 ms at most) and saves it when it is a plain hex colour. Never throws. */
-async function rememberWindowColor(w: BrowserWindow): Promise<void> {
-  try {
-    if (w.isDestroyed()) return;
-    const read = w.webContents.executeJavaScript('getComputedStyle(document.documentElement).getPropertyValue("--bg")') as Promise<unknown>;
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), 500);
-    });
-    const value = await Promise.race([read, timeout]).finally(() => clearTimeout(timer));
-    const color = parseWindowColor(value);
-    if (color) saveWindowColor(windowColorFile(), color);
-  } catch {
-    // keep the old colour
-  }
+/** Reads `--bg` from the page, giving up after 500 ms. */
+async function readWindowBg(w: BrowserWindow): Promise<unknown> {
+  if (w.isDestroyed()) return null;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), 500);
+  });
+  const read = w.webContents.executeJavaScript('getComputedStyle(document.documentElement).getPropertyValue("--bg")') as Promise<unknown>;
+  return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** The allowlisted environment for the server child, with the login-shell PATH on macOS. */
