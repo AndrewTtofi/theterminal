@@ -139,6 +139,23 @@ export async function allow(page: Page, summary: string) {
   await expect(card).toHaveCount(0);
 }
 
+/**
+ * The decision card with this summary for one project. Every spec shares the agent server and the strip shows every
+ * project's decisions, so a card is told apart by the project name it carries.
+ */
+export const decisionCard = (page: Page, summary: string, projectName: string) =>
+  page
+    .getByRole("article", { name: `Decision: ${summary}` })
+    .filter({ has: page.locator(".project-name", { hasText: new RegExp(`^${escape(projectName)}$`) }) });
+
+/** Clicks Allow on the project's decision card with this summary, once it appears. */
+export async function allowIn(page: Page, summary: string, projectName: string) {
+  const card = decisionCard(page, summary, projectName);
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Allow" }).click();
+  await expect(card).toHaveCount(0);
+}
+
 /** The seq of the last ledger entry of every project, read in the page (it carries the cookie). */
 export function latestSeq(page: Page): Promise<number> {
   return page.evaluate(async () => {

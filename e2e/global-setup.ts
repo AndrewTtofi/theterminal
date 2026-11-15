@@ -101,7 +101,8 @@ export default async function globalSetup() {
     process.env.TT_E2E_FAKE_LOG = fakeLog;
     const restoreCreateEnv = setEnv(AT_CREATE);
     try {
-      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir });
+      // Share links listen on an ephemeral port, so a run never needs (or holds) the default one.
+      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir, sharePort: 0 });
       servers.push(agent);
       process.env.TT_E2E_AGENT_URL = agent.url;
     } finally {
