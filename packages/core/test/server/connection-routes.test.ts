@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONNECTION_CATALOG, type AgentAction, type AgentRun, type Connection } from "@theterminal/shared";
 import type { FakeStep as FakeStepLike } from "../../src/agents/fake-adapter.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
@@ -32,7 +33,7 @@ async function start(opts: Partial<Parameters<typeof createServer>[0]> = {}) {
   for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]) delete process.env[k];
   const dataDir = mkdtempSync(join(tmpdir(), "tt-conn-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), ...opts });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...opts });
   running.push(s);
   return s;
 }
@@ -273,7 +274,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0 } };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null } };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -382,5 +383,78 @@ describe("residuals", () => {
     } finally {
       release();
     }
+  });
+});
+
+describe("GET /api/status network (inferred from the Owner's own calls)", { timeout: 15000 }, () => {
+  type Network = { state: string; basis: string; since: string | null; lastError: string | null };
+  const network = async (s: RunningServer) => (await json<{ network: Network }>(get(s, "/api/status"))).network;
+  // As undici rejects when name resolution fails: a TypeError whose cause carries the system code.
+  const dnsFailure = () =>
+    Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) });
+
+  it("a connection test that cannot resolve the provider makes the state offline; a later answer makes it online", async () => {
+    let offline = true;
+    const stub = vi.fn(async () => {
+      if (offline) throw dnsFailure();
+      return new Response("{}", { status: 200 });
+    });
+    const s = await start({ fetch: stub as unknown as typeof fetch });
+    expect(await network(s)).toEqual({ state: "unknown", basis: "inferred", since: null, lastError: null });
+    const added = await json<Connection>(addClaude(s));
+    expect(await json(send(s, "POST", `/api/connections/${added.id}/test`))).toEqual({ ok: false, message: "Could not reach the provider" });
+    const down = await network(s);
+    expect(down).toMatchObject({ state: "offline", basis: "inferred", lastError: "ENOTFOUND" });
+    expect(Object.keys(down).sort()).toEqual(["basis", "lastError", "since", "state"]);
+    expect(Number.isNaN(Date.parse(down.since!))).toBe(false);
+    // Only the plan's fields: no URL, host or error text leaves the server.
+    const text = await (await get(s, "/api/status")).text();
+    expect(text).not.toMatch(/anthropic|https?:|getaddrinfo|fetch failed/i);
+
+    offline = false;
+    expect(await json(send(s, "POST", `/api/connections/${added.id}/test`))).toMatchObject({ ok: true });
+    expect(await network(s)).toMatchObject({ state: "online", lastError: null });
+  });
+
+  it("a refused connection says nothing about the internet and leaves the state", async () => {
+    const stub = vi.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    });
+    const s = await start({ fetch: stub as unknown as typeof fetch });
+    const added = await json<Connection>(addClaude(s));
+    await send(s, "POST", `/api/connections/${added.id}/test`);
+    expect(stub).toHaveBeenCalledOnce();
+    expect((await network(s)).state).toBe("unknown");
+  });
+
+  it("a local model test never counts, even when its call fails like the internet would", async () => {
+    const stub = vi.fn(async () => {
+      throw dnsFailure();
+    });
+    const s = await start({ fetch: stub as unknown as typeof fetch });
+    const added = await json<Connection>(send(s, "POST", "/api/connections", {
+      kind: "llm", provider: "local_model", name: "Fake coder", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "fake-coder:7b" },
+    }));
+    expect(await json(send(s, "POST", `/api/connections/${added.id}/test`))).toMatchObject({ ok: false });
+    expect(stub).toHaveBeenCalled();
+    expect((await network(s)).state).toBe("unknown");
+  });
+
+  it("a GitHub call that cannot resolve makes the state offline, and /api/status still answers 200", async () => {
+    const stub = vi.fn(async () => {
+      throw dnsFailure();
+    });
+    const s = await start({ fetch: stub as unknown as typeof fetch });
+    const gh = await send(s, "POST", "/api/connections", {
+      kind: "github", provider: "github", name: "GitHub", config: { repo: "octo-org/example" }, secrets: { token: "ghp_TESTKEY0000000000" },
+    });
+    expect(gh.status).toBe(201);
+    const overview = await get(s, "/api/github/overview");
+    expect(overview.status).toBe(503);
+    expect(await overview.json()).toEqual({ error: "github_unavailable" });
+    expect(stub).toHaveBeenCalled();
+    const status = await get(s, "/api/status");
+    expect(status.status).toBe(200);
+    expect(((await status.json()) as { network: Network }).network).toMatchObject({ state: "offline", lastError: "ENOTFOUND" });
   });
 });

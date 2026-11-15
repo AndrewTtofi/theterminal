@@ -56,6 +56,7 @@ import { ProviderSettings } from "../agents/settings.js";
 import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
 import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, type SharedGitconfigProblem } from "../agents/worktrees.js";
+import { NetworkObserver, observedFetch } from "../network.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -487,7 +488,10 @@ export async function createServer(opts: {
     repairSharedGitconfig(opts.dataDir);
 
     const sts = selectSts(process.env, opts.sts);
-    const fetchFn = selectFetch(process.env, opts.fetch);
+    // The Owner's own calls to the internet (connection tests, cloud grants, GitHub) go through the observed fetch,
+    // whose outcomes infer the network state. Local-model detection and the link client keep the plain fetch.
+    const network = new NetworkObserver();
+    const fetchFn = observedFetch(selectFetch(process.env, opts.fetch), network);
     const secrets = selectSecretStore(process.env, opts.secrets);
     const connections = new ConnectionService({
       db,
@@ -573,6 +577,7 @@ export async function createServer(opts: {
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
         machines: () => linkService.counts(),
+        network: () => network.state(),
       });
       registerGitHubRoutes(app, { github });
       registerCapacityRoutes(app, {

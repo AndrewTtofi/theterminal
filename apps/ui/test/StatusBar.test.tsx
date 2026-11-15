@@ -16,6 +16,7 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   intakeDecisions: 0,
   intakeProjects: [],
   machines: { linked: 0, online: 0 },
+  network: { state: "unknown", basis: "inferred", since: null, lastError: null },
 });
 const layout = (over: Partial<LayoutControls> = {}): LayoutControls => ({
   current: "Guided",

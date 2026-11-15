@@ -127,6 +127,16 @@ export type Status = {
   intakeProjects: { projectId: string; name: string; decisions: number }[];
   /** Linked machines, and how many answered the last presence check. */
   machines: { linked: number; online: number };
+  /** Inferred from the Owner's own calls to the internet; `lastError` is a fixed system code such as `ENOTFOUND`. */
+  network: NetworkState;
+};
+
+/** `/api/status.network`: never a probe, only what the last outgoing call showed. */
+export type NetworkState = {
+  state: "online" | "offline" | "unknown";
+  basis: "inferred";
+  since: string | null;
+  lastError: string | null;
 };
 
 /** This computer as linking sees it; `linking.port` is the listener's port while linking is on. */

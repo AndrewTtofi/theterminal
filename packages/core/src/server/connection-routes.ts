@@ -7,6 +7,7 @@ import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
 import type { IntakeService } from "../intake/service.js";
+import type { NetworkState } from "../network.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -18,6 +19,8 @@ export type ConnectionRouteDeps = {
   intake: IntakeService;
   /** Paired machines and how many answered their last check; never makes a new check. */
   machines: () => { linked: number; online: number };
+  /** The network state inferred from the Owner's own outgoing calls; never makes a call. */
+  network: () => NetworkState;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -46,7 +49,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, machines } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -130,6 +133,8 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0),
       intakeProjects,
       machines: machines(),
+      // Only the fixed fields: the state, when it began and the system code that made it offline. No URL or message.
+      network: network(),
     };
   });
 }
