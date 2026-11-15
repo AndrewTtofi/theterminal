@@ -28,6 +28,12 @@ export function SharePanel(_props: { id: string }) {
   const [dropped, setDropped] = useState<string | null>(null);
   const previewId = preview?.previewId ?? null;
   const shownId = useRef(previewId);
+  const savedRef = useRef<HTMLParagraphElement>(null);
+
+  // The Confirm button that had focus unmounts with the preview: focus moves to the outcome, not to body.
+  useEffect(() => {
+    if (saved) savedRef.current?.focus();
+  }, [saved]);
 
   // A new preview starts unread: the acknowledgement and the last outcome go. Clearing the preview after a save
   // keeps "Saved." on screen.
@@ -99,7 +105,7 @@ export function SharePanel(_props: { id: string }) {
         </>
       )}
       {saved && (
-        <p className="share-saved" role="status">
+        <p className="share-saved" role="status" tabIndex={-1} ref={savedRef}>
           Saved. Open, download or share it from the Share view.
         </p>
       )}

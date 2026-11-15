@@ -7,8 +7,8 @@ import { ADDRESSES, SHARE_ID } from "./share-fixtures";
 
 const URL = "http://127.0.0.1:47400/tok-TESTKEY";
 
-function renderForm(onCreateLink = vi.fn().mockResolvedValue({ url: URL }), addresses = ADDRESSES) {
-  render(<ShareLinkForm shareId={SHARE_ID} addresses={addresses} onCreateLink={onCreateLink} />);
+function renderForm(onCreateLink = vi.fn().mockResolvedValue({ url: URL }), addresses = ADDRESSES, addressesError: string | null = null) {
+  render(<ShareLinkForm shareId={SHARE_ID} addresses={addresses} addressesError={addressesError} onCreateLink={onCreateLink} />);
   return { onCreateLink };
 }
 
@@ -44,6 +44,9 @@ describe("ShareLinkForm", () => {
     expect(screen.getByText("This link is shown once. Copy it now.")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Copy" }));
     expect(writeText).toHaveBeenCalledWith(URL);
+    // One link per project, shown once: a second Create would only be refused, or replace the url on screen.
+    expect((screen.getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onCreateLink).toHaveBeenCalledTimes(1);
   });
 
   it("passes the chosen address and duration", async () => {
@@ -72,5 +75,20 @@ describe("ShareLinkForm", () => {
   it("cannot create a link with no address offered", () => {
     renderForm(undefined, []);
     expect((screen.getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says why there is no address when the addresses could not be loaded", () => {
+    renderForm(undefined, [], "request_failed");
+    expect((screen.getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toBe(
+      "The addresses this computer can share on could not be loaded. Close and open the Share view to try again.",
+    );
+  });
+
+  it("does not repeat a load failure once addresses are known", () => {
+    renderForm(undefined, ADDRESSES, "request_failed");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

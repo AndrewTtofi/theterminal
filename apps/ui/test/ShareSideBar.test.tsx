@@ -87,9 +87,22 @@ describe("ShareSideBar", () => {
     expect(screen.queryByRole("form", { name: "Share on your network" })).toBeNull();
     const reveal = within(row).getByRole("button", { name: "Share on your network…" });
     expect(reveal.getAttribute("aria-expanded")).toBe("false");
+    // Nothing to control yet: aria-controls must never name an element that is not in the document.
+    expect(reveal.hasAttribute("aria-controls")).toBe(false);
     await userEvent.click(reveal);
     expect(reveal.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("form", { name: "Share on your network" })).toBeTruthy();
+    const form = screen.getByRole("form", { name: "Share on your network" });
+    const controlled = document.getElementById(reveal.getAttribute("aria-controls") ?? "");
+    expect(controlled).not.toBeNull();
+    expect(controlled!.contains(form)).toBe(true);
+  });
+
+  it("names an unknown scope as text rather than undefined", () => {
+    renderShare(<ShareSideBar />, { share: { links: [link({ scope: "moon\u202ebase" as never })] } });
+    const row = within(screen.getByRole("list", { name: "Live links" })).getByRole("listitem");
+    expect(row.textContent).toContain("moon\\u202ebase · until ");
+    expect(row.textContent).not.toContain("undefined");
+    expect(row.textContent).not.toContain("\u202e");
   });
 
   it("lists live links with their scope, end and port, and revokes one", async () => {
@@ -104,6 +117,10 @@ describe("ShareSideBar", () => {
     expect(screen.queryByText("No live links.")).toBeNull();
     await userEvent.click(within(rows[0]!).getByRole("button", { name: "Revoke" }));
     expect(model.share.onRevokeLink).toHaveBeenCalledWith("l1");
+    // The row goes on the next refresh: the outcome is announced and takes focus, so focus is not dropped on body.
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Link revoked.");
+    expect(document.activeElement).toBe(status);
   });
 
   it("shows why a revoke failed", async () => {
@@ -112,6 +129,7 @@ describe("ShareSideBar", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("That link is no longer live."));
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("opens the daily digest tab", async () => {

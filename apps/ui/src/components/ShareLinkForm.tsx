@@ -10,14 +10,18 @@ const DEFAULT_TTL = 1440;
 type Props = {
   shareId: string;
   addresses: ShareAddress[];
+  /** Why the addresses may be missing: the error code of the last failed load, or null. */
+  addressesError?: string | null;
   onCreateLink(shareId: string, address: string, ttlMinutes: number): Promise<{ url: string } | null>;
 };
+
+const ADDRESSES_FAILED = "The addresses this computer can share on could not be loaded. Close and open the Share view to try again.";
 
 /**
  * Serves one saved snapshot behind a one-time link: the address it listens on and how long it lives. The url is
  * held only here, in this form's state, and shown once.
  */
-export function ShareLinkForm({ shareId, addresses, onCreateLink }: Props) {
+export function ShareLinkForm({ shareId, addresses, addressesError = null, onCreateLink }: Props) {
   const uid = useId();
   const [chosen, setChosen] = useState<string | null>(null);
   const [ttl, setTtl] = useState<number>(DEFAULT_TTL);
@@ -28,9 +32,12 @@ export function ShareLinkForm({ shareId, addresses, onCreateLink }: Props) {
   // The first address offered until the Owner picks one (the list loads after the form can open).
   const address = chosen !== null && addresses.some((a) => a.address === chosen) ? chosen : (addresses[0]?.address ?? "");
 
+  // Once the url is shown, nothing more can be created here: the project has its one link, and the url is shown once.
+  const made = url !== null;
+
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy || address === "") return;
+    if (busy || made || address === "") return;
     setBusy(true);
     setError(null);
     try {
@@ -75,9 +82,14 @@ export function ShareLinkForm({ shareId, addresses, onCreateLink }: Props) {
       <p className="note">
         {"Anyone with the link can read this snapshot, and nothing else, until it expires or you revoke it. It works only while The Terminal is running."}
       </p>
-      <button type="submit" disabled={busy || address === ""}>
+      <button type="submit" disabled={busy || made || address === ""}>
         Create link
       </button>
+      {addresses.length === 0 && addressesError !== null && (
+        <p className="share-error" role="alert">
+          {ADDRESSES_FAILED}
+        </p>
+      )}
       {error !== null && (
         <p className="share-error" role="alert">
           {error}

@@ -84,6 +84,7 @@ export function shareModel(over: Partial<WorkbenchModel["share"]> = {}): Workben
     snapshots: [],
     links: [],
     addresses: ADDRESSES,
+    addressesError: null,
     loadAddresses: vi.fn(),
     onCreateLink: vi.fn().mockResolvedValue({ url: "http://127.0.0.1:47400/tok" }),
     onRevokeLink: vi.fn().mockResolvedValue(true),
@@ -92,7 +93,7 @@ export function shareModel(over: Partial<WorkbenchModel["share"]> = {}): Workben
 }
 
 export function digestsModel(over: Partial<WorkbenchModel["digests"]> = {}): WorkbenchModel["digests"] {
-  return { days: 7, onDaysChange: vi.fn(), list: [digest()], ...over };
+  return { days: 7, onDaysChange: vi.fn(), list: [digest()], watch: vi.fn(() => () => {}), ...over };
 }
 
 /** Renders `children` in the shell context with a model holding only what the share views read. */

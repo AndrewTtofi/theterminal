@@ -1049,6 +1049,17 @@ describe("App Share view", () => {
     await waitFor(() => expect(m.listShareAddresses).toHaveBeenCalled());
   });
 
+  it("says why no address is offered when the addresses could not be loaded", async () => {
+    m.listShareAddresses.mockRejectedValue(new ApiError(500, "internal"));
+    m.listShareSnapshots.mockResolvedValue([snapshotRecord()]);
+    await openShare();
+    await userEvent.click(await screen.findByRole("button", { name: "Share on your network…" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The addresses this computer can share on could not be loaded. Close and open the Share view to try again.",
+    );
+    expect((screen.getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("previews with the chosen options, shows the page, and clears a stale preview on confirm", async () => {
     m.previewShare.mockResolvedValue(preview());
     m.confirmShare.mockRejectedValue(new ApiError(409, "preview_stale"));
@@ -1107,11 +1118,14 @@ describe("App Share view", () => {
     expect(m.revokeShareLink).toHaveBeenCalledWith("l1");
   });
 
-  it("loads the digests for the selected project, again on its entries, and for the chosen window", async () => {
+  it("loads the digests once the Daily digest tab opens, again on its entries, and for the chosen window", async () => {
     m.getDigests.mockResolvedValue([digest()]);
     await openShare();
-    expect(m.getDigests).toHaveBeenCalledWith("A", 7);
+    // Nothing asks for digests while the tab is closed: not on opening the view, not on an entry.
+    await act(async () => h.onEntry!(shareEntry(39, "card.created")));
+    expect(m.getDigests).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Open daily digest" }));
+    await waitFor(() => expect(m.getDigests).toHaveBeenCalledWith("A", 7));
     expect(await screen.findByRole("article", { name: "2026-11-15 (UTC)" })).toBeTruthy();
     m.getDigests.mockClear();
     await act(async () => h.onEntry!(shareEntry(40, "card.created")));

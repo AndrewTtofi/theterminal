@@ -1,11 +1,13 @@
-import { useEffect, useId, useState } from "react";
-import { DIGEST_DAYS } from "@theterminal/shared";
+import { useEffect, useId, useRef, useState } from "react";
+import { DIGEST_DAYS, visibleControls } from "@theterminal/shared";
 import type { DigestDays, ShareScope, ShareSnapshotRecord } from "@theterminal/shared";
 import { errorMessage, shareDownloadUrl, shareSnapshotUrl } from "../api";
 import { ShareLinkForm } from "../components/ShareLinkForm";
 import { useShell } from "../shell/model";
 
 export const SCOPE_LABELS: Record<ShareScope, string> = { this_computer: "This computer only", local_network: "Local network" };
+/** The scope's label; a scope this build does not know is shown as text, never as "undefined". */
+const scopeLabel = (scope: ShareScope): string => visibleControls(SCOPE_LABELS[scope] ?? scope);
 
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
 const day = (iso: string) => new Date(iso).toLocaleDateString();
@@ -25,13 +27,18 @@ function SnapshotRow({ s }: { s: ShareSnapshotRecord }) {
         <a download href={shareDownloadUrl(s.id)}>
           Download
         </a>
-        <button type="button" aria-expanded={sharing} aria-controls={formId} onClick={() => setSharing((v) => !v)}>
+        <button type="button" aria-expanded={sharing} aria-controls={sharing ? formId : undefined} onClick={() => setSharing((v) => !v)}>
           Share on your network…
         </button>
       </span>
       {sharing && (
         <div id={formId}>
-          <ShareLinkForm shareId={s.id} addresses={model.share.addresses} onCreateLink={model.share.onCreateLink} />
+          <ShareLinkForm
+            shareId={s.id}
+            addresses={model.share.addresses}
+            addressesError={model.share.addressesError}
+            onCreateLink={model.share.onCreateLink}
+          />
         </div>
       )}
     </li>
@@ -47,8 +54,19 @@ export function ShareSideBar() {
   const share = model.share;
   const uid = useId();
   const [error, setError] = useState<string | null>(null);
+  const [revoked, setRevoked] = useState(false);
+  const revokedRef = useRef<HTMLParagraphElement>(null);
   const { loadAddresses } = share;
   useEffect(() => loadAddresses(), [loadAddresses]);
+  // The Revoke button that had focus goes with its row: focus moves to the outcome, not to body.
+  useEffect(() => {
+    if (revoked) revokedRef.current?.focus();
+  }, [revoked]);
+  const liveCount = share.links.filter((l) => l.state === "active").length;
+  // A new live link makes "Link revoked." stale.
+  useEffect(() => {
+    if (liveCount > 0) setRevoked(false);
+  }, [liveCount]);
 
   if (model.selectedId === null) return <p className="empty">Select or create a project.</p>;
 
@@ -62,8 +80,9 @@ export function ShareSideBar() {
   };
   const revoke = async (id: string) => {
     setError(null);
+    setRevoked(false);
     try {
-      await share.onRevokeLink(id);
+      if (await share.onRevokeLink(id)) setRevoked(true);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -134,13 +153,18 @@ export function ShareSideBar() {
           <ul aria-label="Live links">
             {live.map((l) => (
               <li key={l.id}>
-                <span className="share-row-text">{`${SCOPE_LABELS[l.scope]} · until ${when(l.expiresAt)} · port ${l.port}`}</span>
+                <span className="share-row-text">{`${scopeLabel(l.scope)} · until ${when(l.expiresAt)} · port ${l.port}`}</span>
                 <button type="button" onClick={() => void revoke(l.id)}>
                   Revoke
                 </button>
               </li>
             ))}
           </ul>
+        )}
+        {revoked && (
+          <p className="share-saved" role="status" tabIndex={-1} ref={revokedRef}>
+            Link revoked.
+          </p>
         )}
         <p className="note">Links work only while The Terminal is running on this computer.</p>
       </section>

@@ -48,8 +48,11 @@ describe("SharePanel", () => {
     expect(confirmButton().disabled).toBe(false);
     await userEvent.click(confirmButton());
     expect(model.share.onConfirm).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("Saved. Open, download or share it from the Share view.")).toBeTruthy();
+    const saved = await screen.findByText("Saved. Open, download or share it from the Share view.");
     expect(ack.isConnected).toBe(false);
+    // The button that had focus is gone: focus moves to the outcome, so a keyboard or screen-reader user is not dropped on body.
+    expect(saved.getAttribute("role")).toBe("status");
+    expect(document.activeElement).toBe(saved);
   });
 
   it("clears the preview once saved, keeping Saved. on screen, so another save needs a new preview", async () => {

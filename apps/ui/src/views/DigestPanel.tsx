@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId } from "react";
 import { DIGEST_DAYS, visibleControls } from "@theterminal/shared";
 import type { DailyDigest, DigestDays, DigestItem } from "@theterminal/shared";
 import { useShell } from "../shell/model";
@@ -13,12 +13,12 @@ function Day({ d }: { d: DailyDigest }) {
   const uid = useId();
   return (
     <article aria-labelledby={uid}>
-      <h3 id={uid}>{`${d.day} (UTC)`}</h3>
+      <h3 id={uid}>{`${visibleControls(d.day)} (UTC)`}</h3>
       <p className="digest-summary">{visibleControls(d.summary)}</p>
       <ul>
         {d.items.map((item) => (
           <li key={item.seq} className={itemClass(item)}>
-            <time>{item.time}</time> · {item.topic === "override" && !item.headline.startsWith("OVERRIDE") && <span className="override-tag">OVERRIDE </span>}
+            <time>{visibleControls(item.time)}</time> · {item.topic === "override" && !item.headline.startsWith("OVERRIDE") && <span className="override-tag">OVERRIDE </span>}
             <span className="headline">{visibleControls(item.headline)}</span>
           </li>
         ))}
@@ -31,7 +31,9 @@ function Day({ d }: { d: DailyDigest }) {
 /** One plain-language account per UTC day of the selected project's ledger, newest first. */
 export function DigestPanel(_props: { id: string }) {
   const { model } = useShell();
-  const { days, onDaysChange, list } = model.digests;
+  const { days, onDaysChange, list, watch } = model.digests;
+  // Digests load and reload only while this tab is open.
+  useEffect(() => watch(), [watch]);
   return (
     <section className="digest-panel" aria-label="Daily digest">
       <h2>Daily digest</h2>

@@ -144,6 +144,7 @@ export function App() {
   const [shareSnapshots, setShareSnapshots] = useState<ShareSnapshotRecord[]>([]);
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [shareAddresses, setShareAddresses] = useState<ShareAddress[]>([]);
+  const [shareAddressesError, setShareAddressesError] = useState<string | null>(null);
   const refreshShare = useRef<() => void>(() => {});
   /** Bumped when the options or the project change, so a preview asked for before is dropped when it arrives. */
   const previewGen = useRef(0);
@@ -152,6 +153,8 @@ export function App() {
   const [digestDays, setDigestDays] = useState<DigestDays>(7);
   const [digests, setDigests] = useState<DailyDigest[] | null>(null);
   const refreshDigests = useRef<() => void>(() => {});
+  /** How many Daily digest tabs are mounted: digests load and reload only while this is above zero. */
+  const digestWatchers = useRef(0);
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -318,7 +321,7 @@ export function App() {
         if (e.type.startsWith("agent.")) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
         if (e.type.startsWith("share.")) refreshShare.current();
-        refreshDigests.current();
+        if (digestWatchers.current > 0) refreshDigests.current();
       });
     });
     return () => {
@@ -382,7 +385,8 @@ export function App() {
     };
   }, [selectedId]);
 
-  // The selected project's daily digests over the chosen window: null while they load.
+  // The selected project's daily digests over the chosen window: null while they load. Loaded only while a Daily
+  // digest tab is open; the tab asks when it mounts.
   useEffect(() => {
     setDigests(null);
     if (!selectedId) return;
@@ -392,20 +396,31 @@ export function App() {
       if (!cancelled) setDigests(list);
     }, () => cancelled);
     refreshDigests.current = refresh;
-    refresh();
+    if (digestWatchers.current > 0) refresh();
     return () => {
       cancelled = true;
       refreshDigests.current = () => {};
     };
   }, [selectedId, digestDays]);
+  const watchDigests = useCallback(() => {
+    digestWatchers.current++;
+    refreshDigests.current();
+    return () => {
+      digestWatchers.current--;
+    };
+  }, []);
 
-  // Asked for by the Share view when it opens; a failure keeps the addresses already known.
+  // Asked for by the Share view when it opens; a failure keeps the addresses already known and records why.
   const loadShareAddresses = useCallback(() => {
     void api.listShareAddresses().then(
       (a) => {
-        if (mounted.current) setShareAddresses(a);
+        if (!mounted.current) return;
+        setShareAddresses(a);
+        setShareAddressesError(null);
       },
-      () => {},
+      (e: unknown) => {
+        if (mounted.current) setShareAddressesError(e instanceof ApiError ? e.code : "request_failed");
+      },
     );
   }, []);
 
@@ -789,6 +804,7 @@ export function App() {
       snapshots: selectedId ? shareSnapshots : [],
       links: selectedId ? shareLinks : [],
       addresses: shareAddresses,
+      addressesError: shareAddressesError,
       loadAddresses: loadShareAddresses,
       onCreateLink: async (shareId, address, ttlMinutes) => {
         if (!selectedId) return null;
@@ -805,7 +821,7 @@ export function App() {
         }
       },
     },
-    digests: { days: digestDays, onDaysChange: setDigestDays, list: selectedId ? digests : null },
+    digests: { days: digestDays, onDaysChange: setDigestDays, list: selectedId ? digests : null, watch: watchDigests },
     intake: selectedId ? intake : undefined,
     intakeError: selectedId ? intakeError : null,
     onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),

@@ -180,6 +180,8 @@ export type WorkbenchModel = {
     snapshots: ShareSnapshotRecord[];
     links: ShareLink[];
     addresses: ShareAddress[];
+    /** The error code of the last failed address load, or null; cleared by a load that succeeds. */
+    addressesError: string | null;
     loadAddresses(): void;
     /** The new link's url, shown once; null, sending nothing, with no project. A refusal rejects with the error. */
     onCreateLink(shareId: string, address: string, ttlMinutes: number): Promise<{ url: string } | null>;
@@ -187,8 +189,12 @@ export type WorkbenchModel = {
     onRevokeLink(id: string): Promise<boolean>;
   };
 
-  /** The selected project's daily digests over the last `days`; null while loading. Reloaded on its entries, coalesced. */
-  digests: { days: DigestDays; onDaysChange(d: DigestDays): void; list: DailyDigest[] | null };
+  /**
+   * The selected project's daily digests over the last `days`; null while loading. The Daily digest tab calls
+   * `watch` when it mounts and the returned function when it unmounts: digests load when a watcher appears and
+   * reload on the project's entries (coalesced) only while one is there, never while the tab is closed.
+   */
+  digests: { days: DigestDays; onDaysChange(d: DigestDays): void; list: DailyDigest[] | null; watch(): () => void };
 
   /**
    * The selected project's guided intake: null when it has none, undefined while loading. Reloaded on any
