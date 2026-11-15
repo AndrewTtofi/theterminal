@@ -42,13 +42,21 @@ export const hardwareSummary = (hw: HardwareInfo) =>
 /** How many models a machine's servers list in all. */
 export const modelCount = (m: MachineCapacity) => m.localModels.reduce((n, e) => n + e.models.length, 0);
 
-/** When a machine was checked; an offline machine's figures are the last it sent, so it says when it was last seen. */
+const at = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleString()}</time>;
+
+/**
+ * When a machine was checked. An offline machine's figures are the last it sent, so it says when it last answered
+ * (`lastSeenAt`), or that it never has.
+ */
 export function CheckedAt({ machine }: { machine: MachineCapacity }) {
-  const time = <time dateTime={machine.checkedAt}>{new Date(machine.checkedAt).toLocaleString()}</time>;
-  return machine.online ? time : <>last seen {time}</>;
+  if (machine.online) return at(machine.checkedAt);
+  return machine.lastSeenAt === null ? <>never seen</> : <>last seen {at(machine.lastSeenAt)}</>;
 }
 
-/** One row per linked machine as it last answered; an offline row keeps the last known values, greyed. */
+/**
+ * One row per linked machine as it last answered; an offline row keeps the last known values, greyed. Everything a
+ * machine sent is shown as text with hidden characters made visible.
+ */
 function MachinesTable({ machines }: { machines: MachineCapacity[] }) {
   return (
     <table className="capacity-machines-table" aria-label="Machines">
@@ -66,9 +74,9 @@ function MachinesTable({ machines }: { machines: MachineCapacity[] }) {
           <tr key={m.machineId} className={m.online ? undefined : "offline"}>
             <td>{shownName(m.name)}</td>
             <td>{m.online ? "online" : "offline"}</td>
-            <td>{m.hardware === null ? "not reported" : cpuText(m.hardware)}</td>
+            <td>{m.hardware === null ? "not reported" : shownName(cpuText(m.hardware))}</td>
             <td>{m.hardware === null ? "not reported" : memoryText(m.hardware)}</td>
-            <td>{m.hardware === null ? "not reported" : gpuText(m.hardware)}</td>
+            <td>{m.hardware === null ? "not reported" : shownName(gpuText(m.hardware))}</td>
             <td>{modelCount(m)}</td>
             <td>
               <CheckedAt machine={m} />

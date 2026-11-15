@@ -15,6 +15,7 @@ import {
   helloResponseSchema,
   linkPayloadSchemas,
   machineAddressSchema,
+  machineCapacityBodySchema,
   machineCapacitySchema,
   machineNameSchema,
   mirrorFrameSchema,
@@ -267,7 +268,7 @@ describe("wire schemas", () => {
 
   it("validates a machine's capacity and drops the worker's own hardware switch", () => {
     const capacity = {
-      machineId, name: "GPU box", online: true, checkedAt: "2026-11-15T10:00:00.000Z",
+      machineId, name: "GPU box", online: true, checkedAt: "2026-11-15T10:00:00.000Z", lastSeenAt: "2026-11-15T10:00:00.000Z",
       hardware: {
         cpu: "Ryzen", cores: 16, memoryGb: 64, gpu: "RTX 4090", gpuMemoryGb: 24, platform: "linux", wsl: false,
         detectedAt: "2026-11-15T09:00:00.000Z", enabled: true,
@@ -287,6 +288,23 @@ describe("wire schemas", () => {
     expect(machineCapacitySchema.safeParse({ ...capacity, adapters: ["other"] }).success).toBe(false);
     expect(machineCapacitySchema.safeParse({ ...capacity, connections: [{ id: "c1", kind: "llm", provider: "x", name: "n" }] }).success).toBe(false);
     expect(machineCapacitySchema.safeParse({ ...capacity, localModels: [{ ...capacity.localModels[0], engine: "vllm" }] }).success).toBe(false);
+  });
+
+  it("keeps lastSeenAt (null when never seen), and checks a worker's body without the four fields the requester adds", () => {
+    const body = {
+      hardware: null, localModels: [], sources: [], adapters: ["codex"],
+      connections: [{ id: "c1", kind: "cloud", provider: "aws", name: "Work AWS" }],
+    };
+    const local = { machineId, name: "GPU box", online: false, checkedAt: "2026-11-15T10:00:00.000Z", lastSeenAt: null };
+    expect(machineCapacitySchema.safeParse({ ...local, ...body }).success).toBe(true);
+    expect(machineCapacitySchema.safeParse({ ...local, lastSeenAt: undefined, ...body }).success).toBe(false);
+    expect(machineCapacitySchema.safeParse({ ...local, lastSeenAt: "yesterday", ...body }).success).toBe(false);
+    const parsed = machineCapacityBodySchema.safeParse({ ...body, machineId, name: "spoofed", online: true, apiKey: "TESTKEY-x" });
+    expect(parsed.success).toBe(true);
+    // Fields the worker has no say in are dropped, and so is anything unknown.
+    expect(Object.keys(parsed.data!).sort()).toEqual(["adapters", "connections", "hardware", "localModels", "sources"]);
+    expect(machineCapacityBodySchema.safeParse({ ...body, connections: Array.from({ length: 201 }, () => body.connections[0]) }).success).toBe(false);
+    expect(machineCapacityBodySchema.safeParse({ ...body, connections: [{ ...body.connections[0], name: "x".repeat(121) }] }).success).toBe(false);
   });
 });
 

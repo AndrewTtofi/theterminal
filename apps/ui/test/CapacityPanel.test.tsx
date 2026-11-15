@@ -97,12 +97,12 @@ describe("CapacityPanel", () => {
       ["GPU box", "online", "AMD Ryzen 9 7950X (16 cores)", "64 GB", "NVIDIA RTX 4090, 24 GB", "3", new Date("2026-11-15T12:00:00.000Z").toLocaleString()],
       [
         "<img src=x onerror=alert(1)>", "offline", "Apple M1 (8 cores)", "16 GB", "not detected", "0",
-        `last seen ${new Date("2026-11-15T09:30:00.000Z").toLocaleString()}`,
+        `last seen ${new Date("2026-11-15T08:45:00.000Z").toLocaleString()}`,
       ],
     ]);
     expect(rows[0]!.className).not.toContain("offline");
     expect(rows[1]!.className).toContain("offline");
-    expect(within(rows[1]!).getByText(/^last seen/).querySelector("time")!.getAttribute("dateTime")).toBe("2026-11-15T09:30:00.000Z");
+    expect(within(rows[1]!).getByText(/^last seen/).querySelector("time")!.getAttribute("dateTime")).toBe("2026-11-15T08:45:00.000Z");
     // A machine's name is text, never markup.
     expect(table.querySelector("img")).toBeNull();
   });
@@ -114,6 +114,22 @@ describe("CapacityPanel", () => {
     cleanup();
     renderPanel({ report: report() });
     expect(screen.queryByRole("table", { name: "Machines" })).toBeNull();
+  });
+
+  it("says never seen for an offline machine that has not answered yet", () => {
+    renderPanel({ report: report({ machines: [{ ...machines[1]!, lastSeenAt: null, hardware: null }] }) });
+    const row = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    expect(within(row).getAllByRole("cell").at(-1)!.textContent).toBe("never seen");
+    expect(row.querySelector("time")).toBeNull();
+  });
+
+  it("shows a remote machine's hardware with hidden characters made visible", () => {
+    const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9", gpu: "RTX\u200B4090" };
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });
+    const cells = within(within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!).getAllByRole("cell");
+    expect(cells[2]!.textContent).toBe("Ryzen\\u202e9 (16 cores)");
+    expect(cells[4]!.textContent).toBe("RTX\\u200b4090, 24 GB");
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
   });
 
   it("shows a remote machine's name with hidden characters made visible", () => {

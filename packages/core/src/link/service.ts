@@ -494,6 +494,15 @@ export class LinkService {
     return { machineId: m.id, address: m.address, publicKeyDer: Buffer.from(m.publicKey, "base64") };
   }
 
+  /**
+   * A client presenting this computer's identity, which checks each peer's key against the pinned one before it
+   * sends anything. IdentityUnavailableError without an identity.
+   */
+  newClient(timeoutMs?: number): LinkClient {
+    if (!this.identity) throw new IdentityUnavailableError();
+    return this.deps.client(this.identity, timeoutMs);
+  }
+
   /** The paired machine holding exactly this key, read from the projection on every call. */
   readonly peerCheck: PeerCheck = (spkiDer) => {
     const m = getMachine(this.deps.db, machineIdOf(spkiDer));

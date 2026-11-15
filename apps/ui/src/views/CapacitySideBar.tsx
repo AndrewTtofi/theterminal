@@ -58,7 +58,7 @@ function MachineSection({ machine, id }: { machine: MachineCapacity; id: string 
     <section aria-labelledby={id} className={machine.online ? undefined : "offline"}>
       <h3 id={id}>{`${shownName(machine.name)} · ${machine.online ? "online" : "offline"}`}</h3>
       <ul>
-        <li>{machine.hardware === null ? "Hardware not reported" : hardwareSummary(machine.hardware)}</li>
+        <li>{machine.hardware === null ? "Hardware not reported" : shownName(hardwareSummary(machine.hardware))}</li>
         <li>{`${n} ${n === 1 ? "local model" : "local models"}`}</li>
         {!machine.online && (
           <li>

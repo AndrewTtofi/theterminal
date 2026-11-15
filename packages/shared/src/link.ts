@@ -237,6 +237,7 @@ export const machineCapacitySchema = z.object({
   name: machineNameSchema,
   online: z.boolean(),
   checkedAt: z.iso.datetime(),
+  lastSeenAt: z.iso.datetime().nullable(),
   hardware: hardwareSchema.nullable(),
   localModels: z.array(localEngineSchema).max(10),
   sources: z.array(capacitySourceSchema).max(100),
@@ -252,6 +253,15 @@ export const machineCapacitySchema = z.object({
     )
     .max(200),
 });
+
+/**
+ * What a worker sends about itself (`GET /link/v1/capacity`): a `MachineCapacity` without the fields only the
+ * requester knows (the machine's id and the name it recorded, whether and when it answered). Unknown keys are dropped.
+ */
+export const machineCapacityBodySchema = machineCapacitySchema.omit({
+  machineId: true, name: true, online: true, checkedAt: true, lastSeenAt: true,
+});
+export type MachineCapacityBody = z.infer<typeof machineCapacityBodySchema>;
 
 // The pairing code: Crockford base32 of 12 bytes (8 bytes of the showing machine's fingerprint, then 4 bytes of
 // one-time secret), 20 symbols written as four groups of five.

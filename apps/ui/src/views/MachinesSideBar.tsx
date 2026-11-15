@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { LINKING_ACK, visibleControls } from "@theterminal/shared";
-import type { MachinePresence } from "@theterminal/shared";
+import type { MachineCapacity, MachinePresence } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
 import type { LinkSelf } from "../api";
 import { useShell } from "../shell/model";
+import { hardwareSummary } from "./CapacityPanel";
 
 const REFRESH_MS = 30_000;
 const NAME_HELP = 'Pick a short name such as "Mac" or "GPU desktop". It is recorded in the ledger of every machine you link.';
@@ -191,6 +192,28 @@ function ThisComputer({ self, refresh }: { self: LinkSelf; refresh: () => void }
   );
 }
 
+/**
+ * A linked machine's hardware on one line, as it last answered (asked when the row appears and whenever its presence
+ * changes). Whatever went wrong, the row says one fixed sentence: nothing from a refusal is shown.
+ */
+function MachineHardware({ id, online }: { id: string; online: boolean | null }) {
+  const [capacity, setCapacity] = useState<MachineCapacity | "failed" | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.getMachineCapacity(id).then(
+      (c) => live && setCapacity(c),
+      () => live && setCapacity("failed"),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id, online]);
+  if (capacity === null) return null;
+  const text =
+    capacity === "failed" ? "Hardware unavailable" : capacity.hardware === null ? "Hardware not reported" : shownName(hardwareSummary(capacity.hardware));
+  return <p className="machine-hardware">{text}</p>;
+}
+
 function MachineRow({ m, refresh }: { m: MachinePresence; refresh: () => void }) {
   const uid = useId();
   const [confirming, setConfirming] = useState(false);
@@ -225,6 +248,7 @@ function MachineRow({ m, refresh }: { m: MachinePresence; refresh: () => void })
       <p>
         <span className={`machine-dot ${state.replace(" ", "-")}`}>{state}</span>
       </p>
+      <MachineHardware id={m.id} online={m.online} />
       <p className="machine-fingerprint">
         Fingerprint <code>{fingerprintGroups(m.fingerprint)}</code>
       </p>

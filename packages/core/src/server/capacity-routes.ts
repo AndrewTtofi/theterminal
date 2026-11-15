@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { AuthMode, CapacityReport, HardwareInfo, LocalEngine, Provider } from "@theterminal/shared";
+import type { AuthMode, CapacityReport, HardwareInfo, LocalEngine, MachineCapacity, Provider } from "@theterminal/shared";
 import { capacityReport } from "../capacity/report.js";
 import type { ConnectionService } from "../connections/service.js";
 import type { Db } from "../db.js";
@@ -12,6 +12,8 @@ export type CapacityRouteDeps = {
   hardware: () => Promise<HardwareInfo>;
   /** Detects the model servers on this computer (see detectLocalEngines). A failure counts as none found. */
   localEngines: () => Promise<LocalEngine[]>;
+  /** The paired machines as they answer (each within 3 s, all at once; see LinkCapacity.all). Default: none. */
+  machines?: () => Promise<MachineCapacity[]>;
   /** How long a local model detection is reused. Default 30 s. */
   localEnginesTtlMs?: number;
   now?: () => number;
@@ -21,7 +23,7 @@ const actor = { kind: "human", id: "owner" } as const;
 const LOCAL_ENGINES_TTL_MS = 30_000;
 
 /** Capacity: usage per provider, budgets, observed rate limits and this computer. Errors are mapped in routes.ts. */
-export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRouteDeps): void {
+export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRouteDeps): { report: () => Promise<CapacityReport> } {
   const { db, connections, modes, hardware } = deps;
   const ttl = deps.localEnginesTtlMs ?? LOCAL_ENGINES_TTL_MS;
   const now = deps.now ?? Date.now;
@@ -35,11 +37,18 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
   const localEngines = (): Promise<LocalEngine[]> =>
     cached !== null && now() - cached.at < ttl ? cached.engines : detect();
 
-  app.get("/api/capacity", async (): Promise<CapacityReport> => {
+  /** This computer's own report: what `/link/v1/capacity` tells a paired machine is built from it. */
+  const local = async (machines: MachineCapacity[] = []): Promise<CapacityReport> => {
     const engines = await localEngines();
     return capacityReport(db, {
       budgets: () => connections.budgets(), modes, hardware: () => connections.hardware(), localModels: () => engines,
+      machines: () => machines,
     });
+  };
+
+  app.get("/api/capacity", async (): Promise<CapacityReport> => {
+    const [machines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
+    return local(machines);
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.
@@ -48,4 +57,6 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
     await connections.writeHardware(actor, info);
     return info;
   });
+
+  return { report: () => local() };
 }

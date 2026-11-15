@@ -699,9 +699,18 @@ export class ConnectionService {
    * and after scrubbing, as the runner does), scrubbed, emails replaced, and capped.
    */
   private publicName(name: string): string {
+    const cleaned = this.publicText(name);
+    return cleaned === "" ? "Connection" : cleaned;
+  }
+
+  /**
+   * Any text the Owner typed (a name, a plan) fit to leave the computer, cleaned as publicName cleans a connection's
+   * name; "" when nothing is left.
+   */
+  publicText(text: string): string {
     const secrets = [...this.secretValues(), ...this.extraSecrets()];
-    const cleaned = redact(this.scrub(redact(name, secrets)), secrets).replace(EMAIL, "<email>").trim();
-    return truncate(cleaned === "" ? "Connection" : cleaned, PUBLIC_NAME_MAX);
+    const cleaned = redact(this.scrub(redact(text, secrets)), secrets).replace(EMAIL, "<email>").trim();
+    return cleaned === "" ? "" : truncate(cleaned, PUBLIC_NAME_MAX);
   }
 
   /** The plan and monthly budget of each enabled model connection. */

@@ -7,7 +7,7 @@ vi.mock("../src/api", async (importOriginal) => {
   const real = await importOriginal<typeof import("../src/api")>();
   return {
     ...real,
-    api: { renameMachine: vi.fn(), enableLinking: vi.fn(), disableLinking: vi.fn(), unpairMachine: vi.fn() },
+    api: { renameMachine: vi.fn(), enableLinking: vi.fn(), disableLinking: vi.fn(), unpairMachine: vi.fn(), getMachineCapacity: vi.fn() },
   };
 });
 
@@ -17,6 +17,7 @@ import type { WorkbenchModel } from "../src/shell/model";
 import { MachinesSideBar } from "../src/views/MachinesSideBar";
 import { fakeDock, shellNav } from "./connections-harness";
 import { machine, overview, self } from "./machines-fixtures";
+import { machines as capacities } from "./capacity-fixtures";
 
 const m = vi.mocked(api);
 
@@ -34,7 +35,10 @@ function renderSideBar(machines: Partial<WorkbenchModel["machines"]>) {
 
 const allowLinking = () => screen.getByRole("switch", { name: "Allow linking" });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  m.getMachineCapacity.mockResolvedValue(capacities[0]!);
+});
 
 describe("MachinesSideBar", () => {
   it("loads the overview when it opens", () => {
@@ -202,5 +206,38 @@ describe("MachinesSideBar", () => {
     expect(heading.querySelector("b")).toBeNull();
     expect(container.textContent).not.toMatch(/[\u202e\u0007]/);
     expect(screen.getByRole("button", { name: 'Unlink "GPU\\u202eexe.bat\\u0007<b>x</b>"' })).toBeTruthy();
+  });
+
+  it("shows each linked machine's hardware on one line, as it last answered", async () => {
+    m.getMachineCapacity.mockImplementation(async (id: string) =>
+      id === "22".repeat(16) ? capacities[0]! : { ...capacities[1]!, machineId: id, name: "Laptop" },
+    );
+    renderSideBar({ overview: overview({ machines: [machine(), machine({ id: "33".repeat(16), name: "Laptop", online: false })] }) });
+    const rows = within(screen.getByRole("list", { name: "Linked machines" })).getAllByRole("listitem");
+    await waitFor(() => expect(rows[0]!.querySelector(".machine-hardware")?.textContent).toBe("AMD Ryzen 9 7950X · 64 GB · NVIDIA RTX 4090"));
+    // Offline: the values it last sent.
+    await waitFor(() => expect(rows[1]!.querySelector(".machine-hardware")?.textContent).toBe("Apple M1 · 16 GB · GPU not detected"));
+    expect(m.getMachineCapacity.mock.calls.map((c) => c[0]).sort()).toEqual(["22".repeat(16), "33".repeat(16)]);
+  });
+
+  it("says when a machine sent no hardware, and a fixed sentence when its capacity could not be read", async () => {
+    m.getMachineCapacity.mockImplementation(async (id: string) => {
+      if (id === "22".repeat(16)) return { ...capacities[0]!, hardware: null };
+      throw new ApiError(502, "machine_refused", { message: "<img src=x onerror=alert(1)>refused" });
+    });
+    const { container } = renderSideBar({ overview: overview({ machines: [machine(), machine({ id: "33".repeat(16), name: "Laptop" })] }) });
+    const rows = within(screen.getByRole("list", { name: "Linked machines" })).getAllByRole("listitem");
+    await waitFor(() => expect(rows[0]!.querySelector(".machine-hardware")?.textContent).toBe("Hardware not reported"));
+    await waitFor(() => expect(rows[1]!.querySelector(".machine-hardware")?.textContent).toBe("Hardware unavailable"));
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).not.toContain("refused");
+  });
+
+  it("shows a remote machine's hardware with hidden characters made visible", async () => {
+    m.getMachineCapacity.mockResolvedValue({ ...capacities[0]!, hardware: { ...capacities[0]!.hardware!, cpu: "Ryzen\u202E9" } });
+    const { container } = renderSideBar({ overview: overview({ machines: [machine()] }) });
+    const row = within(screen.getByRole("list", { name: "Linked machines" })).getByRole("listitem");
+    await waitFor(() => expect(row.querySelector(".machine-hardware")?.textContent).toBe("Ryzen\\u202e9 · 64 GB · NVIDIA RTX 4090"));
+    expect(container.textContent).not.toMatch(/[\u202e]/);
   });
 });

@@ -2,9 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { IdentityUnavailableError, type LinkService } from "../link/service.js";
+import type { LinkCapacity } from "../link/capacity.js";
 
 export type LinkRouteDeps = {
   link: LinkService;
+  /** The linked machines' capacity (see LinkCapacity). */
+  capacity: LinkCapacity;
   /** The port the listener asks for when the Owner enables linking (the next 20 are tried). Default 4418. */
   port?: number;
 };
@@ -81,5 +84,12 @@ export function registerLinkRoutes(app: FastifyInstance, deps: LinkRouteDeps): v
     const { id } = idParams.parse(req.params);
     await link.unpair(actor, id);
     return reply.code(204).send();
+  });
+
+  // Asked again now, bypassing the 30 s cache. A machine that does not answer, refuses or sends something unreadable
+  // is `online: false` with the values it last sent; nothing from its reply reaches this answer.
+  app.get("/api/link/machines/:id/capacity", async (req) => {
+    const { id } = idParams.parse(req.params);
+    return deps.capacity.capacityOf(id, { fresh: true });
   });
 }

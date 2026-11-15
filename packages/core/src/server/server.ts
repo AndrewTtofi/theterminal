@@ -40,7 +40,7 @@ import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
@@ -505,10 +505,20 @@ export async function createServer(opts: {
       extraSecrets: (): string[] => [token, ...secretEnvValues(process.env), ...runner.mintedSecrets()],
     });
     await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+    // Linked machines' capacity: this computer's own report is set once the capacity routes exist (below); the link
+    // listener, which answers paired machines from it, starts only after that.
+    let localCapacity: (() => Promise<CapacityReport>) | null = null;
+    const programAvailable = (p: Provider) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null;
     // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().
-    link = wireLink({
+    const wired = wireLink({
       db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0", ...(opts.discovery !== undefined && { discovery: opts.discovery }),
-    }).link;
+      capacity: {
+        report: () => (localCapacity ? localCapacity() : Promise.reject(new Error("capacity is not ready"))),
+        adapters: () => ADAPTERS.filter((id) => adapters[id] !== undefined && (id === "fake" || programAvailable(id))),
+        connections,
+      },
+    });
+    link = wired.link;
     const linkService = link;
 
     const signin = new SignInManager({
@@ -571,7 +581,7 @@ export async function createServer(opts: {
         settings,
         adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
         // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
-        available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
+        available: programAvailable,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
         clean: cleanMirrored,
       });
@@ -587,11 +597,11 @@ export async function createServer(opts: {
         network: () => network.state(),
       });
       registerGitHubRoutes(app, { github });
-      registerCapacityRoutes(app, {
+      localCapacity = registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
-        localEngines: selectLocalEngines(process.env, opts.localEngines),
-      });
-      registerLinkRoutes(app, { link: linkService, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
+        localEngines: selectLocalEngines(process.env, opts.localEngines), machines: () => wired.capacity.all(),
+      }).report;
+      registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
       // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
       await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported

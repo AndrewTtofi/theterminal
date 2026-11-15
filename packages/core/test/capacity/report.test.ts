@@ -52,7 +52,7 @@ describe("capacityReport", () => {
     const { db } = seed();
     expect(report(db).machines).toEqual([]);
     const machines: MachineCapacity[] = [{
-      machineId: "m1", name: "GPU box", online: true, checkedAt: NOW.toISOString(),
+      machineId: "m1", name: "GPU box", online: true, checkedAt: NOW.toISOString(), lastSeenAt: NOW.toISOString(),
       hardware: { cpu: "AMD Ryzen 9", cores: 16, memoryGb: 64, gpu: "NVIDIA RTX 4090", gpuMemoryGb: 24, platform: "linux", wsl: false, detectedAt: NOW.toISOString() },
       localModels: [], sources: [], adapters: ["codex"], connections: [{ id: "c9", kind: "cloud", provider: "aws", name: "Work AWS" }],
     }];

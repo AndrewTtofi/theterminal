@@ -2,12 +2,18 @@ import type { FastifyInstance } from "fastify";
 import type { LinkService } from "./service.js";
 import { registerHello } from "./protocol/hello.js";
 import { registerPair } from "./protocol/pair.js";
+import { registerCapacity, type CapacityProtocolDeps } from "./protocol/capacity.js";
 
 /** What the `/link/v1/*` routes use; grows with pairing, capacity and runs. */
-export type LinkProtocolDeps = { link: LinkService };
+export type LinkProtocolDeps = {
+  link: LinkService;
+  /** What this computer tells a paired machine about itself; without it `/link/v1/capacity` is not offered. */
+  capacity?: CapacityProtocolDeps;
+};
 
 /** Every `/link/v1/*` route, on the link listener only. Each area registers from its own module under `protocol/`. */
 export function registerLinkProtocolRoutes(app: FastifyInstance, deps: LinkProtocolDeps): void {
   registerHello(app, deps);
   registerPair(app, deps);
+  registerCapacity(app, deps);
 }

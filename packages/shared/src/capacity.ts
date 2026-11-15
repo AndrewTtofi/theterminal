@@ -48,7 +48,8 @@ export type LocalEngine = {
 };
 
 /**
- * A linked machine's inventory as it last answered: `online` and `checkedAt` are what the last check said and when.
+ * A linked machine's inventory as it last answered: `online` and `checkedAt` are what the last check said and when;
+ * `lastSeenAt` is when it last answered (null when it never has). An offline machine keeps the values it last sent.
  * `hardware` is the worker's detection without its own `enabled` switch; `connections` names only ids, kinds,
  * providers and names, never a value.
  */
@@ -57,6 +58,7 @@ export type MachineCapacity = {
   name: string;
   online: boolean;
   checkedAt: string;
+  lastSeenAt: string | null;
   hardware: HardwareInfo | null;
   localModels: LocalEngine[];
   sources: CapacitySource[];

@@ -43,12 +43,12 @@ export const localEngines: LocalEngine[] = [
 ];
 
 /**
- * Two linked machines: "GPU box" online with three local models; a machine whose name is markup, offline since its last
- * check, with the hardware it last reported and no local models.
+ * Two linked machines: "GPU box" online with three local models; a machine whose name is markup, offline at its last
+ * check (09:30), with the hardware it last reported when it last answered (08:45) and no local models.
  */
 export const machines: MachineCapacity[] = [
   {
-    machineId: "m1", name: "GPU box", online: true, checkedAt: "2026-11-15T12:00:00.000Z",
+    machineId: "m1", name: "GPU box", online: true, checkedAt: "2026-11-15T12:00:00.000Z", lastSeenAt: "2026-11-15T12:00:00.000Z",
     hardware: {
       cpu: "AMD Ryzen 9 7950X", cores: 16, memoryGb: 64, gpu: "NVIDIA RTX 4090", gpuMemoryGb: 24, platform: "linux", wsl: false,
       detectedAt: "2026-11-15T11:00:00.000Z",
@@ -57,6 +57,7 @@ export const machines: MachineCapacity[] = [
   },
   {
     machineId: "m2", name: "<img src=x onerror=alert(1)>", online: false, checkedAt: "2026-11-15T09:30:00.000Z",
+    lastSeenAt: "2026-11-15T08:45:00.000Z",
     hardware: { cpu: "Apple M1", cores: 8, memoryGb: 16, gpu: null, gpuMemoryGb: null, platform: "darwin", wsl: false, detectedAt: "2026-11-14T08:00:00.000Z" },
     localModels: [], sources: [], adapters: [], connections: [],
   },

@@ -224,6 +224,7 @@ describe("link routes", { timeout: 30_000 }, () => {
       ["DELETE", "/api/link/code"],
       ["POST", "/api/link/pair", { address: "127.0.0.1:1", code: "x" }],
       ["DELETE", `/api/link/machines/${"0".repeat(32)}`],
+      ["GET", `/api/link/machines/${"0".repeat(32)}/capacity`],
     ];
     for (const [method, path, body] of routes) {
       const anon = await send(s, method, path, body, { authed: false });

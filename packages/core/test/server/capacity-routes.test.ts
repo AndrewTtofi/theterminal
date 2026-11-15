@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CapacityReport, Connection, HardwareInfo, LedgerEntry, LocalEngine } from "@theterminal/shared";
+import { LINKING_ACK, type CapacityReport, type Connection, type HardwareInfo, type LedgerEntry, type LocalEngine, type MachineCapacity } from "@theterminal/shared";
 import { fakeHardware } from "../../src/capacity/hardware.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, selectHardware, selectLocalEngines, type RunningServer } from "../../src/server/server.js";
 
@@ -26,7 +27,11 @@ afterEach(async () => {
 async function start(opts: Partial<Parameters<typeof createServer>[0]> = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "tt-capacity-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), ...opts });
+  // A memory store (never the real keychain), the in-process discovery (never multicast), and loopback linking.
+  const s = await createServer({
+    dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(),
+    discovery: fakeDiscovery(), linkBind: "127.0.0.1", linkPort: 0, ...opts,
+  });
   running.push(s);
   return s;
 }
@@ -167,5 +172,63 @@ describe("capacity API", { timeout: 15000 }, () => {
     expect(await json(send(s, "GET", "/api/status"))).toMatchObject({ monthCostUsd: 0, monthlyBudgetUsd: 50 });
     const report = await json<CapacityReport>(send(s, "GET", "/api/capacity"));
     expect(report.sources[0]).toMatchObject({ provider: "claude", plan: "Max 5x", monthlyBudgetUsd: 50, name: "Claude" });
+  });
+});
+
+/** Pairs two running servers over HTTP: `worker` shows a code, `requester` enters it. Answers the worker's machine id. */
+async function pairServers(requester: RunningServer, worker: RunningServer): Promise<string> {
+  for (const s of [requester, worker]) expect((await send(s, "POST", "/api/link/enable", { acknowledgement: LINKING_ACK })).status).toBe(200);
+  const { self } = await json<{ self: { machineId: string; linking: { port: number } } }>(send(worker, "GET", "/api/link"));
+  const { code } = await json<{ code: string }>(send(worker, "POST", "/api/link/code"));
+  const res = await send(requester, "POST", "/api/link/pair", { address: `127.0.0.1:${self.linking.port}`, code });
+  expect(res.status).toBe(201);
+  return self.machineId;
+}
+
+describe("linked machines in the capacity API", { timeout: 30_000 }, () => {
+  it("GET /api/capacity lists each paired machine as it answered; GET /api/link/machines/:id/capacity asks again", async () => {
+    const requester = await start();
+    const worker = await start({ hardware: async () => fakeHardware });
+    await send(worker, "POST", "/api/link/name", { name: "GPU box" });
+    await send(worker, "POST", "/api/capacity/detect");
+    const added = await send(worker, "POST", "/api/connections", {
+      kind: "cloud", provider: "aws", name: "Work AWS", config: { region: "us-east-1" },
+      secrets: { accessKeyId: "AKIATESTKEYSRV00000", secretAccessKey: "TESTKEY-aws-srv-secret-0000000000" },
+    });
+    expect(added.status).toBe(201);
+    const aws = (await added.json()) as Connection;
+    const workerId = await pairServers(requester, worker);
+
+    const report = await json<CapacityReport>(send(requester, "GET", "/api/capacity"));
+    expect(report.machines).toHaveLength(1);
+    const [m] = report.machines;
+    expect(m).toMatchObject({ machineId: workerId, name: "GPU box", online: true, hardware: { cpu: "Fake CPU", gpu: "Fake GPU" } });
+    expect(m!.lastSeenAt).toBe(m!.checkedAt);
+    expect(m!.connections).toEqual([{ id: aws.id, kind: "cloud", provider: "aws", name: "Work AWS" }]);
+    expect(JSON.stringify(report.machines)).not.toContain("TESTKEY");
+
+    const fresh = await send(requester, "GET", `/api/link/machines/${workerId}/capacity`);
+    expect(fresh.status).toBe(200);
+    const one = (await fresh.json()) as MachineCapacity;
+    expect(one).toMatchObject({ machineId: workerId, name: "GPU box", online: true });
+
+    // The worker goes away: offline, with the values it last sent and when it last answered.
+    expect((await send(worker, "POST", "/api/link/disable")).status).toBe(200);
+    const gone = await json<MachineCapacity>(send(requester, "GET", `/api/link/machines/${workerId}/capacity`));
+    expect(gone).toMatchObject({ machineId: workerId, name: "GPU box", online: false, lastSeenAt: one.checkedAt, hardware: { cpu: "Fake CPU" } });
+  });
+
+  it("GET /api/link/machines/:id/capacity: 404 for a machine that is not paired, 401 without the session", async () => {
+    const s = await start();
+    const missing = await send(s, "GET", `/api/link/machines/${"0".repeat(32)}/capacity`);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "not_found" });
+    expect((await send(s, "GET", `/api/link/machines/${"0".repeat(32)}/capacity`, undefined, false)).status).toBe(401);
+    // The workspace host check for this route is in link-routes.test.ts (fetch cannot set Host).
+  });
+
+  it("GET /api/capacity has no machines when none is paired", async () => {
+    const s = await start();
+    expect((await json<CapacityReport>(send(s, "GET", "/api/capacity"))).machines).toEqual([]);
   });
 });

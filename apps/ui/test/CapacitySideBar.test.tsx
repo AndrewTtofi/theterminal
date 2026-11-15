@@ -136,7 +136,7 @@ describe("CapacitySideBar", () => {
     expect(off.className).toContain("offline");
     expect(within(off).getByText("Apple M1 · 16 GB · GPU not detected")).toBeTruthy();
     expect(within(off).getByText("0 local models")).toBeTruthy();
-    expect(within(off).getByText(/^last seen/).textContent).toBe(`last seen ${new Date("2026-11-15T09:30:00.000Z").toLocaleString()}`);
+    expect(within(off).getByText(/^last seen/).textContent).toBe(`last seen ${new Date("2026-11-15T08:45:00.000Z").toLocaleString()}`);
     expect(within(box).queryByText(/^last seen/)).toBeNull();
     expect(document.querySelector(".capacity-side img")).toBeNull();
   });
@@ -152,6 +152,14 @@ describe("CapacitySideBar", () => {
   it("has no machine sections without linked machines", () => {
     renderSideBar({ report: report() });
     expect(screen.queryByRole("region", { name: / · (online|offline)$/ })).toBeNull();
+  });
+
+  it("shows a remote machine's hardware summary with hidden characters made visible", () => {
+    const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9" };
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("Ryzen\\u202e9 · 64 GB · NVIDIA RTX 4090")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
   });
 
   it("shows a remote machine's name with hidden characters made visible", () => {
