@@ -14,6 +14,13 @@ const FAKE_SCRIPT = JSON.stringify([
     result: { ok: true, output: "zq-TESTKEY-e2e-opaque-0000000000" },
   },
   { propose: { tool: "Edit", kind: "file_edit", summary: "Edit /etc/hosts", input: { path: "/etc/hosts" }, paths: ["/etc/hosts"] } },
+  // Only in a run given AWS credentials (cloud.spec.ts), so the other flows are unchanged: a shell command that asks,
+  // then prints the bare minted session token (never stored, and no redaction pattern matches it) and the Azure secret.
+  {
+    whenEnv: "AWS_SESSION_TOKEN",
+    propose: { tool: "Bash", kind: "shell", summary: "Run: printenv", input: { command: "printenv" }, paths: [] },
+    result: { ok: true, output: "{{AWS_SESSION_TOKEN}}\nenv=AZURE_CLIENT_SECRET={{AZURE_CLIENT_SECRET}}" },
+  },
 ]);
 
 // Codex: one command that asks; then a closing message.
@@ -37,9 +44,12 @@ const AT_CREATE = {
   // Connections: secrets in memory (never the real keychain) and connection tests answered without network I/O.
   THETERMINAL_SECRET_STORE: "memory",
   THETERMINAL_FAKE_HTTP: "1",
+  // Capacity: a fixed fake machine instead of this computer's hardware.
+  THETERMINAL_FAKE_HARDWARE: "1",
 };
 // Read at every run start (the API keys) or by the fake CLIs, which inherit the server's env: kept until teardown.
 // The fake OPENAI_API_KEY/GEMINI_API_KEY therefore stay in the Playwright main process env for the whole run.
+// THETERMINAL_FAKE_LOG is added in globalSetup, once the agent data dir exists.
 const DURING_RUNS = {
   THETERMINAL_FAKE_CODEX_SCRIPT: FAKE_CODEX_SCRIPT,
   THETERMINAL_FAKE_GEMINI_SCRIPT: FAKE_GEMINI_SCRIPT,
@@ -80,7 +90,10 @@ export default async function globalSetup() {
     servers.push(board);
     process.env.TT_E2E_URL = board.url;
 
-    restoreRunEnv = setEnv(DURING_RUNS);
+    // The fake CLIs append every message they receive (and the env they started with) here; read by cloud.spec.ts.
+    const fakeLog = join(dirs[1]!, "fake-cli.log");
+    restoreRunEnv = setEnv({ ...DURING_RUNS, THETERMINAL_FAKE_LOG: fakeLog });
+    process.env.TT_E2E_FAKE_LOG = fakeLog;
     const restoreCreateEnv = setEnv(AT_CREATE);
     try {
       const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir });

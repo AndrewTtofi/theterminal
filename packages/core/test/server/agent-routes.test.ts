@@ -685,6 +685,21 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
     expect(await used(s)).toEqual([]);
   });
 
+  it("a Claude run accepts an MCP server: 201, and connection.used records it without the header value", async () => {
+    const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, {
+      kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" },
+      secrets: { headers: "Authorization=Bearer TESTKEY-mcp-route-0000000000" },
+    });
+    const res = await startRun(s, projectId, [id], "claude");
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect((await used(s)).map((e) => e.payload)).toEqual([{ connectionId: id, name: "Docs", runId: run.id, purpose: "mcp_server" }]);
+    // No Claude program here (NO_BUNDLED, no PATH): the run fails at launch, after the grant was recorded.
+    await untilFinished(s, run.id);
+    expect(await (await get(s, "/api/ledger")).text()).not.toContain("TESTKEY-mcp-route");
+  });
+
   it("more than 10 ids is 400 invalid_input; without the token it is 401", async () => {
     const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: fakeSts });
     const res = await startRun(s, projectId, Array.from({ length: 11 }, (_, i) => `id-${i}`));

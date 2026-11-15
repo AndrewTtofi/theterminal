@@ -78,7 +78,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function envSnapshot() {
   const picked = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$)/i.test(k)) picked[k] = v;
+    // Provider and cloud names too, so a test can check which credentials a run was (and was not) given.
+    if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$|AWS_|AZURE_|ARM_|CLOUDSDK_|OPENAI_|ANTHROPIC_)/i.test(k)) picked[k] = v;
   }
   // What the real CLI would read: user-scope settings from GEMINI_CLI_HOME, policies from the --policy argument.
   let settings = null;
