@@ -87,6 +87,7 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
   if (err instanceof ConnectionDisabledError) return reply.code(400).send({ error: "connection_disabled" });
   if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported", adapter: err.adapter });
+  if (err instanceof LocalModelUnsupportedError) return reply.code(400).send({ error: "local_model_unsupported" });
   if (err instanceof DuplicateMcpServerError) return reply.code(400).send({ error: "duplicate_mcp_server" });
   if (err instanceof DuplicateCloudProviderError) return reply.code(400).send({ error: "duplicate_cloud_provider" });
   // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
