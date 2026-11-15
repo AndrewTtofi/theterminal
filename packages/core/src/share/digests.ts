@@ -17,6 +17,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export function projectDigests(
   db: Db, ledger: Ledger, projectId: string, days: DigestDays, now: () => Date = () => new Date(),
+  trim: (e: LedgerEntry) => LedgerEntry = (e) => e,
 ): DailyDigest[] {
   if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) throw new NotFoundError("project", projectId);
   const firstDay = utcDay(new Date(now().getTime() - (days - 1) * DAY_MS).toISOString());
@@ -32,7 +33,7 @@ export function projectDigests(
         older = true;
         break;
       }
-      recent.push(e);
+      recent.push(trim(e));
     }
     if (older) break;
     beforeSeq = page[0]!.seq;

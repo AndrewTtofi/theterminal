@@ -5,6 +5,7 @@ import type { LedgerEntry } from "@theterminal/shared";
 import type { Ledger } from "../ledger/ledger.js";
 import type { SessionStore } from "../people/sessions.js";
 import { builtInClean, displayEntry } from "../link/mirrored.js";
+import { trimForRole } from "../ledger/trim.js";
 import { PresenceRegistry } from "./presence.js";
 
 const PAGE = 500;
@@ -122,7 +123,8 @@ export function registerLedgerStream(
         presence.update(socketId, { projectId: projectId as string | null, view: view as string | null });
       });
 
-      const send = (e: LedgerEntry) => sendRaw(JSON.stringify(displayEntry(e, clean)));
+      // Each socket's copy is the principal's: a collaborator's connection entries carry no config or field names.
+      const send = (e: LedgerEntry) => sendRaw(JSON.stringify(trimForRole(displayEntry(e, clean), principal)));
 
       // Subscribe first and buffer, so nothing appended during the backlog read is lost.
       let live = false;

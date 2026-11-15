@@ -7,6 +7,7 @@ import { projectDigests } from "../share/digests.js";
 import { SHARE_HEADER_CSP } from "../share/render.js";
 import type { ShareService } from "../share/service.js";
 import { actorOf, needs } from "./auth.js";
+import { trimmerFor } from "../ledger/trim.js";
 
 export type ShareRouteDeps = { db: Db; ledger: Ledger; share: ShareService };
 
@@ -61,6 +62,6 @@ export function registerShareRoutes(app: FastifyInstance, deps: ShareRouteDeps):
   });
 
   app.get<Params>("/api/projects/:id/digests", needs("viewer"), async (req) =>
-    projectDigests(db, ledger, req.params.id, digestsQuery.parse(req.query).days),
+    projectDigests(db, ledger, req.params.id, digestsQuery.parse(req.query).days, undefined, trimmerFor(req.principal)),
   );
 }

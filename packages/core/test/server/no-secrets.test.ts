@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import WebSocket from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun, Connection, Role } from "@theterminal/shared";
 import type { FakeStep } from "../../src/agents/fake-adapter.js";
@@ -94,30 +95,52 @@ async function world() {
 }
 
 const GETS = Object.keys(ROUTE_ROLES).filter((k) => k.startsWith("GET ") && k !== "GET /api/events");
-/**
- * Ledger-derived views carry each entry's payload: `connection.added` records the non-secret `config` and the names of
- * the secret fields (never a value) by design, as the record of what the Owner connected.
- */
-const LEDGER_VIEWS = new Set(["GET /api/ledger", "GET /api/ledger/export", "GET /api/cards/:id/story", "GET /api/projects/:id/digests"]);
-const RECORDED_BY_DESIGN = new Set(['"config":', '"secretFields":', '"apiKey"']);
+/** Keys a collaborator's view never holds: a connection's config, its secret and private field names, a key source. */
+const OWNER_FIELDS = ['"secretFields":', '"private":', '"privateFields":', '"config":', '"apiKey"'];
+
+/** Everything the ledger stream sends `headers` up to its first presence frame (which follows the backlog). */
+function streamBacklog(s: RunningServer, headers: Record<string, string>): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events?afterSeq=0`, { headers });
+    const got: string[] = [];
+    ws.on("message", (d) => {
+      const text = String(d);
+      if (JSON.parse(text).type === "presence") {
+        ws.close();
+        resolve(got);
+        return;
+      }
+      got.push(text);
+    });
+    ws.on("error", reject);
+    ws.on("close", (code) => (code === 1000 ? undefined : reject(new Error(`closed ${code}`))));
+  });
+}
 
 describe("no secret reaches a collaborator", () => {
-  it("across every GET route, for a viewer, a reviewer and a maintainer: no secret value, no secret names, no private, config or apiKey fields", async () => {
+  it("across every GET route and the ledger stream, for a viewer, a reviewer and a maintainer: no secret value, no secret or private names, no config, no key source", async () => {
     const { s, as, pathFor } = await world();
     const leaks: string[] = [];
+    const check = (role: string, key: string, text: string) => {
+      if (text.includes(SECRET)) leaks.push(`${role} ${key}: the secret value`);
+      for (const field of OWNER_FIELDS) if (text.includes(field)) leaks.push(`${role} ${key}: ${field}`);
+    };
     for (const role of ["viewer", "reviewer", "maintainer"] as const) {
       for (const key of GETS) {
         const res = await send(s, "GET", pathFor(key), as(role));
         const text = await res.text();
         if (res.status !== 200) continue;
-        if (text.includes(SECRET)) leaks.push(`${role} ${key}: the secret value`);
-        for (const field of ['"secretFields":', '"private":', '"config":', '"apiKey"']) {
-          if (RECORDED_BY_DESIGN.has(field) && LEDGER_VIEWS.has(key)) continue;
-          if (text.includes(field)) leaks.push(`${role} ${key}: ${field}`);
-        }
+        check(role, key, text);
       }
+      const streamed = await streamBacklog(s, as(role));
+      expect(streamed.length).toBeGreaterThan(5);
+      for (const text of streamed) check(role, "WS /api/events", text);
     }
     expect(leaks).toEqual([]);
+    // The record itself is whole for the Owner: the ledger and its stream name the secret fields (never a value).
+    const owners = await (await send(s, "GET", "/api/ledger", as("owner"))).text();
+    expect(owners).toContain('"secretFields":["apiKey"]');
+    expect((await streamBacklog(s, as("owner"))).join("\n")).toContain('"secretFields":["apiKey"]');
   });
 
   it("the Owner's own views carry no secret value either", async () => {

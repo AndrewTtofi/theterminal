@@ -580,6 +580,8 @@ describe("subscribeLedger", () => {
     vi.advanceTimersByTime(61_000);
     expect(ws.sent.length).toBe(2);
     stop();
+  });
+});
 
 describe("a collaborator's run without an API key", () => {
   it("names the provider and points at the Owner", () => {

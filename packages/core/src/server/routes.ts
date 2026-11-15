@@ -38,6 +38,7 @@ import {
   SnapshotMissingError, SnapshotTamperedError,
 } from "../share/errors.js";
 import { actorOf, needs } from "./auth.js";
+import { trimmerFor } from "../ledger/trim.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -264,8 +265,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     board.setCardStatus(actorOf(req), req.params.id, statusBody.parse(req.body).to),
   );
 
+  // A collaborator's copy of a connection entry has no config or field names (trimForRole); the Owner's is whole.
   app.get("/api/ledger", needs("viewer"), async (req) => {
     const q = ledgerQuery.parse(req.query);
+    const trim = trimmerFor(req.principal);
     return ledger
       .list({
         ...(q.projectId !== undefined && { projectId: q.projectId }),
@@ -273,6 +276,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
         ...(q.limit !== undefined && { limit: q.limit }),
       })
-      .map((e) => displayEntry(e, deps.clean));
+      .map((e) => trim(displayEntry(e, deps.clean)));
   });
 }

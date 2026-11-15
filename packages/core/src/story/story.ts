@@ -78,7 +78,9 @@ function unreadableRows(db: Db, cardId: string, runIds: string[]): UnreadableEnt
  * The card, its runs and actions, its gate decisions, and every ledger entry about it, in seq order: a run's entries
  * include a linked machine's mirrored ones, shown through `clean` (this machine's own redaction).
  */
-export function cardStory(db: Db, ledger: Ledger, cardId: string, clean: (s: string) => string = builtInClean): CardStory {
+export function cardStory(
+  db: Db, ledger: Ledger, cardId: string, clean: (s: string) => string = builtInClean, trim: (e: LedgerEntry) => LedgerEntry = (e) => e,
+): CardStory {
   const card = requireCard(db, cardId);
   const runIds = (db.prepare("SELECT id FROM agent_runs WHERE card_id = ? ORDER BY started_at, rowid").all(cardId) as { id: string }[])
     .map((r) => r.id);
@@ -95,7 +97,7 @@ export function cardStory(db: Db, ledger: Ledger, cardId: string, clean: (s: str
     for (const e of pages(ledger, { cardId, runIds: batch })) bySeq.set(e.seq, e);
   }
   for (const e of entriesAt(ledger, planSeqs(db, cardId).filter((seq) => !bySeq.has(seq)))) bySeq.set(e.seq, e);
-  const entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq).map((e) => displayEntry(e, clean));
+  const entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq).map((e) => trim(displayEntry(e, clean)));
 
   const verified = ledger.verify();
   const integrity: StoryIntegrity = verified.ok ? { ok: true } : { ok: false, brokenAtSeq: verified.brokenAtSeq };
@@ -144,6 +146,7 @@ function headlineOf(e: LedgerEntry, ctx: NarrationContext): string {
  */
 export function* ledgerExportLines(
   db: Db, ledger: Ledger, projectId: string | null, now: Date = new Date(), clean: (s: string) => string = builtInClean,
+  trim: (e: LedgerEntry) => LedgerEntry = (e) => e,
 ): Generator<string> {
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
   const headSeq = ledger.headSeq();
@@ -177,7 +180,8 @@ export function* ledgerExportLines(
         yield line({ kind: "gap", seq: row.seq, reason: "unreadable" });
       } else if (belongs(row)) {
         // A linked machine's text goes through this machine's cleaner; `cleaned` says the payload is not the hashed one.
-        const shown = displayEntry(row, clean);
+        // A collaborator's copy of a connection entry is trimmed too (`trim`), and marked `cleaned` like any other change.
+        const shown = trim(displayEntry(row, clean));
         const cleaned = shown !== row && canonicalJson(shown.payload) !== canonicalJson(row.payload);
         yield line({ kind: "entry", ...shown, headline: headlineOf(shown, ctx), ...(cleaned && { cleaned: true }) });
       }
