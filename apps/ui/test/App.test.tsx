@@ -323,8 +323,9 @@ describe("App needs-you strip", () => {
     m.listAllPendingActions.mockResolvedValue([pendingAction("a1", "A", "run ls"), pendingAction("b1", "B", "run make")]);
     render(<App />);
     const strip = await screen.findByRole("region", { name: "Needs you" });
-    // The Board and the Conversation both ask for a project.
-    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
+    // The Board shows the welcome, and the Conversation asks for a project.
+    expect(screen.getByText("Start by opening a project.")).toBeTruthy();
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(1);
     const cards = strip.querySelectorAll("article");
     expect([...cards].map((c) => c.getAttribute("aria-label"))).toEqual(["Decision: run ls", "Decision: run make"]);
     expect(cards[0]!.textContent).toContain("Project A");
@@ -446,8 +447,9 @@ describe("App provider settings", () => {
     await screen.findByRole("navigation", { name: "Views" });
     await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
-    // The Board and the Conversation both ask for a project.
-    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
+    // The Board shows the welcome, and the Conversation asks for a project.
+    expect(screen.getByText("Start by opening a project.")).toBeTruthy();
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(1);
   });
 
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {

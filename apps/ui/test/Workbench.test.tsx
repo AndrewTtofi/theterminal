@@ -187,6 +187,22 @@ describe("Workbench", () => {
     expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
   });
 
+  it("opens Settings with Appearance from the gear at the bottom of the activity bar, outside the views", async () => {
+    render(<Workbench model={model()} />);
+    const gear = screen.getByRole("button", { name: "Settings" });
+    expect(within(views()).queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(gear.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(gear);
+    expect(gear.getAttribute("aria-pressed")).toBe("true");
+    const side = screen.getByRole("complementary", { name: "Side bar" });
+    expect(within(side).getByText("Settings")).toBeTruthy();
+    expect(within(side).getByRole("region", { name: "Appearance" })).toBeTruthy();
+    expect(within(side).getByRole("list", { name: "Themes" })).toBeTruthy();
+    expect(views().querySelector("[aria-pressed='true']")).toBeNull();
+    await userEvent.click(gear);
+    expect(screen.queryByRole("complementary", { name: "Side bar" })).toBeNull();
+  });
+
   it("starts a run from the Agents side bar", async () => {
     const m = model();
     render(<Workbench model={m} />);

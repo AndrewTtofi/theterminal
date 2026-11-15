@@ -2,7 +2,9 @@
 export const VIEWS = [
   "board", "agents", "changes", "needs_you", "ledger", "connections", "github", "capacity", "machines", "people", "share", "learn",
 ] as const;
-export type ViewId = (typeof VIEWS)[number];
+export type ActivityViewId = (typeof VIEWS)[number];
+/** Every side bar view: the twelve above, and Settings, which opens from the gear pinned below them. */
+export type ViewId = ActivityViewId | "settings";
 export const VIEW_LABELS: Record<ViewId, string> = {
   board: "Board",
   agents: "Agents",
@@ -16,4 +18,5 @@ export const VIEW_LABELS: Record<ViewId, string> = {
   people: "People",
   share: "Share",
   learn: "Learn",
+  settings: "Settings",
 };

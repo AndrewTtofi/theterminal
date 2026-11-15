@@ -15,3 +15,4 @@ export * from "./link.js";
 export * from "./share.js";
 export * from "./digest.js";
 export * from "./people.js";
+export * from "./theme.js";

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { VIEWS, VIEW_LABELS } from "./views";
-import type { ViewId } from "./views";
+import type { ActivityViewId, ViewId } from "./views";
 
 type Props = {
   active: ViewId | null;
@@ -18,7 +18,7 @@ const svg = (children: ReactNode) => (
   </svg>
 );
 
-const ICONS: Record<ViewId, ReactNode> = {
+const ICONS: Record<ActivityViewId, ReactNode> = {
   board: svg(<><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="11" rx="1" /><rect x="17" y="4" width="4" height="7" rx="1" /></>),
   agents: svg(<><rect x="5" y="8" width="14" height="11" rx="2" /><path d="M12 8V4M9 13h.01M15 13h.01M9.5 16h5" /></>),
   changes: svg(<><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M12 7v6M9 10h6M9 17h6" /></>),
@@ -33,34 +33,56 @@ const ICONS: Record<ViewId, ReactNode> = {
   learn: svg(<><path d="M12 6C10 4.5 7 4 3 4v14c4 0 7 .5 9 2 2-1.5 5-2 9-2V4c-4 0-7 .5-9 2z" /><path d="M12 6v14" /></>),
 };
 
-const BADGES: Partial<Record<ViewId, keyof Pick<Props, "running" | "pending">>> = { agents: "running", needs_you: "pending" };
+const GEAR = svg(
+  <>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </>,
+);
+
+const BADGES: Partial<Record<ActivityViewId, keyof Pick<Props, "running" | "pending">>> = { agents: "running", needs_you: "pending" };
 
 export function ActivityBar({ active, running, pending, onSelect }: Props) {
   const counts = { running, pending };
   return (
-    <nav className="activity-bar" aria-label="Views">
-      {VIEWS.map((v) => {
-        const badgeOf = BADGES[v];
-        const count = badgeOf ? counts[badgeOf] : 0;
-        return (
-          <button
-            key={v}
-            type="button"
-            className={v === active ? "active" : ""}
-            aria-label={VIEW_LABELS[v]}
-            aria-pressed={v === active}
-            title={count > 0 ? `${VIEW_LABELS[v]} (${count})` : VIEW_LABELS[v]}
-            onClick={() => onSelect(v)}
-          >
-            {ICONS[v]}
-            {count > 0 && (
-              <span className={`badge badge-${v}`} aria-hidden="true">
-                {count}
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </nav>
+    <div className="activity-bar">
+      <nav className="activity-views" aria-label="Views">
+        {VIEWS.map((v) => {
+          const badgeOf = BADGES[v];
+          const count = badgeOf ? counts[badgeOf] : 0;
+          return (
+            <button
+              key={v}
+              type="button"
+              className={v === active ? "active" : ""}
+              aria-label={VIEW_LABELS[v]}
+              aria-pressed={v === active}
+              title={count > 0 ? `${VIEW_LABELS[v]} (${count})` : VIEW_LABELS[v]}
+              onClick={() => onSelect(v)}
+            >
+              {ICONS[v]}
+              {count > 0 && (
+                <span className={`badge badge-${v}`} aria-hidden="true">
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+      {/* Pinned to the bottom, outside the views, like VS Code's Manage gear. */}
+      <div className="activity-manage">
+        <button
+          type="button"
+          className={active === "settings" ? "active" : ""}
+          aria-label="Settings"
+          aria-pressed={active === "settings"}
+          title="Settings"
+          onClick={() => onSelect("settings")}
+        >
+          {GEAR}
+        </button>
+      </div>
+    </div>
   );
 }

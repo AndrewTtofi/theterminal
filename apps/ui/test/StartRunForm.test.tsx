@@ -254,4 +254,19 @@ describe("StartRunForm", () => {
       expect(onStart).toHaveBeenCalledWith("fake", "Go", [], undefined, "m1");
     });
   });
+
+  it("shows a hidden block cursor in the prompt box only while it is empty and focused", async () => {
+    render(<StartRunForm adapters={["fake"]} cards={cards} connections={[]} onStart={vi.fn()} />);
+    const box = screen.getByLabelText("Prompt");
+    const cursor = () => box.parentElement!.querySelector(".cursor");
+    expect(cursor()).toBeNull();
+    await userEvent.click(box);
+    expect(cursor()?.getAttribute("aria-hidden")).toBe("true");
+    await userEvent.type(box, "x");
+    expect(cursor()).toBeNull();
+    await userEvent.clear(box);
+    expect(cursor()).not.toBeNull();
+    await userEvent.tab();
+    expect(cursor()).toBeNull();
+  });
 });

@@ -240,4 +240,19 @@ describe("ConversationPanel", () => {
     const ask = within(panel()).getByRole("region", { name: "Ask an agent" });
     expect(within(ask).getByText("You seem to be offline. Cloud models will not answer; a local model will.")).toBeTruthy();
   });
+
+  it("ends a running ask's answer with a hidden block cursor, and only that one", () => {
+    renderPanel();
+    const cursors = panel().querySelectorAll(".thread .cursor");
+    expect(cursors).toHaveLength(1);
+    expect(cursors[0]!.getAttribute("aria-hidden")).toBe("true");
+    const running = within(panel()).getByRole("article", { name: "You asked Fake" });
+    expect(running.querySelector(".cursor")).not.toBeNull();
+  });
+
+  it("marks a completed ask's result line as done", () => {
+    renderPanel();
+    const results = [...panel().querySelectorAll(".result")];
+    expect(results.map((r) => r.classList.contains("done"))).toEqual([true, false]);
+  });
 });
