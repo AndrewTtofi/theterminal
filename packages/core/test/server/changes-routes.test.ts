@@ -51,6 +51,31 @@ async function start() {
 }
 
 describe("changes routes", { timeout: 20000 }, () => {
+  it("409 run_active for every view while the run waits on a decision; served once it is stopped", async () => {
+    process.env.THETERMINAL_FAKE_AGENT = "1";
+    process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify([
+      { propose: { tool: "Write", kind: "file_write", summary: "write notes", input: { path: "notes.md" }, paths: ["notes.md"] } },
+    ]);
+    const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "tt-changes-")));
+    dirs.push(dataDir);
+    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED });
+    running.push(s);
+    const project = (await (await post(s, "/api/projects", { name: "P" })).json()) as { id: string };
+    const run = (await (await post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" })).json()) as AgentRun;
+    await vi.waitFor(async () => {
+      const pending = (await (await get(s, `/api/projects/${project.id}/pending-actions`)).json()) as unknown[];
+      expect(pending).toHaveLength(1);
+    }, { timeout: 5000 });
+    for (const route of ["changes", "diff?path=notes.txt", "files", "file?path=notes.txt"]) {
+      const res = await get(s, `/api/runs/${run.id}/${route}`);
+      expect(res.status, route).toBe(409);
+      expect(await res.json()).toEqual({ error: "run_active", message: "Changes show when the run is stopped or finished." });
+    }
+    expect((await post(s, `/api/runs/${run.id}/stop`, {})).status).toBe(200);
+    await vi.waitFor(async () => expect((await get(s, `/api/runs/${run.id}/changes`)).status).toBe(200), { timeout: 5000 });
+  });
+
+
   it("serves the changes, a diff, a listing and a file, cleaned", async () => {
     const { s, run, wt } = await start();
     const changes = await get(s, `/api/runs/${run.id}/changes`);

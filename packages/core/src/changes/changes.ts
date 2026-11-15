@@ -36,6 +36,20 @@ export class NoBaseError extends Error {
   }
 }
 
+/** The message shown while a run is live. */
+export const RUN_ACTIVE_MESSAGE = "Changes show when the run is stopped or finished.";
+
+/**
+ * The run is live (`running`, which includes waiting on a decision): its working copy is still changing, so none of
+ * its views is served and no git process is started on it.
+ */
+export class RunActiveError extends Error {
+  constructor(message = RUN_ACTIVE_MESSAGE) {
+    super(message);
+    this.name = "RunActiveError";
+  }
+}
+
 export type ChangesDeps = {
   db: Db;
   dataDir: string;
@@ -76,6 +90,17 @@ const isGitName = (name: string): boolean => isGitSegment(name);
 const isRefusal = (e: unknown): boolean =>
   e instanceof UnsafeGitConfigError || e instanceof HooksDirModifiedError || e instanceof SharedGitconfigModifiedError;
 
+/**
+ * The worktree of a run that is not live: NotFoundError for an unknown run, RunActiveError while it runs (checked
+ * before anything touches its worktree), then runWorktree's checks.
+ */
+function stoppedRunWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; abs: string } {
+  const run = getRun(deps.db, runId);
+  if (!run) throw new NotFoundError("run", runId);
+  if (run.status === "running") throw new RunActiveError();
+  return runWorktree(deps, runId);
+}
+
 export function runWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; abs: string } {
   const run = getRun(deps.db, runId);
   if (!run) throw new NotFoundError("run", runId);
@@ -115,6 +140,11 @@ function confine(deps: ChangesDeps, runId: string, abs: string, path: string): {
  * never blocking, then checks that what was opened is still what the path names: the descriptor's device and inode
  * match an lstat of the path taken before and after opening, and resolveInside still gives the same path (so a
  * parent directory swapped for a symlink in between is caught). Null, with nothing left open, otherwise.
+ *
+ * A residual race remains in principle: a parent directory swapped for a symlink after the last check but while
+ * the file is read. It needs something writing into the worktree during the request, and every view refuses a live
+ * run (RunActiveError) before touching its worktree, so the only writer that could do it, the run's agent, has
+ * stopped. (A human override, Task 3, is exclusive with the run and runs as the Owner.)
  */
 function openChecked(deps: ChangesDeps, abs: string, rel: string, resolved: string): { fd: number; size: number } | null {
   let before;
@@ -275,7 +305,7 @@ async function untrackedPaths(git: WorktreeGit, only?: string): Promise<string[]
 }
 
 export async function listChanges(deps: ChangesDeps, runId: string): Promise<RunChanges> {
-  const { run, abs } = runWorktree(deps, runId);
+  const { run, abs } = stoppedRunWorktree(deps, runId);
   const git = await verifiedGit(deps, run, abs);
   const { base, head } = await forkPoint(deps, run, git);
   let tracked: Map<string, ChangedFile>;
@@ -310,7 +340,7 @@ export async function listChanges(deps: ChangesDeps, runId: string): Promise<Run
 }
 
 export async function fileDiff(deps: ChangesDeps, runId: string, path: string): Promise<FileDiff> {
-  const { run, abs } = runWorktree(deps, runId);
+  const { run, abs } = stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   if (rel === "") throw notFound();
   const git = await verifiedGit(deps, run, abs);
@@ -358,7 +388,7 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
 }
 
 export function listDir(deps: ChangesDeps, runId: string, path: string): DirListing {
-  const { abs } = runWorktree(deps, runId);
+  const { abs } = stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   let dirents;
   try {
@@ -388,7 +418,7 @@ export function listDir(deps: ChangesDeps, runId: string, path: string): DirList
 }
 
 export function readFile(deps: ChangesDeps, runId: string, path: string): FileContent {
-  const { abs } = runWorktree(deps, runId);
+  const { abs } = stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   const file = readCapped(deps, abs, rel, resolved, MAX_FILE_BYTES);
   if (file === null) throw notFound();

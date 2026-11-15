@@ -25,7 +25,7 @@ export {
 } from "./agents/worktrees.js";
 export type { GitRunner } from "./agents/worktrees.js";
 export {
-  runWorktree, listChanges, fileDiff, listDir, readFile, WorktreeMissingError, NoBaseError,
+  runWorktree, listChanges, fileDiff, listDir, readFile, WorktreeMissingError, NoBaseError, RunActiveError, RUN_ACTIVE_MESSAGE,
 } from "./changes/changes.js";
 export type { ChangesDeps } from "./changes/changes.js";
 export { registerChangesRoutes } from "./server/changes-routes.js";

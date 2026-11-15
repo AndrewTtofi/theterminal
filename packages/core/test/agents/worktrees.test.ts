@@ -6,7 +6,8 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
 import {
-  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, SharedGitconfigModifiedError, UnsafeGitConfigError, WorktreeManager,
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, GitTimeoutError, SharedGitconfigModifiedError, UnsafeGitConfigError,
+  WorktreeManager,
   ensureEmptyGitconfig, gitEnv,
   type GitRunner,
 } from "../../src/agents/worktrees.js";
@@ -503,14 +504,21 @@ describe("WorktreeManager", () => {
       await expect(mgr.runGit(repo, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
     });
 
+    /** A fake git whose repository (under `outside`) has the given object format, and whose version is `version`. */
+    const fakeGit = (version: () => string, format = "sha1") => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        if (args.at(-1) === "version") return version();
+        if (args.includes("--show-object-format")) return `${join(outside, ".git")}\n${join(outside, ".git")}\n${format}\n`;
+        return "";
+      };
+      return { calls, m: new WorktreeManager(dataDir, fake) };
+    };
+
     it("neutralises attribute files: core.attributesFile, and --attr-source when git supports it", async () => {
       const argsFor = async (version: string) => {
-        const calls: string[][] = [];
-        const fake: GitRunner = async (args) => {
-          calls.push(args);
-          return args.includes("version") ? version : "";
-        };
-        const m = new WorktreeManager(dataDir, fake);
+        const { calls, m } = fakeGit(() => version);
         await m.runGit(outside, ["status"]);
         await m.runGit(outside, ["status"]);
         expect(calls.filter((a) => a.at(-1) === "version")).toHaveLength(1); // detected once
@@ -522,6 +530,64 @@ describe("WorktreeManager", () => {
       const old = await argsFor("git version 2.39.3 (Apple Git-146)\n");
       expect(old).toContain(`core.attributesFile=${join(dataDir, ".theterminal-empty-attributes")}`);
       expect(old.some((a) => a.startsWith("--attr-source"))).toBe(false);
+    });
+
+    it("uses the empty tree of the repository's object format, and refuses an unknown one", async () => {
+      const sha256 = fakeGit(() => "git version 2.45.1\n", "sha256");
+      await sha256.m.runGit(outside, ["status"]);
+      expect(sha256.calls.at(-1)).toContain("--attr-source=6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321");
+      const odd = fakeGit(() => "git version 2.45.1\n", "sha512");
+      await expect(odd.m.runGit(outside, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it.skipIf(process.platform === "win32")("works in a real sha256 repository", async () => {
+      const repo = join(outside, "r256");
+      mkdirSync(repo);
+      await git(repo, "init", "--object-format=sha256");
+      writeFileSync(join(repo, "a.txt"), "x\n");
+      await mgr.runGit(repo, ["add", "a.txt"]);
+      await mgr.runGit(repo, ["-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-m", "x"]);
+      expect((await mgr.runGit(repo, ["diff", "HEAD"])).trim()).toBe("");
+    });
+
+    it("never caches a failed git version check", async () => {
+      let n = 0;
+      const { calls, m } = fakeGit(() => {
+        n++;
+        if (n === 1) throw new Error("git not ready");
+        return "git version 2.45.1\n";
+      });
+      await expect(m.runGit(outside, ["status"])).rejects.toThrow();
+      await m.runGit(outside, ["status"]);
+      expect(calls.at(-1)).toContain("--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+      expect(calls.filter((a) => a.at(-1) === "version")).toHaveLength(2);
+    });
+
+    it("treats any failure of the attribute scan as a refusal", async () => {
+      const refusedWith = async (fail: (args: string[]) => Error | string | null) => {
+        const fake: GitRunner = async (args) => {
+          const r = fail(args);
+          if (r instanceof Error) throw r;
+          if (typeof r === "string") return r;
+          if (args.at(-1) === "version") return "git version 2.45.1\n";
+          if (args.includes("--show-object-format")) return `${join(outside, ".git")}\n${join(outside, ".git")}\nsha1\n`;
+          return "";
+        };
+        return new WorktreeManager(dataDir, fake).runGit(outside, ["status"]);
+      };
+      const tree = (args: string[]) => (args.includes("ls-tree") ? "sub/.gitattributes\0" : null);
+      await expect(refusedWith((a) => (a.includes("cat-file") ? new Error("bad object") : tree(a)))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith((a) => (a.includes("cat-file") ? new GitOutputTooLargeError() : tree(a)))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith((a) => (a.includes("ls-tree") ? new GitTimeoutError() : null))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      // ls-tree failing while HEAD exists is a refusal; without a HEAD there is simply no tree to scan.
+      const lsTreeFails = (head: boolean) => (a: string[]) =>
+        a.includes("ls-tree") ? new Error("fatal") : a.includes("--verify") ? (head ? "abc\n" : new Error("no HEAD")) : null;
+      await expect(refusedWith(lsTreeFails(true))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith(lsTreeFails(false))).resolves.toBe("");
+      const configFails = (a: string[]) => (a.includes("--get-regexp") ? Object.assign(new Error("bad config"), { code: 128 }) : null);
+      await expect(refusedWith(configFails)).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      writeFileSync(join(outside, ".gitattributes"), `${"#".repeat(300 * 1024)}\n* filter=late\n`);
+      await expect(refusedWith(() => null)).rejects.toBeInstanceOf(UnsafeGitConfigError);
     });
 
     it("neutralises filters named by any .gitattributes in HEAD's tree", async () => {

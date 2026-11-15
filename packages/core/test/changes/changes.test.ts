@@ -11,10 +11,10 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { GitOutputTooLargeError, GitTimeoutError, WorktreeManager, type GitRunner } from "../../src/agents/worktrees.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import {
-  NoBaseError, WorktreeMissingError, fileDiff, isGitSegment, listChanges, listDir, readFile, runWorktree, type ChangesDeps,
+  NoBaseError, RunActiveError, WorktreeMissingError, fileDiff, isGitSegment, listChanges, listDir, readFile, runWorktree, type ChangesDeps,
 } from "../../src/changes/changes.js";
 import { openDatabase, type Db } from "../../src/db.js";
-import { getRun } from "../../src/events/projections.js";
+import { getRun, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 
 const owner = { kind: "human", id: "owner" } as const;
@@ -66,6 +66,46 @@ const commitAll = async () => {
   await worktrees.runGit(wt, ["add", "-A"]);
   await worktrees.runGit(wt, ["commit", "--no-verify", "-m", "agent work"]);
 };
+
+describe("a live run", () => {
+  it("refuses every view with RunActiveError without starting git, and serves the run once it is stopped", async () => {
+    const live = new AgentRunner({
+      db, ledger: new Ledger(db), worktrees, broker: new ApprovalBroker(), dataDir, extraSecrets: () => [KEY], username: "someuser",
+      adapters: {
+        fake: new FakeAdapter([
+          { propose: { tool: "Write", kind: "file_write", summary: "write notes", input: { path: "notes.md" }, paths: ["notes.md"] } },
+        ]),
+      },
+    });
+    try {
+      const r = await live.start(owner, { projectId: run.projectId, adapter: "fake", prompt: "wait" });
+      await vi.waitFor(() => expect(listPendingActions(db, run.projectId)).toHaveLength(1), { timeout: 5000 });
+      expect(getRun(db, r.id)!.status).toBe("running");
+      let gitCalls = 0;
+      const counting: GitRunner = async (args, cwd, opts) => {
+        gitCalls++;
+        return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+      };
+      const d: ChangesDeps = { ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max) };
+      writeFileSync(join(dataDir, r.worktree, "notes.txt"), "x\n");
+      const message = "Changes show when the run is stopped or finished.";
+      await expect(listChanges(d, r.id)).rejects.toThrow(new RunActiveError());
+      await expect(listChanges(d, r.id)).rejects.toThrow(message);
+      await expect(fileDiff(d, r.id, "notes.txt")).rejects.toBeInstanceOf(RunActiveError);
+      expect(() => listDir(d, r.id, "")).toThrow(RunActiveError);
+      expect(() => readFile(d, r.id, "notes.txt")).toThrow(RunActiveError);
+      expect(gitCalls).toBe(0);
+
+      live.stop(owner, r.id);
+      await vi.waitFor(() => expect(getRun(db, r.id)!.status).toBe("stopped"), { timeout: 5000 });
+      expect((await listChanges(d, r.id)).files.map((f) => f.path)).toEqual(["notes.txt"]);
+      expect(readFile(d, r.id, "notes.txt").text).toBe("x\n");
+      expect(gitCalls).toBeGreaterThan(0);
+    } finally {
+      await live.shutdown();
+    }
+  });
+});
 
 describe("runWorktree", () => {
   it("finds the run's working copy; an unknown run is NotFoundError, a deleted one WorktreeMissingError", () => {
