@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import type { LedgerEntry } from "@theterminal/shared";
 import {
-  AddressNotAllowedError, LinkNotActiveError, MAX_TOKEN_FAILURES, ShareLinkActiveError, ShareLinkManager,
-  shareAddresses, shareFastifyOptions, type LinkManagerDeps, type ShareAddress,
+  MAX_TOKEN_FAILURES, ShareLinkManager, shareAddresses, shareFastifyOptions, type LinkManagerDeps, type ShareAddress,
 } from "../../src/share/link-server.js";
+import { AddressNotAllowedError, LinkNotActiveError, ShareLinkActiveError, SnapshotTamperedError } from "../../src/share/errors.js";
+import { LedgerReadOnlyError } from "../../src/ledger/ledger.js";
+import { listShareLinks } from "../../src/events/projections.js";
 import { HumanRequiredError } from "../../src/intake/service.js";
 import { NotFoundError } from "../../src/board/board-service.js";
 import { SHARE_CSP } from "../../src/share/render.js";
@@ -21,8 +23,6 @@ const T0 = new Date("2026-11-15T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** A token-shaped string (43 base64url characters, like a real one) that is not the link's token. */
 const wrongToken = (i: number) => `wrong${String(i).padStart(2, "0")}`.padEnd(43, "A");
-
-class SnapshotTamperedError extends Error {}
 
 type Setup = { w: World; m: ShareLinkManager; clock: { now: Date }; projectId: string; shareId: string };
 const managers: ShareLinkManager[] = [];
@@ -283,7 +283,7 @@ describe("ShareLinkManager", () => {
   });
 
   it("refuses a tampered snapshot before listening", async () => {
-    const { w, m, shareId } = setup({ service: { readHtml: () => { throw new SnapshotTamperedError("tampered"); } } });
+    const { w, m, shareId } = setup({ service: { readHtml: () => { throw new SnapshotTamperedError(); } } });
     const before = w.ledger.headSeq();
     await expect(m.create(human, shareId, "127.0.0.1", 60)).rejects.toBeInstanceOf(SnapshotTamperedError);
     expect(w.ledger.headSeq()).toBe(before);
@@ -333,7 +333,7 @@ describe("ShareLinkManager", () => {
       linkId: "stale", shareId, tokenDigest: "a".repeat(64), expiresAt: new Date(T0.getTime() + DAY_MS).toISOString(),
       port: 4400, scope: "this_computer",
     }, human);
-    expect(m.list()[0]!.state).toBe("active");
+    expect(listShareLinks(w.db)[0]!.state).toBe("active");
     m.recoverOnStartup();
     const stopped = shareEntries(w).at(-1)!;
     expect(stopped.type).toBe("share.stopped");
@@ -372,6 +372,34 @@ describe("ShareLinkManager", () => {
     expect(log).toHaveBeenCalledTimes(1);
     expect(m.activeCount()).toBe(0);
     await expect(fetch(url).then((r) => r.status)).rejects.toThrow();
+    w.ledger.readOnly = false;
+  });
+
+  it("never lists a link as active when no listener serves it (a read-only restart cannot record the end)", async () => {
+    const { w, m, shareId, projectId } = setup();
+    const { link } = await m.create(human, shareId, "127.0.0.1", 60);
+    emit(w, projectId, "share.link_created", {
+      linkId: "stale", shareId, tokenDigest: "a".repeat(64), expiresAt: new Date(T0.getTime() + DAY_MS).toISOString(),
+      port: 4400, scope: "this_computer",
+    }, human);
+    // The ledger still says active for both; only the one with a listener is reported live.
+    expect(listShareLinks(w.db, { state: "active" })).toHaveLength(2);
+    const byId = Object.fromEntries(m.list().map((l) => [l.id, l.state]));
+    expect(byId).toEqual({ [link.id]: "active", stale: "stopped" });
+    expect(m.list(projectId).find((l) => l.id === "stale")!.endedAt).toBeNull();
+    await expect(m.revoke(human, "stale")).rejects.toBeInstanceOf(LinkNotActiveError);
+  });
+
+  it("refuses to create a link on a read-only ledger before anything listens", async () => {
+    // newId runs once a create has passed its checks, just before the listener is built.
+    const newId = vi.fn(() => "link1");
+    const { w, m, shareId } = setup({ newId });
+    w.ledger.readOnly = true;
+    const before = w.ledger.headSeq();
+    await expect(m.create(human, shareId, "127.0.0.1", 60)).rejects.toBeInstanceOf(LedgerReadOnlyError);
+    expect(w.ledger.headSeq()).toBe(before);
+    expect(m.activeCount()).toBe(0);
+    expect(newId).not.toHaveBeenCalled();
     w.ledger.readOnly = false;
   });
 

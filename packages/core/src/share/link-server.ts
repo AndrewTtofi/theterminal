@@ -6,12 +6,13 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { z } from "zod";
 import { TTL_MINUTES, type Actor, type NewLedgerEntry, type ShareLink, type ShareScope } from "@theterminal/shared";
 import type { Db } from "../db.js";
-import type { Ledger } from "../ledger/ledger.js";
+import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { getShareSnapshot, listShareLinks } from "../events/projections.js";
 import { HumanRequiredError } from "../intake/service.js";
 import { NotFoundError } from "../board/board-service.js";
 import { SHARE_CSP } from "./render.js";
+import { AddressNotAllowedError, LinkNotActiveError, ShareLinkActiveError } from "./errors.js";
 
 export const SHARE_PORT_DEFAULT = 4400;
 export const SHARE_PORT_ATTEMPTS = 21;
@@ -65,27 +66,6 @@ function compareIPv4(a: string, b: string): number {
   const pb = b.split(".").map(Number);
   for (let i = 0; i < 4; i++) if (pa[i] !== pb[i]) return pa[i]! - pb[i]!;
   return 0;
-}
-
-export class ShareLinkActiveError extends Error {
-  constructor() {
-    super("a share link is already live for this project");
-    this.name = "ShareLinkActiveError";
-  }
-}
-
-export class AddressNotAllowedError extends Error {
-  constructor() {
-    super("that address cannot be used");
-    this.name = "AddressNotAllowedError";
-  }
-}
-
-export class LinkNotActiveError extends Error {
-  constructor() {
-    super("the link is not live");
-    this.name = "LinkNotActiveError";
-  }
 }
 
 export type LinkManagerDeps = {
@@ -195,6 +175,8 @@ export class ShareLinkManager {
     if (!record) throw new NotFoundError("share snapshot", shareId);
     const bytes = Buffer.from(this.service.readHtml(shareId), "utf8");
     const projectId = record.projectId;
+    // A link that cannot be recorded is never opened: refuse before anything listens.
+    if (this.ledger.readOnly) throw new LedgerReadOnlyError();
     if (this.closed) throw new Error("the share link server is shutting down");
     if (this.pending.has(projectId) || this.hasActive(projectId)) throw new ShareLinkActiveError();
     const offered = this.addresses().find((a) => a.address === address);
@@ -283,8 +265,15 @@ export class ShareLinkManager {
     await this.end(link, "revoked", "owner", actor);
   }
 
+  /**
+   * The links the ledger records, with one correction that fails safe: a row the ledger still calls active but no
+   * listener here serves (after a read-only restart, recoverOnStartup cannot record its end) is reported as
+   * stopped, which is what the next writable start records. Nothing is ever shown as live that is not.
+   */
   list(projectId?: string): ShareLink[] {
-    return listShareLinks(this.db, projectId ? { projectId } : {});
+    return listShareLinks(this.db, projectId ? { projectId } : {}).map((l) =>
+      l.state === "active" && !this.live.get(l.id)?.serving ? { ...l, state: "stopped" } : l,
+    );
   }
 
   /** Links with a listener up right now; what `/api/status` reports. */
