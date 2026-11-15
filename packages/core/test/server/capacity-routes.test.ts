@@ -85,7 +85,7 @@ describe("capacity API", { timeout: 15000 }, () => {
     expect(events.map((e) => e.type)).toEqual(["connection.added", "connection.updated"]);
 
     const report = await json<CapacityReport>(send(s, "GET", "/api/capacity"));
-    expect(report.hardware).toMatchObject({ cpu: "Fake CPU", cores: 8, memoryGb: 32, gpu: "Fake GPU", gpuMemoryGb: 24, wsl: false });
+    expect(report.hardware).toMatchObject({ enabled: true, cpu: "Fake CPU", cores: 8, memoryGb: 32, gpu: "Fake GPU", gpuMemoryGb: 24, wsl: false });
     expect(report.sources.map((x) => x.provider)).toEqual(["claude", "codex", "gemini"]);
   });
 
@@ -101,6 +101,8 @@ describe("capacity API", { timeout: 15000 }, () => {
     // A later detection keeps the Owner's choice.
     await send(s, "POST", "/api/capacity/detect");
     expect((await json<Connection[]>(send(s, "GET", "/api/connections")))[0]!.enabled).toBe(false);
+    // Still reported, marked as turned off.
+    expect((await json<CapacityReport>(send(s, "GET", "/api/capacity"))).hardware).toMatchObject({ enabled: false, cpu: "Fake CPU" });
   });
 
   it("adds the month's cost and the summed monthly budget to /api/status", async () => {

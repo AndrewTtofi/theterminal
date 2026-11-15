@@ -30,7 +30,7 @@ describe("CapacityPanel", () => {
     ]);
     expect(
       screen.getByText(
-        "Figures marked estimate are computed by The Terminal, not published by the provider. Providers that publish no quota have none shown.",
+        "Rate-limit counts are what The Terminal observed in errors, not a quota the provider published. Figures from the providers themselves are not shown yet.",
       ),
     ).toBeTruthy();
   });
@@ -53,10 +53,14 @@ describe("CapacityPanel", () => {
     expect(codex[4]!.textContent).toBe("not reported");
     expect(codex[5]!.textContent).toBe("none");
     expect(codex[6]!.textContent).toBe("500 / 50");
+    // Runs happened and none hit a limit: an observed zero.
+    expect(codex[7]!.textContent).toBe("0 estimate");
 
     const gemini = cells("Gemini");
     expect(gemini[3]!.textContent).toBe("not reported");
     expect(gemini[6]!.textContent).toBe("not reported");
+    // No runs at all: nothing was observed, so no count is shown.
+    expect(gemini[7]!.textContent).toBe("none observed");
     expect(screen.queryByText(/\$0\.00/)).toBeNull();
   });
 

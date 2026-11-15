@@ -1,11 +1,13 @@
-import { PROVIDERS, type AuthMode, type Basis, type CapacityReport, type CapacitySource, type Figure, type HardwareInfo, type Provider, type UsageWindow } from "@theterminal/shared";
+import {
+  PROVIDERS, type AuthMode, type Basis, type CapacityHardware, type CapacityReport, type CapacitySource, type Figure, type Provider, type UsageWindow,
+} from "@theterminal/shared";
 import type { Budget } from "../connections/service.js";
 import type { Db } from "../db.js";
 
 export type CapacityDeps = {
   budgets: () => Budget[];
   modes: (p: Provider) => AuthMode;
-  hardware: () => HardwareInfo | null;
+  hardware: () => CapacityHardware | null;
   now?: () => Date;
 };
 
@@ -38,10 +40,11 @@ function usage(db: Db, adapter: Provider, from: Date, to: Date): UsageWindow {
 
 function rateLimits(db: Db, adapter: Provider, now: Date): CapacitySource["rateLimits"] {
   const recent = db
-    .prepare("SELECT COUNT(*) AS n FROM rate_limits WHERE adapter = ? AND at > ?")
+    .prepare("SELECT COUNT(DISTINCT run_id) AS n FROM rate_limits WHERE adapter = ? AND at > ?")
     .get(adapter, new Date(now.getTime() - DAY_MS).toISOString()) as { n: number };
   const last = db.prepare("SELECT MAX(at) AS at FROM rate_limits WHERE adapter = ?").get(adapter) as { at: string | null };
-  // What the adapters inferred from errors, not a quota the provider published.
+  // Runs, not events: one run may retry into the same limit many times. What the adapters inferred from errors, not
+  // a quota the provider published.
   return { last24h: recent.n, lastAt: last.at, basis: "estimate" };
 }
 

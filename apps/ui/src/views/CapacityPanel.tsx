@@ -6,7 +6,7 @@ import { useShell } from "../shell/model";
 const REFRESH_MS = 60_000;
 const ESTIMATE_TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
 const FOOTER =
-  "Figures marked estimate are computed by The Terminal, not published by the provider. Providers that publish no quota have none shown.";
+  "Rate-limit counts are what The Terminal observed in errors, not a quota the provider published. Figures from the providers themselves are not shown yet.";
 
 /** The word `estimate`, explained on hover: shown next to every figure The Terminal computed itself. */
 export function Estimate() {
@@ -59,6 +59,12 @@ function Tokens({ s }: { s: CapacitySource }) {
   );
 }
 
+/** Runs that hit a rate limit in 24 h; `none observed` when nothing ran this month and so nothing could be observed. */
+function RateLimits({ s }: { s: CapacitySource }) {
+  if (s.rateLimits.last24h === 0 && s.month.runs === 0) return <>none observed</>;
+  return <FigureText figure={{ value: s.rateLimits.last24h, basis: s.rateLimits.basis }} format={count} />;
+}
+
 /** The Capacity tab: each provider's mode, plan, spend, budget, tokens and observed rate limits. */
 export function CapacityPanel(_props: { id: string }) {
   const { model } = useShell();
@@ -97,7 +103,7 @@ export function CapacityPanel(_props: { id: string }) {
                 <Tokens s={s} />
               </td>
               <td>
-                <FigureText figure={{ value: s.rateLimits.last24h, basis: s.rateLimits.basis }} format={count} />
+                <RateLimits s={s} />
               </td>
             </tr>
           ))}

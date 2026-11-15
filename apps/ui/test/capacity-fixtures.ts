@@ -22,8 +22,8 @@ export function source(provider: Provider, over: Partial<CapacitySource> = {}): 
   };
 }
 
-export const hardware: HardwareInfo = {
-  cpu: "Apple M2 Max", cores: 12, memoryGb: 32, gpu: "Apple M2 Max", gpuMemoryGb: 32, platform: "darwin", wsl: false,
+export const hardware: HardwareInfo & { enabled: boolean } = {
+  enabled: true, cpu: "Apple M2 Max", cores: 12, memoryGb: 32, gpu: "Apple M2 Max", gpuMemoryGb: 32, platform: "darwin", wsl: false,
   detectedAt: "2026-11-15T12:00:00.000Z",
 };
 
