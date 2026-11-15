@@ -62,7 +62,7 @@ export const SHARE_SECTION_TITLES: Record<ShareSection, string> = {
 };
 
 /** The hidden line that `includePrompts` removes. */
-export const HIDDEN_PROMPTS_LINE = "Your prompts to agents (shown only when you tick Include my prompts)";
+export const HIDDEN_PROMPTS_LINE = "Your prompts to agents (shown only when you tick Include my prompts to agents)";
 /** The hidden line that `includeHardware` removes. */
 export const HIDDEN_HARDWARE_LINE = "This computer's hardware (shown only when you tick Include this computer's hardware)";
 
