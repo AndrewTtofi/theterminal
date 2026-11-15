@@ -55,6 +55,18 @@ export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
 export { workspaceCounts, listMachines, getMachine, getLinkRun, listLinkRuns, applyMirrored, mirroredIds } from "./events/projections.js";
 export type { WorkspaceCounts } from "./events/projections.js";
+export {
+  getPerson, listPeople, listCredentials, findCredential, getInvite, getInviteByHash, listInvites, getRemoteState, getGateRequirement,
+} from "./events/projections.js";
+export { SessionStore } from "./people/sessions.js";
+export type { Session } from "./people/sessions.js";
+export { ChallengeStore, CHALLENGE_TTL_MS, CHALLENGE_MAX, CHALLENGE_PER_CLIENT } from "./people/challenges.js";
+export { LockoutStore, LOCKOUT_MAX_KEYS } from "./people/lockouts.js";
+export {
+  PeopleService, InviteInvalidError, OwnerCredentialRequiredError, LastCredentialError, SelfChangeError, OwnerRoleError,
+  CredentialExistsError, LockedError, LOCKOUT_FAILURES, LOCKOUT_MS, OWNER_INVITE_TTL_MS,
+} from "./people/service.js";
+export type { PeopleServiceDeps } from "./people/service.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
 export { FakeAdapter } from "./agents/fake-adapter.js";
