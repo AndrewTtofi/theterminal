@@ -195,7 +195,7 @@ describe("PeopleService roles and removal", () => {
 });
 
 describe("PeopleService credentials and names", () => {
-  it("refuses removing a person's last credential but allows the Owner's", () => {
+  it("refuses removing anyone's last credential, the Owner's included", () => {
     const p = joinReviewer();
     expect(() => people.removeCredential(owner, p.id, "cred-1")).toThrow(LastCredentialError);
     people.addCredential(owner, p.id, keyCred(2));
@@ -205,10 +205,14 @@ describe("PeopleService credentials and names", () => {
     expect(findCredential(db, "cred-1")).toBeNull();
     expect(() => people.removeCredential(owner, p.id, "cred-1")).toThrow(NotFoundError);
 
+    // The Owner too: on a headless server their credential is the only way in from the network.
     people.addCredential(owner, OWNER_ID, passkey(3));
+    expect(() => people.removeCredential(owner, OWNER_ID, "cred-3")).toThrow(LastCredentialError);
+    expect(people.hasOwnerCredential()).toBe(true);
+    people.addCredential(owner, OWNER_ID, keyCred(4));
     people.removeCredential(owner, OWNER_ID, "cred-3");
-    expect(listCredentials(db, OWNER_ID)).toEqual([]);
-    expect(people.hasOwnerCredential()).toBe(false);
+    expect(listCredentials(db, OWNER_ID).map((c) => c.credentialId)).toEqual(["key-4"]);
+    expect(people.hasOwnerCredential()).toBe(true);
   });
 
   it("removing a credential clears its lockouts", () => {

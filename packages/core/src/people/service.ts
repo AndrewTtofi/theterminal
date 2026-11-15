@@ -190,7 +190,11 @@ export class PeopleService {
     });
   }
 
-  /** LastCredentialError for anyone's last credential but the Owner's (the Owner still has the token). */
+  /**
+   * LastCredentialError for anyone's last credential, the Owner's included: the token opens the local listener only,
+   * and on a headless server with remote access on, the Owner's credential is their only way in until a restart
+   * prints a new bootstrap link.
+   */
   removeCredential(actor: Actor, personId: string, credentialId: string): void {
     requireHuman(actor);
     commitEvent(this.db, this.ledger, () => {
@@ -199,7 +203,7 @@ export class PeopleService {
         .prepare("SELECT credential_id FROM credentials WHERE person_id = ? AND removed_at IS NULL")
         .all(personId) as { credential_id: string }[];
       if (!active.some((c) => c.credential_id === credentialId)) throw new NotFoundError("credential", credentialId);
-      if (active.length === 1 && personId !== OWNER_ID) throw new LastCredentialError();
+      if (active.length === 1) throw new LastCredentialError();
       return {
         event: { projectId: null, actor, type: "person.credential_removed", payload: { personId, credentialId } },
         result: () => undefined,

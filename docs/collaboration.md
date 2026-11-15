@@ -62,7 +62,7 @@ A person proves who they are with one of two kinds of credential. Both are asked
 
 **Passkeys do not work on raw IP addresses.** Browsers refuse them there, so a workspace reached as `https://192.168.1.20:4318` cannot use them. The join page then says that this browser cannot use passkeys here and creates a key for this browser instead. To get passkeys, give the workspace a name (a domain, or a name your network resolves).
 
-Each person can hold several credentials. Under **People**, **Add a passkey** and **Add a key for this browser** add another one, for example on a new laptop or a phone. A person cannot remove their last credential, or they would be locked out. Removing a lost device's credential is how you cut it off.
+Each person can hold several credentials. Under **People**, **Add a passkey** and **Add a key for this browser** add another one, for example on a new laptop or a phone. Nobody can remove their last credential, the Owner included, or they would be locked out: the Owner's session token opens the workspace on this computer only, so on a server reached over the network their passkey or key is their only way in. Add another credential first, then remove the old one. Removing a lost device's credential is how you cut it off.
 
 ## Signing in, sessions and lockouts
 
