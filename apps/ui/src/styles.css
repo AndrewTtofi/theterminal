@@ -535,3 +535,75 @@ pre.proposed .del { background: var(--diff-del); }
 .invite-dialog .role-choice .note { display: block; }
 .invite-dialog input[readonly] { width: 100%; font-family: var(--font-mono); }
 .people-side .dot { display: inline-block; }
+
+/* ==========================================================================
+   Settings / Appearance (Plan 10). The gear pinned to the bottom of the activity bar, the Settings side bar and
+   its Appearance section. Layout only: every colour comes from a theme property through var().
+   ========================================================================== */
+.activity-views { display: flex; flex-direction: column; }
+.activity-manage { margin-top: auto; display: flex; flex-direction: column; padding-bottom: 4px; }
+
+.settings-side { padding-top: 2px; }
+.appearance { display: flex; flex-direction: column; gap: 12px; }
+.appearance > h2 { margin: 0; color: var(--fg-strong); }
+.appearance .note { margin: 0; font-size: 12px; color: var(--muted); }
+
+/* Buttons: calm outlines here; the accent stays for what is chosen. */
+.appearance button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line-strong); border-radius: 4px; padding: 3px 10px; }
+.appearance button.secondary:hover:not(:disabled) { background: var(--hover); border-color: var(--muted); color: var(--fg-strong); }
+.appearance button.secondary.quiet-danger { color: var(--danger); }
+.appearance button.secondary.quiet-danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+.appearance button:disabled { opacity: 0.5; cursor: default; }
+.appearance button.danger { border-radius: 4px; padding: 3px 10px; }
+
+/* Gallery */
+.theme-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.appearance .theme-card { width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 6px; text-align: left; background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 6px; transition: border-color 120ms ease; }
+.appearance .theme-card:hover:not(:disabled) { background: var(--hover); border-color: var(--muted); }
+.appearance .theme-card.chosen, .appearance .theme-card.chosen:hover:not(:disabled) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 14px -4px var(--glow); }
+.appearance .theme-card:focus-visible { outline-offset: 2px; }
+.theme-card-preview { display: flex; height: 36px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
+.theme-card-preview .swatch { display: block; background: var(--swatch); }
+.theme-card-preview .swatch-bg { flex: 3; }
+.theme-card-preview .swatch-panel { flex: 2; }
+.theme-card-preview .swatch-accent { flex: 1; }
+.theme-card-label { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+.theme-card.chosen .theme-card-label::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.theme-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-card.chosen .theme-card-name { color: var(--fg-strong); }
+.theme-tag { flex: none; margin-left: auto; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 10px; line-height: 14px; color: var(--muted); }
+
+.theme-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.theme-confirm { padding: 8px 10px; border: 1px solid var(--line-strong); border-left: 2px solid var(--danger); border-radius: 4px; background: var(--bg); }
+.theme-confirm p { margin: 0 0 8px; }
+
+/* Readability warnings and safety fallbacks */
+.theme-warnings { display: flex; flex-direction: column; gap: 4px; }
+.theme-warning, .theme-fallback { margin: 0; padding: 6px 8px; font-size: 12px; border-radius: 4px; background: var(--warning-bg); color: var(--warning-fg); border-left: 2px solid var(--warning-line); }
+.theme-fallback { border-left-color: var(--attention); }
+
+/* Editor */
+.theme-editor { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.theme-name { display: flex; flex-direction: column; gap: 4px; }
+.theme-name label { font-size: 12px; color: var(--muted); }
+.theme-name input { width: 100%; }
+.colour-grid { display: flex; flex-direction: column; gap: 4px; }
+.colour-row { display: grid; grid-template-columns: minmax(0, 1fr) 28px 86px; align-items: center; gap: 6px; }
+.colour-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.colour-label.mono { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.colour-picker { width: 28px; height: 22px; padding: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: none; cursor: pointer; }
+.colour-picker::-webkit-color-swatch-wrapper { padding: 0; }
+.colour-picker::-webkit-color-swatch { border: 0; border-radius: 3px; }
+.colour-picker::-moz-color-swatch { border: 0; border-radius: 3px; }
+.colour-hex { width: 100%; padding: 2px 6px; font-family: var(--font-mono); font-size: 12px; }
+.colour-hex[aria-invalid="true"], .theme-name input[aria-invalid="true"] { border-color: var(--danger); }
+.theme-advanced > summary { cursor: pointer; padding: 2px 0; font-size: 12px; color: var(--muted); }
+.theme-advanced > summary:hover { color: var(--fg); }
+.theme-advanced[open] > summary { margin-bottom: 6px; }
+.theme-advanced > .note { margin-bottom: 6px; }
+
+/* Import */
+.theme-import { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.theme-error { margin: 0; padding: 6px 8px; border-radius: 4px; font-size: 12px; background: var(--error-bg); color: var(--error-fg); overflow-wrap: anywhere; }
+.appearance .theme-notice:empty { margin: 0; }
