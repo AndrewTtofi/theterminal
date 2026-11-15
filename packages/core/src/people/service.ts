@@ -253,20 +253,22 @@ export class PeopleService {
   }
 
   /**
-   * Counts a failed sign-in for the credential from `source`. When it locks the pair, `person.locked` is recorded for
-   * the credential's person (never the address); a credential nobody holds records nothing.
+   * Counts a failed sign-in for the credential from `source`. Only a credential someone can sign in with is counted
+   * (an unknown or removed one makes no lockout entry, so made-up ids cannot fill the store and evict other pairs).
+   * When it locks the pair, `person.locked` is recorded for the credential's person (never the address).
    */
   failure(credentialId: string, source: string): void {
+    const holder = findCredential(this.db, credentialId);
+    if (!holder) return;
     const r = this.lockouts.failure(credentialId, source);
     if (!r.locked || r.until === null) return;
     const until = r.until;
     commitEvent(this.db, this.ledger, () => {
-      const holder = this.db.prepare("SELECT person_id FROM credentials WHERE credential_id = ?").get(credentialId) as
-        | { person_id: string }
-        | undefined;
-      if (!holder) return { result: () => undefined };
+      // Read again inside the transaction: the credential or its person may have been removed meanwhile.
+      const current = findCredential(this.db, credentialId);
+      if (!current) return { result: () => undefined };
       return {
-        event: { projectId: null, actor: AUTH, type: "person.locked", payload: { personId: holder.person_id, until, failures: r.failures } },
+        event: { projectId: null, actor: AUTH, type: "person.locked", payload: { personId: current.personId, until, failures: r.failures } },
         result: () => undefined,
       };
     });

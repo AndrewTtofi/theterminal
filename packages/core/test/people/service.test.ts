@@ -269,9 +269,21 @@ describe("PeopleService sign-in and lockouts", () => {
     people.success("cred-1", "198.51.100.8");
   });
 
-  it("failures of an unknown credential lock the pair but record nothing", () => {
+  it("failures of an unknown credential create no lockout entry and record nothing", () => {
     for (let i = 0; i < 5; i++) people.failure("ghost", "198.51.100.7");
     expect(ofType("person.locked")).toHaveLength(0);
-    expect(() => people.assertNotLocked("ghost", "198.51.100.7")).toThrow(LockedError);
+    expect(() => people.assertNotLocked("ghost", "198.51.100.7")).not.toThrow();
+    expect((lockouts as unknown as { entries: Map<string, unknown> }).entries.size).toBe(0);
+  });
+
+  it("failures of a removed credential, or of a removed person's, create no entry and record nothing", () => {
+    const p = joinReviewer();
+    people.addCredential(owner, p.id, keyCred(2));
+    people.removeCredential(owner, p.id, "key-2");
+    for (let i = 0; i < 5; i++) people.failure("key-2", "198.51.100.7");
+    people.remove(owner, p.id);
+    for (let i = 0; i < 5; i++) people.failure("cred-1", "198.51.100.7");
+    expect(ofType("person.locked")).toHaveLength(0);
+    expect((lockouts as unknown as { entries: Map<string, unknown> }).entries.size).toBe(0);
   });
 });
