@@ -12,6 +12,10 @@ import {
 } from "../connections/service.js";
 import { SecretStoreUnavailableError } from "../secrets/store.js";
 import {
+  DecisionNotApplicableError, HumanRequiredError, IntakeCompletedError, IntakeIncompleteError, NoIntakeError,
+  SecretInTextError,
+} from "../intake/service.js";
+import {
   GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
 } from "../github/client.js";
 
@@ -77,6 +81,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
     if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+    if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
+    if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
+    if (err instanceof SecretInTextError) return reply.code(400).send({ error: "secret_in_text" });
+    if (err instanceof IntakeCompletedError) return reply.code(409).send({ error: "intake_completed" });
+    if (err instanceof IntakeIncompleteError) return reply.code(409).send({ error: "intake_incomplete", missing: err.missing });
+    if (err instanceof DecisionNotApplicableError) return reply.code(409).send({ error: "decision_not_applicable" });
     if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
     if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
     if (err instanceof GitHubRejectedError) return reply.code(502).send({ error: "github_rejected" });

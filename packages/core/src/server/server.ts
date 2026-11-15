@@ -16,6 +16,8 @@ import { acquireDataDirLock } from "./data-dir-lock.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
+import { registerIntakeRoutes } from "./intake-routes.js";
+import { IntakeService } from "../intake/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { GitHubClient } from "../github/client.js";
@@ -456,6 +458,14 @@ export async function createServer(opts: {
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
+    const intake = new IntakeService({
+      db,
+      ledger,
+      dataDir: opts.dataDir,
+      // Read on every check, like the runner's: a value stored later is refused at once.
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
     const app = Fastify();
@@ -475,8 +485,9 @@ export async function createServer(opts: {
         available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
       });
+      registerIntakeRoutes(app, { intake });
       registerConnectionRoutes(app, {
-        db, connections, signin, ledger,
+        db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
       });

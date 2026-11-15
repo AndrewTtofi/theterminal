@@ -253,7 +253,7 @@ export const gatePayloadSchemas = {
             .object({
               gateId: gateIdSchema,
               outcome: z.enum(["needs_sign_off", "blocked"]),
-              unmet: z.array(z.string()).max(20),
+              unmet: z.array(z.string().max(300)).max(20),
             })
             .strict(),
         )
@@ -267,7 +267,7 @@ export const gatePayloadSchemas = {
       cardId: id,
       from: stageSchema,
       to: stageSchema,
-      conditions: z.array(z.string()).max(20),
+      conditions: z.array(z.string().max(300)).max(20),
       acknowledgement: z.string().max(1000),
       signedBy: z.string().min(1).max(200),
     })
@@ -279,7 +279,7 @@ export const gatePayloadSchemas = {
       cardId: id,
       from: stageSchema,
       to: stageSchema,
-      unmet: z.array(z.string()).min(1).max(20),
+      unmet: z.array(z.string().max(300)).min(1).max(20),
       reason: z.string().min(10).max(500),
       acknowledgement: z.string().max(1000),
       waivedBy: z.string().min(1).max(200),

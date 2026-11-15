@@ -95,12 +95,14 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       ).run(p.intakeId, e.projectId, p.idea, e.ts, e.ts);
       break;
     case "intake.answered":
+      requireIntake(db, p.intakeId, e.projectId);
       db.prepare("INSERT OR REPLACE INTO intake_answers (intake_id, question_id, answer, answered_at) VALUES (?, ?, ?, ?)").run(
         p.intakeId, p.questionId, canonicalJson(p.answer), e.ts,
       );
       touchIntake(db, p.intakeId, e.ts);
       break;
     case "intake.decided":
+      requireIntake(db, p.intakeId, e.projectId);
       db.prepare(
         `INSERT OR REPLACE INTO intake_decisions (intake_id, decision_id, chosen, rationale, owner, decided_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
@@ -108,12 +110,14 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       touchIntake(db, p.intakeId, e.ts);
       break;
     case "intake.completed":
+      requireIntake(db, p.intakeId, e.projectId);
       // The card.created entries committed with it are reduced by their own case.
       db.prepare("UPDATE intakes SET status = 'completed', summary = ?, completed_at = ?, updated_at = ? WHERE id = ?").run(
         p.summary, e.ts, e.ts, p.intakeId,
       );
       break;
     case "intake.reopened":
+      requireIntake(db, p.intakeId, e.projectId);
       db.prepare("UPDATE intakes SET status = 'open', completed_at = NULL, updated_at = ? WHERE id = ?").run(e.ts, p.intakeId);
       break;
     case "gate.signed_off":
@@ -133,6 +137,12 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     default: // gate.blocked and conversation entries project nothing
       break;
   }
+}
+
+/** An intake event must name an intake of its own project; otherwise the append rolls back instead of writing orphan rows. */
+function requireIntake(db: Db, intakeId: string, projectId: string | null): void {
+  const row = db.prepare("SELECT 1 FROM intakes WHERE id = ? AND project_id IS ?").get(intakeId, projectId);
+  if (!row) throw new Error("intake event for an unknown intake");
 }
 
 function touchIntake(db: Db, intakeId: string, ts: string): void {

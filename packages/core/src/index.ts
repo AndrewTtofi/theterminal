@@ -22,6 +22,13 @@ export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
 export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
+export {
+  IntakeService, HumanRequiredError, SecretInTextError, IntakeCompletedError, IntakeIncompleteError,
+  DecisionNotApplicableError, NoIntakeError,
+} from "./intake/service.js";
+export type { IntakeServiceDeps, IntakeProjectDecisions } from "./intake/service.js";
+export { registerIntakeRoutes } from "./server/intake-routes.js";
+export type { IntakeRouteDeps } from "./server/intake-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
 export { workspaceCounts } from "./events/projections.js";

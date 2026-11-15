@@ -213,6 +213,27 @@ describe("gate event payloads", () => {
     expect(s.safeParse({ ...ok, acknowledgement: "I agree." }).success).toBe(false);
     expect(s.safeParse({ ...ok, unmet: [] }).success).toBe(false);
   });
+
+  it("caps each unmet and condition string at 300 characters", () => {
+    const long = "x".repeat(301);
+    const ok = "x".repeat(300);
+    const blocked = gatePayloadSchemas["gate.blocked"];
+    const g = (unmet: string[]) => ({ cardId: "c1", from: "build", to: "ship", gates: [{ gateId: "ready_to_ship", outcome: "blocked", unmet }] });
+    expect(blocked.safeParse(g([ok])).success).toBe(true);
+    expect(blocked.safeParse(g([long])).success).toBe(false);
+    const signed = {
+      gateId: "ready_to_ship", cardId: "c1", from: "build", to: "ship", conditions: [ok],
+      acknowledgement: gate("ready_to_ship").acknowledgement, signedBy: "owner",
+    };
+    expect(gatePayloadSchemas["gate.signed_off"].safeParse(signed).success).toBe(true);
+    expect(gatePayloadSchemas["gate.signed_off"].safeParse({ ...signed, conditions: [long] }).success).toBe(false);
+    const waived = {
+      gateId: "plan_approved", cardId: "c1", from: "plan", to: "build", unmet: [ok], reason: "a demo for the club",
+      acknowledgement: gate("plan_approved").acknowledgement, waivedBy: "owner",
+    };
+    expect(gatePayloadSchemas["gate.waived"].safeParse(waived).success).toBe(true);
+    expect(gatePayloadSchemas["gate.waived"].safeParse({ ...waived, unmet: [long] }).success).toBe(false);
+  });
 });
 
 describe("shared story types", () => {
