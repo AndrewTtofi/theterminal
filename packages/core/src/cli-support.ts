@@ -1,22 +1,155 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
+import { isIP } from "node:net";
+import { isAbsolute, join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { domainSchema, type TlsMode } from "@theterminal/shared";
 import { DataDirInUseError } from "./server/data-dir-lock.js";
+import { KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-store.js";
+import { RemoteStartError } from "./server/remote.js";
+import { CertificateError } from "./server/certs.js";
 import { redact, secretEnvValues } from "./agents/redact.js";
 import { pathScrubber, usernameScrubber } from "./agents/scrub-paths.js";
 
-export const USAGE = "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir PATH] [--core-dir ABSOLUTE_PATH]";
+export const USAGE =
+  "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir PATH] [--core-dir ABSOLUTE_PATH]" +
+  " [--remote] [--remote-port N] [--remote-bind ADDR] [--remote-domain NAME] [--remote-tls self_signed|acme|provided]" +
+  " [--tls-cert FILE] [--tls-key FILE] [--secret-store keychain|file] [--secret-key-file FILE] [--allow-key-in-data-dir]";
 export const START_FAILED = "The Terminal could not start. See the log for details.";
 export const SHUTDOWN_FAILED = "The Terminal did not shut down cleanly.";
 export const SHUTDOWN_TIMED_OUT = "The Terminal did not shut down in time.";
 export const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /**
- * The one stderr line for a failed start. Console output ends up in bug reports and host logs, so only the
- * data-folder-in-use message (fixed text, no path or pid) is shown; every other error gets a fixed line.
+ * The one stderr line for a failed start. Console output ends up in bug reports and host logs, so only errors whose
+ * messages are fixed text (no path, pid or value) are shown: the data folder in use, the key file inside the data
+ * folder, the remote listener and its certificate. Every other error gets a fixed line.
  */
 export function startErrorLine(err: unknown): string {
-  return err instanceof DataDirInUseError ? `The Terminal could not start: ${err.message}` : START_FAILED;
+  if (err instanceof KeyInsideDataDirError) return err.message;
+  if (err instanceof DataDirInUseError || err instanceof RemoteStartError || err instanceof CertificateError) {
+    return `The Terminal could not start: ${err.message}`;
+  }
+  return START_FAILED;
+}
+
+/** What `theterminal start` passes to createServer. */
+export type StartOptions = {
+  dataDir: string;
+  uiDir?: string;
+  port?: number;
+  coreDir?: string;
+  remote?: { enabled: true; port?: number; bind?: string; domain?: string; tls?: TlsMode; certFile?: string; keyFile?: string };
+  secretStore?: "keychain" | "file";
+  secretKeyFile?: string;
+  allowKeyInDataDir?: true;
+};
+
+const TLS_MODES: readonly TlsMode[] = ["self_signed", "acme", "provided"];
+const NEEDS_REMOTE = "--remote-port, --remote-bind, --remote-domain, --remote-tls, --tls-cert and --tls-key need --remote";
+const NEEDS_FILE_STORE = "--secret-key-file and --allow-key-in-data-dir need --secret-store file";
+
+/**
+ * Reads `theterminal start`'s arguments. Every refusal is a fixed line that echoes no path or value (except a bad
+ * --port, as before), so the console never carries what the operator typed.
+ */
+export function parseStartArgs(
+  args: string[],
+  defaults: { dataDir: () => string; uiDir: () => string | undefined },
+): { ok: true; options: StartOptions } | { ok: false; message: string } {
+  const failed = (message: string) => ({ ok: false as const, message });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      allowPositionals: true,
+      options: {
+        port: { type: "string" },
+        "data-dir": { type: "string" },
+        "ui-dir": { type: "string" },
+        "core-dir": { type: "string" },
+        remote: { type: "boolean" },
+        "remote-port": { type: "string" },
+        "remote-bind": { type: "string" },
+        "remote-domain": { type: "string" },
+        "remote-tls": { type: "string" },
+        "tls-cert": { type: "string" },
+        "tls-key": { type: "string" },
+        "secret-store": { type: "string" },
+        "secret-key-file": { type: "string" },
+        "allow-key-in-data-dir": { type: "boolean" },
+      },
+    });
+  } catch {
+    return failed(USAGE);
+  }
+  const { values: v, positionals } = parsed;
+  if (positionals[0] !== "start") return failed(USAGE);
+
+  const options: StartOptions = { dataDir: v["data-dir"] ?? defaults.dataDir() };
+  const uiDir = v["ui-dir"] ?? defaults.uiDir();
+  if (uiDir !== undefined) options.uiDir = uiDir;
+  if (v.port !== undefined) {
+    const port = Number(v.port);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) return failed(`Invalid --port: ${v.port}`);
+    options.port = port;
+  }
+  if (v["core-dir"] !== undefined) {
+    if (!isAbsolute(v["core-dir"])) return failed("Invalid --core-dir: must be an absolute path");
+    options.coreDir = v["core-dir"];
+  }
+
+  const remoteFlags = [v["remote-port"], v["remote-bind"], v["remote-domain"], v["remote-tls"], v["tls-cert"], v["tls-key"]];
+  if (!v.remote && remoteFlags.some((f) => f !== undefined)) return failed(NEEDS_REMOTE);
+  if (v.remote) {
+    const remote: NonNullable<StartOptions["remote"]> = { enabled: true };
+    if (v["remote-port"] !== undefined) {
+      const port = Number(v["remote-port"]);
+      if (!/^\d+$/.test(v["remote-port"]) || port < 1 || port > 65535) return failed("Invalid --remote-port: must be a port number");
+      remote.port = port;
+    }
+    if (v["remote-bind"] !== undefined) {
+      if (isIP(v["remote-bind"]) === 0) return failed("Invalid --remote-bind: must be an IP address");
+      remote.bind = v["remote-bind"];
+    }
+    if (v["remote-domain"] !== undefined) {
+      if (!domainSchema.safeParse(v["remote-domain"]).success) return failed("Invalid --remote-domain: must be a DNS name");
+      remote.domain = v["remote-domain"].toLowerCase();
+    }
+    const tls = v["remote-tls"];
+    if (tls !== undefined) {
+      if (!(TLS_MODES as readonly string[]).includes(tls)) return failed("Invalid --remote-tls: must be self_signed, acme or provided");
+      remote.tls = tls as TlsMode;
+    }
+    if (remote.tls === "acme" && remote.domain === undefined) return failed("--remote-tls acme needs --remote-domain");
+    const certFile = v["tls-cert"];
+    const keyFile = v["tls-key"];
+    if (remote.tls === "provided") {
+      if (certFile === undefined || keyFile === undefined) return failed("--remote-tls provided needs --tls-cert and --tls-key");
+      remote.certFile = resolve(certFile);
+      remote.keyFile = resolve(keyFile);
+    } else if (certFile !== undefined || keyFile !== undefined) {
+      return failed("--tls-cert and --tls-key need --remote-tls provided");
+    }
+    options.remote = remote;
+  }
+
+  const store = v["secret-store"];
+  if (store !== undefined && store !== "keychain" && store !== "file") return failed("Invalid --secret-store: must be keychain or file");
+  if (store !== "file" && (v["secret-key-file"] !== undefined || v["allow-key-in-data-dir"])) return failed(NEEDS_FILE_STORE);
+  if (store !== undefined) options.secretStore = store;
+  if (store === "file") {
+    if (v["secret-key-file"] === undefined) return failed("--secret-store file needs --secret-key-file");
+    options.secretKeyFile = resolve(v["secret-key-file"]);
+    if (v["allow-key-in-data-dir"]) options.allowKeyInDataDir = true;
+    try {
+      assertKeyOutsideDataDir(options.secretKeyFile, options.dataDir, options.allowKeyInDataDir ?? false);
+    } catch (e) {
+      if (e instanceof KeyInsideDataDirError) return failed(e.message);
+      throw e;
+    }
+  }
+  return { ok: true, options };
 }
 
 function osUsername(): string {

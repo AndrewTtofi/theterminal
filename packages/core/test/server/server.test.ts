@@ -11,6 +11,7 @@ import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ChunkedSecretStore } from "../../src/secrets/store.js";
 import { FileSecretStore, KeyInsideDataDirError } from "../../src/secrets/file-store.js";
+import { RemoteStartError } from "../../src/server/remote.js";
 import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
@@ -472,6 +473,40 @@ describe("the file secret store", () => {
     ).rejects.toBeInstanceOf(KeyInsideDataDirError);
     expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
     expect(existsSync(join(dataDir, "k", "secret.key"))).toBe(false);
+  });
+});
+
+describe("the Owner bootstrap invite at startup", () => {
+  it("is not issued while remote access is off, and the server never calls bootstrapInvite", async () => {
+    const dataDir = tmp();
+    const seen: string[] = [];
+    await start({ dataDir, port: 0, bootstrapInvite: (u) => seen.push(u) });
+    expect(seen).toEqual([]);
+    expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
+  });
+
+  it("refuses --remote until the remote listener is wired, before taking the data folder", async () => {
+    const dataDir = tmp();
+    await expect(start({ dataDir, port: 0, remote: { enabled: true, port: 0, bind: "127.0.0.1" } })).rejects.toBeInstanceOf(RemoteStartError);
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+  });
+
+  it("a leftover bootstrap file is removed at startup once the Owner has a credential", async () => {
+    const dataDir = tmp();
+    const s = await start({ dataDir, port: 0 });
+    await stop(s);
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    commitEvent(db, new Ledger(db), () => ({
+      event: {
+        projectId: null, actor: { kind: "human", id: "owner" }, type: "person.credential_added",
+        payload: { personId: "owner", credential: { kind: "key", credentialId: "key-1", publicKey: "TESTKEY1", label: "Key" } },
+      },
+      result: () => undefined,
+    }));
+    db.close();
+    writeFileSync(join(dataDir, "bootstrap-invite"), "https://192.0.2.10:4318/join/old#fp=AA\n");
+    await start({ dataDir, port: 0 });
+    expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
   });
 });
 

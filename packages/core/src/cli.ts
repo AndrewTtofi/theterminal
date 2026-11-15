@@ -1,44 +1,24 @@
 #!/usr/bin/env node
-import { isAbsolute } from "node:path";
-import { parseArgs } from "node:util";
 import { createServer, type RunningServer } from "./server/server.js";
 import { releaseDataDirLock } from "./server/data-dir-lock.js";
 import { defaultDataDir, defaultUiDir } from "./paths.js";
-import { USAGE, createShutdown, failAndExit, startErrorLine, writeStartLog } from "./cli-support.js";
+import { createShutdown, failAndExit, parseStartArgs, startErrorLine, writeStartLog } from "./cli-support.js";
+import { BOOTSTRAP_LINE } from "./server/bootstrap-invite.js";
 import type { HostMessage, ReadyMessage } from "./host.js";
 
 async function main(): Promise<void> {
-  let parsed;
-  try {
-    parsed = parseArgs({
-      allowPositionals: true,
-      options: {
-        port: { type: "string" },
-        "data-dir": { type: "string" },
-        "ui-dir": { type: "string" },
-        "core-dir": { type: "string" },
-      },
-    });
-  } catch {
-    return failAndExit(USAGE);
-  }
-  const { values, positionals } = parsed;
+  const parsed = parseStartArgs(process.argv.slice(2), { dataDir: defaultDataDir, uiDir: defaultUiDir });
+  if (!parsed.ok) return failAndExit(parsed.message);
+  const options = parsed.options;
+  const dataDir = options.dataDir;
 
-  if (positionals[0] !== "start") return failAndExit(USAGE);
-
-  let port: number | undefined;
-  if (values.port !== undefined) {
-    port = Number(values.port);
-    if (!Number.isInteger(port) || port < 0 || port > 65535) return failAndExit(`Invalid --port: ${values.port}`);
-  }
-
-  const coreDir = values["core-dir"];
-  if (coreDir !== undefined && !isAbsolute(coreDir)) return failAndExit("Invalid --core-dir: must be an absolute path");
-
-  const dataDir = values["data-dir"] ?? defaultDataDir();
   let running: RunningServer;
   try {
-    running = await createServer({ dataDir, port, uiDir: values["ui-dir"] ?? defaultUiDir(), coreDir });
+    running = await createServer({
+      ...options,
+      // The invite link is the only secret this process ever prints, once per start, until the Owner claims it.
+      bootstrapInvite: (url) => console.log(`${BOOTSTRAP_LINE} ${url}`),
+    });
   } catch (err) {
     writeStartLog(dataDir, err);
     return failAndExit(startErrorLine(err));
@@ -54,7 +34,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   if (!process.send) {
-    console.log(`The Terminal is running at ${running.url}`);
+    // With remote access on, stdout is a container or service log others may read: no token there. Locally it is the
+    // Owner's own terminal, and the link with the token is how they open the workspace.
+    console.log(`The Terminal is running at ${options.remote ? running.loopbackUrl : running.url}`);
     return;
   }
   // Supervised by a host: the bootstrap URL (it carries the token) goes over IPC only, never to the log. The listeners

@@ -19,6 +19,8 @@ import { PeopleService } from "../people/service.js";
 import { getPerson } from "../events/projections.js";
 import { registerStaticUi } from "./static-ui.js";
 import { acquireDataDirLock } from "./data-dir-lock.js";
+import { announceBootstrapInvite, watchBootstrapInvite } from "./bootstrap-invite.js";
+import { RemoteStartError } from "./remote.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
@@ -56,7 +58,7 @@ import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
 import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type TlsMode, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
@@ -462,6 +464,13 @@ export async function createServer(opts: {
   secretKeyFile?: string;
   /** Lets `secretKeyFile` sit inside the data folder (refused otherwise). */
   allowKeyInDataDir?: boolean;
+  /**
+   * Called once at startup with the Owner bootstrap link, while remote access listens and nobody has claimed the
+   * Owner identity (the CLI prints it). The link is also written to `<dataDir>/bootstrap-invite` (mode 0600).
+   */
+  bootstrapInvite?: (url: string) => void;
+  /** The CLI's `--remote` flags: turn remote access on at startup with this configuration. */
+  remote?: { enabled?: boolean; port?: number; bind?: string; domain?: string; tls?: TlsMode; certFile?: string; keyFile?: string };
   /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
   fetch?: typeof fetch;
   /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
@@ -484,6 +493,9 @@ export async function createServer(opts: {
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
 }): Promise<RunningServer> {
+  // Fail closed: the remote listener is not started from the flags yet, and a server asked for remote access must not
+  // come up without it.
+  if (opts.remote?.enabled) throw new RemoteStartError();
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
   const coreDir = opts.coreDir;
@@ -684,6 +696,7 @@ export async function createServer(opts: {
 
     const app = Fastify();
     let boundPort = 0;
+    let stopBootstrapWatch = (): void => undefined;
     try {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
@@ -759,7 +772,17 @@ export async function createServer(opts: {
       if (lastError) {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
+      // The Owner bootstrap link: issued once per start while nobody owns the workspace and remote access listens; the
+      // file holding it goes as soon as the Owner joins (and at any start after that).
+      stopBootstrapWatch = watchBootstrapInvite(ledger, opts.dataDir);
+      if (!ledger.readOnly) {
+        announceBootstrapInvite({
+          db, people: people.service, dataDir: opts.dataDir, remote: null,
+          ...(opts.bootstrapInvite && { bootstrapInvite: opts.bootstrapInvite }),
+        });
+      }
     } catch (err) {
+      stopBootstrapWatch();
       await remote.shutdown();
       await linkService.shutdown();
       await links.shutdown();
@@ -777,6 +800,7 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          stopBootstrapWatch();
           await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart
           await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await links.shutdown(); // closes every share link's listener and records it, while the db is open

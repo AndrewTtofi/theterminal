@@ -8,6 +8,7 @@ import { createServer, type RunningServer } from "../src/server/server.js";
 import { MemorySecretStore } from "../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../src/link/discovery.js";
 import type { ReadyMessage } from "../src/host.js";
+import { USAGE } from "../src/cli-support.js";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
 const TIMEOUT = 30_000;
@@ -29,7 +30,7 @@ function tmp(): string {
 }
 
 const CORE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
-const USAGE = "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir PATH] [--core-dir ABSOLUTE_PATH]";
+
 
 function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}): Spawned {
   const child = spawn(process.execPath, [CLI, ...args], {
@@ -150,6 +151,47 @@ describe("theterminal start as a host's child process", () => {
     expect(text).toContain("is inside the UI directory");
     expect(text).toContain("<data>");
     if (process.platform !== "win32") expect(statSync(log).mode & 0o777).toBe(0o600);
+  });
+
+  it("the usage line names every flag", () => {
+    for (const flag of ["--remote", "--remote-port", "--remote-bind", "--remote-domain", "--remote-tls", "--tls-cert", "--tls-key",
+      "--secret-store", "--secret-key-file", "--allow-key-in-data-dir"]) {
+      expect(USAGE).toContain(`[${flag}`);
+    }
+  });
+
+  it("--secret-store file without --secret-key-file exits 1", { timeout: TIMEOUT }, async () => {
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--secret-store", "file"]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("--secret-store file needs --secret-key-file\n");
+    expect(stdout()).toBe("");
+  });
+
+  it("--remote-tls acme without --remote-domain exits 1", { timeout: TIMEOUT }, async () => {
+    const { exit, stderr } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--remote", "--remote-tls", "acme"]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("--remote-tls acme needs --remote-domain\n");
+  });
+
+  it("a --secret-key-file inside --data-dir exits 1 and writes no key", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(dir, "secret.key");
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", dir, "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("Refusing to start: the secret key file is inside the data directory\n");
+    expect(stdout()).toBe("");
+    expect(existsSync(keyFile)).toBe(false);
+  });
+
+  it("--secret-store file creates the key file at startup, outside the data folder", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(tmp(), "key", "secret.key");
+    const { ready, stdout } = await startReady(dir, ["--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(ready).toMatchObject({ type: "ready" });
+    expect(statSync(keyFile).size).toBe(32);
+    if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(dir, "secret.key"))).toBe(false);
+    expect(stdout()).not.toContain("Open this link once");
   });
 
   it("a real --core-dir is used for the bundled programs", { timeout: TIMEOUT }, async () => {
