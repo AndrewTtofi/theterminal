@@ -61,7 +61,7 @@ import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
 import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
 import {
-  ADAPTERS, PROVIDERS, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider, type TlsMode,
+  ADAPTERS, PROVIDERS, RESTRICTED_SIGNIN_ENV, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider, type TlsMode,
 } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
@@ -471,6 +471,21 @@ export function selectLocalEngines(
   return realLocalEngines;
 }
 
+const PROVIDER_WORDS: Record<Provider, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
+
+/**
+ * At start: a recorded own-plan mode that the restricted sign-in switch being off turns into `api_key` is reported,
+ * so the Owner learns why runs use an API key. Fixed text with the providers' fixed names only.
+ */
+export function warnTurnedOff(providers: Provider[], warn: (message: string) => void = console.warn): void {
+  for (const p of providers) {
+    warn(
+      `The Terminal: signing in with your own ${PROVIDER_WORDS[p]} plan is turned off, so ${PROVIDER_WORDS[p]} runs use an API key. ` +
+        `Start with ${RESTRICTED_SIGNIN_ENV}=1 to turn it on.`,
+    );
+  }
+}
+
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -525,6 +540,12 @@ export async function createServer(opts: {
    * the ledger says; otherwise the recorded state decides (startIfEnabled). On a headless server the flag is the switch.
    */
   remote?: RemoteOptions;
+  /**
+   * The restricted sign-in switch: lets the Owner choose and use Claude's subscription and Gemini's Google sign-in,
+   * which those providers do not allow other apps to use. Default off. The CLI sets it from
+   * `--allow-restricted-signin` or THETERMINAL_RESTRICTED_SIGNIN=1, read once at start.
+   */
+  restrictedSignIn?: boolean;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -628,8 +649,10 @@ export async function createServer(opts: {
     link = wired.link;
     const linkService = link;
 
+    const restrictedSignIn = opts.restrictedSignIn === true;
     const signin = new SignInManager({
       dataDir: opts.dataDir,
+      restrictedSignIn,
       program: (p) => signinProgram(p, fakeCli, bundled, which),
       cliHome: (p) => connections.credentialsFor(p)?.cliHome,
       extraEnv: fakeLoginEnv(),
@@ -657,6 +680,7 @@ export async function createServer(opts: {
       selectConnections: (ids) => connections.selectForRun(ids),
       mintCloud: (source, signal) => mintCloudGrant(source, { sts, fetch: fetchFn, signal }),
       dataDir: opts.dataDir,
+      restrictedSignIn,
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
@@ -753,7 +777,8 @@ export async function createServer(opts: {
       registerLedgerStream(app, ledger, cleanMirrored, { sessions: people.sessions });
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
       registerGateRoutes(app, { gates, principal: (req) => req.principal });
-      const settings = new ProviderSettings(db, ledger);
+      const settings = new ProviderSettings(db, ledger, { restrictedSignIn });
+      warnTurnedOff(settings.turnedOff());
       registerAgentRoutes(app, {
         db,
         runner,

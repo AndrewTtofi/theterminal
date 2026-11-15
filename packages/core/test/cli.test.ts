@@ -185,7 +185,7 @@ describe("theterminal start as a host's child process", () => {
 
   it("the usage line names every flag", () => {
     for (const flag of ["--remote", "--remote-port", "--remote-bind", "--remote-domain", "--remote-tls", "--tls-cert", "--tls-key",
-      "--secret-store", "--secret-key-file", "--allow-key-in-data-dir"]) {
+      "--secret-store", "--secret-key-file", "--allow-key-in-data-dir", "--allow-restricted-signin"]) {
       expect(USAGE).toContain(`[${flag}`);
     }
   });

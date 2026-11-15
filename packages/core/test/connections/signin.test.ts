@@ -7,6 +7,7 @@ import type { LedgerEntry, Provider } from "@theterminal/shared";
 
 const owner = { kind: "human", id: "owner" } as const;
 import { InvalidCliHomeError, SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
+import { RestrictedSignInError } from "../../src/agents/settings.js";
 import { ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
@@ -143,7 +144,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
   });
 
   it("allows one sign-in per provider at a time", async () => {
-    const { m } = manager({ hang: true });
+    const { m } = manager({ hang: true }, { restrictedSignIn: true });
     m.start("codex", owner);
     expect(() => m.start("codex", owner)).toThrow(/already running/);
     expect(() => m.start("claude", owner)).not.toThrow();
@@ -197,10 +198,21 @@ describe("SignInManager", { timeout: 15000 }, () => {
   });
 
   it("refuses Gemini, whose CLI signs in only in a terminal, and a provider that is not installed", () => {
-    const { m } = manager({});
+    const { m } = manager({}, { restrictedSignIn: true });
     expect(() => m.start("gemini", owner)).toThrow(/terminal/);
     const missing = manager({}, { program: () => null });
     expect(() => missing.m.start("codex", owner)).toThrow(/not installed/);
+  });
+
+  it("with the restricted sign-in switch off (the default), refuses Claude and Gemini before anything starts; Codex still signs in", async () => {
+    const pidFile = join(tempDir(), "pid");
+    const { m } = manager({ pidFile, exit: 0 });
+    expect(() => m.start("claude", owner)).toThrow(RestrictedSignInError);
+    expect(() => m.start("gemini", owner)).toThrow(expect.objectContaining({ name: "RestrictedSignInError", provider: "gemini" }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(pidFile)).toBe(false);
+    const { id } = m.start("codex", owner);
+    expect((await settle(m, id)).state).toBe("succeeded");
   });
 
   it("refuses a relative CLI home folder with a fixed message, before anything starts", async () => {
@@ -303,10 +315,14 @@ async function waitForFile(f: string) {
 }
 
 describe("sign-in API", { timeout: 15000 }, () => {
-  async function start(script: Record<string, unknown>, bundled = { claude: () => null, codex: () => fake, gemini: () => null }) {
+  async function start(
+    script: Record<string, unknown>, bundled = { claude: () => null, codex: () => fake, gemini: () => null }, restrictedSignIn = false,
+  ) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_LOGIN = JSON.stringify(script);
-    const s = await createServer({ dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
+    const s = await createServer({
+      dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore(), discovery: fakeDiscovery(), restrictedSignIn,
+    });
     running.push(s);
     return s;
   }
@@ -351,7 +367,7 @@ describe("sign-in API", { timeout: 15000 }, () => {
   });
 
   it("signin-status reports not_installed when a CLI is missing, and refuses a sign-in for it", async () => {
-    const s = await start({ status: 0 });
+    const s = await start({ status: 0 }, undefined, true);
     expect(await (await call(s, "GET", "/api/connections/signin-status")).json()).toEqual({
       claude: "not_installed", codex: "signed_in", gemini: "not_installed",
     });
@@ -361,6 +377,23 @@ describe("sign-in API", { timeout: 15000 }, () => {
     const gem = await call(s, "POST", "/api/connections/signin/gemini");
     expect(gem.status).toBe(422);
     expect(await gem.json()).toEqual({ error: "terminal_required" });
+  });
+
+  it("with the restricted sign-in switch off (the default), refuses a Claude or Gemini sign-in with restricted_signin_off and records nothing", async () => {
+    const s = await start({ exit: 0 }, { claude: () => fake, codex: () => fake, gemini: () => fake });
+    for (const provider of ["claude", "gemini"]) {
+      const res = await call(s, "POST", `/api/connections/signin/${provider}`);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: "restricted_signin_off", provider });
+    }
+    const entries = (await (await call(s, "GET", "/api/ledger")).json()) as LedgerEntry[];
+    expect(entries.some((e) => e.type === "connection.signin")).toBe(false);
+    expect((await call(s, "POST", "/api/connections/signin/codex")).status).toBe(202);
+  });
+
+  it("with the switch on, starts a Claude sign-in", async () => {
+    const s = await start({ exit: 0 }, { claude: () => fake, codex: () => fake, gemini: () => null }, true);
+    expect((await call(s, "POST", "/api/connections/signin/claude")).status).toBe(202);
   });
 
   it("requires the token", async () => {

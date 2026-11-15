@@ -643,9 +643,9 @@ describe("AgentRunner: connection credentials", () => {
     return service;
   }
 
-  function credRunner(adapters: Partial<Record<AdapterId, AgentAdapter>>, service: ConnectionService | null) {
+  function credRunner(adapters: Partial<Record<AdapterId, AgentAdapter>>, service: ConnectionService | null, restrictedSignIn = false) {
     const runner = new AgentRunner({
-      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir,
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir, restrictedSignIn,
       extraSecrets: () => service?.secretValues() ?? [],
       ...(service && { credentials: (p: Provider) => service.credentialsFor(p) }),
     });
@@ -734,11 +734,11 @@ describe("AgentRunner: connection credentials", () => {
       secrets: { apiKey: GEMINI_KEY }, private: { cliHome: CLI_HOME },
     });
     const seen: RunCredentials[] = [];
-    const runner = credRunner({ gemini: recording("gemini", seen) }, service);
+    const runner = credRunner({ gemini: recording("gemini", seen) }, service, true);
 
     const keyRun = await runner.start(owner, { projectId, adapter: "gemini", prompt: "p" });
     await untilFinished(keyRun.id);
-    new ProviderSettings(db, ledger).setMode(owner, "gemini", "google", PROVIDER_ACKS.gemini);
+    new ProviderSettings(db, ledger, { restrictedSignIn: true }).setMode(owner, "gemini", "google", PROVIDER_ACKS.gemini);
     const loginRun = await runner.start(owner, { projectId, adapter: "gemini", prompt: "p" });
     await untilFinished(loginRun.id);
 
@@ -749,6 +749,40 @@ describe("AgentRunner: connection credentials", () => {
     expect(ledger.list().filter((e) => e.type === "connection.used").map((e) => (e.payload as { purpose: string }).purpose)).toEqual([
       "api_key", "cli_home",
     ]);
+  });
+
+  describe("with the restricted sign-in switch off (the default)", () => {
+    it.each([
+      ["claude", "subscription", STORED_KEY],
+      ["gemini", "google", GEMINI_KEY],
+    ] as const)("a stored %s %s mode runs on the API key and is recorded as api_key", async (provider, mode, key) => {
+      const service = await connections();
+      // Gemini's connection can hold a CLI home for its login; the run must not take it.
+      const cliHome = provider === "gemini" ? { private: { cliHome: CLI_HOME } } : {};
+      await service.add(owner, { kind: "llm", provider, name: provider, secrets: { apiKey: key }, ...cliHome });
+      new ProviderSettings(db, ledger, { restrictedSignIn: true }).setMode(owner, provider, mode, PROVIDER_ACKS[provider]);
+      const seen: RunCredentials[] = [];
+      const runner = credRunner({ [provider]: recording(provider, seen) }, service);
+      const run = await runner.start(owner, { projectId, adapter: provider, prompt: "p" });
+      await untilFinished(run.id);
+      expect(run.authMode).toBe("api_key");
+      expect(seen).toEqual([{ apiKey: key, env: {}, mcpServers: [] }]); // never the CLI home a login would use
+      const started = ledger.list().find((e) => e.type === "agent.started")!;
+      expect(started.payload).toMatchObject({ authMode: "api_key" });
+      // The recorded choice is left as it was.
+      expect(new ProviderSettings(db, ledger, { restrictedSignIn: true }).getMode(provider)).toBe(mode);
+    });
+
+    it("Codex's ChatGPT sign-in still runs as chatgpt", async () => {
+      const service = await connections();
+      await service.add(owner, { kind: "llm", provider: "codex", name: "Codex", private: { cliHome: CLI_HOME } });
+      new ProviderSettings(db, ledger).setMode(owner, "codex", "chatgpt", PROVIDER_ACKS.codex);
+      const seen: RunCredentials[] = [];
+      const run = await credRunner({ codex: recording("codex", seen) }, service).start(owner, { projectId, adapter: "codex", prompt: "p" });
+      await untilFinished(run.id);
+      expect(run.authMode).toBe("chatgpt");
+      expect(seen).toEqual([{ cliHome: CLI_HOME, env: {}, mcpServers: [] }]);
+    });
   });
 });
 
