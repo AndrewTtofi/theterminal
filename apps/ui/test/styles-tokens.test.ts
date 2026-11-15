@@ -18,10 +18,9 @@ const ICE: Record<string, string> = {
 };
 
 describe("styles.css tokens", () => {
-  it("has no colour literals outside :root except the share frame", () => {
-    const cleaned = rest.replace(/\.share-frame\s*\{[^}]*\}/g, "");
-    expect(cleaned.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) ?? []).toEqual([]);
-    expect(rest).toMatch(/\.share-frame\s*\{[^}]*#ffffff/);
+  it("has no colour literals outside :root", () => {
+    expect(rest.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) ?? []).toEqual([]);
+    expect(rest).toMatch(/\.share-frame\s*\{[^}]*background: var\(--bg\)/);
   });
   it("defines every key in Ice's values", () => {
     for (const [k, v] of Object.entries(ICE)) {

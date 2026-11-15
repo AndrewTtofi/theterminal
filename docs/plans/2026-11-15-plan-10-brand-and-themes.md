@@ -74,7 +74,7 @@ diff-add #3fb97f26  diff-del #e5534b26  diff-hunk #4fc3d914
 
 If a readability test fails on one of these, the implementer of Task 1 adjusts it, and the controller carries the change to Task 2.
 
-`.share-frame { background: #ffffff }` stays as it is: it shows the white share page preview. Fonts are two more properties, `--font-ui` and `--font-mono`, which are not colour keys.
+`.share-frame` uses `var(--bg)`: share pages are Ice now, so the preview has no white literal. Fonts are two more properties, `--font-ui` and `--font-mono`, which are not colour keys.
 
 ## Review Focus
 
@@ -137,7 +137,7 @@ If a readability test fails on one of these, the implementer of Task 1 adjusts i
 **Interfaces:** Consumes the key list above. Does not import Task 1: it may run in parallel, and Task 3 ties them together.
 
 - [ ] **Step 1: Write the failing test.** It reads `styles.css` as text and asserts:
-  - outside the `:root` block, no `#hex` or `rgb(`/`rgba(` literal appears, except the allowed `.share-frame` `#ffffff`;
+  - outside the `:root` block, no `#hex` or `rgb(`/`rgba(` literal appears;
   - `:root` defines every key in the list above, in Ice's values (`--bg: #0d1016`, `--panel: #121620`, `--accent: #4fc3d9`);
   - `body` uses `var(--font-ui)`, and `:root` defines `--font-ui` (today's system sans stack) and `--font-mono` (the monospace stack).
 - [ ] **Step 2:** Run `pnpm --filter @theterminal/ui exec vitest run test/styles-tokens.test.ts`. It fails.

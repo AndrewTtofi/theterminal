@@ -481,7 +481,7 @@ pre.diff .line, pre.file .line { content-visibility: auto; contain-intrinsic-siz
 .share-error { margin: 6px 0 0; color: var(--attention); }
 .share-panel { padding: 8px 12px; height: 100%; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
 .share-body { flex: 1; display: flex; gap: 12px; min-height: 320px; }
-.share-frame { flex: 1; min-width: 0; border: 1px solid var(--line-strong); background: #ffffff; }
+.share-frame { flex: 1; min-width: 0; border: 1px solid var(--line-strong); background: var(--bg); }
 .share-hidden { flex: 0 0 240px; overflow: auto; font-size: 12px; }
 .share-hidden li { padding: 3px 0; border-bottom: 1px solid var(--line); }
 .share-confirm { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
