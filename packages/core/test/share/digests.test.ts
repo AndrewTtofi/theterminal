@@ -73,6 +73,20 @@ describe("projectDigests", () => {
     for (const [q] of spy.mock.calls) expect(q).toHaveProperty("beforeSeq");
   });
 
+  it("reads on past a page cut short by an unreadable row, so the older days are still there", () => {
+    card(projectId, "Last week", "2026-11-13T08:00:00.000Z");
+    w.at("2026-11-15T01:00:00.000Z");
+    const c = w.board.addCard(human, projectId, { title: "Busy", stage: "plan" }).id;
+    for (let i = 0; i < 600; i++) w.board.setCardStatus(human, c, i % 2 === 0 ? "done" : "todo");
+    // A tampered row near the head: the newest page stops there and comes back short.
+    w.db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+    w.db.prepare("UPDATE ledger SET payload = ? WHERE seq = ?").run("{not json", w.ledger.headSeq() - 5);
+
+    const d = projectDigests(w.db, w.ledger, projectId, 7, NOW);
+    expect(d.map((x) => x.day)).toEqual(["2026-11-15", "2026-11-13"]);
+    expect(d[1]!.counts.entries).toBe(1);
+  });
+
   it("an empty window is an empty list, and an unknown project is not found", () => {
     expect(projectDigests(w.db, w.ledger, projectId, 7, NOW)).toEqual([]);
     expect(() => projectDigests(w.db, w.ledger, "nope", 7, NOW)).toThrow(NotFoundError);

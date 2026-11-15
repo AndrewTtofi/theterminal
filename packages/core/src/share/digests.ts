@@ -11,8 +11,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * The project's daily digests for the last `days` UTC days, today included, newest first. The window starts at UTC
  * midnight `days - 1` days ago. Entries are read newest first, a page at a time, and the reading stops at the first
  * entry older than the window, so a long history is never read in full. Like the ledger panel, this is the Owner's
- * own live view: it reads the ledger as it is (a tampered row ends the read, as `Ledger.list` does), while the
- * read-only banner reports a broken chain.
+ * own live view: it reads the ledger as it is, while the read-only banner reports a broken chain. `Ledger.list` cuts
+ * a page at an unreadable row, so a short page is not the end: the reading goes on to the older pages, and only the
+ * rest of the cut page is left out, as the ledger leaves it out.
  */
 export function projectDigests(
   db: Db, ledger: Ledger, projectId: string, days: DigestDays, now: () => Date = () => new Date(),
@@ -33,7 +34,7 @@ export function projectDigests(
       }
       recent.push(e);
     }
-    if (older || page.length < PAGE) break;
+    if (older) break;
     beforeSeq = page[0]!.seq;
   }
   return dailyDigests(recent, narrationContext(db));
