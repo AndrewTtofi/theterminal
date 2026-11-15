@@ -51,27 +51,10 @@ function requestFor(key: string): { method: string; path: string } {
 }
 
 /**
- * Keys ahead of their routes, by the task that lands them. Each is checked again as soon as its route exists; until
- * then the stale-key test skips it, and the role test only asserts the hook's 403 below the rank.
+ * Keys ahead of their routes, by the task that lands them. An entry here must be unmatched: the moment its route
+ * exists the stale-key test fails, so the entry is removed and the key is checked like every other.
  */
 const LANDING_LATER: Record<string, string> = {
-  "GET /api/me": "T3b people routes",
-  "PATCH /api/me": "T3b people routes",
-  "POST /api/me/sign-out": "T3b people routes",
-  "POST /api/me/credentials/passkey/options": "T3b people routes",
-  "POST /api/me/credentials/passkey/verify": "T3b people routes",
-  "POST /api/me/credentials/key/challenge": "T3b people routes",
-  "POST /api/me/credentials/key": "T3b people routes",
-  "DELETE /api/me/credentials/:id": "T3b people routes",
-  "DELETE /api/me/sessions/:prefix": "T3b people routes",
-  "GET /api/people": "T3b people routes",
-  "GET /api/people/invites": "T3b people routes",
-  "POST /api/people/invites": "T3b people routes",
-  "DELETE /api/people/invites/:id": "T3b people routes",
-  "PATCH /api/people/:id": "T3b people routes",
-  "DELETE /api/people/:id": "T3b people routes",
-  "POST /api/people/:id/sign-out": "T3b people routes",
-  "GET /api/presence": "T8b events and presence",
   "GET /api/remote": "T6c remote listener wiring",
   "PUT /api/remote": "T6c remote listener wiring",
 };
@@ -83,7 +66,9 @@ const isUnmatched = (status: number, body: unknown) =>
   status === 404 && typeof body === "object" && body !== null && (body as { statusCode?: number }).statusCode === 404;
 
 const below = (role: Role): Role | null => (role === "viewer" ? null : ROLES[ROLES.indexOf(role) - 1]!);
-const ENTRIES = Object.entries(ROUTE_ROLES);
+/** Calling it ends the caller's own session, so it goes last: every other key is called on a live session. */
+const SIGNS_OUT = "POST /api/me/sign-out";
+const ENTRIES = Object.entries(ROUTE_ROLES).sort(([a], [b]) => Number(a === SIGNS_OUT) - Number(b === SIGNS_OUT));
 
 async function call(s: RunningServer, key: string, headers: Record<string, string>) {
   const { method, path } = requestFor(key);
@@ -102,12 +87,19 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
   it("every key in ROUTE_ROLES has a registered route (no stale entry), except those named as landing later", async () => {
     const { s, as } = await start();
     const stale: string[] = [];
+    const live: string[] = [];
     for (const [key] of ENTRIES) {
-      if (key in LANDING_LATER || WEBSOCKET_ONLY.has(key)) continue;
+      if (WEBSOCKET_ONLY.has(key)) continue;
       const { status, body } = await call(s, key, as("owner"));
-      if (isUnmatched(status, body)) stale.push(key);
+      const unmatched = isUnmatched(status, body);
+      if (key in LANDING_LATER) {
+        if (!unmatched) live.push(`${key} (${LANDING_LATER[key]}) has landed: remove it from LANDING_LATER`);
+      } else if (unmatched) {
+        stale.push(key);
+      }
     }
     expect(stale).toEqual([]);
+    expect(live).toEqual([]);
   });
 
   it("an unlisted route inside an encapsulated plugin is reported, so the server refuses to start", async () => {
@@ -130,14 +122,13 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
     const { s, as } = await start();
     const wrong: string[] = [];
     for (const [key, role] of ENTRIES) {
-      // An unmatched path is Fastify's 404 whoever asks; the hook judges the role once the route exists.
-      if (key in LANDING_LATER) continue;
       const lower = below(role);
       if (lower !== null) {
         const { status, body } = await call(s, key, as(lower));
-        if (status !== 403 || JSON.stringify(body) !== JSON.stringify({ error: "forbidden", required: role })) {
-          wrong.push(`${key}: ${lower} got ${status} ${JSON.stringify(body)}`);
-        }
+        const refused = status === 403 && JSON.stringify(body) === JSON.stringify({ error: "forbidden", required: role });
+        // A key ahead of its route can only be Fastify's 404 to everyone; anything else there is a route the allowlist misses.
+        const ahead = key in LANDING_LATER && isUnmatched(status, body);
+        if (!refused && !ahead) wrong.push(`${key}: ${lower} got ${status} ${JSON.stringify(body)}`);
       } else {
         const anonymous = await call(s, key, {});
         if (anonymous.status !== 401) wrong.push(`${key}: nobody got ${anonymous.status}`);
@@ -149,13 +140,13 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
     expect(wrong).toEqual([]);
   });
 
-  it("a viewer is refused 403 on every write", async () => {
+  it("a viewer is refused 403 on every write above their rank", async () => {
     const { s, as } = await start();
     const allowed: string[] = [];
-    for (const [key] of ENTRIES) {
-      if (key.startsWith("GET ") || key in LANDING_LATER) continue;
-      const { status } = await call(s, key, as("viewer"));
-      if (status !== 403) allowed.push(`${key}: ${status}`);
+    for (const [key, role] of ENTRIES) {
+      if (key.startsWith("GET ") || role === "viewer") continue; // a viewer's own account is theirs to change
+      const { status, body } = await call(s, key, as("viewer"));
+      if (status !== 403 && !(key in LANDING_LATER && isUnmatched(status, body))) allowed.push(`${key}: ${status}`);
     }
     expect(allowed).toEqual([]);
   });
