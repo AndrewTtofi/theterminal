@@ -981,3 +981,23 @@ describe("cloud, MCP and hardware connections", () => {
     expect(svc.list()).toEqual([]);
   });
 });
+
+describe("Google Cloud key redaction", () => {
+  const PEM = "-----BEGIN PRIVATE KEY-----\nTESTKEYTESTKEYTESTKEYTESTKEY0000\n-----END PRIVATE KEY-----\n";
+  const KEY_ID = "0000000000000000000000000000000000testkey";
+  const SA_JSON = JSON.stringify({
+    type: "service_account", project_id: "tt-test-project", private_key_id: KEY_ID, private_key: PEM,
+    client_email: "tester@tt-test-project.iam.gserviceaccount.com", token_uri: "https://oauth2.googleapis.com/token",
+  });
+  const addGcp = (svc: ConnectionService) =>
+    svc.add(owner, { kind: "cloud", provider: "gcp", name: "GCP", config: { project: "tt-test-project" }, secrets: { serviceAccountJson: SA_JSON } });
+
+  it("redacts the parsed private key and its id, not only the whole JSON", async () => {
+    const svc = make();
+    await addGcp(svc);
+    expect(svc.secretValues()).toEqual(expect.arrayContaining([SA_JSON, PEM, KEY_ID]));
+    const reloaded = make();
+    await reloaded.load();
+    expect(reloaded.secretValues()).toEqual(expect.arrayContaining([SA_JSON, PEM, KEY_ID]));
+  });
+});

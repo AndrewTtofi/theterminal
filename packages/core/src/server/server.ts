@@ -15,7 +15,8 @@ import { registerConnectionRoutes } from "./connection-routes.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
-import { CONNECTION_TESTERS } from "../connections/testers.js";
+import { CONNECTION_TESTERS, cloudTesters } from "../connections/testers.js";
+import { fakeSts, realSts, type StsCaller } from "../connections/cloud/aws.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
@@ -216,21 +217,40 @@ export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected
   return new ChunkedSecretStore(new KeychainSecretStore());
 }
 
+const FAKE_TOKEN = { access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" };
+const AZURE_TOKEN_URL = /^https:\/\/login\.microsoftonline\.com\/[^/]+\/oauth2\/v2\.0\/token$/;
+
+const jsonResponse = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+async function bodyText(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<string> {
+  if (init?.body !== undefined && init.body !== null) return typeof init.body === "string" ? init.body : String(init.body);
+  return input instanceof Request ? input.text() : "";
+}
+
 /**
- * Tests only: answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise. Never performs
- * network I/O.
+ * Tests only. Never performs network I/O. In this order:
+ * - a POST to the Google or Azure token endpoint answers a fake token when the form holds `grant_type` (and, for
+ *   Azure, a `client_secret` containing `TESTKEY`), and 401 otherwise;
+ * - anything else answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise.
  */
 const fakeHttp: typeof fetch = async (input, init) => {
+  const url = input instanceof Request ? input.url : String(input);
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const google = url === "https://oauth2.googleapis.com/token";
+  const azure = AZURE_TOKEN_URL.test(url);
+  if (method === "POST" && (google || azure)) {
+    const form = new URLSearchParams(await bodyText(input, init));
+    const granted = form.has("grant_type") && (google || (form.get("client_secret") ?? "").includes("TESTKEY"));
+    return granted ? jsonResponse(200, FAKE_TOKEN) : jsonResponse(401, { error: "invalid_client" });
+  }
   const headers = new Headers(input instanceof Request ? input.headers : undefined);
   new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
   let accepted = false;
   headers.forEach((value) => {
     if (value.includes("TESTKEY")) accepted = true;
   });
-  return new Response(accepted ? "{}" : '{"error":"unauthorized"}', {
-    status: accepted ? 200 : 401,
-    headers: { "content-type": "application/json" },
-  });
+  return accepted ? jsonResponse(200, {}) : jsonResponse(401, { error: "unauthorized" });
 };
 
 /**
@@ -241,6 +261,16 @@ export function selectFetch(env: NodeJS.ProcessEnv = process.env, injected?: typ
   if (injected) return injected;
   if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeHttp;
   return globalThis.fetch;
+}
+
+/**
+ * The STS caller AWS tests and grants use: the injected one, else the AWS SDK. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HTTP=1 selects a stub that never leaves the process; it is ignored otherwise.
+ */
+export function selectSts(env: NodeJS.ProcessEnv = process.env, injected?: StsCaller): StsCaller {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeSts;
+  return realSts;
 }
 
 /** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
@@ -261,6 +291,8 @@ export async function createServer(opts: {
   secrets?: SecretStore;
   /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
   fetch?: typeof fetch;
+  /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
+  sts?: StsCaller;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -293,11 +325,12 @@ export async function createServer(opts: {
 
   repairSharedGitconfig(opts.dataDir);
 
+  const sts = selectSts(process.env, opts.sts);
   const connections = new ConnectionService({
     db,
     ledger,
     secrets: selectSecretStore(process.env, opts.secrets),
-    testers: CONNECTION_TESTERS,
+    testers: { ...CONNECTION_TESTERS, ...cloudTesters(sts) },
     fetch: selectFetch(process.env, opts.fetch),
   });
   await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
