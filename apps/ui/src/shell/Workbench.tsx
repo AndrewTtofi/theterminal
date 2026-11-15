@@ -13,6 +13,7 @@ import { DiffPanel } from "../views/DiffPanel";
 import { FilePanel } from "../views/FilePanel";
 import { IntakePanel } from "../views/IntakePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
+import { NeedsYouPanel } from "../views/NeedsYouPanel";
 import { StoryPanel } from "../views/StoryPanel";
 import { ActivityBar } from "./ActivityBar";
 import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
@@ -21,7 +22,6 @@ import type { DockApi, DockPanelId } from "./Dock";
 import { LAYOUT_KEY } from "./layout-store";
 import { ShellContext } from "./model";
 import type { AppModel, ShellContextValue, WorkbenchModel } from "./model";
-import { PlaceholderPanel } from "./placeholders";
 import { SIDE_BAR_DEFAULT, SideBar } from "./SideBar";
 import { StatusBar } from "./StatusBar";
 import type { LayoutControls } from "./StatusBar";
@@ -31,7 +31,7 @@ import type { ViewId } from "./views";
 const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
-  conversation: ConversationPanel, needs_you: PlaceholderPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
+  conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
 };
 
 type Props = { model: AppModel };
@@ -82,6 +82,12 @@ export function Workbench({ model }: Props) {
       return;
     }
     showView(v);
+  };
+  /** A strip card's "More context": shows the Needs-you tab, leaving focus on the button the Owner pressed. */
+  const moreContext = () => {
+    const from = document.activeElement;
+    dockRef.current?.focus("needs_you");
+    if (from instanceof HTMLElement && from.isConnected && document.activeElement !== from) from.focus();
   };
   const openLearn = (topicId: string) => {
     setLearnTopic(topicId);
@@ -186,7 +192,7 @@ export function Workbench({ model }: Props) {
                 )}
                 <IntakeNotices notices={notices} />
                 {model.pending.map((a) => (
-                  <DecisionCard key={a.id} action={a} projectName={a.projectName} onDecide={model.onDecide} />
+                  <DecisionCard key={a.id} action={a} projectName={a.projectName} onDecide={model.onDecide} onMore={moreContext} />
                 ))}
               </section>
             )}

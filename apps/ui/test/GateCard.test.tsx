@@ -4,7 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { GATES } from "@theterminal/shared";
 import type { GateEvaluation } from "@theterminal/shared";
 import { GateCards } from "../src/components/GateCard";
-import type { GatePrompt } from "../src/shell/model";
+import { ShellContext } from "../src/shell/model";
+import type { GatePrompt, ShellContextValue, WorkbenchModel } from "../src/shell/model";
+import { fakeDock, shellNav } from "./connections-harness";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 
 const ACK = GATES.find((g) => g.id === "ready_to_ship")!.acknowledgement;
@@ -170,5 +172,27 @@ describe("GateCards", () => {
     await userEvent.click(moveButton());
     const sent = onResolve.mock.calls[0]![0][0].reason as string;
     expect(sent.length).toBe(500);
+  });
+
+  it("links each gate to its Learn topic", async () => {
+    const nav = shellNav();
+    const gate: GatePrompt = {
+      cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false,
+    };
+    render(
+      <ShellContext.Provider value={{ model: {} as WorkbenchModel, dock: () => fakeDock(), ...nav } satisfies ShellContextValue}>
+        <GateCards gate={gate} onResolve={vi.fn()} onCancel={vi.fn()} />
+      </ShellContext.Provider>,
+    );
+    await userEvent.click(within(card("Ready to ship")).getByRole("button", { name: "Learn more" }));
+    expect(nav.openLearn).toHaveBeenCalledWith("readiness_gates");
+  });
+
+  it("can leave focus where it is, for a second copy of the prompt", () => {
+    const gate: GatePrompt = {
+      cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false,
+    };
+    render(<GateCards gate={gate} onResolve={vi.fn()} onCancel={vi.fn()} autoFocus={false} />);
+    expect(document.activeElement).toBe(document.body);
   });
 });

@@ -393,3 +393,17 @@ details.override [role="status"]:empty { margin: 0; }
 .learn-footer { font-size: 11px; margin-top: 12px; }
 .learn-side ul { list-style: none; margin: 0; padding: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Needs-you tab: each decision with its context */
+.needs-you-panel { padding: 8px 16px; overflow: auto; height: 100%; box-sizing: border-box; }
+.needs-you-panel h3 { color: var(--attention); }
+.decision-card .decision-links { display: flex; gap: 12px; margin: 0 0 6px; font-size: 12px; }
+.decision-context { margin: 0 0 6px; padding: 0 8px 8px; }
+.decision-context h4 { margin: 6px 0 4px; }
+.decision-context .note { margin: 4px 0; font-size: 12px; color: var(--muted); }
+pre.proposed { overflow: auto; max-height: 320px; background: var(--panel); padding: 6px; margin: 0; }
+pre.proposed > span { display: block; white-space: pre; }
+pre.proposed .add { background: rgba(46, 160, 67, 0.15); }
+pre.proposed .del { background: rgba(199, 78, 57, 0.15); }
+.agent-said { margin: 4px 0; padding-left: 18px; }
+.agent-said li { white-space: pre-wrap; }

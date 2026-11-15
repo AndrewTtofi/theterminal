@@ -400,6 +400,29 @@ describe("Workbench", () => {
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", [], "c1");
   });
 
+  it("opens the Needs-you tab from a strip card's More context, keeping focus on the button", async () => {
+    const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+    expect(container.querySelector('[data-panel="needs_you"]')).toBeNull();
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    const more = within(strip).getByRole("button", { name: "More context" });
+    await userEvent.click(more);
+    const tab = container.querySelector<HTMLElement>('[data-panel="needs_you"]')!;
+    expect(tab.getAttribute("data-active")).toBe("true");
+    const everything = within(tab).getByRole("region", { name: "Everything that needs you" });
+    expect(within(everything).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
+    // The tab's own cards need no More context: it is already open.
+    expect(within(everything).queryByRole("button", { name: "More context" })).toBeNull();
+    expect(document.activeElement).toBe(more);
+  });
+
+  it("opens Learn on a shell decision's topic from the strip", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    await userEvent.click(within(strip).getByRole("button", { name: "Learn more" }));
+    expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+    expect(testDock.shell!.learnTopic).toBe("action_kinds");
+  });
+
   it("does not show the strip when nothing is pending", () => {
     render(<Workbench model={model()} />);
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();

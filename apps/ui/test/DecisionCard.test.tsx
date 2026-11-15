@@ -4,6 +4,9 @@ import userEvent from "@testing-library/user-event";
 import type { AgentAction } from "@theterminal/shared";
 import { ApiError } from "../src/api";
 import { DecisionCard } from "../src/components/DecisionCard";
+import { ShellContext } from "../src/shell/model";
+import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const action: AgentAction = {
   id: "act1",
@@ -170,5 +173,27 @@ describe("DecisionCard", () => {
     expect(container.textContent).toContain("<img src=x onerror=");
     expect(container.querySelector("pre")?.textContent).toContain("<script>");
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
+  it("links to the Learn topic for its kind of action", async () => {
+    const nav = shellNav();
+    render(
+      <ShellContext.Provider value={{ model: {} as WorkbenchModel, dock: () => fakeDock(), ...nav } satisfies ShellContextValue}>
+        <DecisionCard action={action} onDecide={vi.fn()} />
+      </ShellContext.Provider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Learn more" }));
+    expect(nav.openLearn).toHaveBeenCalledWith("action_kinds");
+  });
+
+  it("offers More context only when asked to, described by the card's heading", async () => {
+    const onMore = vi.fn();
+    const { rerender } = render(<DecisionCard action={action} onDecide={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "More context" })).toBeNull();
+    rerender(<DecisionCard action={action} onDecide={vi.fn()} onMore={onMore} />);
+    const more = screen.getByRole("button", { name: "More context" });
+    expect(document.getElementById(more.getAttribute("aria-describedby")!)!.textContent).toBe('Agent wants to run the command "npm test"');
+    await userEvent.click(more);
+    expect(onMore).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { visibleControls } from "@theterminal/shared";
+import { useContext, useEffect, useId, useRef, useState } from "react";
+import { GATE_TOPIC, visibleControls } from "@theterminal/shared";
 import type { GateDecisionInput, GateEvaluation, Stage } from "@theterminal/shared";
+import { ShellContext } from "../shell/model";
 import type { GatePrompt } from "../shell/model";
 import { stageLabel } from "./Board";
 
@@ -26,6 +27,8 @@ export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }:
   const [reason, setReason] = useState("");
   const [chosen, setChosen] = useState<"sign_off" | "waive" | null>(null);
   const hintId = useId();
+  // Outside the shell there is no Learn view to open, so no link.
+  const openLearn = useContext(ShellContext)?.openLearn;
   const trimmed = reason.trim();
 
   const reset = () => {
@@ -67,6 +70,13 @@ export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }:
       </ul>
       <h4>What this means</h4>
       <p>{visibleControls(g.learn)}</p>
+      {openLearn && (
+        <p>
+          <button type="button" className="link" onClick={() => openLearn(GATE_TOPIC[g.id])}>
+            Learn more
+          </button>
+        </p>
+      )}
       <label className="gate-ack">
         <input
           type="checkbox"
@@ -126,10 +136,12 @@ type Props = {
   gate: GatePrompt;
   onResolve: (decisions: GateDecisionInput[]) => Promise<boolean>;
   onCancel: () => void;
+  /** Moves focus to the first waiting gate when the prompt appears or its checklist changes; off for a second copy. */
+  autoFocus?: boolean;
 };
 
 /** A gated move in the Needs-you strip: one card per gate waiting on the Owner, the passed ones in a line each, and the move. */
-export function GateCards({ gate, onResolve, onCancel }: Props) {
+export function GateCards({ gate, onResolve, onCancel, autoFocus = true }: Props) {
   // Keyed by refusal, gate, outcome and which conditions hold: a gate whose checklist changed, or any gate after the
   // server refused the decisions, starts over with no decision, acknowledgement or reason.
   const [decisions, setDecisions] = useState<Record<string, GateDecisionInput>>({});
@@ -147,8 +159,8 @@ export function GateCards({ gate, onResolve, onCancel }: Props) {
   // When the prompt appears (it is keyed by card and stage) and whenever its checklist changes, move focus to the
   // first gate, so a keyboard or screen reader user lands on what needs them.
   useEffect(() => {
-    rootRef.current?.querySelector<HTMLElement>(".gate-card h3")?.focus();
-  }, [checklist]);
+    if (autoFocus) rootRef.current?.querySelector<HTMLElement>(".gate-card h3")?.focus();
+  }, [checklist, autoFocus]);
 
   return (
     <div className="gate-prompt" ref={rootRef}>
