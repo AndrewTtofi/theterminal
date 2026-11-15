@@ -309,6 +309,54 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(fixture.requests).toEqual([]); // nothing was ever sent to it
   });
 
+  it("unlinking the machine ends its runs at once, though the stream is open and quiet, and stops following them", async () => {
+    const started = remote.started();
+    let beat: ReturnType<typeof setInterval> | undefined;
+    cleanups.push(() => clearInterval(beat));
+    const fixture = await follow((_req, res) => {
+      ndjson(res);
+      res.write(`${remote.line(started)}\n`);
+      // Alive and waiting (a decision is pending there): heartbeats only, never an end.
+      beat = setInterval(() => res.write("\n"), 40);
+    });
+    await vi.waitFor(() => expect(originIds()).toEqual([started.id]), { timeout: 5000 });
+    await link.unpair(owner, remote.machineId);
+    await vi.waitFor(() => expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" }), { timeout: 2000 });
+    expect(getRun(db, remote.runId)!.status).toBe("failed");
+    const failed = ledger.list().filter((e) => e.type === "link.run_failed");
+    expect(failed.map((e) => e.payload)).toEqual([{ runId: remote.runId, machineId: remote.machineId, error: "machine_unpaired" }]);
+    await sleep(300); // several backoffs: never asked again
+    expect(eventsRequests(fixture)).toHaveLength(1);
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toHaveLength(1);
+  });
+
+  it("unlinking another machine leaves this one's runs alone", async () => {
+    const started = remote.started();
+    let beat: ReturnType<typeof setInterval> | undefined;
+    cleanups.push(() => clearInterval(beat));
+    await follow((_req, res) => {
+      ndjson(res);
+      res.write(`${remote.line(started)}\n`);
+      beat = setInterval(() => res.write("\n"), 40);
+    });
+    await vi.waitFor(() => expect(originIds()).toEqual([started.id]), { timeout: 5000 });
+    const other = await remoteRun("run-remote-2", projectId);
+    commitEvent(db, ledger, () => ({
+      event: {
+        projectId: null, actor: owner, type: "machine.paired",
+        payload: {
+          machineId: other.machineId, name: "Laptop", publicKey: other.identity.publicKeyBase64, fingerprint: other.identity.fingerprint,
+          address: "127.0.0.1:1", role: "entered_code",
+        },
+      },
+      result: () => undefined,
+    }));
+    await link.unpair(owner, other.machineId);
+    await sleep(200);
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "running", error: null });
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
+  });
+
   it("a run this computer did not request is never followed, and shutdown stops every stream", async () => {
     const fixture = await fixtureWorker(remote.identity, (_req, res) => {
       ndjson(res);

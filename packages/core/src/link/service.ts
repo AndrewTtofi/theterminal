@@ -663,7 +663,10 @@ export class LinkService {
     }
   }
 
-  /** Commits `machine.paired` and drops any cached presence for it. */
+  /**
+   * Commits `machine.paired` and resets its cached presence. The side that entered the code has just been answered by
+   * the machine over the pinned connection, so it counts as online; the side that showed the code has not reached it.
+   */
   private recordPaired(actor: Actor, payload: {
     machineId: string; name: string; publicKey: string; fingerprint: string; address: string; role: "showed_code" | "entered_code";
   }): Machine {
@@ -671,7 +674,8 @@ export class LinkService {
       event: { projectId: null, actor, type: "machine.paired", payload },
       result: () => undefined,
     }));
-    this.checked.delete(payload.machineId);
+    if (payload.role === "entered_code") this.checked.set(payload.machineId, { online: true, checkedAt: this.now() });
+    else this.checked.delete(payload.machineId);
     const m = getMachine(this.deps.db, payload.machineId);
     if (!m) throw new NotFoundError("machine", payload.machineId);
     return m;

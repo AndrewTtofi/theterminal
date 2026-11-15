@@ -118,6 +118,7 @@ export class RemoteRunService {
   private readonly streamIdleMs: number;
   private readonly clean: (s: string) => string;
   private readonly following = new Map<string, Following>();
+  private readonly stopWatching: () => void;
   private closed = false;
 
   constructor(deps: RemoteRunDeps) {
@@ -125,6 +126,26 @@ export class RemoteRunService {
     this.backoffMs = deps.backoffMs && deps.backoffMs.length > 0 ? deps.backoffMs : DEFAULT_BACKOFF_MS;
     this.streamIdleMs = deps.streamIdleMs ?? DEFAULT_STREAM_IDLE_MS;
     this.clean = deps.clean ?? ((s) => redact(s));
+    // An unlinked machine's runs end when it is unlinked, not when its stream next breaks: a quiet stream (a decision
+    // pending there) is kept open by heartbeats indefinitely. After the entry's listeners, so the order is kept.
+    this.stopWatching = deps.ledger.onAppend((e) => {
+      if (e.type !== "machine.unpaired") return;
+      const machineId = (e.payload as { machineId?: unknown }).machineId;
+      if (typeof machineId === "string") queueMicrotask(() => this.unpaired(machineId));
+    });
+  }
+
+  /**
+   * The machine was unlinked: its key is gone, so nothing from it can be checked any more. Each run this computer
+   * asked of it stops being followed and ends here (`machine_unpaired`); nothing is sent to the machine.
+   */
+  private unpaired(machineId: string): void {
+    for (const r of listLinkRuns(this.deps.db)) {
+      if (r.direction !== "requested" || r.machineId !== machineId) continue;
+      if (r.state !== "requested" && r.state !== "running" && r.state !== "finished") continue;
+      this.following.get(r.runId)?.abort.abort();
+      this.recordFailed(r.projectId, r.runId, machineId, "machine_unpaired");
+    }
   }
 
   /** Whether the run executes on a linked machine. */
@@ -290,6 +311,7 @@ export class RemoteRunService {
   /** Stops following every run (each stream is aborted) and waits for them to end. */
   async shutdown(): Promise<void> {
     this.closed = true;
+    this.stopWatching();
     const all = [...this.following.values()];
     for (const f of all) f.abort.abort();
     await Promise.all(all.map((f) => f.done));

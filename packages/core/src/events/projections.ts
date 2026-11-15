@@ -366,14 +366,17 @@ export function listActions(db: Db, runId: string): AgentAction[] {
   return rows.map(toAction);
 }
 
-/** Pending actions across every project, oldest first, each with its project's id and name. */
+/**
+ * Pending actions across every project, oldest first, each with its project's id and name. Only a running run's
+ * actions wait for a decision: a run on a linked machine that ended here (link.run_failed) keeps its last record.
+ */
 export function listAllPendingActions(db: Db): PendingAgentAction[] {
   const rows = db
     .prepare(
       `SELECT a.*, r.project_id AS p_id, p.name AS p_name, m.name AS m_name FROM agent_actions a
        JOIN agent_runs r ON r.id = a.run_id JOIN projects p ON p.id = r.project_id
        LEFT JOIN machines m ON m.id = r.machine_id
-       WHERE a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+       WHERE a.status = 'pending' AND r.status = 'running' ORDER BY a.requested_at, a.rowid`,
     )
     .all() as (ActionRow & { p_id: string; p_name: string; m_name: string | null })[];
   return rows.map((r) => ({
@@ -385,7 +388,7 @@ export function listPendingActions(db: Db, projectId: string): AgentAction[] {
   const rows = db
     .prepare(
       `SELECT a.* FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-       WHERE r.project_id = ? AND a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+       WHERE r.project_id = ? AND a.status = 'pending' AND r.status = 'running' ORDER BY a.requested_at, a.rowid`,
     )
     .all(projectId) as ActionRow[];
   return rows.map(toAction);
@@ -415,7 +418,9 @@ export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts
       .get(from.toISOString(), to.toISOString()) as { total: number }).total;
   return {
     runningAgents: count("SELECT COUNT(*) AS n FROM agent_runs WHERE status = 'running'"),
-    pendingDecisions: count("SELECT COUNT(*) AS n FROM agent_actions WHERE status = 'pending'"),
+    pendingDecisions: count(
+      "SELECT COUNT(*) AS n FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id WHERE a.status = 'pending' AND r.status = 'running'",
+    ),
     todayCostUsd: cost(dayStart, nextDay),
     monthCostUsd: cost(monthStart, nextMonth),
     connections: {
@@ -496,7 +501,7 @@ export function countPendingActions(db: Db, projectId: string): number {
   return (db
     .prepare(
       `SELECT COUNT(*) AS n FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-       WHERE r.project_id = ? AND a.status = 'pending'`,
+       WHERE r.project_id = ? AND a.status = 'pending' AND r.status = 'running'`,
     )
     .get(projectId) as { n: number }).n;
 }

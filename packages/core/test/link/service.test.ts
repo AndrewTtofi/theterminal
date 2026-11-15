@@ -458,6 +458,21 @@ describe("LinkService pairing", () => {
     await expect(e.link.pair(owner, `127.0.0.1:${sPort}`, shown.code)).rejects.toBeInstanceOf(NoPairingError);
   });
 
+  it("counts the machine it just paired with as online on the side that entered the code, before any hello", async () => {
+    const { s, e, sPort } = await pairOfServices();
+    // E reached S over TLS to pair, so E knows S answered; S was only reached, so it says nothing until it checks.
+    const counted: Array<{ linked: number; online: number }> = [];
+    const stop = e.ledger.onAppend((x) => {
+      if (x.type === "machine.paired") queueMicrotask(() => counted.push(e.link.counts()));
+    });
+    await e.link.pair(owner, `127.0.0.1:${sPort}`, s.link.showCode().code);
+    stop();
+    expect(counted).toEqual([{ linked: 1, online: 1 }]);
+    expect(e.link.counts()).toEqual({ linked: 1, online: 1 });
+    expect(e.link.presence()[0]!.online).toBe(true);
+    expect(s.link.counts()).toEqual({ linked: 1, online: 0 });
+  });
+
   it("refuses to pair with itself, and refuses a malformed code or address before connecting", async () => {
     const { e, ePort } = await pairOfServices();
     const own = e.link.showCode();

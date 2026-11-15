@@ -609,6 +609,21 @@ describe("mirrored remote runs (applyMirrored)", () => {
     expect(dump()).toEqual(live);
   });
 
+  it("a pending action of a mirrored run that link.run_failed ended is no longer pending anywhere", () => {
+    mirror(remote.started());
+    mirror(remote.requested("act-1"));
+    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["act-1"]);
+    expect(countPendingActions(db, PROJECT)).toBe(1);
+    emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "machine_unpaired" }, link, PROJECT);
+    // Nothing from that machine can be checked any more, so nothing can settle it: no one is asked to decide it.
+    expect(listAllPendingActions(db)).toEqual([]);
+    expect(listPendingActions(db, PROJECT)).toEqual([]);
+    expect(countPendingActions(db, PROJECT)).toBe(0);
+    expect(workspaceCounts(db).pendingDecisions).toBe(0);
+    // The record itself is kept as it was.
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "act-1", status: "pending" })]);
+  });
+
   it("rebuild with mirrored entries equals the live tables", () => {
     mirror(remote.started());
     mirror(remote.connectionUsed());
