@@ -1,10 +1,10 @@
-import type { AgentAction, AgentRun, LedgerEntry, MirroredOrigin } from "@theterminal/shared";
+import { mirrorFrameSchema, type AgentAction, type AgentRun, type LedgerEntry, type MirroredOrigin } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { getLinkRun, getMachine, MirroredEntryRefusedError } from "../events/projections.js";
 import { redact } from "../agents/redact.js";
-import { checkFrame, cleanStrings, displayOrigin, type FrameCheck, type FrameRefusal } from "./mirror.js";
+import { checkFrame, cleanStrings, displayOrigin, verifyFrame, type FrameCheck, type FrameRefusal } from "./mirror.js";
 
 /**
  * The requester's side of a mirrored run, where it touches the ledger: committing one untrusted line of a worker's
@@ -135,4 +135,44 @@ export function remoteDisplay(db: Db, clean: (s: string) => string = builtInClea
           output: a.output === null ? null : clean(a.output), input: cleanStrings(a.input, clean),
         },
   };
+}
+
+/** The most bad seqs one verification lists; `ok` and `checked` still cover every entry. */
+export const MAX_BAD_SEQS = 1000;
+
+/**
+ * Checks the signature of every `link.mirrored` entry in the ledger again, with the key this computer pinned for the
+ * machine it names (the `machines` table now). An entry of a machine that is no longer paired is bad: its key is gone,
+ * so nothing vouches for it. A stored payload that no longer reads as a frame is bad too.
+ */
+export function verifyMirrored(db: Db): { ok: boolean; checked: number; badSeqs: number[] } {
+  const keys = new Map<string, Buffer | null>();
+  const keyOf = (machineId: string): Buffer | null => {
+    if (!keys.has(machineId)) {
+      const m = getMachine(db, machineId);
+      keys.set(machineId, m ? Buffer.from(m.publicKey, "base64") : null);
+    }
+    return keys.get(machineId)!;
+  };
+  let checked = 0;
+  let bad = 0;
+  const badSeqs: number[] = [];
+  const rows = db.prepare("SELECT seq, payload FROM ledger WHERE type = 'link.mirrored' ORDER BY seq").iterate() as Iterable<{ seq: number; payload: string }>;
+  for (const row of rows) {
+    checked++;
+    let good = false;
+    try {
+      const p = JSON.parse(row.payload) as { machineId?: unknown; origin?: unknown; signature?: unknown };
+      const key = typeof p.machineId === "string" ? keyOf(p.machineId) : null;
+      const frame = mirrorFrameSchema.safeParse({ origin: p.origin, signature: p.signature });
+      good = key !== null && frame.success && verifyFrame(key, frame.data);
+    } catch {
+      good = false;
+    }
+    if (!good) {
+      bad++;
+      if (badSeqs.length < MAX_BAD_SEQS) badSeqs.push(row.seq);
+    }
+  }
+  return { ok: bad === 0, checked, badSeqs };
 }

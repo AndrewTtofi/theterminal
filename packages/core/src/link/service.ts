@@ -543,6 +543,15 @@ export class LinkService {
     }
   }
 
+  /**
+   * What another connection to a paired machine just showed (a remote run's event stream answering, or failing to
+   * connect), kept as its last check, so its presence reads offline while a run waits to reconnect.
+   */
+  observed(machineId: string, online: boolean): void {
+    if (getMachine(this.deps.db, machineId) === null) return;
+    this.checked.set(machineId, { online, checkedAt: this.now() });
+  }
+
   /** Each paired machine with what its last hello said and when (null when never checked). */
   presence(): MachinePresence[] {
     return this.machines().map((m) => {

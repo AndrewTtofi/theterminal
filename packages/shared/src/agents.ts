@@ -58,7 +58,8 @@ export type AgentAction = {
 };
 
 /** A pending action with the project it belongs to, for the cross-project "Needs you" strip. */
-export type PendingAgentAction = AgentAction & { projectId: string; projectName: string };
+/** `machineName`: the name this computer recorded for the linked machine the run executes on; absent for a local run. */
+export type PendingAgentAction = AgentAction & { projectId: string; projectName: string; machineName?: string };
 
 export const CLAUDE_SUBSCRIPTION_ACK =
   "I understand that running Claude on my own Claude subscription through The Terminal may violate Anthropic's terms and could put my account at risk. I choose to do this at my own risk.";

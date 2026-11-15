@@ -103,6 +103,7 @@ const script: FakeStep[] = [{ propose: { ...shell, paths: [] }, result: { ok: tr
 let a: RunningServer;
 let b: RunningServer;
 let projectId: string;
+let aMachineId: string;
 
 beforeAll(async () => {
   for (const k of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"] as const) delete process.env[k];
@@ -195,13 +196,32 @@ describe("offline mode (spec goal 9)", { timeout: 30_000 }, () => {
     const res = await send(b, "POST", "/api/link/pair", { address: `127.0.0.1:${aSelf.linking.port}`, code });
     expect(res.status).toBe(201);
     expect(((await res.json()) as Machine).id).toBe(aSelf.machineId);
+    aMachineId = aSelf.machineId;
     expect((await json<{ machines: { linked: number } }>(send(b, "GET", "/api/status"))).machines.linked).toBe(1);
     // Pairing used no internet, so B never inferred anything about it.
     expect((await network(b)).state).toBe("unknown");
   });
 
-  // Needs remote runs (Tasks 7c and 8b), which are not on this branch yet.
-  it.todo("a remote fake run on the linked machine completes and is imported");
+  it("a remote fake run on the linked machine completes and is imported", { timeout: 120_000 }, async () => {
+    const remoteProject = (await json<{ id: string }>(send(b, "POST", "/api/projects", { name: "Linked club", pitch: "x" }))).id;
+    const run = await json<AgentRun>(send(b, "POST", `/api/projects/${remoteProject}/runs`, {
+      adapter: "fake", prompt: "run the tests over there", machineId: aMachineId,
+    }));
+    expect(run.machineId).toBe(aMachineId);
+    let action: AgentAction | undefined;
+    await vi.waitFor(async () => {
+      action = (await json<AgentAction[]>(send(b, "GET", `/api/projects/${remoteProject}/pending-actions`)))[0];
+      expect(action).toBeDefined();
+    }, { timeout: 60_000, interval: 100 });
+    expect((await send(b, "POST", `/api/actions/${action!.id}/decision`, { decision: "allow" })).status).toBe(200);
+    await vi.waitFor(async () => {
+      const entries = await json<Array<{ type: string; payload: { runId?: string; commit?: string } }>>(send(b, "GET", "/api/ledger?limit=500"));
+      expect(entries.find((e) => e.type === "link.changes_imported" && e.payload.runId === run.id)?.payload.commit).toMatch(/^[0-9a-f]{40}$/);
+    }, { timeout: 60_000, interval: 100 });
+    expect((await getRun(b, run.id)).run).toMatchObject({ status: "completed", machineId: aMachineId });
+    // A run on a machine of the local network says nothing about the internet.
+    expect((await network(b)).state).toBe("unknown");
+  });
 
   it("the GitHub overview answers 503 github_unavailable while /api/status still answers 200", async () => {
     const gh = await send(a, "POST", "/api/connections", {

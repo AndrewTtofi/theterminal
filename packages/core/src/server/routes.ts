@@ -18,6 +18,7 @@ import {
   IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
 } from "../link/service.js";
 import { displayEntry } from "../link/mirrored.js";
+import { RemoteRunRefusedError } from "../link/remote-runs.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
@@ -148,6 +149,8 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof SelfPairingError) return reply.code(400).send({ error: "self_pairing" });
   if (err instanceof MachineUnreachableError) return reply.code(502).send({ error: "machine_unreachable" });
   if (err instanceof MachineKeyMismatchError) return reply.code(409).send({ error: "machine_key_mismatch" });
+  // Remote runs, requester side: the worker's code and this computer's name for it, never the worker's message.
+  if (err instanceof RemoteRunRefusedError) return reply.code(err.status).send({ error: "remote_refused", code: err.code, machine: err.machine });
   if (err instanceof RemoteRefusedError) return reply.code(502).send({ error: "machine_refused" });
   // Remote runs, worker side: a repository sent by a paired machine.
   if (err instanceof RepoTooLargeError) return reply.code(413).send({ error: "repo_too_large" });

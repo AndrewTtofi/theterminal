@@ -78,6 +78,12 @@ async function enabled(s: RunningServer) {
 }
 
 describe("link routes", { timeout: 30_000 }, () => {
+  it("GET /api/link/verify is 401 without auth, and with nothing mirrored answers ok with nothing checked", async () => {
+    const s = await start();
+    expect((await send(s, "GET", "/api/link/verify", undefined, { authed: false })).status).toBe(401);
+    expect(await json(send(s, "GET", "/api/link/verify"))).toEqual({ ok: true, checked: 0, badSeqs: [] });
+  });
+
   it("the first start records this computer's identity at seq 1", async () => {
     const s = await start();
     const [first] = await ledger(s);

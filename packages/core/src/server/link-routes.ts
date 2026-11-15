@@ -3,6 +3,8 @@ import { z } from "zod";
 import { LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { IdentityUnavailableError, type LinkService } from "../link/service.js";
 import type { LinkCapacity } from "../link/capacity.js";
+import { verifyMirrored } from "../link/mirrored.js";
+import type { Db } from "../db.js";
 
 export type LinkRouteDeps = {
   link: LinkService;
@@ -10,6 +12,8 @@ export type LinkRouteDeps = {
   capacity: LinkCapacity;
   /** The port the listener asks for when the Owner enables linking (the next 20 are tried). Default 4418. */
   port?: number;
+  /** The projections and the ledger, for GET /api/link/verify. */
+  db: Db;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -86,6 +90,10 @@ export function registerLinkRoutes(app: FastifyInstance, deps: LinkRouteDeps): v
     await link.unpair(actor, id);
     return reply.code(204).send();
   });
+
+  // Every linked machine's entry recorded here, checked again against the key pinned for it now. The plan gives this
+  // to a Reviewer; there is only the Owner today, behind registerAuth like every /api route.
+  app.get("/api/link/verify", async () => verifyMirrored(deps.db));
 
   // Asked again now, or with `?cached=1` from the 30 s cache (sharing a request in flight). A machine that does not
   // answer, refuses or sends something unreadable is `online: false` with the values it last sent; nothing from its

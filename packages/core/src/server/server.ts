@@ -29,6 +29,7 @@ import { wireLink } from "./link-wiring.js";
 import type { LinkService } from "../link/service.js";
 import type { Discovery } from "../link/discovery.js";
 import { registerLinkRoutes } from "./link-routes.js";
+import { RemoteRunService } from "../link/remote-runs.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -437,6 +438,8 @@ export async function createServer(opts: {
   linkPort?: number;
   /** Finds other Terminals on the network. Default: mDNS, or the in-process fake under the test flags (selectDiscovery). */
   discovery?: Discovery;
+  /** Tests only: shorter reconnect waits (and stream idle timeout) for runs on linked machines. */
+  remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -567,6 +570,12 @@ export async function createServer(opts: {
       return redact(recorded.scrub(redact(s, secrets)), secrets);
     };
     const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which, settling: (id) => runner.settling(id) });
+    // Runs this computer asks a linked machine to do: followed through its signed entries, decided and stopped there.
+    const remote = new RemoteRunService({
+      db, ledger, link: linkService, worktrees, dataDir: opts.dataDir, clean: cleanMirrored,
+      ...(opts.remoteRuns?.backoffMs !== undefined && { backoffMs: opts.remoteRuns.backoffMs }),
+      ...(opts.remoteRuns?.streamIdleMs !== undefined && { streamIdleMs: opts.remoteRuns.streamIdleMs }),
+    });
 
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });
@@ -591,6 +600,7 @@ export async function createServer(opts: {
         available: programAvailable,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
         clean: cleanMirrored,
+        remoteRuns: remote,
       });
       registerIntakeRoutes(app, { intake });
       registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
@@ -608,10 +618,12 @@ export async function createServer(opts: {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
         localEngines: selectLocalEngines(process.env, opts.localEngines), machines: () => wired.capacity.all(),
       }).report;
-      registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
+      registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, db, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
       // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
       await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported
+      // Runs on linked machines survive a restart: the runner left them alone; follow each from its cursor again.
+      if (!ledger.readOnly) remote.resume();
       await app.ready();
 
       const first = opts.port ?? DEFAULT_PORT;
@@ -632,6 +644,7 @@ export async function createServer(opts: {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
     } catch (err) {
+      await remote.shutdown();
       await linkService.shutdown();
       await overrides.shutdown();
       await signin.shutdown();
@@ -647,6 +660,7 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart
           await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open

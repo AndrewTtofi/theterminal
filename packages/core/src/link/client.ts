@@ -69,8 +69,11 @@ export const MAX_JSON_BYTES = 1024 * 1024;
 /** Each NDJSON line of a stream: the mirrored frame cap, enforced before a line's newline arrives (NdjsonLines). */
 export const MAX_FRAME_BYTES = MIRROR_FRAME_BYTES;
 const DEFAULT_TIMEOUT_MS = 10_000;
-/** How long a stream may stay silent before it is treated as cut (the caller then reconnects). */
-const DEFAULT_STREAM_IDLE_MS = 120_000;
+/**
+ * How long a stream may stay silent before it is treated as cut (the caller then reconnects): the link's idle timeout.
+ * A worker writes a heartbeat line every 30 s, so only a machine that is gone stays silent this long.
+ */
+export const DEFAULT_STREAM_IDLE_MS = 120_000;
 
 const refusalSchema = z.object({ error: z.string().min(1).max(100).regex(/^[a-z0-9_]+$/), message: z.string().max(500).optional() });
 
@@ -170,12 +173,18 @@ export class LinkClient {
     return this.json(res, peer, schema);
   }
 
-  /** An NDJSON stream: each non-empty line goes to `onFrame`, one at a time. Resolves on a clean end or an abort. */
-  async stream(peer: Peer, path: string, onFrame: (line: string) => Promise<void>, signal: AbortSignal): Promise<void> {
+  /**
+   * An NDJSON stream: each non-empty line goes to `onFrame`, one at a time. Resolves on a clean end or an abort. Any
+   * bytes (a blank heartbeat line too) keep it open; silence for `idleMs` (default: this client's stream idle timeout)
+   * cuts it with MachineUnreachableError.
+   */
+  async stream(
+    peer: Peer, path: string, onFrame: (line: string) => Promise<void>, signal: AbortSignal, opts: { idleMs?: number } = {},
+  ): Promise<void> {
     if (signal.aborted) return;
     const { req, res } = await this.open(peer, "GET", path, { accept: "application/x-ndjson" }, (r) => r.end(), signal);
     if (!ok(res)) throw await refusal(res, peer.machineId);
-    res.socket.setTimeout(this.streamIdleMs);
+    res.socket.setTimeout(opts.idleMs ?? this.streamIdleMs);
     const abort = () => req.destroy();
     signal.addEventListener("abort", abort, { once: true });
     // Lines past the cap or not UTF-8 are refused as they arrive; blank lines (the worker's heartbeat) are skipped.
@@ -233,9 +242,22 @@ export class LinkClient {
     await this.json(res, peer);
   }
 
-  /** Saves a response body to `file`; past `maxBytes` it aborts with 413 `too_large`. A failed download leaves no file. */
-  async download(peer: Peer, path: string, file: string, maxBytes: number): Promise<void> {
-    const { req, res } = await this.open(peer, "GET", path, { accept: "application/octet-stream" }, (r) => r.end());
+  /**
+   * Saves a response body to `file`, in a folder that must exist; past `maxBytes` it aborts with 413 `too_large`. An
+   * abort through `signal` ends it as MachineUnreachableError. A failed download leaves no file.
+   */
+  async download(peer: Peer, path: string, file: string, maxBytes: number, signal?: AbortSignal): Promise<void> {
+    const { req, res } = await this.open(peer, "GET", path, { accept: "application/octet-stream" }, (r) => r.end(), signal);
+    const abort = () => req.destroy();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      await this.save(peer, req, res, file, maxBytes);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  private async save(peer: Peer, req: ClientRequest, res: IncomingMessage, file: string, maxBytes: number): Promise<void> {
     if (!ok(res)) throw await refusal(res, peer.machineId);
     const declared = Number(res.headers["content-length"] ?? NaN);
     if (Number.isFinite(declared) && declared > maxBytes) {

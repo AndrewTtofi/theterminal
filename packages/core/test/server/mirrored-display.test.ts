@@ -8,6 +8,7 @@ import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { acceptMirroredLine } from "../../src/link/mirrored.js";
 import { pairAndRequest, remoteRun } from "../link/remote-fixtures.js";
 
@@ -36,7 +37,9 @@ describe("a linked machine's entries leave this server through its own cleaner",
   it("redacts a mirrored payload in the ledger, the live stream, the story and the export, and in their narration", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "tt-mirrored-"));
     dirs.push(dataDir);
-    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+    const s = await createServer({
+      dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(),
+    });
     running.push(s);
     const projectId = (await post<{ id: string }>(s, "/api/projects", { name: "Book Club" })).id;
     const cardId = (await post<{ id: string }>(s, `/api/projects/${projectId}/cards`, { title: "Reading list", stage: "plan" })).id;
@@ -85,19 +88,20 @@ describe("a linked machine's entries leave this server through its own cleaner",
       expect(leaks(body)).toBe(false);
     }
 
-    // Stopping or deciding for it here is refused: it runs on the other machine.
+    // Stopping or deciding for it is sent to the machine it runs on, never done here; that machine does not answer
+    // (a closed port), so both are 502 and nothing is recorded.
     const head = (await (await get(s, "/api/ledger?limit=500")).json() as LedgerEntry[]).at(-1)!.seq;
     const stop = await fetch(`http://127.0.0.1:${s.port}/api/runs/${remote.runId}/stop`, {
       method: "POST", headers: { authorization: `Bearer ${s.token}` },
     });
-    expect(stop.status).toBe(409);
-    expect(await stop.json()).toMatchObject({ error: "remote_run" });
+    expect(stop.status).toBe(502);
+    expect(await stop.json()).toEqual({ error: "machine_unreachable" });
     const decision = await fetch(`http://127.0.0.1:${s.port}/api/actions/act-1/decision`, {
       method: "POST", headers: { authorization: `Bearer ${s.token}`, "content-type": "application/json" },
       body: JSON.stringify({ decision: "allow", reason: "" }),
     });
-    expect(decision.status).toBe(409);
-    expect(await decision.json()).toMatchObject({ error: "remote_run" });
+    expect(decision.status).toBe(502);
+    expect(await decision.json()).toEqual({ error: "machine_unreachable" });
     expect((await (await get(s, "/api/ledger?limit=500")).json() as LedgerEntry[]).at(-1)!.seq).toBe(head);
 
     const messages: LedgerEntry[] = [];

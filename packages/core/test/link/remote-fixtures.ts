@@ -75,7 +75,8 @@ export function requestRun(db: Db, ledger: Ledger, remote: RemoteRun): void {
 export function pairAndRequest(db: Db, ledger: Ledger, remote: RemoteRun, name = "GPU box"): void {
   emitter(db, ledger)("machine.paired", {
     machineId: remote.machineId, name, publicKey: remote.identity.publicKeyBase64, fingerprint: remote.identity.fingerprint,
-    address: "gpu-box.local:4418", role: "entered_code",
+    // A closed loopback port: a server that follows or decides the run is refused at once, never resolves a name.
+    address: "127.0.0.1:1", role: "entered_code",
   }, null);
   requestRun(db, ledger, remote);
 }

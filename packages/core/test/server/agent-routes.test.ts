@@ -20,6 +20,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { createServer, repairSharedGitconfig, type RunningServer } from "../../src/server/server.js";
 import { AwsRejectedError, fakeSts, type StsCaller } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
@@ -66,7 +67,9 @@ async function start(
     if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
   }
   const dataDir = tmp();
-  const s = await createServer({ dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), ...opts });
+  const s = await createServer({
+    dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...opts,
+  });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
   return { s, projectId: project.id, dataDir };
@@ -307,6 +310,24 @@ describe("agent API", { timeout: 15000 }, () => {
     expect((await get(s, "/api/projects/nope/pending-actions")).status).toBe(404);
     expect((await get(s, "/api/runs/nope")).status).toBe(404);
     expect((await post(s, "/api/actions/nope/decision", { decision: "allow" })).status).toBe(404);
+  });
+
+  it("a run on a linked machine: an unpaired machine id is 404, a malformed one 400, and without auth 401; nothing is recorded", async () => {
+    const { s, projectId } = await start(script);
+    const ledgerLength = async () => (await json<unknown[]>(get(s, "/api/ledger?limit=500"))).length;
+    const before = await ledgerLength();
+    const unpaired = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", machineId: "0".repeat(32) });
+    expect(unpaired.status).toBe(404);
+    expect(await unpaired.json()).toEqual({ error: "not_found" });
+    const malformed = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", machineId: "../x" });
+    expect(malformed.status).toBe(400);
+    const anonymous = await fetch(`${base(s)}/api/projects/${projectId}/runs`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ adapter: "fake", prompt: "go", machineId: "0".repeat(32) }),
+    });
+    expect(anonymous.status).toBe(401);
+    expect(await ledgerLength()).toBe(before);
+    expect(await json<AgentRun[]>(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
   });
 
   it("an empty or oversized prompt is 400 invalid_input, before any project work", async () => {
