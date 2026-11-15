@@ -17,8 +17,10 @@ describe("builderConfig", () => {
     expect(c.electronVersion).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("puts staged core (with its node_modules), Node and the UI under Resources", () => {
-    expect(c.extraResources).toEqual([{ from: "stage", to: ".", filter: ["core/**/*", "node/**/*", "ui/**/*"] }]);
+  it("puts staged core (with its node_modules), Node, the UI and the third-party notices under Resources", () => {
+    expect(c.extraResources).toEqual([
+      { from: "stage", to: ".", filter: ["core/**/*", "node/**/*", "ui/**/*", "licenses/**/*", "THIRD_PARTY_NOTICES.txt"] },
+    ]);
   });
 
   it("ad-hoc signs macOS without the hardened runtime and builds a dmg", () => {
