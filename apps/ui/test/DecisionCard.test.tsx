@@ -124,12 +124,17 @@ describe("DecisionCard", () => {
   });
 
   it("makes C1 controls and bidi and zero-width characters in the text to be typed visible", () => {
-    const typed = "a\u0085b\u009bc​d‏e‪f‮g⁦h⁩i j";
+    const typed = "a\u0085b\u009bc\u200Bd\u200Fe\u202Af\u202Eg\u2066h\u2069i j";
     const stdin = { ...action, tool: "codex.stdin", summary: "Type into bash: ...", input: { command: "bash", kind: "writeStdin", reason: typed } };
     const { container } = render(<DecisionCard action={stdin} onDecide={vi.fn()} />);
     expect(container.querySelector("pre.command")?.textContent).toBe(
       "a\\u0085b\\u009bc\\u200bd\\u200fe\\u202af\\u202eg\\u2066h\\u2069i j",
     );
+  });
+
+  it("makes hidden characters in the project name visible", () => {
+    const { container } = render(<DecisionCard action={action} projectName={"Book\u202EClub"} onDecide={vi.fn()} />);
+    expect(container.querySelector("p.project-name")?.textContent).toBe("Book\\u202eClub");
   });
 
   it("makes hidden characters in a shell command visible", () => {

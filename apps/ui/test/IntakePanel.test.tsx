@@ -37,6 +37,12 @@ function setup(intake: IntakeView | null | undefined, over: Partial<WorkbenchMod
 const heading = () => screen.getByRole("heading", { name: "Plan intake", level: 2 });
 
 describe("IntakePanel", () => {
+  it("says the project no longer exists instead of loading forever", () => {
+    const { panel } = setup(undefined, { intakeError: "This project no longer exists" });
+    expect(within(panel).getByRole("status").textContent).toBe("This project no longer exists");
+    expect(within(panel).queryByText("Loading…")).toBeNull();
+  });
+
   it("asks for a project while none is selected", () => {
     setup(undefined, { selectedId: null });
     expect(screen.getByText("Choose a project to plan it.")).toBeTruthy();
@@ -177,10 +183,10 @@ describe("IntakePanel", () => {
   });
 
   it("shows hidden characters in recorded text as escapes", () => {
-    const view = intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }, { name: "Book‮Club" });
+    const view = intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }, { name: "Book\u202EClub" });
     const { panel } = setup(view);
     expect(panel.textContent).toContain("Book\\u202eClub is for");
-    expect(panel.textContent).not.toContain("‮");
+    expect(panel.textContent).not.toContain("\u202E");
   });
 
   it("caps the idea at the server's limit", () => {

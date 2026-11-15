@@ -180,7 +180,10 @@ export const api = {
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
   cancelSignIn: (id: string) => request<void>(`/api/connections/signin/${enc(id)}`, { method: "DELETE" }),
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
-  /** The project's guided intake, or null when it has none yet. */
+  /**
+   * The project's guided intake, or null when it has none yet. A project that no longer exists throws its 404
+   * `not_found`, which `errorMessage(e, "intake")` words as "This project no longer exists".
+   */
   getIntake: async (projectId: string): Promise<IntakeView | null> => {
     try {
       return await request<IntakeView>(`/api/projects/${enc(projectId)}/intake`);
@@ -235,7 +238,8 @@ export function exportLedgerUrl(projectId: string | null): string {
 
 /**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
- * `"intake"` words a conflict as the project already having an intake, `"reopen"` as the plan being open already.
+ * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
+ * conflict as the plan being open already.
  */
 export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"): string {
   if (e instanceof ApiError) {
@@ -248,6 +252,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     }
     if (e.code === "decision_not_applicable") return "That decision no longer applies to your answers";
     if (context === "intake" && e.status === 409 && e.code === "conflict") return "This project already has a plan intake";
+    if (context === "intake" && e.status === 404 && e.code === "not_found") return "This project no longer exists";
     if (context === "reopen" && e.status === 409 && e.code === "conflict") return "This plan is already open for changes.";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";

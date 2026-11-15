@@ -170,7 +170,10 @@ describe("intake api", () => {
     f = respond(404, { error: "no_intake" });
     expect(await api.getIntake("p1")).toBeNull();
     respond(404, { error: "not_found" });
-    expect(await api.getIntake("p1").catch((e: unknown) => e)).toMatchObject({ status: 404, code: "not_found" });
+    const gone = await api.getIntake("p1").catch((e: unknown) => e);
+    expect(gone).toMatchObject({ status: 404, code: "not_found" });
+    // A project that no longer exists is said plainly, not left loading.
+    expect(errorMessage(gone, "intake")).toBe("This project no longer exists");
   });
 
   it("starts, answers, decides, completes and reopens on the intake routes", async () => {

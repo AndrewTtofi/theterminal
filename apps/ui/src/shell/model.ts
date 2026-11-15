@@ -111,6 +111,8 @@ export type WorkbenchModel = {
    * intake.* or card.* entry of the selected project.
    */
   intake: IntakeView | null | undefined;
+  /** Why the intake cannot load (the project no longer exists), shown instead of loading; absent otherwise. */
+  intakeError?: string | null;
   /** Each resolves true when the server accepted the change; a refusal is shown as the error message. */
   onStartIntake: (idea: string) => Promise<boolean>;
   onAnswerIntake: (questionId: QuestionId, answer: IntakeAnswer) => Promise<boolean>;

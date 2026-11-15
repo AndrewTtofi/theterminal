@@ -61,6 +61,7 @@ type BodyProps = {
 function IntakeBody({ model, answersRef, expanded, onExpand }: BodyProps) {
   const intake = model.intake;
   if (model.selectedId === null) return <p className="empty">Choose a project to plan it.</p>;
+  if (intake === undefined && model.intakeError) return <p className="empty" role="status">{model.intakeError}</p>;
   if (intake === undefined) return <p className="empty">Loading…</p>;
   if (intake === null) return <Describe onStart={model.onStartIntake} />;
   if (intake.step === "completed") return <Completed view={intake} onReopen={model.onReopenIntake} />;

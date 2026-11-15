@@ -53,7 +53,7 @@ vi.mock("../src/api", () => ({
       super(code);
     }
   },
-  errorMessage: () => "err",
+  errorMessage: vi.fn(() => "err"),
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
@@ -69,7 +69,7 @@ vi.mock("../src/api", () => ({
 
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
-import { ApiError, api } from "../src/api";
+import { ApiError, api, errorMessage } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
 import { intakeView } from "./intake-fixtures";
@@ -186,6 +186,19 @@ describe("App plan intake", () => {
   const entry = (seq: number, type: LedgerEntry["type"], projectId = "A"): LedgerEntry => ({
     seq, id: String(seq), ts: "2026-01-01T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
     type, payload: {}, prevHash: "", hash: "",
+  });
+
+  it("says so when the selected project no longer exists, instead of loading forever", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const gone = new ApiError(404, "not_found");
+    m.getIntake.mockRejectedValue(gone);
+    vi.mocked(errorMessage).mockImplementation((e, context) =>
+      e === gone && context === "intake" ? "This project no longer exists" : "err");
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await userEvent.click(screen.getByRole("button", { name: "Plan intake" }));
+    expect(await screen.findByText("This project no longer exists")).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
   });
 
   it("loads the selected project's intake, reloads it on its intake and card entries, and shows a saved answer", async () => {

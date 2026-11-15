@@ -49,6 +49,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [board, setBoard] = useState<BoardData | null>(null);
   const [intake, setIntake] = useState<IntakeView | null | undefined>(undefined);
+  const [intakeError, setIntakeError] = useState<string | null>(null);
   const refreshIntake = useRef<() => void>(() => {});
   /** The selected project as of the latest render, so a late intake answer for another project is dropped. */
   const selectedRef = useRef<string | null>(null);
@@ -253,11 +254,25 @@ export function App() {
   // The selected project's guided intake: undefined while it loads, null when the project has none.
   useEffect(() => {
     setIntake(undefined);
+    setIntakeError(null);
     if (!selectedId) return;
     let cancelled = false;
     const refresh = coalesced(async () => {
-      const view = await api.getIntake(selectedId);
-      if (!cancelled) setIntake(view);
+      let view: IntakeView | null;
+      try {
+        view = await api.getIntake(selectedId);
+      } catch (e) {
+        // A project that no longer exists will not come back on a retry: say so instead of loading forever.
+        if (!cancelled && e instanceof ApiError && e.status === 404 && e.code === "not_found") {
+          setIntake(undefined);
+          setIntakeError(errorMessage(e, "intake"));
+        }
+        throw e;
+      }
+      if (!cancelled) {
+        setIntake(view);
+        setIntakeError(null);
+      }
     }, () => cancelled);
     refreshIntake.current = refresh;
     refresh();
@@ -474,6 +489,7 @@ export function App() {
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
     intake: selectedId ? intake : undefined,
+    intakeError: selectedId ? intakeError : null,
     onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),
     onAnswerIntake: (questionId, answer) => intakeAction((id) => api.answerIntake(id, questionId, answer)),
     onDecideIntake: (decisionId, chosen, rationale) => intakeAction((id) => api.decideIntake(id, decisionId, chosen, rationale)),
