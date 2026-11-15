@@ -40,6 +40,7 @@ vi.mock("../src/api", () => ({
     removeConnection: vi.fn(),
     testConnection: vi.fn(),
     getGitHubOverview: vi.fn(),
+    getLink: vi.fn(),
     getIntake: vi.fn(),
     startIntake: vi.fn(),
     answerIntake: vi.fn(),
@@ -113,7 +114,7 @@ beforeEach(() => {
   h.subs.clear();
   m.getStatus.mockResolvedValue({
     runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0 },
   });
   m.getIntake.mockResolvedValue(null);
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
@@ -645,6 +646,41 @@ describe("App GitHub view", () => {
     render(<App />);
     await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
     expect(await screen.findByRole("link", { name: "octo-org/example" })).toBeTruthy();
+  });
+});
+
+describe("App Machines view", () => {
+  const views = () => screen.getByRole("navigation", { name: "Views" });
+  const entry = (seq: number, type: LedgerEntry["type"]): LedgerEntry => ({
+    seq, id: `m${seq}`, ts: "", projectId: null, actor: { kind: "human", id: "owner" }, type, payload: {}, prevHash: "", hash: "",
+  });
+  const overview = {
+    identity: "ok" as const,
+    self: { machineId: "11".repeat(16), fingerprint: "ab".repeat(32), name: "Mac", linking: { enabled: false, port: null } },
+    machines: [],
+    discovered: [],
+  };
+
+  it("asks for nothing until the view opens, then reloads on machine entries only", async () => {
+    m.getLink.mockResolvedValue(overview);
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBeGreaterThan(0));
+    await act(async () => h.onEntry!(entry(5, "machine.named")));
+    expect(m.getLink).not.toHaveBeenCalled();
+    await userEvent.click(within(views()).getByRole("button", { name: "Machines" }));
+    expect(await screen.findByRole("switch", { name: "Allow linking" })).toBeTruthy();
+    const calls = m.getLink.mock.calls.length;
+    await act(async () => h.onEntry!(entry(6, "card.created")));
+    expect(m.getLink.mock.calls.length).toBe(calls);
+    await act(async () => h.onEntry!(entry(7, "machine.paired")));
+    await waitFor(() => expect(m.getLink.mock.calls.length).toBe(calls + 1));
+  });
+
+  it("says it could not load", async () => {
+    m.getLink.mockRejectedValue(new ApiError(500, "internal"));
+    render(<App />);
+    await userEvent.click(within(views()).getByRole("button", { name: "Machines" }));
+    expect(await screen.findByText("Could not load machines")).toBeTruthy();
   });
 });
 

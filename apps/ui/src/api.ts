@@ -23,6 +23,8 @@ import type {
   IntakeAnswer,
   IntakeView,
   LedgerEntry,
+  Machine,
+  MachinePresence,
   PendingAgentAction,
   Project,
   Provider,
@@ -123,7 +125,23 @@ export type Status = {
   intakeDecisions: number;
   /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
   intakeProjects: { projectId: string; name: string; decisions: number }[];
+  /** Linked machines, and how many answered the last presence check. */
+  machines: { linked: number; online: number };
 };
+
+/** This computer as linking sees it; `linking.port` is the listener's port while linking is on. */
+export type LinkSelf = { machineId: string; fingerprint: string; name: string; linking: { enabled: boolean; port: number | null } };
+/** A machine another computer announced on the local network; `name` and `address` are its own words, untrusted. */
+export type DiscoveredMachine = { machineId: string; name: string; address: string; seenAt: string };
+/** `GET /api/link`: `self` is null when the keychain is unavailable (`identity: "unavailable"`). */
+export type LinkOverview = {
+  identity: "ok" | "unavailable";
+  self: LinkSelf | null;
+  machines: MachinePresence[];
+  discovered: DiscoveredMachine[];
+};
+/** A one-time pairing code this computer shows, until `expiresAt`, and the addresses it can be reached at. */
+export type PairingCode = { code: string; expiresAt: string; addresses: string[] };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
 export type SignInView = { state: "running" | "succeeded" | "failed"; lines: string[] };
@@ -213,6 +231,17 @@ export const api = {
   getGitHubOverview: () => request<GitHubOverview>("/api/github/overview"),
   getCapacity: () => request<CapacityReport>("/api/capacity"),
   detectHardware: () => request<HardwareInfo>("/api/capacity/detect", { method: "POST" }),
+  getLink: () => request<LinkOverview>("/api/link"),
+  renameMachine: (name: string) => request<LinkSelf>("/api/link/name", { method: "POST", body: { name } }),
+  /** `acknowledgement` must be LINKING_ACK verbatim; 409 `linking_disabled` never applies here, 503 `identity_unavailable` does. */
+  enableLinking: (acknowledgement: string) => request<LinkSelf>("/api/link/enable", { method: "POST", body: { acknowledgement } }),
+  disableLinking: () => request<LinkSelf>("/api/link/disable", { method: "POST" }),
+  /** Opens a pairing window (replacing any earlier one); 409 `linking_disabled` while linking is off. */
+  showPairingCode: () => request<PairingCode>("/api/link/code", { method: "POST" }),
+  cancelPairingCode: () => request<void>("/api/link/code", { method: "DELETE" }),
+  /** Pairs with the machine showing `code` at `address`; see errorMessage(e, "pair") for its refusals. */
+  pairMachine: (address: string, code: string) => request<Machine>("/api/link/pair", { method: "POST", body: { address, code } }),
+  unpairMachine: (machineId: string) => request<void>(`/api/link/machines/${enc(machineId)}`, { method: "DELETE" }),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
@@ -284,10 +313,17 @@ export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finishe
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
- * cannot be read yet.
+ * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair"): string {
   if (e instanceof ApiError) {
+    if (e.code === "identity_unavailable") return "Your keychain is unavailable, so this computer has no identity for linking.";
+    if (e.code === "linking_disabled") return "Turn on linking first (Machines view)";
+    if (e.code === "pairing_code_mismatch") return "That code was not shown by the machine at this address";
+    if (e.code === "pairing_rejected") return "The other machine rejected the code";
+    if (e.code === "no_pairing") return "That machine is not showing a code right now";
+    if (e.code === "self_pairing") return "That address is this computer";
+    if (context === "pair" && e.code === "machine_unreachable") return "Could not reach that address";
     if (e.status === 423) return "Workspace is read-only";
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
     if (e.code === "secret_in_text") return "That text looks like it contains a key or password. It was not saved.";

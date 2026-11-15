@@ -5,7 +5,7 @@ import type {
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, subscribeLedger } from "./api";
-import type { AgentsInfo, Health, Status } from "./api";
+import type { AgentsInfo, Health, LinkOverview, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
@@ -112,6 +112,10 @@ export function App() {
   /** Set once the Capacity view or tab has asked for the report: from then on, usage changes refresh it too. */
   const capacityWanted = useRef(false);
   const refreshCapacityRef = useRef<() => void>(() => {});
+  const [machines, setMachines] = useState<{ overview: LinkOverview | null; error: string | null }>({ overview: null, error: null });
+  /** Set once the Machines view or the Link a machine tab has asked: from then on, machine.* entries refresh it too. */
+  const machinesWanted = useRef(false);
+  const refreshMachinesRef = useRef<() => void>(() => {});
   /** The gated move waiting on the Owner, with the project of its card. */
   const [gate, setGate] = useState<(GatePrompt & { projectId: string }) | null>(null);
   const gateRef = useRef(gate);
@@ -172,6 +176,8 @@ export function App() {
         // Spend, rate limits, budgets and hardware change the Capacity report.
         const usage = e.type === "agent.finished" || e.type === "agent.rate_limited" || e.type.startsWith("connection.");
         if (usage && capacityWanted.current) refreshCapacityRef.current();
+        // Names, the linking switch, pairings and unlinks change the Machines view.
+        if (e.type.startsWith("machine.") && machinesWanted.current) refreshMachinesRef.current();
         const g = gateRef.current;
         if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
         for (const listener of [...entryListeners.current]) listener(e);
@@ -218,6 +224,22 @@ export function App() {
     };
   });
   refreshCapacityRef.current = refreshCapacity;
+  // The Machines view and the Link a machine tab ask for this when they open and while open; made once, likewise.
+  const [refreshMachines] = useState(() => {
+    const load = coalesced(async () => {
+      try {
+        const overview = await api.getLink();
+        if (mounted.current) setMachines({ overview, error: null });
+      } catch (e) {
+        if (mounted.current) setMachines((prev) => ({ overview: prev.overview, error: e instanceof ApiError ? e.code : "request_failed" }));
+      }
+    }, () => !mounted.current);
+    return () => {
+      machinesWanted.current = true;
+      load();
+    };
+  });
+  refreshMachinesRef.current = refreshMachines;
   // The open gate's checklist, read again; made once, like refreshGitHub.
   const [refreshGate] = useState(() =>
     coalesced(async () => {
@@ -671,6 +693,7 @@ export function App() {
     status,
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
+    machines: { ...machines, refresh: refreshMachines },
     intake: selectedId ? intake : undefined,
     intakeError: selectedId ? intakeError : null,
     onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),

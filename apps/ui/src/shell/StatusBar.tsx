@@ -40,6 +40,8 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
   const connections = conn
     ? `Connections: ${conn.enabled} connected${conn.failed > 0 ? `, ${conn.failed} failed` : ""}`
     : "Connections: 0 connected";
+  const linked = status?.machines?.linked ?? 0;
+  const machines = `Machines: ${linked} linked${linked > 0 ? `, ${status?.machines?.online ?? 0} online` : ""}`;
   return (
     <footer className="status-bar" aria-label="Status bar">
       <div className="status-left">
@@ -74,6 +76,9 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
             {connections}
           </button>
         )}
+        <button type="button" className="status-item" onClick={() => onSelectView("machines")}>
+          {machines}
+        </button>
         <CiItem ci={status?.ci ?? null} />
         <LayoutItem layout={layout} />
         <button type="button" className="status-item" onClick={onResetLayout}>

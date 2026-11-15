@@ -342,3 +342,45 @@ describe("ledger pages", () => {
     ]);
   });
 });
+
+describe("link api", () => {
+  it("calls each linking route with the plan's method and body", async () => {
+    const f = respond(200, {});
+    await api.getLink();
+    await api.renameMachine("GPU desktop");
+    await api.enableLinking("I accept");
+    await api.disableLinking();
+    await api.showPairingCode();
+    await api.pairMachine("192.168.1.10:4418", "ABCDE-FGHJK-MNPQR-STVWX");
+    const seen = (f.mock.calls as [string, RequestInit | undefined][]).map(([path, init]) => [path, init?.method ?? "GET", init?.body ?? null]);
+    expect(seen).toEqual([
+      ["/api/link", "GET", null],
+      ["/api/link/name", "POST", JSON.stringify({ name: "GPU desktop" })],
+      ["/api/link/enable", "POST", JSON.stringify({ acknowledgement: "I accept" })],
+      ["/api/link/disable", "POST", null],
+      ["/api/link/code", "POST", null],
+      ["/api/link/pair", "POST", JSON.stringify({ address: "192.168.1.10:4418", code: "ABCDE-FGHJK-MNPQR-STVWX" })],
+    ]);
+  });
+
+  it("cancels the code and unlinks a machine with DELETE, the id encoded", async () => {
+    const f = respond(204);
+    await api.cancelPairingCode();
+    await api.unpairMachine("a/b");
+    expect(call(f, 0)).toEqual(["/api/link/code", expect.objectContaining({ method: "DELETE" })]);
+    expect(call(f, 1)).toEqual(["/api/link/machines/a%2Fb", expect.objectContaining({ method: "DELETE" })]);
+  });
+
+  it("words each pairing refusal", () => {
+    const pair = (status: number, code: string) => errorMessage(new ApiError(status, code), "pair");
+    expect(pair(400, "pairing_code_mismatch")).toBe("That code was not shown by the machine at this address");
+    expect(pair(403, "pairing_rejected")).toBe("The other machine rejected the code");
+    expect(pair(404, "no_pairing")).toBe("That machine is not showing a code right now");
+    expect(pair(502, "machine_unreachable")).toBe("Could not reach that address");
+    expect(pair(409, "linking_disabled")).toBe("Turn on linking first (Machines view)");
+    expect(pair(400, "self_pairing")).toBe("That address is this computer");
+    expect(errorMessage(new ApiError(503, "identity_unavailable"))).toBe(
+      "Your keychain is unavailable, so this computer has no identity for linking.",
+    );
+  });
+});

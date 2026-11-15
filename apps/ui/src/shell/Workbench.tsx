@@ -13,6 +13,7 @@ import { ConnectionEditor } from "../views/ConnectionEditor";
 import { DiffPanel } from "../views/DiffPanel";
 import { FilePanel } from "../views/FilePanel";
 import { IntakePanel } from "../views/IntakePanel";
+import { LinkMachinePanel } from "../views/LinkMachinePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { NeedsYouPanel } from "../views/NeedsYouPanel";
 import { StoryPanel } from "../views/StoryPanel";
@@ -33,6 +34,7 @@ const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
+  link_machine: LinkMachinePanel,
 };
 
 type Props = { model: AppModel };

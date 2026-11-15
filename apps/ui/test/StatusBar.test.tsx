@@ -15,6 +15,7 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   ci: null,
   intakeDecisions: 0,
   intakeProjects: [],
+  machines: { linked: 0, online: 0 },
 });
 const layout = (over: Partial<LayoutControls> = {}): LayoutControls => ({
   current: "Guided",
@@ -117,6 +118,19 @@ describe("StatusBar", () => {
     expect(onSelectView).toHaveBeenLastCalledWith("needs_you");
     await userEvent.click(screen.getByRole("button", { name: "Connections: 3 connected, 1 failed" }));
     expect(onSelectView).toHaveBeenLastCalledWith("connections");
+  });
+
+  it("counts linked machines, adding how many are online once any is linked, and selects Machines", async () => {
+    const onSelectView = vi.fn();
+    const { rerender } = render(<StatusBar status={null} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
+    rerender(<StatusBar status={status()} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    await userEvent.click(screen.getByRole("button", { name: "Machines: 2 linked, 1 online" }));
+    expect(onSelectView).toHaveBeenLastCalledWith("machines");
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 1, online: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 1 linked, 0 online" })).toBeTruthy();
   });
 
   describe("layouts", () => {

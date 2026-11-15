@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { ActivityBar } from "../src/shell/ActivityBar";
 
 describe("ActivityBar", () => {
-  it("renders the nine views in order, Changes third and Learn last, and marks the active one", () => {
+  it("renders the ten views in order, Changes third, Machines after Capacity and Learn last, and marks the active one", () => {
     render(<ActivityBar active="agents" running={0} pending={0} onSelect={vi.fn()} />);
     const nav = screen.getByRole("navigation", { name: "Views" });
     const buttons = within(nav).getAllByRole("button");
@@ -17,10 +17,11 @@ describe("ActivityBar", () => {
       "Connections",
       "GitHub",
       "Capacity",
+      "Machines",
       "Learn",
     ]);
     expect(buttons.map((b) => b.getAttribute("aria-pressed"))).toEqual([
-      "false", "true", "false", "false", "false", "false", "false", "false", "false",
+      "false", "true", "false", "false", "false", "false", "false", "false", "false", "false",
     ]);
   });
 

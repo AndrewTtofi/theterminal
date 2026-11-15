@@ -26,7 +26,7 @@ import type {
   RunChanges,
   Stage,
 } from "@theterminal/shared";
-import type { AgentsInfo, Status } from "../api";
+import type { AgentsInfo, LinkOverview, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 import type { ViewId } from "./views";
@@ -150,6 +150,12 @@ export type WorkbenchModel = {
 
   /** The Capacity view's data: the last report, or the error code of the last failed load. */
   capacity: { report: CapacityReport | null; error: string | null; refresh: () => void };
+
+  /**
+   * The Machines view's data: this computer, the linked machines and those found on the network, or the error code of
+   * the last failed load. The view and the Link a machine tab ask for it; any machine.* entry reloads it once asked.
+   */
+  machines: { overview: LinkOverview | null; error: string | null; refresh: () => void };
 
   /**
    * The selected project's guided intake: null when it has none, undefined while loading. Reloaded on any
