@@ -87,7 +87,7 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
         </button>
         {network === "offline" && (
           <span className="status-item attention" title={OFFLINE_TITLE}>
-            Offline
+            Offline (inferred)
           </span>
         )}
         <NetworkAnnouncement state={network} />

@@ -217,10 +217,10 @@ describe("StatusBar", () => {
       },
     });
 
-    it("shows Offline, marked for attention and with its basis in the title, when the inferred state is offline", () => {
+    it("shows Offline (inferred), marked for attention and with its basis in the title, when the inferred state is offline", () => {
       render(<StatusBar status={net("offline")} running={0} pending={0} {...noop} />);
       const bar = screen.getByRole("contentinfo", { name: "Status bar" });
-      const item = within(bar).getByText("Offline");
+      const item = within(bar).getByText("Offline (inferred)");
       expect(item.classList.contains("status-item")).toBe(true);
       expect(item.classList.contains("attention")).toBe(true);
       expect(item.getAttribute("title")).toBe(OFFLINE_TITLE);
@@ -229,7 +229,7 @@ describe("StatusBar", () => {
     it("shows nothing about the network when the state is unknown or online, or before the first answer", () => {
       for (const s of [net("unknown"), net("online"), null]) {
         const { unmount } = render(<StatusBar status={s} running={0} pending={0} {...noop} />);
-        expect(screen.queryByText("Offline")).toBeNull();
+        expect(screen.queryByText(/Offline/)).toBeNull();
         expect(screen.getByRole("contentinfo").textContent).not.toMatch(/online/i);
         unmount();
       }
