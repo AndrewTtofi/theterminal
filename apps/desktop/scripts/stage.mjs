@@ -1,5 +1,5 @@
 // Completes the staged tree after `pnpm deploy` wrote core to stage/core: prunes it, adds the pinned and
-// checksum-verified Node runtime and the built UI, then checks the result.
+// checksum-verified Node runtime, the built UI and the third-party licence and notice files, then checks the result.
 //   node scripts/stage.mjs [--arch <arch>]   stage for this host (the arch must be the host's)
 //   node scripts/stage.mjs --clean           remove stage/ before a fresh deploy
 import { execFile } from "node:child_process";
@@ -8,7 +8,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { BUNDLE_CLAUDE } from "../bundle-claude.mjs";
-import { PRUNE, WORKSPACE_PRUNE, assertLayout, buildMachinePaths, isExcludedPackage, nodeArchive, sanitizeManifest, verifySha256 } from "./stage-lib.mjs";
+import {
+  PRUNE, WORKSPACE_PRUNE, assertLayout, buildMachinePaths, collectNotices, isExcludedPackage, nodeArchive, sanitizeManifest,
+  thirdPartyPrograms, verifySha256, writeNotices,
+} from "./stage-lib.mjs";
 
 const run = promisify(execFile);
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -103,7 +106,13 @@ if (!existsSync(join(uiDist, "index.html"))) throw new Error("apps/ui/dist is mi
 rmSync(join(STAGE, "ui"), { recursive: true, force: true });
 cpSync(uiDist, join(STAGE, "ui"), { recursive: true });
 
-// 5. The staged tree must match the packaged layout exactly.
+// 5. Every shipped third-party program's licence (required) and notice files, under licenses/<id>/, and the list
+// of them in THIRD_PARTY_NOTICES.txt. A missing licence file fails the stage.
+const notices = collectNotices(STAGE, APP, thirdPartyPrograms(platform, arch, BUNDLE_CLAUDE, manifest.version));
+if (notices.problems.length > 0) throw new Error(`Third-party licences are missing: ${notices.problems.join(", ")}`);
+writeNotices(STAGE, notices.entries);
+
+// 6. The staged tree must match the packaged layout exactly.
 const problems = assertLayout(STAGE, platform, arch, { bundleClaude: BUNDLE_CLAUDE, buildPaths: buildMachinePaths(join(APP, "..", "..")) });
 if (problems.length > 0) throw new Error(`Staged layout is incomplete: ${problems.join(", ")}`);
 console.log(`Staged core, Node ${manifest.version} and the UI for ${platform}-${arch}${BUNDLE_CLAUDE ? "" : " (Claude Code not bundled)"}`);

@@ -64,9 +64,9 @@ export function builderConfig(env) {
     // would only name build-machine paths.
     asar: true,
     files: ["dist/**/*", "!dist/**/*.map", "package.json"],
-    // stage/{core,node,ui} -> Resources/{core,node,ui}. One mapping from stage/ itself: electron-builder always drops
-    // a node_modules directly under a mapping's `from`, which would drop core's.
-    extraResources: [{ from: "stage", to: ".", filter: ["core/**/*", "node/**/*", "ui/**/*"] }],
+    // stage/{core,node,ui,licenses} and THIRD_PARTY_NOTICES.txt -> Resources/. One mapping from stage/ itself:
+    // electron-builder always drops a node_modules directly under a mapping's `from`, which would drop core's.
+    extraResources: [{ from: "stage", to: ".", filter: ["core/**/*", "node/**/*", "ui/**/*", "licenses/**/*", "THIRD_PARTY_NOTICES.txt"] }],
     // Native addons are N-API prebuilds loaded by the shipped Node, never by Electron.
     npmRebuild: false,
     artifactName: "TheTerminal-${version}-${os}-${arch}.${ext}",

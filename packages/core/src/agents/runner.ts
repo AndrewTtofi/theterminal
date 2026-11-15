@@ -130,6 +130,11 @@ export type AgentRunnerDeps = {
   /** Recorded strings show this directory as `<data>`. */
   dataDir: string;
   newId?: () => string;
+  /**
+   * The restricted sign-in switch (see ProviderSettings): off by default, so a recorded Claude subscription or Gemini
+   * Google mode runs on an API key.
+   */
+  restrictedSignIn?: boolean;
   /** How long shutdown() waits for adapters to return after aborting them. Default 5000. */
   shutdownTimeoutMs?: number;
   /** How long the gate waits for a human decision before denying with "timed out". Default 23h. */
@@ -366,7 +371,9 @@ export class AgentRunner {
     // A local model needs no login: the provider's own mode and connection are not used. A collaborator's run is on
     // an API key whatever the mode says, and never starts without one.
     const provider: Provider | null = input.adapter === "fake" || localModel !== null ? null : input.adapter;
-    const authMode: AuthMode = provider === null ? "none" : input.forceApiKey ? "api_key" : new ProviderSettings(db, ledger).getMode(provider);
+    // A recorded restricted mode reads as api_key while the restricted sign-in switch is off.
+    const settings = new ProviderSettings(db, ledger, { restrictedSignIn: this.deps.restrictedSignIn === true });
+    const authMode: AuthMode = provider === null ? "none" : input.forceApiKey ? "api_key" : settings.getMode(provider);
     const creds = provider === null ? null : (this.deps.credentials?.(provider) ?? null);
     if (provider !== null && input.forceApiKey && !creds?.apiKey && !process.env[API_KEY_ENV[provider]]) throw new ApiKeyRequiredError(provider);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.

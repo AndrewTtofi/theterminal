@@ -43,6 +43,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Documentation: `docs/collaboration.md`, `docs/self-hosting.md`, and new sections in `docs/connections-and-credentials.md`.
 
 ### Changed
+- Signing in with your own Claude plan and Gemini CLI's Google sign-in are turned off, because those providers do not allow other apps to use them. API keys are the recommended way; Codex's Sign in with ChatGPT is unchanged. A server started with `THETERMINAL_RESTRICTED_SIGNIN=1` (or `--allow-restricted-signin`) turns them back on. While off, a mode chosen earlier is not used and runs use the API key.
+- The desktop app ships the licence and notice files of Node.js, Codex CLI, Gemini CLI and the Claude Agent SDK, listed in `THIRD_PARTY_NOTICES.txt`.
 - The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
 - Runs recorded before this version show no Changes list or diffs, because the commit they started from was not kept. Their files can still be browsed under Files, and the emergency override still works for them.
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.

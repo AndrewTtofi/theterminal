@@ -165,6 +165,7 @@ describe("parseStartArgs", () => {
     for (const flag of [
       "--port", "--data-dir", "--ui-dir", "--core-dir", "--remote", "--remote-port", "--remote-bind", "--remote-domain",
       "--remote-tls", "--tls-cert", "--tls-key", "--secret-store", "--secret-key-file", "--allow-key-in-data-dir",
+      "--allow-restricted-signin",
     ]) {
       expect(USAGE).toContain(`[${flag}`);
     }
@@ -181,6 +182,16 @@ describe("parseStartArgs", () => {
     expect(parseStartArgs([], defaults)).toEqual({ ok: false, message: USAGE });
     expect(fail("--port", "70000")).toBe("Invalid --port: 70000");
     expect(fail("--core-dir", "relative")).toBe("Invalid --core-dir: must be an absolute path");
+  });
+
+  it("turns the restricted sign-in switch on with --allow-restricted-signin or THETERMINAL_RESTRICTED_SIGNIN=1, and leaves it off otherwise", () => {
+    const base = { dataDir: defaults.dataDir(), uiDir: defaults.uiDir() };
+    expect(parseStartArgs(["start", "--allow-restricted-signin"], defaults, {})).toEqual({ ok: true, options: { ...base, restrictedSignIn: true } });
+    expect(parseStartArgs(["start"], defaults, { THETERMINAL_RESTRICTED_SIGNIN: "1" })).toEqual({ ok: true, options: { ...base, restrictedSignIn: true } });
+    for (const value of ["0", "", "true", "yes", " 1"]) {
+      expect(parseStartArgs(["start"], defaults, { THETERMINAL_RESTRICTED_SIGNIN: value })).toEqual({ ok: true, options: base });
+    }
+    expect(parseStartArgs(["start"], defaults, {})).toEqual({ ok: true, options: base });
   });
 
   it("reads the remote flags", () => {

@@ -18,7 +18,7 @@ import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, Menu, session, shell } from "electron";
 import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
-import { desktopDataDir, devLayout, packagedLayout, profileDir, serverArgs, serverLogFile, type Layout } from "./layout.js";
+import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
@@ -123,7 +123,7 @@ function run(args: DesktopArgs, dataDir: string): void {
       server = startServer({
         nodeFile: layout.nodeFile,
         cliFile: layout.cliFile,
-        args: serverArgs(layout, dataDir, args.port),
+        args: serverArgs(layout, dataDir, args.port, { restrictedSignIn: restrictedSignInRequested(process.env) }),
         env,
         logFile: serverLogFile(dataDir),
         // The first launch waits for the user to allow keychain access; the server is ready only after that.

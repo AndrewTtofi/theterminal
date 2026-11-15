@@ -285,10 +285,12 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           provider={provider}
           mode={info.providers[provider].mode}
           ack={info.acks[provider]}
+          ownModeAvailable={info.providers[provider].ownModeAvailable !== false}
           onChange={model.onProviderAuthChange}
         />
       )}
-      {provider && info && (
+      {/* No sign-in for an own-plan mode the server has turned off: the section above says why. */}
+      {provider && info && info.providers[provider].ownModeAvailable !== false && (
         <div className="connection-field signin">
           {signingIn ? (
             <SignInPanel provider={provider} onClose={() => setSigningIn(false)} />

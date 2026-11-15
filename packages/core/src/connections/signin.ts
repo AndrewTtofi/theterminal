@@ -2,8 +2,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute } from "node:path";
-import { PROVIDERS, type Actor, type AuthMode, type Provider } from "@theterminal/shared";
+import { PROVIDERS, isRestrictedMode, type Actor, type AuthMode, type Provider } from "@theterminal/shared";
 import { buildChildEnv } from "../agents/child-env.js";
+import { RestrictedSignInError } from "../agents/settings.js";
 import { redact } from "../agents/redact.js";
 import { pathScrubber, usernameScrubber, type Scrub } from "../agents/scrub-paths.js";
 
@@ -174,6 +175,11 @@ export type SignInManagerDeps = {
    * cancelled or shutdown stopped.
    */
   record: (provider: Provider, ok: boolean, actor: Actor) => void;
+  /**
+   * The restricted sign-in switch (see ProviderSettings). Off by default: a login whose mode is restricted (Claude's
+   * subscription, Gemini's Google sign-in) is refused with RestrictedSignInError before anything starts.
+   */
+  restrictedSignIn?: boolean;
   /** How long a sign-in may run before it is killed. Default 10 minutes. */
   timeoutMs?: number;
   newId?: () => string;
@@ -224,10 +230,14 @@ export class SignInManager {
     };
   }
 
-  /** Starts `p`'s login command for `actor`. Throws when one is running, the CLI is missing, or it needs a terminal. */
+  /**
+   * Starts `p`'s login command for `actor`. Throws when its mode is restricted and the switch is off, one is running,
+   * the CLI is missing, or it needs a terminal.
+   */
   start(p: Provider, actor: Actor): { id: string } {
     if (this.shuttingDown) throw new Error("shutting down");
     const spec = SPECS[p];
+    if (this.deps.restrictedSignIn !== true && isRestrictedMode(p, spec.mode)) throw new RestrictedSignInError(p);
     if (spec.login === null) throw new TerminalRequiredError();
     for (const s of this.sessions.values()) {
       if (s.provider === p && s.state === "running") throw new SignInRunningError();
