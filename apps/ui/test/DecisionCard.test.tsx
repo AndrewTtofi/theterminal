@@ -154,7 +154,8 @@ describe("DecisionCard", () => {
     const evil = { ...action, summary: '<img src=x onerror="window.__pwned=1">', input: { x: "<script>window.__pwned=1</script>" } };
     const { container } = render(<DecisionCard action={evil} onDecide={vi.fn()} />);
     expect(container.querySelector("img, script")).toBeNull();
-    expect(container.textContent).toContain('<img src=x onerror="window.__pwned=1">');
+    // Shown as literal text (narration escapes the quotes inside a command).
+    expect(container.textContent).toContain("<img src=x onerror=");
     expect(container.querySelector("pre")?.textContent).toContain("<script>");
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
   });
