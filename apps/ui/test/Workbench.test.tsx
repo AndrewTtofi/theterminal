@@ -26,6 +26,9 @@ function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsMode
   };
 }
 
+/** Every provider is available since 5B; this catalog keeps one unavailable to cover that path. */
+const withoutAws = CONNECTION_CATALOG.map((e) => (e.provider === "aws" ? { ...e, available: false } : e));
+
 const board: Board = {
   project: { id: "p1", name: "Local Model Hub", pitch: "", createdAt: "" },
   columns: { plan: [], design: [], build: [], ship: [], operate: [] },
@@ -79,6 +82,8 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onLedgerScopeChange: vi.fn(),
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
+    github: { overview: null, error: null, refresh: vi.fn() },
+    capacity: { report: null, error: null, refresh: vi.fn() },
     ...over,
   };
 }
@@ -136,7 +141,7 @@ describe("Workbench", () => {
     await userEvent.click(view("Agents"));
     await userEvent.type(screen.getByLabelText("Prompt"), "hello");
     await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
-    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello");
+    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", []);
   });
 
   it("shows the selected run's actions in the Agent feed panel", () => {
@@ -170,8 +175,8 @@ describe("Workbench", () => {
     expect(within(side).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
   });
 
-  it("lists the connection catalog, with Plan 5B entries disabled, and opens an editor tab from a row", async () => {
-    const { container } = render(<Workbench model={model()} />);
+  it("lists the connection catalog, with unavailable entries disabled, and opens an editor tab from a row", async () => {
+    const { container } = render(<Workbench model={model({ connections: connectionsModel({ catalog: withoutAws }) })} />);
     await userEvent.click(view("Connections"));
     const side = screen.getByRole("complementary", { name: "Side bar" });
     for (const label of ["Claude (Anthropic)", "Codex (OpenAI)", "Gemini (Google)", "GitHub"]) {
@@ -179,7 +184,7 @@ describe("Workbench", () => {
     }
     const aws = within(side).getByText("AWS").closest("li")!;
     expect(aws.getAttribute("aria-disabled")).toBe("true");
-    expect(aws.textContent).toContain("Arrives with Plan 5B");
+    expect(aws.textContent).toContain("Arrives in a later release");
 
     await userEvent.click(within(side).getByRole("button", { name: "GitHub" }));
     const tab = container.querySelector('[data-panel="connection:new:github"]')!;
@@ -215,22 +220,41 @@ describe("Workbench", () => {
   });
 
   it("prunes a restored new-connection tab for a provider that is not available", () => {
-    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false }) })} />);
+    const { container, rerender } = render(<Workbench model={model({ connections: connectionsModel({ loaded: false, catalog: withoutAws }) })} />);
     act(() => {
       testDock.api!.open("connection:new:aws", "AWS", "main");
       testDock.api!.open("connection:new:github", "GitHub", "main");
     });
-    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true }) })} />);
+    rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, catalog: withoutAws }) })} />);
     expect(container.querySelector('[data-panel="connection:new:aws"]')).toBeNull();
     expect(container.querySelector('[data-panel="connection:new:github"]')).toBeTruthy();
   });
 
-  it("shows the Plan 5B placeholder for GitHub and Capacity", async () => {
-    render(<Workbench model={model()} />);
+  it("loads the GitHub view when it is selected", async () => {
+    const github = { overview: null, error: null, refresh: vi.fn() };
+    render(<Workbench model={model({ github })} />);
     await userEvent.click(view("GitHub"));
-    expect(screen.getByText("Arrives with Plan 5B.")).toBeTruthy();
+    expect(github.refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Loading…")).toBeTruthy();
+  });
+
+  it("loads the Capacity view when it is selected, and opens the Capacity tab from it", async () => {
+    const capacity = { report: { sources: [], hardware: null, generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
+    const { container } = render(<Workbench model={model({ capacity })} />);
+    expect(container.querySelector('[data-panel="capacity"]')).toBeNull();
     await userEvent.click(view("Capacity"));
-    expect(screen.getByText("Arrives with Plan 5B.")).toBeTruthy();
+    expect(capacity.refresh).toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Open capacity" }));
+    const tab = container.querySelector('[data-panel="capacity"]');
+    expect(tab?.getAttribute("data-active")).toBe("true");
+    expect(within(tab as HTMLElement).getByRole("table")).toBeTruthy();
+  });
+
+  it("opens the Connections view from the GitHub view when GitHub is not connected", async () => {
+    render(<Workbench model={model({ github: { overview: null, error: "github_not_connected", refresh: vi.fn() } })} />);
+    await userEvent.click(view("GitHub"));
+    await userEvent.click(screen.getByRole("button", { name: "Open Connections" }));
+    expect(view("Connections").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("keeps the Needs-you strip above the dock in every view, even with the bottom panel closed", async () => {

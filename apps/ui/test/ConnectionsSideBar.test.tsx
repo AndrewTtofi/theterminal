@@ -40,12 +40,14 @@ describe("ConnectionsSideBar", () => {
     for (const e of CONNECTION_CATALOG) expect(screen.getByText(e.label)).toBeTruthy();
   });
 
-  it("shows unavailable entries disabled, with the Plan 5B note", async () => {
+  it("shows unavailable entries disabled, with the later-release note", async () => {
+    m.getConnectionCatalog.mockResolvedValue(CONNECTION_CATALOG.map((e) => (e.provider === "aws" ? { ...e, available: false } : e)));
     renderWithConnections(<ConnectionsSideBar />);
     await waitFor(() => expect((screen.getByRole("button", { name: "GitHub" }) as HTMLButtonElement).disabled).toBe(false));
     const aws = screen.getByText("AWS").closest("li")!;
     expect(aws.getAttribute("aria-disabled")).toBe("true");
-    expect(aws.textContent).toContain("Arrives with Plan 5B");
+    expect(aws.textContent).toContain("Arrives in a later release");
+    expect(aws.textContent).not.toMatch(/Plan \d/);
     expect((within(aws).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
     const claude = screen.getByText("Claude (Anthropic)").closest("li")!;
     expect(claude.getAttribute("aria-disabled")).toBeNull();
@@ -138,5 +140,64 @@ describe("ConnectionsSideBar", () => {
     expect(dock.open).toHaveBeenCalledWith("connection:c1", "Claude (Anthropic)", "main");
     await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
     expect(dock.open).toHaveBeenCalledWith("connection:new:github", "GitHub", "main");
+  });
+  it("offers Add another for a provider that allows several connections, once one exists", async () => {
+    m.listConnections.mockResolvedValue([
+      connection(),
+      connection({ id: "a1", kind: "cloud", provider: "aws", name: "AWS", config: { region: "us-east-1" }, secretFields: [] }),
+    ]);
+    const { dock } = renderWithConnections(<ConnectionsSideBar />);
+    const add = (await screen.findByRole("button", { name: "Add another AWS" })) as HTMLButtonElement;
+    expect(add.textContent).toBe("Add another");
+    // Single-connection providers, and providers with no connection yet, have no Add another.
+    expect(screen.queryByRole("button", { name: "Add another Claude (Anthropic)" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add another Google Cloud" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Add another/ })).toBe(add);
+    await userEvent.click(add);
+    expect(dock.open).toHaveBeenCalledWith("connection:new:aws", "AWS", "main");
+    // The row itself still opens the existing connection.
+    await userEvent.click(screen.getByRole("button", { name: "AWS" }));
+    expect(dock.open).toHaveBeenCalledWith("connection:a1", "AWS", "main");
+  });
+
+  it("offers Add another for MCP servers too", async () => {
+    m.listConnections.mockResolvedValue([
+      connection({ id: "m1", kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.test/" }, secretFields: [] }),
+    ]);
+    const { dock } = renderWithConnections(<ConnectionsSideBar />);
+    await userEvent.click(await screen.findByRole("button", { name: "Add another MCP server (remote)" }));
+    expect(dock.open).toHaveBeenCalledWith("connection:new:mcp_http", "MCP server (remote)", "main");
+  });
+
+  it("lists each connection by name when a provider has several, each with its own tab and switch", async () => {
+    m.listConnections.mockResolvedValue([
+      connection({ id: "a1", kind: "cloud", provider: "aws", name: "Staging", config: { region: "us-east-1" }, secretFields: [] }),
+      connection({
+        id: "a2", kind: "cloud", provider: "aws", name: "Production", enabled: false, config: { region: "eu-west-1" }, secretFields: [],
+        status: { state: "ok", message: "ok", testedAt: "2026-01-01T00:00:00Z" },
+      }),
+    ]);
+    m.updateConnection.mockResolvedValue(
+      connection({ id: "a2", kind: "cloud", provider: "aws", name: "Production", enabled: true, config: { region: "eu-west-1" }, secretFields: [] }),
+    );
+    const { dock } = renderWithConnections(<ConnectionsSideBar />);
+    const prod = await screen.findByRole("button", { name: "AWS: Production" });
+    expect(screen.getByRole("button", { name: "AWS: Staging" })).toBeTruthy();
+    expect(prod.querySelector(".status-dot")!.classList.contains("ok")).toBe(true);
+    await userEvent.click(prod);
+    expect(dock.open).toHaveBeenCalledWith("connection:a2", "Production", "main");
+    const sw = screen.getByRole("switch", { name: "Enable AWS: Production" });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    await userEvent.click(sw);
+    expect(m.updateConnection).toHaveBeenCalledWith("a2", { enabled: true });
+  });
+
+  it("lists no per-connection rows while a provider has only one connection", async () => {
+    m.listConnections.mockResolvedValue([
+      connection({ id: "a1", kind: "cloud", provider: "aws", name: "Staging", config: { region: "us-east-1" }, secretFields: [] }),
+    ]);
+    renderWithConnections(<ConnectionsSideBar />);
+    await screen.findByRole("button", { name: "Add another AWS" });
+    expect(screen.queryByRole("button", { name: "AWS: Staging" })).toBeNull();
   });
 });

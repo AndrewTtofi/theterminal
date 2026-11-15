@@ -6,9 +6,13 @@ import type {
   Board,
   Card,
   CatalogEntry,
+  CapacityReport,
+  CiStatus,
   Connection,
   ConnectionKind,
   ConnectionProvider,
+  GitHubOverview,
+  HardwareInfo,
   LedgerEntry,
   PendingAgentAction,
   Project,
@@ -29,6 +33,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** What the error names, when the server sends it: the connection whose cloud credentials could not be had. */
+    readonly detail?: string,
   ) {
     super(`${status} ${code}`);
     this.name = "ApiError";
@@ -49,12 +55,16 @@ async function request<T>(
   });
   if (!res.ok) {
     let code = "internal";
+    let detail: string | undefined;
     try {
-      code = ((await res.json()) as { error?: string }).error ?? code;
+      const body = (await res.json()) as { error?: string; name?: unknown; adapter?: unknown };
+      code = body.error ?? code;
+      if (code === "cloud_credentials_failed" && typeof body.name === "string") detail = body.name;
+      if (code === "mcp_unsupported" && typeof body.adapter === "string") detail = body.adapter;
     } catch {
       // non-JSON error body: keep the default code
     }
-    throw new ApiError(res.status, code);
+    throw new ApiError(res.status, code, detail);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -89,8 +99,13 @@ export type Status = {
   runningAgents: number;
   pendingDecisions: number;
   todayCostUsd: number;
+  /** Over runs started this calendar month (the server's local time). */
+  monthCostUsd: number;
+  /** The summed monthly budgets of the enabled model connections; null when none has one. */
+  monthlyBudgetUsd: number | null;
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
-  ci: null;
+  /** null when GitHub is not connected. */
+  ci: CiStatus | null;
 };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
@@ -111,7 +126,7 @@ export const api = {
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
-  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string }) =>
+  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[] }) =>
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
@@ -139,6 +154,9 @@ export const api = {
   testConnection: (id: string) =>
     request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST" }),
   getStatus: () => request<Status>("/api/status"),
+  getGitHubOverview: () => request<GitHubOverview>("/api/github/overview"),
+  getCapacity: () => request<CapacityReport>("/api/capacity"),
+  detectHardware: () => request<HardwareInfo>("/api/capacity/detect", { method: "POST" }),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
@@ -146,11 +164,32 @@ export const api = {
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
 };
 
-export function errorMessage(e: unknown): string {
+/** Why a Codex run cannot be given an MCP server; the picker and the MCP editors show it too. */
+export const CODEX_MCP_NOTE =
+  "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.";
+/** Why a Gemini run cannot be given an MCP server; the picker and the MCP editors show it too. */
+export const GEMINI_MCP_NOTE =
+  "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
+
+/** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
+export function errorMessage(e: unknown, context?: "run"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
+    if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
+    if (e.status === 400 && e.code === "mcp_unsupported") return e.detail === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "duplicate_mcp_server") {
+      return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
+    }
+    if (e.status === 400 && e.code === "duplicate_cloud_provider") {
+      return "A run can be given only one connection per cloud provider. Untick the extra one.";
+    }
+    if (e.status === 502 && e.code === "cloud_credentials_failed") {
+      return `Could not get credentials from "${e.detail ?? "a cloud connection"}". The run did not start.`;
+    }
     if (e.status === 409 && e.code === "conflict") return "Already connected";
     if (e.code === "secret_in_config") return "That field must not contain a key or token";
+    if (e.status === 400 && e.code === "connection_unsupported") return "This connection cannot be used that way";
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";

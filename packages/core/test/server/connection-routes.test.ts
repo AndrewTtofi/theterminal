@@ -122,6 +122,13 @@ describe("connections API", { timeout: 15000 }, () => {
     expect(await (await get(s, "/api/ledger")).text()).not.toContain(KEY);
   });
 
+  it("refuses to add This computer through the API with 400 connection_unsupported", async () => {
+    const s = await start();
+    const res = await send(s, "POST", "/api/connections", { kind: "hardware", provider: "local_hardware", name: "This computer", config: { cores: "8" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "connection_unsupported" });
+  });
+
   it("refuses an unknown field with 400 invalid_input", async () => {
     const s = await start();
     const res = await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "C", secrets: { token: KEY } });
@@ -266,7 +273,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -282,7 +289,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     await vi.waitFor(async () => {
       expect((await json<{ run: AgentRun }>(get(s, `/api/runs/${run.id}`))).run.status).toBe("completed");
     }, { timeout: 5000, interval: 25 });
-    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25 });
+    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25, monthCostUsd: 0.25 });
 
     await addClaude(s);
     expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });

@@ -10,13 +10,18 @@
 //   with this other id) }. Steps:
 //   {"approve":"command","command":"ls","cwd"?:"…","itemId":"i1","output"?:"…","exitCode"?:0,"nullCommand"?:true,
 //    "network"?:{"host":"…","protocol":"https"},"stdin"?:"y\n"} (once running: network asks for network access for
-//    the same item; stdin asks to write that input to the running command, as a writeStdin approval with its own item id)
+//    the same item; stdin asks to write that input to the running command, as a writeStdin approval with its own item id;
+//    "run"?:["file","arg",…] really runs that program once accepted, with the env a Codex command would get under the
+//    shell_environment_policy given by `-c` (see commandEnv), and reports its stdout as the output)
 //   {"approve":"fileChange","itemId":"f1","changes":[{"path":"a.txt","kind":"add"|"update"|"delete","diff"?:"…"}]}
 //   {"message":"text"}  {"unknownRequest":"x/y"}  {"fail":"reason"}
 //   {"ungated":"commandExecution"|"mcpToolCall"|…} (a command also streams output, as one that really ran would)
 //   {"exit":1,"stderr"?:"…"|["chunk",…]} (an array is written chunk by chunk, each flushed before the next)  {"hang":true}
+// Script option userFilters: true acts as if the user's config.toml set shell_environment_policy.filters: like Codex
+//   0.169.0, startup then fails when `-c` also sets the legacy `exclude` or `include_only`.
 // THETERMINAL_FAKE_LOG: a file that receives one JSON line per event (start, requests, notifications, and the
 //   answers to the fake's own server-requests), for test assertions.
+import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 const raw = process.env.THETERMINAL_FAKE_CODEX_SCRIPT ?? "[]";
@@ -27,6 +32,52 @@ const logFile = process.env.THETERMINAL_FAKE_LOG;
 const log = (entry) => {
   if (logFile) appendFileSync(logFile, JSON.stringify(entry) + "\n");
 };
+
+/** The shell_environment_policy keys given with `-c`, values parsed as TOML would (JSON covers the subset we send). */
+const policy = {};
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] !== "-c") continue;
+  const kv = argv[++i] ?? "";
+  const eq = kv.indexOf("=");
+  const key = kv.slice(0, eq);
+  if (!key.startsWith("shell_environment_policy.")) continue;
+  const raw = kv.slice(eq + 1);
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    value = raw;
+  }
+  policy[key.slice("shell_environment_policy.".length)] = value;
+}
+if (script.userFilters && (policy.exclude !== undefined || policy.include_only !== undefined)) {
+  process.stderr.write("Error: cannot mix `filters` with legacy `exclude` or `include_only`\n");
+  process.exit(1);
+}
+
+/** Codex's case-insensitive glob over variable names: `*` any run, `?` one character. */
+const glob = (p) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, "i");
+const CORE = ["HOME", "LOGNAME", "PATH", "SHELL", "USER", "USERNAME", "TMPDIR", "TEMP", "TMP"];
+
+/**
+ * The env a command gets, in Codex's order: inherit (all, core or none), the default *KEY*, *SECRET*, *TOKEN*
+ * excludes unless ignore_default_excludes, `exclude`, `set`, then `include_only` (empty keeps everything).
+ */
+function commandEnv() {
+  const inherit = policy.inherit ?? "all";
+  let env = Object.entries(process.env).filter(([k]) => inherit === "all" || (inherit === "core" && CORE.includes(k.toUpperCase())));
+  const drop = (patterns) => {
+    const res = patterns.map(glob);
+    env = env.filter(([k]) => !res.some((r) => r.test(k)));
+  };
+  if (policy.ignore_default_excludes !== true) drop(["*KEY*", "*SECRET*", "*TOKEN*"]);
+  drop(policy.exclude ?? []);
+  for (const [k, v] of Object.entries(policy.set ?? {})) env.push([k, v]);
+  const only = (policy.include_only ?? []).map(glob);
+  if (only.length > 0) env = env.filter(([k]) => only.some((r) => r.test(k)));
+  return Object.fromEntries(env);
+}
 
 if (script.ignoreSigterm) process.on("SIGTERM", () => log({ signal: "SIGTERM" }));
 log({
@@ -91,7 +142,9 @@ async function runSteps() {
       if (r.result?.decision !== "accept") {
         completed(commandItem(s, "declined"));
       } else {
-        const output = s.output ?? `ran ${s.command}`;
+        const output = s.run
+          ? execFileSync(s.run[0], s.run.slice(1), { env: commandEnv(), encoding: "utf8" })
+          : (s.output ?? `ran ${s.command}`);
         notify("item/commandExecution/outputDelta", { threadId: THREAD, turnId: TURN, itemId: s.itemId, delta: output });
         if (s.network) {
           await serverRequest("item/commandExecution/requestApproval", {

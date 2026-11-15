@@ -6,7 +6,8 @@ import { join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 import WebSocket from "ws";
-import { createServer, selectFetch, selectSecretStore, type RunningServer } from "../../src/server/server.js";
+import { createServer, selectFetch, selectSecretStore, selectSts, type RunningServer } from "../../src/server/server.js";
+import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ChunkedSecretStore } from "../../src/secrets/store.js";
 
@@ -362,5 +363,84 @@ describe("test doubles for connections", () => {
     expect(bearer.status).toBe(200);
     expect((await stub("https://example.invalid/v1/models", { headers: { "x-api-key": "sk-ant-other" } })).status).toBe(401);
     expect((await stub("https://example.invalid/v1/models")).status).toBe(401);
+  });
+});
+
+describe("test doubles for cloud connections", () => {
+  const FAKE = { THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_HTTP: "1" };
+  const stub = selectFetch(FAKE);
+  const form = (o: Record<string, string>) => ({
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(o).toString(),
+  });
+  const TOKEN = { access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" };
+
+  it("uses the fake STS caller only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", () => {
+    expect(selectSts(FAKE)).toBe(fakeSts);
+    expect(selectSts({ THETERMINAL_FAKE_HTTP: "1" })).toBe(realSts);
+    expect(selectSts({ THETERMINAL_FAKE_AGENT: "1" })).toBe(realSts);
+    expect(selectSts({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_FAKE_HTTP: "1" })).toBe(realSts);
+    expect(selectSts({})).toBe(realSts);
+    const injected = { ...fakeSts };
+    expect(selectSts(FAKE, injected)).toBe(injected);
+  });
+
+  it("answers the Google token endpoint with a fake token when the body is a grant", async () => {
+    const ok = await stub("https://oauth2.googleapis.com/token", form({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: "a.b.c" }));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(TOKEN);
+    expect((await stub("https://oauth2.googleapis.com/token", form({ assertion: "a.b.c" }))).status).toBe(401);
+  });
+
+  it("answers the Azure token endpoint only for a TESTKEY client secret", async () => {
+    const url = "https://login.microsoftonline.com/00000000-0000-0000-0000-00000000aaaa/oauth2/v2.0/token";
+    const grant = { grant_type: "client_credentials", client_id: "x", scope: "https://management.azure.com/.default" };
+    const ok = await stub(url, form({ ...grant, client_secret: "TESTKEY-azure-secret-0000000000" }));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(TOKEN);
+    expect((await stub(url, form({ ...grant, client_secret: "another-secret-0000000000" }))).status).toBe(401);
+    expect((await stub(url, form(grant))).status).toBe(401);
+  });
+
+  it("keeps the header rule for everything else, so a fake Bearer token reads the project or subscription", async () => {
+    const auth = { headers: { authorization: "Bearer TESTKEY-access-token-0000000000" } };
+    expect((await stub("https://management.azure.com/subscriptions/00000000-0000-0000-0000-00000000cccc?api-version=2022-12-01", auth)).status).toBe(200);
+    expect((await stub("https://cloudresourcemanager.googleapis.com/v1/projects/tt-test-project", { headers: { authorization: "Bearer other" } })).status).toBe(401);
+  });
+
+  it("tests an Azure connection end to end through the fakes, recording no secret", async () => {
+    const saved = { agent: process.env.THETERMINAL_FAKE_AGENT, http: process.env.THETERMINAL_FAKE_HTTP };
+    process.env.THETERMINAL_FAKE_AGENT = "1";
+    process.env.THETERMINAL_FAKE_HTTP = "1";
+    try {
+      const dataDir = tmp();
+      const s = await start({ dataDir, port: 0, secrets: new MemorySecretStore() });
+      const added = await post(s, "/api/connections", {
+        kind: "cloud", provider: "azure", name: "Ops Azure",
+        config: {
+          tenantId: "00000000-0000-0000-0000-00000000aaaa", clientId: "00000000-0000-0000-0000-00000000bbbb",
+          subscriptionId: "00000000-0000-0000-0000-00000000cccc",
+        },
+        secrets: { clientSecret: "TESTKEY-azure-secret-0000000000" },
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const res = await fetch(`${base(s)}/api/connections/${id}/test`, { method: "POST", headers: auth(s) });
+      expect(await res.json()).toEqual({ ok: true, message: "Connected" });
+      const db = new Database(join(dataDir, "ledger.db"), { readonly: true });
+      const rows = db.prepare("SELECT payload FROM ledger WHERE type = 'connection.tested'").all() as { payload: string }[];
+      const all = db.prepare("SELECT payload FROM ledger").all() as { payload: string }[];
+      db.close();
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.payload)).toMatchObject({ connectionId: id, ok: true, message: "Connected" });
+      for (const r of all) {
+        expect(r.payload).not.toContain("TESTKEY-azure-secret");
+        expect(r.payload).not.toContain("TESTKEY-access-token");
+      }
+    } finally {
+      for (const [k, v] of [["THETERMINAL_FAKE_AGENT", saved.agent], ["THETERMINAL_FAKE_HTTP", saved.http]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });

@@ -4,10 +4,16 @@ import { cardStatusSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
-import { AdapterUnavailableError, ShuttingDownError } from "../agents/runner.js";
+import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
+import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { redact } from "../agents/redact.js";
-import { ConflictError, SecretInConfigError, UnknownFieldError } from "../connections/service.js";
+import {
+  ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
+} from "../connections/service.js";
 import { SecretStoreUnavailableError } from "../secrets/store.js";
+import {
+  GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
+} from "../github/client.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -62,8 +68,19 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
     if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
     if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
+    if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
+    if (err instanceof ConnectionDisabledError) return reply.code(400).send({ error: "connection_disabled" });
+    if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported", adapter: err.adapter });
+    if (err instanceof DuplicateMcpServerError) return reply.code(400).send({ error: "duplicate_mcp_server" });
+    if (err instanceof DuplicateCloudProviderError) return reply.code(400).send({ error: "duplicate_cloud_provider" });
+    // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
+    if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
     if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+    if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
+    if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
+    if (err instanceof GitHubRejectedError) return reply.code(502).send({ error: "github_rejected" });
+    if (err instanceof GitHubUnavailableError) return reply.code(503).send({ error: "github_unavailable" });
     if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
     if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
     if (err instanceof LedgerReadOnlyError) {

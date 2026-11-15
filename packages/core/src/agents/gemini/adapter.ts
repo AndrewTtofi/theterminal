@@ -5,7 +5,7 @@ import { chmod, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "../adapter.js";
+import { RATE_LIMIT_TEXT, type AdapterStartOptions, type AgentAdapter, type ProposedAction, type RunCredentials } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
@@ -31,6 +31,7 @@ const MODE_CHANGED = "agent changed its approval mode";
 const NO_ASKING_MODE = "Gemini offers no approval mode that asks for every tool";
 const NO_ALLOW_ONCE = "agent offered no allow_once option";
 const OUTSIDE = "outside worktree";
+const NO_MCP = "Gemini cannot use MCP servers in The Terminal yet";
 
 /** ACP v1. Gemini answers with the client's version when it supports it; anything else is refused. */
 const PROTOCOL_VERSION = 1;
@@ -56,7 +57,22 @@ const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
 const POLICY_TOML =
   CORE_TOOLS.map((tool) => `[[rule]]\ntoolName = "${tool}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`).join("\n") +
   `\n[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 998\n`;
-/** `--extensions none` loads no extension; the MCP allowlist names a server that does not exist, so none connects. */
+/**
+ * `--extensions none` loads no extension; the MCP allowlist names a server that does not exist, so none connects.
+ *
+ * Gemini is given no MCP server in this version: gemini-cli 0.68.0 starts MCP servers only in a trusted folder, and a
+ * run's worktree is never trusted (see GEMINI_CLI_TRUST_WORKSPACE below). The runner refuses such a run; this adapter
+ * refuses one too. Verified against the 0.68.0 bundle, for a later plan that finds a way to trust nothing else:
+ * - ACP `session/new` maps `mcpServers` entries `{ name, command, args, env: [{ name, value }] }` (stdio, cwd = the
+ *   session cwd) and `{ type: "http", name, url, headers: [{ name, value }] }` into its config (over stdin, never argv);
+ *   `--allowed-mcp-server-names a,b` is then the allowlist, and also adds an allow rule at priority 4.1.
+ * - MCP tools are named `mcp_<server>_<tool>` (`generateValidName`; a hyphen is kept), parsed with
+ *   /^([^_]+)_(.+)$/, so a server name must hold no underscore (`tt-xxxxxxxx` does not).
+ * - A policy rule `mcpName = "<server>"` with `toolName = "*"` loads as `mcp_<server>_*` and matches every tool of
+ *   that server by the call's server name; with `decision = "ask_user"`, `priority = 999` and `argsPattern = ".*"`
+ *   (placed before the wildcard deny) it lands at 4.999, above that allow and the `tools.core` wildcard deny (4.24).
+ *   `tools.core` only filters built-in tools, so MCP tools would still be registered.
+ */
 const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
 /** Per run: our policy directory replaces the user's, and `--allowed-tools` replaces `tools.allowed` with a name matching no tool. */
 const runArgs = (policies: string): string[] => [...ACP_ARGS, "--policy", policies, "--allowed-tools", "theterminal-none"];
@@ -102,6 +118,10 @@ const STDERR_KEEP = 4096;
 const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+/** How gemini-cli 0.68.0 prefixes an API error it prints (parseAndFormatApiError). */
+const API_ERROR = "[API Error:";
+/** gemini-cli 0.68.0 names HTTP 429 by its status, RESOURCE_EXHAUSTED; the shared pattern covers the rest. */
+const GEMINI_RATE_LIMIT = new RegExp(`${RATE_LIMIT_TEXT.source}|\\bRESOURCE_EXHAUSTED\\b`, "i");
 const KILL_GRACE_MS = 5000;
 /**
  * How long an early exit waits for stderr to end before it is reported. The OS gives no order between the stdout and
@@ -272,6 +292,7 @@ export class GeminiAdapter implements AgentAdapter {
     // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
     if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
     if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: "invalid projectId" };
+    if (o.credentials.mcpServers.length > 0) return { status: "failed", error: NO_MCP }; // the runner refuses these first
     const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
@@ -328,11 +349,11 @@ export class GeminiAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AuthMode, credentials: RunCredentials): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    const { cliHome, googleCloudProject } = credentials;
-    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject }), ...this.fakeEnv }; // the user's own login, untouched
+    const { cliHome, googleCloudProject, env: extraEnv } = credentials;
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject, extraEnv }), ...this.fakeEnv }; // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject }), ...this.fakeEnv };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv }), ...this.fakeEnv };
   }
 }
 
@@ -347,7 +368,12 @@ class GeminiRun {
   private readonly terminals: Terminals;
   /** Terminal id -> the allowed action it runs for. */
   private readonly terminalActions = new Map<string, string>();
-  /** The agent's env without provider keys: terminal commands never see them. */
+  /**
+   * The agent's env without provider variables: terminal commands never see them. The run's cloud grant is the
+   * exception: its own variables (GOOGLE_CLOUD_PROJECT, GOOGLE_OAUTH_ACCESS_TOKEN among them) reach the command with
+   * the grant's values, so an approved `gcloud` or `terraform` command can authenticate, and the Gemini connection's
+   * own project (which Gemini itself keeps) never does.
+   */
   private readonly terminalEnv: NodeJS.ProcessEnv;
   private sessionId: string | null = null;
   private inTurn = false;
@@ -358,6 +384,8 @@ class GeminiRun {
   private stderrTail = "";
   /** The latest cumulative USD cost from an ACP usage_update, if any. */
   private costUsd: number | undefined;
+  /** At most one rate limit per run: Gemini may print the API error and then fail the prompt with it. */
+  private rateLimited = false;
   private closing: Promise<void> | null = null;
 
   constructor(
@@ -373,6 +401,7 @@ class GeminiRun {
     for (const [k, v] of Object.entries(env)) {
       if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
     }
+    Object.assign(this.terminalEnv, o.credentials.env);
   }
 
   async run(file: string, args: string[]): Promise<StartResult> {
@@ -430,7 +459,13 @@ class GeminiRun {
       await this.setup("session/set_mode", { sessionId: this.sessionId, modeId: DEFAULT_MODE });
     }
     this.inTurn = true;
-    const res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
+    let res: unknown;
+    try {
+      res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
+    } catch (e) {
+      this.noteRateLimit(errorMessage(e));
+      throw e;
+    }
     this.inTurn = false;
     if (this.costUsd !== undefined) this.o.emit({ type: "usage", costUsd: this.costUsd });
     const stopReason = isRecord(res) && typeof res.stopReason === "string" ? res.stopReason : "unknown";
@@ -527,7 +562,11 @@ class GeminiRun {
     const u = params.update;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        if (isRecord(u.content) && u.content.type === "text" && typeof u.content.text === "string") this.text(u.content.text);
+        if (isRecord(u.content) && u.content.type === "text" && typeof u.content.text === "string") {
+          // Only Gemini's own API error text counts, never prose that happens to mention a rate limit.
+          if (u.content.text.includes(API_ERROR)) this.noteRateLimit(u.content.text);
+          this.text(u.content.text);
+        }
         return;
       case "tool_call":
       case "tool_call_update":
@@ -572,6 +611,13 @@ class GeminiRun {
       title: typeof tc.title === "string" ? tc.title : null,
       locations: Array.isArray(tc.locations) ? locationPaths(tc.locations) : null,
     };
+  }
+
+  /** Emits rate_limited once when `message` reads as a rate limit (a heuristic, so the count is an estimate). */
+  private noteRateLimit(message: string): void {
+    if (this.rateLimited || !GEMINI_RATE_LIMIT.test(message)) return;
+    this.rateLimited = true;
+    this.o.emit({ type: "rate_limited" });
   }
 
   /**

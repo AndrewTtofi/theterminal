@@ -7,6 +7,8 @@ import type { Status } from "../src/api";
 const status = (over: Partial<Status["connections"]> = {}): Status => ({
   runningAgents: 2,
   todayCostUsd: 0.4,
+  monthCostUsd: 12,
+  monthlyBudgetUsd: null,
   pendingDecisions: 1,
   connections: { enabled: 3, failed: 1, keychain: "ok", ...over },
   ci: null,
@@ -52,6 +54,37 @@ describe("StatusBar", () => {
     render(<StatusBar status={status({ keychain: "unavailable" })} running={0} pending={0} {...noop} />);
     expect(screen.getByText("Keychain unavailable")).toBeTruthy();
     expect(screen.queryByText(/Connections:/)).toBeNull();
+  });
+
+  it("shows the CI state as a link, marking a failing one", () => {
+    const url = "https://github.com/octo-org/example/actions/runs/1";
+    render(<StatusBar status={{ ...status(), ci: { state: "failing", url, branch: "main", updatedAt: null } }} running={0} pending={0} {...noop} />);
+    const link = screen.getByRole("link", { name: "CI: failing" });
+    expect(link.getAttribute("href")).toBe(url);
+    expect(link.className).toContain("attention");
+    expect(screen.queryByText("CI: not connected")).toBeNull();
+  });
+
+  it("shows the CI state without a link when there is no run", () => {
+    render(<StatusBar status={{ ...status(), ci: { state: "unknown", url: null, branch: null, updatedAt: null } }} running={0} pending={0} {...noop} />);
+    expect(screen.getByText("CI: unknown")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("shows the month's spend against the budget when one is set, marking it once reached", () => {
+    const { rerender } = render(<StatusBar status={{ ...status(), monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
+    const bar = screen.getByRole("contentinfo", { name: "Status bar" });
+    expect(bar.textContent).toContain("Today: $0.40 · Month: $12.00 of $50.00");
+    const monthItem = screen.getByText("· Month: $12.00 of $50.00", { exact: false });
+    expect(monthItem.className).not.toContain("attention");
+    expect(monthItem.getAttribute("title")).toBe("Includes estimates: Claude's cost is computed by its SDK, not billed by the provider.");
+    rerender(<StatusBar status={{ ...status(), monthCostUsd: 50, monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
+    expect(screen.getByText("· Month: $50.00 of $50.00", { exact: false }).className).toContain("attention");
+  });
+
+  it("leaves the month out when no budget is set", () => {
+    render(<StatusBar status={status()} running={0} pending={0} {...noop} />);
+    expect(screen.queryByText(/Month:/)).toBeNull();
   });
 
   it("selects the Needs you and Connections views when clicked", async () => {

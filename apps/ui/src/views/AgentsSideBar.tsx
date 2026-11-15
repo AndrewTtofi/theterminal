@@ -10,6 +10,7 @@ export function AgentsSideBar() {
     <AgentPanel
       adapters={model.agentsInfo.adapters}
       providers={model.agentsInfo.providers}
+      connections={model.connections.list}
       runs={model.runs}
       selectedRunId={model.selectedRunId}
       onStart={model.onStartRun}

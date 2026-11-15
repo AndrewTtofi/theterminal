@@ -20,6 +20,7 @@ import { openDatabase } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { GeminiAdapter as IndexGeminiAdapter } from "../../src/index.js";
+import type { McpServerSpec } from "../../src/connections/mcp.js";
 import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyBodyWindows, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-gemini.mjs");
@@ -162,7 +163,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
       denied.push([a, reason]);
     },
     clean: (t) => t,
-    credentials: {},
+    credentials: { env: {}, mcpServers: [] },
   };
   return { opts, proposed, decisions, denied, events, abort, gated, emitted };
 }
@@ -299,7 +300,7 @@ describe("GeminiAdapter", () => {
     const connectionKey = "AIzaTESTKEYconnection000000000000000000";
     const apiKey = vi.fn(() => FAKE_KEY);
     const h = harness();
-    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project" } });
+    const r = await adapter({ apiKey }).start({ ...h.opts, credentials: { apiKey: connectionKey, googleCloudProject: "test-project", env: {}, mcpServers: [] } });
     expect(r).toEqual({ status: "completed" });
     expect(apiKey).not.toHaveBeenCalled();
     const snap = readLog().find((e) => e.initialize)!.initialize;
@@ -312,7 +313,7 @@ describe("GeminiAdapter", () => {
     script([]);
     const cliHome = join(outside, "connection-gemini-home");
     const h = harness(policyGate(), "google");
-    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project" } });
+    const r = await adapter().start({ ...h.opts, credentials: { cliHome, googleCloudProject: "test-project", env: {}, mcpServers: [] } });
     expect(r).toEqual({ status: "completed" });
     const snap = readLog().find((e) => e.initialize)!.initialize;
     expect(snap.env.GEMINI_CLI_HOME).toBe(cliHome);
@@ -380,6 +381,46 @@ describe("GeminiAdapter", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("MCP servers", () => {
+    const SPEC: McpServerSpec = {
+      serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "http",
+      url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer TESTKEY-mcp-header-0000000000" },
+    };
+
+    it("fails without starting gemini when given an MCP server: it starts them only in a trusted folder", async () => {
+      script([]);
+      const { spawn, children } = fakeSpawn();
+      const h = harness();
+      const r = await adapter({ spawn }).start({ ...h.opts, credentials: { env: {}, mcpServers: [SPEC] } });
+      expect(r).toEqual({ status: "failed", error: "Gemini cannot use MCP servers in The Terminal yet" });
+      expect(children).toEqual([]);
+    });
+
+    it("an MCP tool call that asks is gated as kind other and completes after Allow", async () => {
+      script([{ type: "mcpTool", server: "tt-abc12345", tool: "list", permission: true }]);
+      const h = harness(policyGate(() => ({ decision: "allow", reason: "owner allowed" })));
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      expect(h.proposed).toMatchObject([{ kind: "other", summary: "mcp_tt-abc12345_list", paths: [] }]);
+      expect(h.events).toContainEqual({ type: "action_result", actionId: "act-1", ok: true, output: "done" });
+      expect(logged("mcpTool")).toMatchObject([{ name: "mcp_tt-abc12345_list", allowed: true }]);
+    });
+
+    it("an MCP tool call that runs without asking fails the run and is recorded denied", async () => {
+      script([{ type: "mcpTool", server: "tt-9f8e7d6c", tool: "create" }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "failed", error: "agent executed an ungated tool" });
+      expect(h.denied).toMatchObject([[{ kind: "other", summary: "Ungated tool: mcp_tt-9f8e7d6c_create" }, "agent executed an ungated tool"]]);
+    });
+
+    it("the mcpTool step without a server is skipped when session/new names none", async () => {
+      script([{ type: "mcpTool", tool: "list", permission: true }]);
+      const h = harness();
+      expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+      expect(h.proposed).toEqual([]);
+      expect(logged("mcpTool")).toEqual([]);
+    });
   });
 
   it("refuses a prompt that gemini would run as a slash or shell command, without starting it", async () => {
@@ -690,6 +731,35 @@ describe("GeminiAdapter", () => {
     expect(logged("terminal/wait_for_exit")[0]!.result).toEqual({ exitCode: 0, signal: null });
     expect(logged("terminal/release")[0]!.result).toEqual({});
     expect(h.events).toEqual([{ type: "action_result", actionId: "act-1", ok: true, output: out.output }]);
+  });
+
+  it.each(["api_key", "google"] as const)("%s mode: the run's cloud grant reaches Gemini", async (authMode) => {
+    script([]);
+    const envs: NodeJS.ProcessEnv[] = [];
+    const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+      envs.push(opts.env);
+      return nodeSpawn(file, args, opts as never);
+    }) as unknown as typeof nodeSpawn;
+    const h = harness(policyGate(), authMode);
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    expect(await adapter({ spawn }).start({ ...h.opts, credentials })).toEqual({ status: "completed" });
+    expect(envs[0]!.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
+  });
+
+  it("a terminal command keeps the grant's Google Cloud variables and still never sees a provider key", async () => {
+    const probe = "process.stdout.write(JSON.stringify({ token: process.env.CLOUDSDK_AUTH_ACCESS_TOKEN ?? null, oauth: process.env.GOOGLE_OAUTH_ACCESS_TOKEN ?? null, project: process.env.GOOGLE_CLOUD_PROJECT ?? null, core: process.env.CLOUDSDK_CORE_PROJECT ?? null, key: process.env.GEMINI_API_KEY ?? null }))";
+    script([{ type: "terminal", command: process.execPath, args: ["-e", probe] }]);
+    const h = harness();
+    const credentials = {
+      googleCloudProject: "gemini-project", mcpServers: [],
+      env: { CLOUDSDK_AUTH_ACCESS_TOKEN: "TESTKEY-gcp-token", GOOGLE_OAUTH_ACCESS_TOKEN: "TESTKEY-gcp-token", CLOUDSDK_CORE_PROJECT: "grant-project", GOOGLE_CLOUD_PROJECT: "grant-project" },
+    };
+    expect(await adapter().start({ ...h.opts, credentials })).toEqual({ status: "completed" });
+    // Gemini itself keeps its own project; the command gets the grant's.
+    expect(readLog().find((e) => e.initialize)!.initialize.env.GOOGLE_CLOUD_PROJECT).toBe("gemini-project");
+    expect(JSON.parse(logged("terminal/output")[0]!.result.output)).toEqual({
+      token: "TESTKEY-gcp-token", oauth: "TESTKEY-gcp-token", project: "grant-project", core: "grant-project", key: null,
+    });
   });
 
   it("a terminal with a cwd outside the worktree is denied and never runs", async () => {
@@ -1418,6 +1488,28 @@ describe("GeminiAdapter", () => {
     expect(r.status).toBe("failed");
     expect(r.error).toContain("quota exceeded");
     expect(r.error).not.toContain(SECRET);
+  });
+
+  it("emits rate_limited when the prompt fails with Gemini's 429 status (RESOURCE_EXHAUSTED), and not for other errors", async () => {
+    script([{ type: "fail", message: "[API Error: Quota exceeded for this model (Status: RESOURCE_EXHAUSTED)]" }]);
+    const h = harness();
+    expect((await adapter().start(h.opts)).status).toBe("failed");
+    expect(h.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
+    script([{ type: "fail", message: "Internal error" }]);
+    const h2 = harness();
+    await adapter().start(h2.opts);
+    expect(h2.events.filter((e) => e.type === "rate_limited")).toEqual([]);
+  });
+
+  it("emits rate_limited once for an API error in the agent's text, never for prose that mentions a rate limit", async () => {
+    script([
+      { type: "message", text: "I added a rate limit to the API handler. " },
+      { type: "message", text: "[API Error: You exceeded your current quota (Status: RESOURCE_EXHAUSTED)] " },
+      { type: "message", text: "[API Error: 429 Too Many Requests, rate limit] " },
+    ]);
+    const h = harness();
+    await adapter().start(h.opts);
+    expect(h.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
   });
 
   it("fails when gemini exits in the middle of a prompt", async () => {

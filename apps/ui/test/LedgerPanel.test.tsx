@@ -13,6 +13,18 @@ const entry = (seq: number, type: LedgerEntry["type"], payload: unknown, actor: 
   actor,
 });
 
+describe("describeEntry rate limits", () => {
+  it("describes an observed rate limit, with the wait when there is one", () => {
+    const agent = { kind: "agent", id: "abcdef1234567890" } as const;
+    expect(describeEntry(entry(1, "agent.rate_limited", { runId: "abcdef1234567890", retryAfterS: null }, agent))).toBe(
+      "Agent abcdef12 was rate-limited by the provider",
+    );
+    expect(describeEntry(entry(2, "agent.rate_limited", { runId: "abcdef1234567890", retryAfterS: 30 }, agent))).toBe(
+      "Agent abcdef12 was rate-limited by the provider; retry after 30 s",
+    );
+  });
+});
+
 describe("describeEntry connections", () => {
   const c = { connectionId: "c1", name: "Work key" };
   it("describes connection events", () => {
@@ -36,6 +48,24 @@ describe("describeEntry connections", () => {
     expect(
       describeEntry(entry(9, "connection.used", { ...c, runId: "abcdef1234567890", purpose: "api_key" }, { kind: "system", id: "runner" })),
     ).toBe('Agent abcdef12 was given access to "Work key"');
+  });
+
+  it("describes what a run was given: the kind of cloud credential, or an MCP server, never a value", () => {
+    const used = (purpose: string, extra: Record<string, unknown> = {}) =>
+      describeEntry(entry(20, "connection.used", { connectionId: "c1", name: "Ops", runId: "abcdef1234567890", purpose, ...extra }, { kind: "system", id: "runner" }));
+    expect(used("cloud_credentials", { credential: "aws_session_token", expiresAt: "2026-11-16T00:00:00.000Z" })).toBe(
+      'Agent abcdef12 was given a 12-hour AWS session token from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "aws_static_keys", expiresAt: null })).toBe(
+      'Agent abcdef12 was given the AWS access keys (no session token available) from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "gcp_access_token", expiresAt: "2026-11-16T00:00:00.000Z" })).toBe(
+      'Agent abcdef12 was given a 1-hour Google Cloud token from "Ops"',
+    );
+    expect(used("cloud_credentials", { credential: "azure_client_secret", expiresAt: null })).toBe(
+      'Agent abcdef12 was given the Azure client secret from "Ops"',
+    );
+    expect(used("mcp_server")).toBe('Agent abcdef12 was given the MCP server "Ops"');
   });
 
   it("describes a sign-in with only the provider and the outcome", () => {

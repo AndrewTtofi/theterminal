@@ -1,13 +1,17 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import type { HookCallbackMatcher, HookInput, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import { dirname, join } from "node:path";
+import { query as realSdkQuery, type HookCallbackMatcher, type HookInput, type Options, type SpawnOptions, type query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
-import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
+import { ClaudeAdapter, VERIFIED_CLAUDE_CODE_VERSION, toolToAction } from "../../src/agents/claude-adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { classify } from "../../src/agents/policy.js";
 import { AgentRunner, DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
+import type { McpServerSpec } from "../../src/connections/mcp.js";
 import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
@@ -19,6 +23,18 @@ import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderS
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
 const CONNECTION_KEY = "sk-ant-TESTKEY-0000000000";
 const CWD = join("tmp", "worktree");
+const MCP_ENV_SECRET = "TESTKEY-mcp-env-0000000000";
+const MCP_HEADER_SECRET = "Bearer TESTKEY-mcp-header-0000000000";
+const MCP_SPECS: McpServerSpec[] = [
+  {
+    serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "stdio",
+    command: "npx", args: ["-y", "example-server"], env: { API_TOKEN: MCP_ENV_SECRET, MODE: "read" },
+  },
+  {
+    serverName: "tt-9f8e7d6c", connectionId: "9f8e7d6c-0000-4000-8000-000000000000", name: "Tracker", transport: "http",
+    url: "https://mcp.example.com/mcp", headers: { Authorization: MCP_HEADER_SECRET },
+  },
+];
 
 describe("toolToAction", () => {
   const cases: [string, Record<string, unknown>, Partial<ProposedAction>][] = [
@@ -116,6 +132,19 @@ describe("toolToAction", () => {
     expect(toolToAction("Read", { file_path: "" }, CWD).paths).toEqual([]);
   });
 
+  it("names the server of one of our MCP tools, and the gate asks for it", () => {
+    const a = toolToAction("mcp__tt-abc12345__list", {}, CWD);
+    expect(a).toEqual({ tool: "mcp__tt-abc12345__list", kind: "mcp", summary: "MCP tool list on tt-abc12345", input: {}, paths: [] });
+    expect(toolToAction("mcp__my_server__get_item", {}, CWD).summary).toBe("MCP tool get_item on my_server");
+    expect(toolToAction("mcp__odd", {}, CWD)).toMatchObject({ kind: "mcp", summary: "MCP tool mcp__odd" });
+    const wtRoot = mkdtempSync(join(tmpdir(), "claude-mcp-"));
+    try {
+      expect(classify(a, join(wtRoot, "wt"), new WorktreeManager(wtRoot)).verdict).toBe("ask");
+    } finally {
+      rmSync(wtRoot, { recursive: true, force: true });
+    }
+  });
+
   it("is exported from the core index", () => {
     expect(indexToolToAction).toBe(toolToAction);
     expect(IndexClaudeAdapter).toBe(ClaudeAdapter);
@@ -126,7 +155,18 @@ describe("toolToAction", () => {
 /** A scripted SDK step: a message to yield, or a tool call that runs the registered hooks. */
 type Step =
   | { msg: Record<string, unknown> }
-  | { tool: string; input: Record<string, unknown>; id: string; response?: unknown; error?: string };
+  | { tool: string; input: Record<string, unknown>; id: string; response?: unknown; error?: string; run?: string[] };
+
+/**
+ * The env Claude Code hands a Bash command: its own env, unless subprocess scrubbing is on (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+ * truthy, or GITHUB_ACTIONS truthy without the scrub variable set false), which strips cloud credentials.
+ */
+function claudeCommandEnv(env: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const on = (v: string | undefined) => v !== undefined && /^(1|true|yes|on)$/i.test(v);
+  const off = (v: string | undefined) => v !== undefined && /^(0|false|no|off)$/i.test(v);
+  const scrub = on(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) || (on(env.GITHUB_ACTIONS) && !off(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB));
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !(scrub && /^(AWS_|AZURE_|ARM_|CLOUDSDK_|GOOGLE_)/.test(k))));
+}
 
 type HookOutput = { hookSpecificOutput?: { hookEventName: string; permissionDecision?: string; permissionDecisionReason?: string } };
 
@@ -159,7 +199,11 @@ function fakeQuery(steps: Step[], opts: { hang?: boolean } = {}) {
         preDecisions.push(out!);
         if (out?.hookSpecificOutput?.permissionDecision !== "allow") continue;
         if (step.error !== undefined) await run("PostToolUseFailure", { ...base, error: step.error }, step.id);
-        else await run("PostToolUse", { ...base, tool_response: step.response }, step.id);
+        else if (step.run) {
+          // Runs the command for real, as Claude Code's Bash tool would, with the env it would give it.
+          const stdout = execFileSync(step.run[0]!, step.run.slice(1), { env: claudeCommandEnv(options.env ?? {}), encoding: "utf8" });
+          await run("PostToolUse", { ...base, tool_response: { stdout, stderr: "", interrupted: false } }, step.id);
+        } else await run("PostToolUse", { ...base, tool_response: step.response }, step.id);
       }
       if (opts.hang) {
         await new Promise<void>((resolve) => options.abortController?.signal.addEventListener("abort", () => resolve()));
@@ -189,7 +233,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     emit: (e) => events.push(e),
     recordDenied: async () => {},
     clean: (t) => t,
-    credentials: {},
+    credentials: { env: {}, mcpServers: [] },
   };
   return { opts, proposed, events, abort };
 }
@@ -316,7 +360,7 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     const fallback = vi.fn(() => FAKE_KEY);
     const h = harness();
-    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY } });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY, env: {}, mcpServers: [] } });
     expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe(CONNECTION_KEY);
     expect(fallback).not.toHaveBeenCalled();
   });
@@ -328,6 +372,30 @@ describe("ClaudeAdapter", () => {
     await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => bundled, findClaude }).start(harness().opts);
     expect(q.calls[0]!.options).not.toHaveProperty("pathToClaudeCodeExecutable");
     expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it.each(["api_key", "subscription"] as const)("%s mode: the run's cloud grant reaches Claude Code and its Bash commands", async (authMode) => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => CLAUDE_BIN }).start({ ...h.opts, authMode, credentials });
+    const env = q.calls[0]!.options.env!;
+    expect(env.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
+    // Claude Code hands its own env to Bash commands unless subprocess scrubbing is on, which this env never turns on.
+    expect(Object.keys(env).filter((k) => /SUBPROCESS_ENV_SCRUB|^GITHUB_ACTIONS$/.test(k))).toEqual([]);
+    expect(env.CLAUDE_CODE_ENTRYPOINT).not.toBe("local-agent");
+  });
+
+  it("an approved Bash command gets the grant in its env, and no API key it was not meant to see", async () => {
+    const probe = "process.stdout.write(JSON.stringify({ s: process.env.AZURE_CLIENT_SECRET ?? null, o: process.env.OPENAI_API_KEY ?? null }))";
+    const q = fakeQuery([{ tool: "Bash", input: { command: "node probe" }, id: "tu-1", run: [process.execPath, "-e", probe] }, success(0)]);
+    vi.stubEnv("OPENAI_API_KEY", "sk-TESTKEY-openai-0000000000000000");
+    vi.stubEnv("GITHUB_ACTIONS", "true"); // dropped by the allowlist, so it never turns scrubbing on
+    const h = harness();
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...h.opts, credentials });
+    const done = h.events.find((e) => e.type === "action_result") as { output: string };
+    expect(JSON.parse((JSON.parse(done.output) as { stdout: string }).stdout)).toEqual({ s: "TESTKEY-azure-secret-0000000000", o: null });
   });
 
   it("api_key mode falls back to Claude Code on PATH when the bundled one is missing (the desktop app does not ship it)", async () => {
@@ -447,6 +515,43 @@ describe("ClaudeAdapter", () => {
     expect(h.events).toEqual([{ type: "usage", costUsd: 0.5 }]);
   });
 
+  describe("rate limits", () => {
+    const start = async (steps: Step[]) => {
+      const h = harness();
+      const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: fakeQuery(steps).fn, apiKey: () => FAKE_KEY }).start(h.opts);
+      return { r, limited: h.events.filter((e) => e.type === "rate_limited") };
+    };
+    const rateEvent = (status: string) => ({ msg: { type: "rate_limit_event", rate_limit_info: { status, rateLimitType: "five_hour" }, uuid: "u", session_id: "s" } });
+    const retry = (error: string, delayMs: number) => ({
+      msg: { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: delayMs, error_status: 429, error, uuid: "u", session_id: "s" },
+    });
+
+    it("emits rate_limited for a rejected rate_limit_event and ignores allowed ones", async () => {
+      const { limited } = await start([rateEvent("allowed"), rateEvent("allowed_warning"), rateEvent("rejected"), success(0)]);
+      expect(limited).toEqual([{ type: "rate_limited" }]);
+    });
+
+    it("emits rate_limited with the delay in whole seconds for an api_retry caused by a rate limit, and ignores other retries", async () => {
+      const { limited } = await start([retry("overloaded", 4000), retry("rate_limit", 12_400), success(0)]);
+      expect(limited).toEqual([{ type: "rate_limited", retryAfterS: 12 }]);
+    });
+
+    it("falls back to the error text of a result: an is_error result saying 429 rate limit is a rate limit", async () => {
+      const { r, limited } = await start([{ msg: { type: "result", subtype: "success", is_error: true, result: "API Error: 429 rate limit exceeded", total_cost_usd: 0 } }]);
+      expect(r.status).toBe("failed");
+      expect(limited).toEqual([{ type: "rate_limited" }]);
+    });
+
+    it("does not count the fallback again after a typed signal, nor treat error_max_turns or other errors as rate limits", async () => {
+      const typed = await start([rateEvent("rejected"), { msg: { type: "result", subtype: "success", is_error: true, result: "429 rate limit", total_cost_usd: 0 } }]);
+      expect(typed.limited).toHaveLength(1);
+      const turns = await start([{ msg: { type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0, errors: ["rate limit of turns reached"] } }]);
+      expect(turns.limited).toEqual([]);
+      const other = await start([{ msg: { type: "result", subtype: "success", is_error: true, result: "invalid request", total_cost_usd: 0 } }]);
+      expect(other.limited).toEqual([]);
+    });
+  });
+
   it("fails with a redacted error when the SDK throws", async () => {
     const q = fakeQuery([{ msg: { type: "system", subtype: "init" } }]);
     const throwing = ((p: Parameters<typeof sdkQuery>[0]) => {
@@ -471,6 +576,74 @@ describe("ClaudeAdapter", () => {
     expect(await done).toEqual({ status: "failed", error: "run stopped" });
     expect(q.calls[0]!.options.abortController!.signal.aborted).toBe(true);
     expect(q.closed).toBe(true);
+  });
+
+  it("hands the selected MCP servers to Claude Code with their secrets as variables of its env, keeping strictMcpConfig", async () => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...h.opts, credentials: { env: {}, mcpServers: MCP_SPECS } });
+    const { options } = q.calls[0]!;
+    expect(options.strictMcpConfig).toBe(true);
+    expect(options.mcpServers).toEqual({
+      "tt-abc12345": { type: "stdio", command: "npx", args: ["-y", "example-server"], env: { API_TOKEN: "${TT_MCP_0_0}", MODE: "${TT_MCP_0_1}" } },
+      "tt-9f8e7d6c": { type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "${TT_MCP_1_0}" } },
+    });
+    expect(options.env).toMatchObject({ TT_MCP_0_0: MCP_ENV_SECRET, TT_MCP_0_1: "read", TT_MCP_1_0: MCP_HEADER_SECRET });
+    expect(JSON.stringify(options.mcpServers)).not.toContain("TESTKEY");
+  });
+
+  it("passes no mcpServers option and no MCP variables without MCP servers", async () => {
+    const q = fakeQuery([success(0)]);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
+    expect(q.calls[0]!.options).not.toHaveProperty("mcpServers");
+    expect(Object.keys(q.calls[0]!.options.env!).filter((k) => k.startsWith("TT_MCP_"))).toEqual([]);
+  });
+
+  it("fails without starting Claude when an MCP server name is not one of ours", async () => {
+    const q = fakeQuery([success(0)]);
+    const bad = { ...MCP_SPECS[0]!, serverName: "tt_bad" } as McpServerSpec;
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...harness().opts, credentials: { env: {}, mcpServers: [bad] } });
+    expect(r).toEqual({ status: "failed", error: "invalid MCP server name" });
+    expect(q.calls).toHaveLength(0);
+  });
+
+  it("the command line the Agent SDK builds for Claude Code holds no MCP secret; its env does", async () => {
+    // The real SDK, stopped at the point where it would spawn Claude Code: it puts mcpServers on the command line.
+    let spawned: SpawnOptions | undefined;
+    const capture = ((p: Parameters<typeof sdkQuery>[0]) => {
+      try {
+        return realSdkQuery({
+          ...p,
+          options: {
+            ...p.options,
+            spawnClaudeCodeProcess: (so) => {
+              spawned = so;
+              throw new Error("not spawning in tests");
+            },
+          },
+        });
+      } catch {
+        return Object.assign((async function* () {})(), { close: () => undefined });
+      }
+    }) as unknown as typeof sdkQuery;
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: capture, apiKey: () => FAKE_KEY }).start({ ...harness().opts, credentials: { env: {}, mcpServers: MCP_SPECS } });
+    expect(r.status).toBe("failed");
+    expect(spawned).toBeDefined();
+    const argv = [spawned!.command, ...spawned!.args].join(" ");
+    expect(argv).toContain("--mcp-config");
+    expect(argv).toContain("${TT_MCP_0_0}");
+    for (const secret of [MCP_ENV_SECRET, MCP_HEADER_SECRET, "TESTKEY"]) expect(argv).not.toContain(secret);
+    expect(spawned!.env).toMatchObject({ TT_MCP_0_0: MCP_ENV_SECRET, TT_MCP_1_0: MCP_HEADER_SECRET });
+  });
+
+  it("the installed Agent SDK bundles the Claude Code version whose MCP variable expansion was verified", () => {
+    // The package's exports hide package.json; it sits next to the entry point.
+    const entry = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
+    const pkg = JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8")) as { name: string; claudeCodeVersion: string };
+    expect(pkg.name).toBe("@anthropic-ai/claude-agent-sdk");
+    // A bump means: recheck that `--mcp-config` still expands ${VAR} (the live test), then update the constant.
+    expect(pkg.claudeCodeVersion).toBe(VERIFIED_CLAUDE_CODE_VERSION);
+    expect(VERIFIED_CLAUDE_CODE_VERSION).toBe("2.1.323");
   });
 
   it("does not start Claude when the signal is already aborted", async () => {

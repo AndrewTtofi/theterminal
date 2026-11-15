@@ -9,9 +9,12 @@ import {
   type Actor,
   type CatalogEntry,
   type Connection,
+  type ConnectionField,
   type ConnectionKind,
   type ConnectionProvider,
   type FieldStorage,
+  type CapacityHardware,
+  type HardwareInfo,
   type NewLedgerEntry,
   type Provider,
 } from "@theterminal/shared";
@@ -21,6 +24,9 @@ import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
+import { pairValueSecrets, pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
+import { privateKeySecrets } from "./cloud/gcp.js";
+import { hardwareConfig, hardwareFromConfig } from "../capacity/hardware.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -45,6 +51,33 @@ export class UnknownFieldError extends Error {
     this.name = "UnknownFieldError";
   }
 }
+
+/** A connection that is switched off was asked for. */
+export class ConnectionDisabledError extends Error {
+  constructor(message = "connection is disabled") {
+    super(message);
+    this.name = "ConnectionDisabledError";
+  }
+}
+
+/** A connection that cannot be used this way: given to a run (a model, GitHub, hardware), or written by hand (hardware). */
+export class UnsupportedConnectionError extends Error {
+  constructor(message = "this connection cannot be given to a run") {
+    super(message);
+    this.name = "UnsupportedConnectionError";
+  }
+}
+
+export type CloudSource = {
+  connectionId: string;
+  name: string;
+  provider: "aws" | "gcp" | "azure";
+  config: Record<string, string>;
+  secrets: Record<string, string>;
+};
+export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[] };
+export type GitHubSource = { connectionId: string; token: string; repo: string } | null;
+export type Budget = { connectionId: string; provider: Provider; name: string; plan: string | null; monthlyBudgetUsd: number | null };
 
 export type ConnectionTester = (
   input: { config: Record<string, string>; private: Record<string, string>; secrets: Record<string, string> },
@@ -101,6 +134,13 @@ const UNTESTABLE = "Testing is not available for this connection yet";
 const UNREACHABLE = "Could not reach the provider";
 /** How long past its own timeout a tester may run before it is abandoned. */
 const TESTER_GRACE_MS = 1000;
+/** Written only by hardware detection, never through `add`/`update`. */
+const DETECTED_PROVIDER: ConnectionProvider = "local_hardware";
+const MANAGED_BY_DETECTION = "this connection is managed by detection";
+/** Kinds whose connections a run may be given. */
+const RUN_KINDS: ReadonlySet<ConnectionKind> = new Set(["cloud", "mcp"]);
+const NUMBER_VALUE = /^\d{1,9}(\.\d{1,2})?$/;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
 
@@ -121,6 +161,22 @@ function requestValues(...groups: Record<string, string | null>[]): string[] {
     .filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
 }
 
+/**
+ * The secret strings in a Google Cloud key, if it parses: its private key (whole, JSON-escaped and line by line, see
+ * privateKeySecrets) and private_key_id, those long enough to be secrets.
+ */
+function serviceAccountSecrets(json: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== "object" || parsed === null) return [];
+    const { private_key: key, private_key_id: keyId } = parsed as Record<string, unknown>;
+    const values = [...(typeof key === "string" ? privateKeySecrets(key) : []), keyId];
+    return values.filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
+  } catch {
+    return []; // A value that is not JSON stays redacted as a whole.
+  }
+}
+
 /** Writes and deletes for the given secret and private values, secrets first. */
 function toOps(secrets: Record<string, string | null>, priv: Record<string, string | null>): KeychainOp[] {
   return [
@@ -129,12 +185,50 @@ function toOps(secrets: Record<string, string | null>, priv: Record<string, stri
   ];
 }
 
+const MCP_PROVIDERS: ReadonlySet<ConnectionProvider> = new Set(["mcp_stdio", "mcp_http"]);
+const MCP_VAR_REFERENCE = 'must not contain "${": the agent program would read it as a reference to one of its variables';
+
 function invalid(path: (string | number)[], message: string): never {
   throw new z.ZodError([{ code: "custom", path, message }]);
 }
 
 const catalogFor = (provider: ConnectionProvider): CatalogEntry | undefined =>
   CONNECTION_CATALOG.find((e) => e.provider === provider);
+
+/**
+ * Why a URL is refused, or null: it must be https, or http to this computer only. A URL is config and reaches the
+ * ledger, so one carrying a user name, a password, a query string or a fragment (where tokens tend to go) is refused too.
+ */
+function urlProblem(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "must be an https URL, or http on localhost";
+  }
+  if (!(url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)))) {
+    return "must be an https URL, or http on localhost";
+  }
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "" || /[?#]/.test(url.href)) {
+    return "Put credentials in Headers, not in the URL.";
+  }
+  return null;
+}
+
+/**
+ * Checks a value against its field's input type and catalog pattern. Failures name the field's path, never the value.
+ * A "pairs" field is parsed, so a bad line is refused at [field, line] before anything is stored.
+ */
+function checkFormat(provider: ConnectionProvider, field: ConnectionField, value: string, path: (string | number)[]): void {
+  if (field.input === "number" && !NUMBER_VALUE.test(value)) invalid(path, "must be a number with at most 2 decimals");
+  const badUrl = field.input === "url" ? urlProblem(value) : null;
+  if (badUrl !== null) invalid(path, badUrl);
+  if (field.pattern !== undefined && !new RegExp(field.pattern).test(value)) invalid(path, "is not in the expected format");
+  if (field.format === "pairs") parsePairs(value, pairsKind(provider));
+  // Claude Code expands ${VAR} in an MCP server's command, arguments, URL, env and headers from its own env, which
+  // holds the run's other secrets: a reference there could hand one to the server. Its syntax has no escape.
+  if (MCP_PROVIDERS.has(provider) && value.includes("${")) invalid(path, MCP_VAR_REFERENCE);
+}
 
 /**
  * Connections to model providers and services. Secret and private values live only in the keychain (and an
@@ -155,6 +249,8 @@ export class ConnectionService {
   private state: "ok" | "unavailable" = "ok";
   /** The last keychain write or delete failed as unavailable (the cache stays good); cleared by the next success. */
   private writeFailed = false;
+  /** The tail of the hardware detections being recorded (see writeHardware). */
+  private hardwareWrites: Promise<unknown> = Promise.resolve();
   /** Whether a `load()` has succeeded since the process started. */
   private loaded = false;
   private loading: Promise<void> | null = null;
@@ -195,7 +291,7 @@ export class ConnectionService {
           read = true;
           if (value === null) continue;
           values[field] = value;
-          if (storage === "secret") this.seen.add(value);
+          if (storage === "secret") this.remember(row.provider, field, value);
         }
         next.set(row.id, values);
       }
@@ -260,6 +356,7 @@ export class ConnectionService {
   }
 
   async add(actor: Actor, input: AddConnectionInput): Promise<Connection> {
+    if (input.provider === DETECTED_PROVIDER) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
     await this.tryLoad();
     const entry = this.availableEntry(input.provider);
     if (entry.kind !== input.kind) invalid(["provider"], "provider does not belong to this kind");
@@ -283,7 +380,7 @@ export class ConnectionService {
     });
     const ops = toOps(secrets, priv);
     return this.exclusive(connectionId, async () => {
-      await this.commitWithKeychain(connectionId, ops, () => {
+      await this.commitWithKeychain(connectionId, entry.provider, ops, () => {
         this.assertNoConflict(entry);
         return { projectId: null, actor, type: "connection.added", payload };
       });
@@ -297,6 +394,9 @@ export class ConnectionService {
 
   private async updateNow(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
     const row = this.requireRow(id);
+    // The Owner may switch This computer off or on; only detection writes its fields.
+    const onlyEnabled = Object.keys(patch).every((k) => k === "enabled" || patch[k as keyof UpdateConnectionPatch] === undefined);
+    if (row.provider === DETECTED_PROVIDER && !onlyEnabled) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
     await this.tryLoad();
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
@@ -311,6 +411,10 @@ export class ConnectionService {
     for (const f of entry.fields) {
       const given = f.storage === "secret" ? secrets : f.storage === "private" ? priv : {};
       if (f.required && given[f.name] === null) invalid([f.storage === "secret" ? "secrets" : f.storage, f.name], "required");
+      // A new config replaces the old one whole, so it must still hold every required field.
+      if (f.required && f.storage === "config" && patch.config !== undefined && patch.config[f.name] === undefined) {
+        invalid(["config", f.name], "required");
+      }
     }
     const setOf = (values: Record<string, string | null>) => Object.keys(values).filter((k) => values[k] !== null).sort();
     const removedOf = (values: Record<string, string | null>) => Object.keys(values).filter((k) => values[k] === null).sort();
@@ -325,7 +429,7 @@ export class ConnectionService {
     // Writes before deletes: a failed write then leaves nothing deleted.
     const all = toOps(secrets, priv);
     const ops = [...all.filter((op) => op.value !== null), ...all.filter((op) => op.value === null)];
-    await this.commitWithKeychain(id, ops, () => {
+    await this.commitWithKeychain(id, row.provider, ops, () => {
       this.requireRow(id);
       return { projectId: null, actor, type: "connection.updated", payload };
     });
@@ -423,15 +527,146 @@ export class ConnectionService {
   }
 
   /**
+   * What a run is given for `ids`, from the cache: cloud accounts with their secrets and MCP server specs, in the order
+   * asked, duplicates collapsed. Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
+   * not start with half its secrets), before anything is returned.
+   */
+  selectForRun(ids: string[]): RunSelection {
+    const rows = [...new Set(ids)].map((id) => this.requireRow(id));
+    for (const row of rows) {
+      if (!RUN_KINDS.has(row.kind)) throw new UnsupportedConnectionError();
+      if (row.enabled !== 1) throw new ConnectionDisabledError();
+    }
+    if (rows.length > 0 && this.keychainState() !== "ok") throw new SecretStoreUnavailableError();
+    // Every field the projection lists must be in the cache: a run never gets an incomplete source.
+    for (const row of rows) {
+      const values = this.cache.get(row.id) ?? {};
+      if (this.storedFields(row).some(([f]) => values[f] === undefined)) throw new SecretStoreUnavailableError();
+    }
+    const selection: RunSelection = { cloud: [], mcp: [] };
+    for (const row of rows) {
+      const values = this.cache.get(row.id) ?? {};
+      if (row.kind === "mcp") {
+        selection.mcp.push(toMcpSpec(this.toConnection(row), values));
+        continue;
+      }
+      const secretFields = new Set(JSON.parse(row.secret_fields) as string[]);
+      selection.cloud.push({
+        connectionId: row.id, name: row.name, provider: row.provider as CloudSource["provider"],
+        config: JSON.parse(row.config) as Record<string, string>,
+        secrets: Object.fromEntries(Object.entries(values).filter(([f]) => secretFields.has(f))),
+      });
+    }
+    return selection;
+  }
+
+  /** The enabled GitHub connection with a stored token and a repository, else null. */
+  githubSource(): GitHubSource {
+    const row = this.db
+      .prepare("SELECT * FROM connections WHERE provider = 'github' AND enabled = 1 ORDER BY created_at, rowid LIMIT 1")
+      .get() as Row | undefined;
+    if (!row) return null;
+    const token = this.cache.get(row.id)?.token;
+    const repo = (JSON.parse(row.config) as Record<string, string>).repo;
+    return token && repo ? { connectionId: row.id, token, repo } : null;
+  }
+
+  /**
+   * Records a hardware detection in the This computer connection: added when absent, else updated with the new config
+   * (every detection is recorded, as its time changes). Whether it is enabled stays the Owner's choice. Detections run
+   * one at a time, so two at once never both add it.
+   */
+  writeHardware(actor: Actor, info: HardwareInfo): Promise<Connection> {
+    const next = this.hardwareWrites.then(() => this.writeHardwareNow(actor, info));
+    this.hardwareWrites = next.catch(() => undefined);
+    return next;
+  }
+
+  private async writeHardwareNow(actor: Actor, info: HardwareInfo): Promise<Connection> {
+    const entry = this.availableEntry(DETECTED_PROVIDER);
+    const config = this.checkConfig(entry, hardwareConfig(info), []);
+    const existing = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
+    if (existing) {
+      const payload = eventPayloadSchemas["connection.updated"].parse({ connectionId: existing.id, name: existing.name, changes: { config } });
+      return this.exclusive(existing.id, async () => {
+        await this.commitWithKeychain(existing.id, DETECTED_PROVIDER, [], () => {
+          this.requireRow(existing.id);
+          return { projectId: null, actor, type: "connection.updated", payload };
+        });
+        return this.get(existing.id);
+      });
+    }
+    const connectionId = this.newId();
+    const payload = eventPayloadSchemas["connection.added"].parse({
+      connectionId, kind: entry.kind, provider: entry.provider, name: entry.label, config, secretFields: [], privateFields: [],
+    });
+    return this.exclusive(connectionId, async () => {
+      await this.commitWithKeychain(connectionId, DETECTED_PROVIDER, [], () => {
+        this.assertNoConflict(entry);
+        return { projectId: null, actor, type: "connection.added", payload };
+      });
+      return this.get(connectionId);
+    });
+  }
+
+  /** The last detection recorded in the This computer connection, with whether it is enabled; null when none. */
+  hardware(): CapacityHardware | null {
+    const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
+    const info = row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
+    return row && info ? { ...info, enabled: row.enabled === 1 } : null;
+  }
+
+  /** The plan and monthly budget of each enabled model connection. */
+  budgets(): Budget[] {
+    return this.rows()
+      .filter((r) => r.kind === "llm" && r.enabled === 1)
+      .map((r) => {
+        const config = JSON.parse(r.config) as Record<string, string>;
+        return {
+          connectionId: r.id, provider: r.provider as Provider, name: r.name, plan: config.plan ?? null,
+          monthlyBudgetUsd: config.monthlyBudgetUsd === undefined ? null : Number(config.monthlyBudgetUsd),
+        };
+      });
+  }
+
+  /**
+   * Adds a secret value to the redaction list. The values of a "pairs" field are added one by one too (those long
+   * enough to be secrets), so a header or variable is redacted on its own, not only as the whole blob, and so is the
+   * credential after a `Bearer `, `Basic ` or `token ` scheme word. Likewise a
+   * Google Cloud key's private key (parsed, JSON-escaped and each long body line) and private_key_id: in the JSON the
+   * key's line breaks are escaped, so the key as a tool might print it would not match the stored text.
+   */
+  private remember(provider: ConnectionProvider, field: string, value: string): void {
+    this.seen.add(value);
+    if (provider === "gcp" && field === "serviceAccountJson") {
+      for (const v of serviceAccountSecrets(value)) this.seen.add(v);
+      return;
+    }
+    const def = catalogFor(provider)?.fields.find((f) => f.name === field);
+    if (def?.format !== "pairs") return;
+    try {
+      for (const v of Object.values(parsePairs(value, pairsKind(provider)))) {
+        for (const secret of pairValueSecrets(v, MIN_SECRET_LENGTH)) this.seen.add(secret);
+      }
+    } catch {
+      // A stored value that no longer parses stays redacted as a whole.
+    }
+  }
+
+  /**
    * Applies `ops` to the keychain, then commits the event. If a keychain op or the commit fails, every op done
    * in this call is undone (best effort: the previous value is put back, or the entry deleted) and the error rethrown.
    */
-  private async commitWithKeychain(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
+  private async commitWithKeychain(
+    connectionId: string, provider: ConnectionProvider, ops: KeychainOp[], build: () => NewLedgerEntry,
+  ): Promise<void> {
     if (ops.length > 0) await this.ensureKeychain();
-    await this.mutating(connectionId, () => this.applyAndCommit(connectionId, ops, build));
+    await this.mutating(connectionId, () => this.applyAndCommit(connectionId, provider, ops, build));
   }
 
-  private async applyAndCommit(connectionId: string, ops: KeychainOp[], build: () => NewLedgerEntry): Promise<void> {
+  private async applyAndCommit(
+    connectionId: string, provider: ConnectionProvider, ops: KeychainOp[], build: () => NewLedgerEntry,
+  ): Promise<void> {
     const cached = this.cache.get(connectionId) ?? {};
     const done: Undo[] = [];
     try {
@@ -439,7 +674,7 @@ export class ConnectionService {
         const account = accountFor(connectionId, op.field);
         // A value the cache does not hold (an entry the projection does not list) is read, so undo can restore it.
         const previous = Object.hasOwn(cached, op.field) ? cached[op.field] : ((await this.secrets.get(account)) ?? undefined);
-        if (previous !== undefined && op.secret) this.seen.add(previous);
+        if (previous !== undefined && op.secret) this.remember(provider, op.field, previous);
         done.push({ account, previous });
         if (op.value === null) await this.secrets.delete(account);
         else await this.secrets.set(account, op.value);
@@ -458,7 +693,7 @@ export class ConnectionService {
     for (const op of ops) {
       if (op.value === null) delete next[op.field];
       else next[op.field] = op.value;
-      if (op.value !== null && op.secret) this.seen.add(op.value);
+      if (op.value !== null && op.secret) this.remember(provider, op.field, op.value);
     }
     this.cache.set(connectionId, next);
   }
@@ -552,6 +787,7 @@ export class ConnectionService {
   private checkConfig(entry: CatalogEntry, input: Record<string, string>, same: string[]): Record<string, string> {
     const config = connectionConfigSchema.parse(input);
     this.checkFields(entry, "config", Object.keys(config));
+    for (const [name, value] of Object.entries(config)) checkFormat(entry.provider, entry.fields.find((f) => f.name === name)!, value, ["config", name]);
     const secrets = [...this.secretValues(), ...same];
     if (JSON.stringify(redact(config, secrets)) !== JSON.stringify(config)) throw new SecretInConfigError();
     return config;
@@ -568,6 +804,7 @@ export class ConnectionService {
       if (field.input !== "multiline" && /[\r\n]/.test(value)) invalid([...path, name], "must be a single line");
       // A relative folder would resolve against wherever the CLI happens to start (the run's worktree).
       if (field.input === "path" && !isAbsolute(value)) invalid([...path, name], "must be an absolute path");
+      checkFormat(entry.provider, field, value, [...path, name]);
     }
   }
 

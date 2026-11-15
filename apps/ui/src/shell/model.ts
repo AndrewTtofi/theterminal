@@ -5,6 +5,8 @@ import type {
   AgentRun,
   AuthMode,
   Board,
+  CapacityReport,
+  GitHubOverview,
   LedgerEntry,
   PendingAgentAction,
   Project,
@@ -14,6 +16,7 @@ import type {
 import type { AgentsInfo, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
+import type { ViewId } from "./views";
 
 export type LedgerScope = "project" | "all";
 
@@ -33,7 +36,7 @@ export type WorkbenchModel = {
   selectedRunId: string | null;
   runActions: AgentAction[];
   /** Resolves false when starting failed, so the prompt is kept. */
-  onStartRun: (adapter: AdapterId, prompt: string) => Promise<boolean>;
+  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[]) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 
@@ -51,9 +54,15 @@ export type WorkbenchModel = {
 
   /** The server's status counts for the status bar; null until the first answer. */
   status: Status | null;
+
+  /** The GitHub view's data: the last overview, or the error code of the last failed load. */
+  github: { overview: GitHubOverview | null; error: string | null; refresh: () => void };
+
+  /** The Capacity view's data: the last report, or the error code of the last failed load. */
+  capacity: { report: CapacityReport | null; error: string | null; refresh: () => void };
 };
 
-export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null };
+export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };
 
 /** Dock panels render through portals, so they read the model from context rather than props. */
 export const ShellContext = createContext<ShellContextValue | null>(null);

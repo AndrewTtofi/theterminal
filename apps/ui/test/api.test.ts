@@ -13,6 +13,14 @@ const call = (f: ReturnType<typeof vi.fn>, i: number) => f.mock.calls[i] as [str
 
 afterEach(() => vi.unstubAllGlobals());
 
+describe("run refusals from the server", () => {
+  it("carries which agent refused MCP servers", async () => {
+    respond(400, { error: "mcp_unsupported", adapter: "gemini" });
+    const err = await api.startRun("p1", { adapter: "gemini", prompt: "go", connectionIds: ["m1"] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: "gemini" });
+  });
+});
+
 describe("connections api", () => {
   it("lists connections and the catalog", async () => {
     const f = respond(200, []);
@@ -53,6 +61,17 @@ describe("connections api", () => {
     expect(call(f, 0)[0]).toBe("/api/status");
   });
 
+  it("starts a run with the selected connections and reads the failed connection's name", async () => {
+    const f = respond(201, {});
+    await api.startRun("p1", { adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
+    expect(call(f, 0)[0]).toBe("/api/projects/p1/runs");
+    expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
+    respond(502, { error: "cloud_credentials_failed", name: "AWS dev" });
+    await expect(api.startRun("p1", { adapter: "claude", prompt: "go" })).rejects.toMatchObject({
+      status: 502, code: "cloud_credentials_failed", detail: "AWS dev",
+    });
+  });
+
   it("surfaces the error code", async () => {
     respond(503, { error: "keychain_unavailable" });
     await expect(api.addConnection({ kind: "llm", provider: "claude", name: "Claude" })).rejects.toMatchObject({
@@ -66,8 +85,28 @@ describe("errorMessage", () => {
   it("maps the connection errors", () => {
     expect(errorMessage(new ApiError(409, "conflict"))).toBe("Already connected");
     expect(errorMessage(new ApiError(400, "secret_in_config"))).toBe("That field must not contain a key or token");
+    expect(errorMessage(new ApiError(400, "connection_unsupported"))).toBe("This connection cannot be used that way");
     expect(errorMessage(new ApiError(503, "keychain_unavailable"))).toBe("Your keychain is unavailable. Nothing was saved.");
     expect(errorMessage(new ApiError(400, "invalid_input"))).toBe("That input was not accepted");
+  });
+  it("maps the run start refusals; a failed cloud grant names the connection", () => {
+    expect(errorMessage(new ApiError(400, "connection_unsupported"), "run")).toBe("That connection cannot be given to a run");
+    expect(errorMessage(new ApiError(400, "connection_disabled"), "run")).toBe("That connection is disabled");
+    expect(errorMessage(new ApiError(400, "duplicate_cloud_provider"), "run")).toBe(
+      "A run can be given only one connection per cloud provider. Untick the extra one.",
+    );
+    expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
+      "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
+    );
+    expect(errorMessage(new ApiError(400, "mcp_unsupported", "gemini"), "run")).toBe(
+      "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.",
+    );
+    expect(errorMessage(new ApiError(400, "duplicate_mcp_server"), "run")).toBe(
+      "Two of the selected MCP servers would get the same name in this run. Untick one of them.",
+    );
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", "AWS dev"), "run")).toBe(
+      'Could not get credentials from "AWS dev". The run did not start.',
+    );
   });
   it("maps the sign-in refusals", () => {
     expect(errorMessage(new ApiError(422, "terminal_required"))).toBe(

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
-import { CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
+import { CODEX_COMMAND_EXCLUDES, CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
 import { AgentRunner } from "../../src/agents/runner.js";
@@ -214,7 +214,7 @@ describe("CodexAdapter (fake app-server)", () => {
         denied.push([a, reason]);
       },
       clean: (t) => t,
-      credentials: {},
+      credentials: { env: {}, mcpServers: [] },
       ...o,
     });
     return { result, proposed, denied, events, usage };
@@ -427,6 +427,24 @@ describe("CodexAdapter (fake app-server)", () => {
     script([{ fail: "model overloaded" }]);
     const { result } = run(make());
     expect(await result).toEqual({ status: "failed", error: "model overloaded" });
+  });
+
+  it("emits rate_limited with the retry delay when the turn fails on a rate limit", async () => {
+    script([{ fail: "Rate limit reached, retry after 12 seconds" }]);
+    const { result, events } = run(make());
+    expect((await result).status).toBe("failed");
+    expect(events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited", retryAfterS: 12 }]);
+  });
+
+  it("emits rate_limited without a delay for a 429 error, and nothing for other errors", async () => {
+    script([{ fail: "unexpected status 429 Too Many Requests" }]);
+    const limited = run(make());
+    await limited.result;
+    expect(limited.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
+    script([{ fail: "model overloaded" }]);
+    const other = run(make());
+    await other.result;
+    expect(other.events.filter((e) => e.type === "rate_limited")).toEqual([]);
   });
 
   it("fails when Codex exits mid-turn, with a short stderr tail", async () => {
@@ -662,6 +680,20 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
     });
 
+    it("never hands Codex the run's MCP servers, even if some reached it: only the ones Codex knows of, all disabled", async () => {
+      script({ mcpServers: ["docs"], steps: [] });
+      const spec = {
+        serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "http" as const,
+        url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer TESTKEY-mcp-header-0000000000" },
+      };
+      const { result } = run(make(), undefined, { credentials: { env: {}, mcpServers: [spec] } });
+      expect(await result).toEqual({ status: "completed" });
+      const config = received("thread/start")[0].params.config as Record<string, unknown>;
+      expect(Object.keys(config).filter((k) => k.startsWith("mcp_servers."))).toEqual(["mcp_servers.docs.enabled"]);
+      expect(config["mcp_servers.docs.enabled"]).toBe(false);
+      expect(JSON.stringify(fakeLog())).not.toMatch(/tt-abc12345|TESTKEY-mcp/);
+    });
+
     it("re-lists MCP servers after the thread starts, and refuses one only the thread sees", async () => {
       script({ mcpAddedByThread: ["project-server"], steps: [] });
       const { result } = run(make());
@@ -702,7 +734,7 @@ describe("CodexAdapter (fake app-server)", () => {
       script([]);
       const connectionKey = "sk-TESTKEY-connection-0000000000";
       const fallback = vi.fn(() => FAKE_KEY);
-      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey } });
+      const { result } = run(make({ apiKey: fallback }), undefined, { authMode: "api_key", credentials: { apiKey: connectionKey, env: {}, mcpServers: [] } });
       expect(await result).toEqual({ status: "completed" });
       expect(fakeLog().find((e) => e.start).env).toMatchObject({ OPENAI_API_KEY: connectionKey, CODEX_API_KEY: connectionKey });
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: connectionKey });
@@ -712,9 +744,73 @@ describe("CodexAdapter (fake app-server)", () => {
     it("chatgpt mode points CODEX_HOME at the connection's CLI home folder", async () => {
       const cliHome = join(dir, "connection-codex-home");
       script([]);
-      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome } });
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { cliHome, env: {}, mcpServers: [] } });
       expect(await result).toEqual({ status: "completed" });
       expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: cliHome });
+    });
+
+    const GRANT = { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000", AWS_SESSION_TOKEN: "FQoGZXIvYXdzTESTKEY-session-0000000000" };
+    const policyArgs = (names: string[]) => [
+      "-c", 'shell_environment_policy.inherit="all"',
+      "-c", "shell_environment_policy.ignore_default_excludes=true",
+      "-c", `shell_environment_policy.include_only=${JSON.stringify([
+        ...CHILD_ENV_ALLOWLIST, ...(process.platform === "win32" ? WIN32_ALLOWLIST : []), "LC_*",
+        "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", ...names,
+      ])}`,
+      "-c", `shell_environment_policy.exclude=${JSON.stringify([
+        "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN",
+      ])}`,
+    ];
+
+    it.each(["api_key", "chatgpt"] as const)("%s mode: the run's cloud grant reaches Codex, with a command env policy that lets only it through", async (authMode) => {
+      script([]);
+      const envs: NodeJS.ProcessEnv[] = [];
+      const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+        envs.push(opts.env);
+        return nodeSpawn(file, args, opts as never);
+      }) as unknown as typeof nodeSpawn;
+      const { result } = run(make({ spawn }), undefined, { authMode, credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({ status: "completed" });
+      expect(envs[0]!.AZURE_CLIENT_SECRET).toBe(GRANT.AZURE_CLIENT_SECRET);
+      const login = authMode === "api_key" ? ["-c", "cli_auth_credentials_store=ephemeral"] : [];
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...login, ...policyArgs(Object.keys(GRANT))]);
+      expect(CODEX_COMMAND_EXCLUDES).toContain("NODE_REPL_AUTH_TOKEN");
+    });
+
+    it("an approved command run through the fake app-server gets the grant, the git pin, and no provider key", async () => {
+      const probe = "process.stdout.write(JSON.stringify(Object.fromEntries(['AZURE_CLIENT_SECRET', 'AWS_SESSION_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME', 'GIT_CONFIG_NOSYSTEM'].map((k) => [k, process.env[k] ?? null]))))";
+      script([{ approve: "command", command: "node probe", itemId: "i1", run: [process.execPath, "-e", probe] }]);
+      const { result, events } = run(make(), undefined, { authMode: "api_key", credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({ status: "completed" });
+      const done = events.find((e) => e.type === "action_result") as { output: string };
+      expect(JSON.parse(done.output)).toEqual({
+        AZURE_CLIENT_SECRET: GRANT.AZURE_CLIENT_SECRET, AWS_SESSION_TOKEN: GRANT.AWS_SESSION_TOKEN,
+        OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: null, GIT_CONFIG_NOSYSTEM: "1",
+      });
+    });
+
+    it("without the policy, Codex's default excludes would drop the grant's secret and token from a command", async () => {
+      const probe = "process.stdout.write(JSON.stringify({ s: process.env.AZURE_CLIENT_SECRET ?? null }))";
+      script([{ approve: "command", command: "node probe", itemId: "i1", run: [process.execPath, "-e", probe] }]);
+      const { result, events } = run(make({ fakeEnv: { ...fakeAgentEnv(), AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" } }), undefined, { authMode: "api_key" });
+      expect(await result).toEqual({ status: "completed" });
+      expect(JSON.parse((events.find((e) => e.type === "action_result") as { output: string }).output)).toEqual({ s: null });
+    });
+
+    it("explains a user shell_environment_policy with filters, which Codex refuses to mix with ours", async () => {
+      script({ userFilters: true, steps: [] });
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({
+        status: "failed",
+        error: "Your Codex configuration's shell_environment_policy conflicts with The Terminal's credential passing; remove `filters` from it",
+      });
+    });
+
+    it("without a cloud grant leaves Codex's command env policy alone", async () => {
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "chatgpt" });
+      expect(await result).toEqual({ status: "completed" });
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server"]);
     });
 
     it("api_key mode keeps a separate Codex home per project", async () => {

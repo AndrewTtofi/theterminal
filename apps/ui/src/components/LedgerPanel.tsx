@@ -17,6 +17,14 @@ const clip = (s: unknown, max: number) => {
   return t.length > max ? `${t.slice(0, max)}…` : t;
 };
 
+/** What a run was given for a cloud connection, by credential kind (never its value). */
+const CREDENTIAL_LABELS: Record<string, string> = {
+  aws_session_token: "a 12-hour AWS session token",
+  aws_static_keys: "the AWS access keys (no session token available)",
+  gcp_access_token: "a 1-hour Google Cloud token",
+  azure_client_secret: "the Azure client secret",
+};
+
 export function describeEntry(e: LedgerEntry): string {
   const who = actorName(e.actor);
   const p = (e.payload ?? {}) as Record<string, unknown>;
@@ -44,6 +52,10 @@ export function describeEntry(e: LedgerEntry): string {
       return `${who} said: "${clip(p.text, 80)}"`;
     case "agent.finished":
       return `Agent run ${p.status}`;
+    case "agent.rate_limited": {
+      const retry = typeof p.retryAfterS === "number" ? `; retry after ${p.retryAfterS} s` : "";
+      return `Agent ${String(p.runId ?? "").slice(0, 8)} was rate-limited by the provider${retry}`;
+    }
     case "settings.claude_auth_changed":
       return `${who} set Claude to use ${p.mode === "subscription" ? "own subscription" : "API key"}`;
     case "settings.provider_auth_changed": {
@@ -72,8 +84,15 @@ export function describeEntry(e: LedgerEntry): string {
       return p.ok ? `"${p.name}" connected` : `"${p.name}" failed to connect: ${clip(p.message, 200)}`;
     case "connection.signin":
       return p.ok ? `${who} signed in to ${cap(p.provider)}` : `Sign-in to ${cap(p.provider)} failed`;
-    case "connection.used":
-      return `Agent ${String(p.runId).slice(0, 8)} was given access to "${p.name}"`;
+    case "connection.used": {
+      const agent = `Agent ${String(p.runId).slice(0, 8)}`;
+      if (p.purpose === "mcp_server") return `${agent} was given the MCP server "${p.name}"`;
+      if (p.purpose === "cloud_credentials") {
+        const label = CREDENTIAL_LABELS[String(p.credential)] ?? "cloud credentials";
+        return `${agent} was given ${label} from "${p.name}"`;
+      }
+      return `${agent} was given access to "${p.name}"`;
+    }
     default:
       return `${who} recorded ${e.type}`;
   }

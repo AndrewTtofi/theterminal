@@ -1,16 +1,22 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROVIDER_ACKS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter, ProposedAction, RunCredentials } from "../../src/agents/adapter.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
-import { ConnectionService } from "../../src/connections/service.js";
+import { ConnectionService, UnsupportedConnectionError } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
-import { AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, ShuttingDownError } from "../../src/agents/runner.js";
+import {
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError,
+  type AgentRunnerDeps,
+} from "../../src/agents/runner.js";
+import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
+import type { McpServerSpec } from "../../src/connections/mcp.js";
+import type { CloudSource, RunSelection } from "../../src/connections/service.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -533,6 +539,25 @@ describe("AgentRunner: live secrets and usage totals", () => {
     expect(getRun(db, run.id)).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
   });
 
+  it("commits agent.rate_limited as the agent with an integer retry, or null for a missing or non-integer one", async () => {
+    const run = await fakeRunner([
+      { rateLimited: { retryAfterS: 30 } },
+      { rateLimited: { retryAfterS: 2.5 } },
+      { rateLimited: { retryAfterS: -1 } },
+      { rateLimited: {} },
+    ]).start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const limited = agentEvents().filter((e) => e.type === "agent.rate_limited");
+    expect(limited.map((e) => e.payload)).toEqual([
+      { runId: run.id, retryAfterS: 30 },
+      { runId: run.id, retryAfterS: null },
+      { runId: run.id, retryAfterS: null },
+      { runId: run.id, retryAfterS: null },
+    ]);
+    expect(limited.every((e) => e.actor.kind === "agent" && e.actor.id === run.id)).toBe(true);
+    expect(getRun(db, run.id)!.status).toBe("completed");
+  });
+
   it("records null token totals when the adapter reports none", async () => {
     const run = await fakeRunner([{ message: "hi" }]).start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilFinished(run.id);
@@ -590,7 +615,7 @@ describe("AgentRunner: connection credentials", () => {
     await untilFinished(run.id);
 
     expect(getRun(db, run.id)!.status).toBe("completed");
-    expect(seen).toEqual([{ apiKey: STORED_KEY }]);
+    expect(seen).toEqual([{ apiKey: STORED_KEY, env: {}, mcpServers: [] }]);
     const types = ledger.list().map((e) => e.type);
     expect(types.indexOf("connection.used")).toBe(types.indexOf("agent.started") + 1);
     const used = ledger.list().find((e) => e.type === "connection.used")!;
@@ -606,7 +631,7 @@ describe("AgentRunner: connection credentials", () => {
     const seen: RunCredentials[] = [];
     const run = await credRunner({ claude: recording("claude", seen) }, service).start(owner, { projectId, adapter: "claude", prompt: "p" });
     await untilFinished(run.id);
-    expect(seen).toEqual([{}]);
+    expect(seen).toEqual([{ env: {}, mcpServers: [] }]);
     expect(ledger.list().some((e) => e.type === "connection.used")).toBe(false);
   });
 
@@ -614,7 +639,7 @@ describe("AgentRunner: connection credentials", () => {
     const seen: RunCredentials[] = [];
     const run = await credRunner({ claude: recording("claude", seen) }, null).start(owner, { projectId, adapter: "claude", prompt: "p" });
     await untilFinished(run.id);
-    expect(seen).toEqual([{}]);
+    expect(seen).toEqual([{ env: {}, mcpServers: [] }]);
   });
 
   it("records purpose cli_home for a login mode with a CLI home, and nothing in api_key mode without a key", async () => {
@@ -630,7 +655,7 @@ describe("AgentRunner: connection credentials", () => {
     new ProviderSettings(db, ledger).setMode(owner, "codex", "chatgpt", PROVIDER_ACKS.codex);
     const second = await runner.start(owner, { projectId, adapter: "codex", prompt: "p" });
     await untilFinished(second.id);
-    expect(seen).toEqual([{}, { cliHome: CLI_HOME }]); // the CLI home only reaches a login-mode run
+    expect(seen).toEqual([{ env: {}, mcpServers: [] }, { cliHome: CLI_HOME, env: {}, mcpServers: [] }]); // the CLI home only reaches a login-mode run
     const used = ledger.list().filter((e) => e.type === "connection.used");
     expect(used.map((e) => e.payload)).toEqual([{ connectionId: conn.id, name: "Codex", runId: second.id, purpose: "cli_home" }]);
   });
@@ -651,11 +676,268 @@ describe("AgentRunner: connection credentials", () => {
     await untilFinished(loginRun.id);
 
     expect(seen).toEqual([
-      { apiKey: GEMINI_KEY, googleCloudProject: "test-project" },
-      { cliHome: CLI_HOME, googleCloudProject: "test-project" },
+      { apiKey: GEMINI_KEY, googleCloudProject: "test-project", env: {}, mcpServers: [] },
+      { cliHome: CLI_HOME, googleCloudProject: "test-project", env: {}, mcpServers: [] },
     ]);
     expect(ledger.list().filter((e) => e.type === "connection.used").map((e) => (e.payload as { purpose: string }).purpose)).toEqual([
       "api_key", "cli_home",
     ]);
+  });
+});
+
+describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
+  const SESSION_TOKEN = "FQoGZXIvYXdzTESTKEY-session-0000000000";
+  const STATIC_SECRET = "TESTKEY-static-secret-0000000000";
+  const AZURE_SECRET = "TESTKEY-azure-secret-0000000000";
+  const HEADER_VALUE = "TESTKEY-mcp-header-0000000000";
+  const EXPIRES = "2026-11-16T02:00:00.000Z";
+
+  const aws: CloudSource = {
+    connectionId: "conn-aws-0001", name: "AWS dev", provider: "aws", config: { region: "eu-west-1" },
+    secrets: { accessKeyId: "AKIATESTKEY000000000", secretAccessKey: STATIC_SECRET },
+  };
+  const azure: CloudSource = {
+    connectionId: "conn-azure-0001", name: "Azure dev", provider: "azure",
+    config: { tenantId: "t", clientId: "c", subscriptionId: "s" }, secrets: { clientSecret: AZURE_SECRET },
+  };
+  const mcp: McpServerSpec = {
+    serverName: "tt-connmcp0", connectionId: "conn-mcp-0001", name: "Docs", transport: "http",
+    url: "https://mcp.example.com/mcp", headers: { Authorization: HEADER_VALUE },
+  };
+  const grants: Record<string, CloudGrant> = {
+    "conn-aws-0001": {
+      env: { AWS_ACCESS_KEY_ID: "ASIATESTKEY000000000", AWS_SECRET_ACCESS_KEY: "TESTKEY-minted-secret-000000", AWS_SESSION_TOKEN: SESSION_TOKEN },
+      credential: "aws_session_token", expiresAt: EXPIRES,
+      secrets: ["ASIATESTKEY000000000", "TESTKEY-minted-secret-000000", SESSION_TOKEN, "AKIATESTKEY000000000", STATIC_SECRET],
+    },
+    "conn-azure-0001": { env: { AZURE_CLIENT_SECRET: AZURE_SECRET }, credential: "azure_client_secret", expiresAt: null, secrets: [AZURE_SECRET] },
+  };
+  /** Another MCP connection whose id gives the same server name. */
+  const mcpTwin: McpServerSpec = { ...mcp, connectionId: "conn-mcp-0002", name: "Docs copy" };
+  const byId: Record<string, CloudSource | McpServerSpec> = {
+    "conn-aws-0001": aws, "conn-azure-0001": azure, "conn-mcp-0001": mcp, "conn-mcp-0002": mcpTwin,
+  };
+  const select = (ids: string[]): RunSelection => ({
+    cloud: ids.map((id) => byId[id]!).filter((x): x is CloudSource => "provider" in x),
+    mcp: ids.map((id) => byId[id]!).filter((x): x is McpServerSpec => "transport" in x),
+  });
+  const mint = vi.fn(async (source: CloudSource, _signal: AbortSignal) => grants[source.connectionId]!);
+
+  function cloudRunner(adapters: Partial<Record<AdapterId, AgentAdapter>>, deps: Partial<AgentRunnerDeps> = {}) {
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir, extraSecrets: () => [],
+      selectConnections: select, mintCloud: mint, ...deps,
+    });
+    runners.push(runner);
+    return runner;
+  }
+  const used = () => ledger.list().filter((e) => e.type === "connection.used");
+  const worktreeDir = () => join(dataDir, "projects", projectId, "worktrees");
+  const noRun = () => {
+    expect(db.prepare("SELECT COUNT(*) AS n FROM agent_runs").get()).toEqual({ n: 0 });
+    expect(existsSync(worktreeDir()) ? readdirSync(worktreeDir()) : []).toEqual([]);
+    expect(used()).toEqual([]);
+  };
+  beforeEach(() => {
+    mint.mockClear();
+  });
+
+  it("mints each grant, records connection.used per grant and MCP server in order, merges the env and redacts per run", async () => {
+    const seen: RunCredentials[] = [];
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        seen.push(o.credentials);
+        o.emit({ type: "message", text: `token ${SESSION_TOKEN} static ${STATIC_SECRET} header ${HEADER_VALUE}` });
+        expect(o.clean(`x ${SESSION_TOKEN}`)).toBe("x [REDACTED]");
+        return { status: "failed", error: `failed with ${SESSION_TOKEN}` };
+      },
+    };
+    const runner = cloudRunner({ claude: adapter });
+    const run = await runner.start(owner, {
+      projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001", "conn-azure-0001"],
+    });
+    await untilFinished(run.id);
+
+    expect(mint.mock.calls.map(([s]) => s.connectionId)).toEqual(["conn-aws-0001", "conn-azure-0001"]);
+    expect(seen).toEqual([{ env: { ...grants["conn-aws-0001"]!.env, AZURE_CLIENT_SECRET: AZURE_SECRET }, mcpServers: [mcp] }]);
+    expect(used().map((e) => [e.actor, e.payload])).toEqual([
+      [{ kind: "system", id: "runner" }, { connectionId: "conn-aws-0001", name: "AWS dev", runId: run.id, purpose: "cloud_credentials", credential: "aws_session_token", expiresAt: EXPIRES }],
+      [{ kind: "system", id: "runner" }, { connectionId: "conn-azure-0001", name: "Azure dev", runId: run.id, purpose: "cloud_credentials", credential: "azure_client_secret", expiresAt: null }],
+      [{ kind: "system", id: "runner" }, { connectionId: "conn-mcp-0001", name: "Docs", runId: run.id, purpose: "mcp_server" }],
+    ]);
+    const message = ledger.list().find((e) => e.type === "agent.message")!;
+    expect((message.payload as { text: string }).text).toBe("token [REDACTED] static [REDACTED] header [REDACTED]");
+    expect(getRun(db, run.id)!.error).toBe("failed with [REDACTED]");
+    const all = JSON.stringify(ledger.list());
+    for (const v of [SESSION_TOKEN, STATIC_SECRET, HEADER_VALUE, AZURE_SECRET]) expect(all).not.toContain(v);
+  });
+
+  it("redacts an MCP credential on its own when the value carries a Bearer, Basic or token scheme word", async () => {
+    const BARE = "TESTKEY-mcp-bare-0000";
+    const schemed: McpServerSpec = { ...mcp, headers: { Authorization: `bearer ${BARE}`, "X-Gh": "Token TESTKEY-gh-00", "X-Short": "Basic short12" } };
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        o.emit({ type: "message", text: `printed ${BARE} and TESTKEY-gh-00 and short12` });
+        return { status: "completed" };
+      },
+    };
+    const runner = cloudRunner({ claude: adapter }, { selectConnections: () => ({ cloud: [], mcp: [schemed] }) });
+    const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-mcp-0001"] });
+    await untilFinished(run.id);
+    const message = ledger.list().find((e) => e.type === "agent.message")!;
+    expect((message.payload as { text: string }).text).toBe("printed [REDACTED] and [REDACTED] and short12");
+  });
+
+  it("redacts a minted value from every later run for the life of the process, even one given no grant", async () => {
+    let echo = "";
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        o.emit({ type: "message", text: echo });
+        return { status: "completed" };
+      },
+    };
+    const runner = cloudRunner({ claude: adapter });
+    echo = "first";
+    const a = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001"] });
+    await untilFinished(a.id);
+    echo = `B saw ${SESSION_TOKEN}`;
+    const b = await runner.start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(b.id);
+    const texts = ledger.list().filter((e) => e.type === "agent.message").map((e) => (e.payload as { text: string }).text);
+    expect(texts).toEqual(["first", "B saw [REDACTED]"]);
+    expect(runner.mintedSecrets()).toEqual(expect.arrayContaining([SESSION_TOKEN, STATIC_SECRET]));
+  });
+
+  it("refuses two cloud connections of the same provider before anything is minted", async () => {
+    const second: CloudSource = { ...aws, connectionId: "conn-aws-0002", name: "AWS prod" };
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      selectConnections: () => ({ cloud: [aws, second], mcp: [] }),
+    });
+    const err = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["a", "b"] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateCloudProviderError);
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses grants that would set the same variable, before a worktree exists", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      mintCloud: async (s) =>
+        s.provider === "azure"
+          ? { ...grants["conn-azure-0001"]!, env: { ...grants["conn-azure-0001"]!.env, AWS_SESSION_TOKEN: "x" } }
+          : grants[s.connectionId]!,
+    });
+    const err = await runner
+      .start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-azure-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateCloudProviderError);
+    noRun();
+  });
+
+  it("starts nothing when minting fails: no run, no worktree, no connection.used", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      mintCloud: async (s) => {
+        throw new CloudCredentialError(s.name, `Could not get credentials for the connection "${s.name}": AWS could not be reached`);
+      },
+    });
+    await expect(runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001"] })).rejects.toBeInstanceOf(
+      CloudCredentialError,
+    );
+    noRun();
+  });
+
+  it("fails the start when minting never settles, after one shared deadline that aborts the signal", async () => {
+    let signal: AbortSignal | undefined;
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      grantTimeoutMs: 50,
+      mintCloud: (_s, sig) => {
+        signal = sig;
+        return new Promise<CloudGrant>(() => {});
+      },
+    });
+    const started = Date.now();
+    const err = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001"] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloudCredentialError);
+    expect((err as CloudCredentialError).connectionName).toBe("AWS dev");
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(signal!.aborted).toBe(true);
+    noRun();
+  });
+
+  it("shares one deadline across grants", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      grantTimeoutMs: 80,
+      mintCloud: (s, sig) =>
+        new Promise<CloudGrant>((resolve, reject) => {
+          const t = setTimeout(() => resolve(grants[s.connectionId]!), 50);
+          sig.addEventListener("abort", () => (clearTimeout(t), reject(new Error("aborted"))));
+        }),
+    });
+    const err = await runner
+      .start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-azure-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloudCredentialError);
+    expect((err as CloudCredentialError).connectionName).toBe("Azure dev");
+    noRun();
+  });
+
+  it("connectionIds: [] adds nothing: no connection.used and an empty env", async () => {
+    const seen: RunCredentials[] = [];
+    const runner = cloudRunner({ claude: { id: "claude", start: async (o) => (seen.push(o.credentials), { status: "completed" }) } });
+    const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: [] });
+    await untilFinished(run.id);
+    expect(seen).toEqual([{ env: {}, mcpServers: [] }]);
+    expect(used()).toEqual([]);
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Codex run with an MCP server before anything is minted", async () => {
+    const runner = cloudRunner({ codex: { id: "codex", start: async () => ({ status: "completed" }) } });
+    const err = await runner
+      .start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpUnsupportedError);
+    expect((err as McpUnsupportedError).adapter).toBe("codex");
+    expect((err as Error).message).toBe("Codex cannot use MCP servers in The Terminal yet");
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses a Gemini run with an MCP server before anything is minted", async () => {
+    const start = vi.fn(async () => ({ status: "completed" as const }));
+    const runner = cloudRunner({ gemini: { id: "gemini", start } });
+    const err = await runner
+      .start(owner, { projectId, adapter: "gemini", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpUnsupportedError);
+    expect((err as McpUnsupportedError).adapter).toBe("gemini");
+    expect((err as Error).message).toBe("Gemini cannot use MCP servers in The Terminal yet");
+    expect(start).not.toHaveBeenCalled();
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses a run whose MCP connections would share a server name, before anything is minted", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } });
+    const err = await runner
+      .start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001", "conn-mcp-0002"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateMcpServerError);
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses any connection id by default, before a worktree exists", async () => {
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), dataDir, extraSecrets: () => [],
+      adapters: { claude: { id: "claude", start: async () => ({ status: "completed" }) } },
+    });
+    runners.push(runner);
+    await expect(runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["x"] })).rejects.toBeInstanceOf(
+      UnsupportedConnectionError,
+    );
+    noRun();
   });
 });

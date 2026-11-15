@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, PROVIDERS } from "@theterminal/shared";
+import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, PROVIDERS, type CiStatus } from "@theterminal/shared";
 import type { ConnectionService } from "../connections/service.js";
 import { CliNotInstalledError, InvalidCliHomeError, SignInRunningError, TerminalRequiredError, type SignInManager } from "../connections/signin.js";
 import type { Db } from "../db.js";
@@ -12,6 +12,8 @@ export type ConnectionRouteDeps = {
   connections: ConnectionService;
   signin: SignInManager;
   ledger: Ledger;
+  /** The CI status for the status bar without waiting on the network; null when GitHub is not connected. */
+  ci: () => CiStatus | null;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -40,7 +42,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger } = deps;
+  const { db, connections, signin, ledger, ci } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -109,12 +111,16 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
     void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
+    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
     return {
       runningAgents: counts.runningAgents,
       pendingDecisions: counts.pendingDecisions,
       todayCostUsd: counts.todayCostUsd,
+      monthCostUsd: counts.monthCostUsd,
+      // The sum of the enabled model connections' budgets; null when none has one.
+      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
       connections: { ...counts.connections, keychain: connections.keychainState() },
-      ci: null,
+      ci: ci(),
     };
   });
 }

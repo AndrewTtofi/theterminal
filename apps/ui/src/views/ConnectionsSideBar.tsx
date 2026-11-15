@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { Fragment, useId, useState } from "react";
 import type { CatalogEntry, Connection, ConnectionKind } from "@theterminal/shared";
 import { errorMessage } from "../api";
 import { useShell } from "../shell/model";
@@ -49,6 +49,18 @@ export function ConnectionsSideBar() {
       );
   };
 
+  const toggleSwitch = (conn: Connection, label: string) => (
+    <button
+      type="button"
+      role="switch"
+      className="switch"
+      aria-checked={conn.enabled}
+      aria-label={`Enable ${label}`}
+      disabled={!loaded || toggling.has(conn.id)}
+      onClick={() => toggle(conn)}
+    />
+  );
+
   return (
     <div className="connections-side">
       <input
@@ -78,48 +90,77 @@ export function ConnectionsSideBar() {
           <h3>{g.title}</h3>
           <ul>
             {g.entries.map((entry) => {
-              const conn = entry.available ? list.find((c) => c.provider === entry.provider) : undefined;
+              const conns = entry.available ? list.filter((c) => c.provider === entry.provider) : [];
+              const conn = conns[0];
               const state = conn ? conn.status.state : "not-connected";
               const statusId = `${uid}-${entry.provider}-status`;
               const noteId = `${uid}-${entry.provider}-note`;
               return (
-                <li
-                  key={entry.provider}
-                  className={`connection-row${entry.available ? "" : " unavailable"}`}
-                  aria-disabled={entry.available ? undefined : true}
-                >
-                  {/* Until the list has loaded, a row cannot know whether to open a new or an existing tab. */}
-                  <button
-                    type="button"
-                    className="connection-open"
-                    aria-label={entry.label}
-                    aria-describedby={`${statusId} ${noteId}`}
-                    disabled={!entry.available || !loaded}
-                    onClick={() => dock()?.open(editorPanelId(entry, conn), entry.label, "main")}
+                <Fragment key={entry.provider}>
+                  <li
+                    className={`connection-row${entry.available ? "" : " unavailable"}`}
+                    aria-disabled={entry.available ? undefined : true}
                   >
-                    <span className={`status-dot ${state}`} aria-hidden="true" />
-                    <span id={statusId} className="visually-hidden">
-                      {conn ? DOT_LABEL[conn.status.state] : "Not connected"}
-                    </span>
-                    <span className="connection-text">
-                      <span className="connection-label">{entry.label}</span>
-                      <span id={noteId} className="connection-note">
-                        {entry.available ? entry.description : "Arrives with Plan 5B"}
-                      </span>
-                    </span>
-                  </button>
-                  {conn && (
+                    {/* Until the list has loaded, a row cannot know whether to open a new or an existing tab. */}
                     <button
                       type="button"
-                      role="switch"
-                      className="switch"
-                      aria-checked={conn.enabled}
-                      aria-label={`Enable ${entry.label}`}
-                      disabled={!loaded || toggling.has(conn.id)}
-                      onClick={() => toggle(conn)}
-                    />
-                  )}
-                </li>
+                      className="connection-open"
+                      aria-label={entry.label}
+                      aria-describedby={`${statusId} ${noteId}`}
+                      disabled={!entry.available || !loaded}
+                      onClick={() => dock()?.open(editorPanelId(entry, conn), entry.label, "main")}
+                    >
+                      <span className={`status-dot ${state}`} aria-hidden="true" />
+                      <span id={statusId} className="visually-hidden">
+                        {conn ? DOT_LABEL[conn.status.state] : "Not connected"}
+                      </span>
+                      <span className="connection-text">
+                        <span className="connection-label">{entry.label}</span>
+                        <span id={noteId} className="connection-note">
+                          {entry.available ? entry.description : "Arrives in a later release"}
+                        </span>
+                      </span>
+                    </button>
+                    {conn && !entry.single && (
+                      <button
+                        type="button"
+                        className="connection-add"
+                        aria-label={`Add another ${entry.label}`}
+                        disabled={!loaded}
+                        onClick={() => dock()?.open(`connection:new:${entry.provider}`, entry.label, "main")}
+                      >
+                        Add another
+                      </button>
+                    )}
+                    {conn && toggleSwitch(conn, entry.label)}
+                  </li>
+                  {/* A provider with several connections lists each one, so every one can be opened. */}
+                  {conns.length > 1 &&
+                    conns.map((c) => {
+                      const label = `${entry.label}: ${c.name}`;
+                      return (
+                        <li key={c.id} className="connection-row nested">
+                          <button
+                            type="button"
+                            className="connection-open"
+                            aria-label={label}
+                            aria-describedby={`${uid}-${c.id}-status`}
+                            disabled={!loaded}
+                            onClick={() => dock()?.open(`connection:${c.id}`, c.name, "main")}
+                          >
+                            <span className={`status-dot ${c.status.state}`} aria-hidden="true" />
+                            <span id={`${uid}-${c.id}-status`} className="visually-hidden">
+                              {DOT_LABEL[c.status.state]}
+                            </span>
+                            <span className="connection-text">
+                              <span className="connection-label">{c.name}</span>
+                            </span>
+                          </button>
+                          {toggleSwitch(c, label)}
+                        </li>
+                      );
+                    })}
+                </Fragment>
               );
             })}
           </ul>

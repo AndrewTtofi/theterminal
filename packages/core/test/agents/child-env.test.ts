@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { allowlistedEnv, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
+import { MCP_ENV_NAME, allowlistedEnv, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
@@ -150,6 +150,67 @@ describe("buildChildEnv allowlist", () => {
       expect(env.GOOGLE_CLOUD_PROJECT).toBe("proj-1");
     }
     expect(buildChildEnv("codex", "chatgpt", { dataDir: DATA_DIR, base: dirty, googleCloudProject: "proj-1" }).GOOGLE_CLOUD_PROJECT).toBeUndefined();
+  });
+});
+
+describe("buildChildEnv extraEnv", () => {
+  const grant = { AWS_ACCESS_KEY_ID: "AKIATESTKEY000000000", AWS_SESSION_TOKEN: "t" };
+  const modes = [
+    ["claude", "api_key"], ["claude", "subscription"], ["codex", "api_key"], ["codex", "chatgpt"], ["gemini", "api_key"], ["gemini", "google"],
+  ] as const;
+
+  it.each(modes)("%s %s: adds the allowlisted cloud variables", (p, mode) => {
+    const env = buildChildEnv(p, mode, { apiKey: "k", dataDir: DATA_DIR, base, extraEnv: grant });
+    expect(env.AWS_ACCESS_KEY_ID).toBe("AKIATESTKEY000000000");
+    expect(env.AWS_SESSION_TOKEN).toBe("t");
+  });
+
+  it("throws for a variable outside CLOUD_ENV_ALLOWLIST, before anything is returned", () => {
+    expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, extraEnv: { NPM_TOKEN: "x" } })).toThrow(
+      new TypeError("variable not allowed for a child: NPM_TOKEN"),
+    );
+  });
+
+  it("never copies cloud variables from the base environment", () => {
+    const env = buildChildEnv("claude", "api_key", {
+      apiKey: "k", dataDir: DATA_DIR, base: { ...base, AWS_SECRET_ACCESS_KEY: "base-secret", AWS_PROFILE: "x" },
+    });
+    expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.AWS_PROFILE).toBeUndefined();
+  });
+
+  it("never overwrites a variable already set: the Gemini connection's project wins over a grant's", () => {
+    const env = buildChildEnv("gemini", "google", {
+      dataDir: DATA_DIR, base, googleCloudProject: "gemini-project",
+      extraEnv: { GOOGLE_CLOUD_PROJECT: "grant-project", CLOUDSDK_CORE_PROJECT: "grant-project" },
+    });
+    expect(env.GOOGLE_CLOUD_PROJECT).toBe("gemini-project");
+    expect(env.CLOUDSDK_CORE_PROJECT).toBe("grant-project");
+    const plain = buildChildEnv("gemini", "google", { dataDir: DATA_DIR, base, extraEnv: { GOOGLE_CLOUD_PROJECT: "grant-project" } });
+    expect(plain.GOOGLE_CLOUD_PROJECT).toBe("grant-project");
+  });
+});
+
+describe("buildChildEnv mcpEnv", () => {
+  it("adds Claude's MCP secret variables, named TT_MCP_<server>_<value>", () => {
+    const env = buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, mcpEnv: { TT_MCP_0_0: "v0", TT_MCP_1_2: "v1" } });
+    expect(env.TT_MCP_0_0).toBe("v0");
+    expect(env.TT_MCP_1_2).toBe("v1");
+    expect(MCP_ENV_NAME.test("TT_MCP_10_3")).toBe(true);
+  });
+
+  it.each(["PATH", "TT_MCP_0", "TT_MCP_a_0", "tt_mcp_0_0", "TT_MCP_0_0_X", "ANTHROPIC_API_KEY"])(
+    "throws for %s before anything is returned",
+    (name) => {
+      expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, mcpEnv: { [name]: "x" } })).toThrow(
+        new TypeError(`variable not allowed for a child: ${name}`),
+      );
+    },
+  );
+
+  it("never copies MCP variables from the base environment", () => {
+    const env = buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base: { ...base, TT_MCP_0_0: "from-base" } });
+    expect(env.TT_MCP_0_0).toBeUndefined();
   });
 });
 

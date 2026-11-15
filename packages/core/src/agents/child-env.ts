@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { AuthMode, Provider } from "@theterminal/shared";
+import { CLOUD_ENV_ALLOWLIST } from "../connections/cloud/env.js";
 import { EMPTY_GITCONFIG, assertEmptyGitconfig } from "./worktrees.js";
 
 /** Throws SharedGitconfigModifiedError when the shared empty git config has content (see worktrees.ts). */
@@ -15,9 +16,23 @@ export type ChildEnvOptions = {
   cliHome?: string;
   /** Gemini only: GOOGLE_CLOUD_PROJECT. */
   googleCloudProject?: string;
+  /**
+   * A cloud grant's variables. Every name must be in CLOUD_ENV_ALLOWLIST, else a TypeError is thrown before anything
+   * is built. A variable this function already set (the Gemini connection's GOOGLE_CLOUD_PROJECT) is never replaced.
+   */
+  extraEnv?: Record<string, string>;
+  /**
+   * Claude only: the values of the run's MCP env variables and headers, which its MCP config names as `${TT_MCP_<n>_<m>}`
+   * so they never appear on Claude Code's command line. Every name must match MCP_ENV_NAME, else a TypeError is thrown
+   * before anything is built.
+   */
+  mcpEnv?: Record<string, string>;
   /** Test-only: the platform whose variables are allowlisted. Default process.platform. */
   platform?: NodeJS.Platform;
 };
+
+/** The variables that carry MCP secrets to Claude Code: server index, then value index. */
+export const MCP_ENV_NAME = /^TT_MCP_\d+_\d+$/;
 
 /** Exact names copied from the base environment when present. Everything else is dropped. */
 export const CHILD_ENV_ALLOWLIST: readonly string[] = [
@@ -78,10 +93,18 @@ export function allowlistedEnv(base: NodeJS.ProcessEnv, platform: NodeJS.Platfor
  * The child-process environment for a provider CLI, built from an allowlist: a copy of the allowlisted
  * variables in `base` (default process.env), which is never changed. Every GIT_*, provider variable,
  * NODE_OPTIONS and the like is dropped. Then git is pinned to the empty global config, and in api_key mode
- * only the given key is added. Login modes pass no key, so the CLI's own stored login is used untouched.
+ * only the given key is added, then a cloud grant's allowlisted variables (`extraEnv`). Login modes pass no key, so the CLI's own stored login is used untouched.
  * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
  */
 export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
+  const extra = Object.entries(opts.extraEnv ?? {});
+  for (const [k] of extra) {
+    if (!CLOUD_ENV_ALLOWLIST.includes(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
+  }
+  const mcp = Object.entries(opts.mcpEnv ?? {});
+  for (const [k] of mcp) {
+    if (!MCP_ENV_NAME.test(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
+  }
   const env = allowlistedEnv(opts.base ?? process.env, opts.platform ?? process.platform);
   env.GIT_CONFIG_GLOBAL = join(opts.dataDir, EMPTY_GITCONFIG);
   env.GIT_CONFIG_NOSYSTEM = "1";
@@ -98,6 +121,10 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
     else if (provider === "gemini" && mode === "google") env.GEMINI_CLI_HOME = opts.cliHome;
   }
   if (provider === "gemini" && opts.googleCloudProject) env.GOOGLE_CLOUD_PROJECT = opts.googleCloudProject;
+  // Cloud variables never come from `base`, only from a grant; what the CLI itself needs is never moved.
+  for (const [k, v] of extra) if (env[k] === undefined) env[k] = v;
+  // MCP secret variables never come from `base` either (TT_MCP_* is not allowlisted), only from the run's MCP servers.
+  for (const [k, v] of mcp) env[k] = v;
   assertEmptyGitconfig(opts.dataDir); // a modified shared config fails the run before the CLI starts
   return env;
 }

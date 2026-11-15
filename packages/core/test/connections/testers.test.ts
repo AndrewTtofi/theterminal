@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { CONNECTION_TESTERS } from "../../src/connections/testers.js";
+import { CONNECTION_TESTERS, cloudTesters } from "../../src/connections/testers.js";
+import { fakeSts } from "../../src/connections/cloud/aws.js";
 
 const KEY = "sk-ant-TESTKEY-0000000000";
 const signal = new AbortController().signal;
@@ -81,5 +82,9 @@ describe("success messages", () => {
 
   it("only covers the 5A providers", () => {
     expect(Object.keys(CONNECTION_TESTERS).sort()).toEqual(["claude", "codex", "gemini", "github"]);
+  });
+
+  it("offers the cloud testers separately, bound to an STS caller", () => {
+    expect(Object.keys(cloudTesters(fakeSts)).sort()).toEqual(["aws", "azure", "gcp"]);
   });
 });

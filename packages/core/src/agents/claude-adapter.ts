@@ -1,8 +1,9 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { query as sdkQuery, type HookCallback, type HookJSONOutput, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query as sdkQuery, type HookCallback, type HookJSONOutput, type McpServerConfig, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ActionKind } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "./adapter.js";
+import { RATE_LIMIT_TEXT, type AdapterStartOptions, type AgentAdapter, type ProposedAction, type RunCredentials } from "./adapter.js";
+import { MCP_SERVER_NAME, type McpServerSpec } from "../connections/mcp.js";
 import { redact } from "./redact.js";
 import { buildChildEnv } from "./child-env.js";
 import { bundledClaude } from "./bundled.js";
@@ -14,6 +15,9 @@ const NO_API_KEY = "No Anthropic API key configured";
 const NO_CLAUDE_CODE = "Claude Code is unavailable: its bundled program is missing and none is on PATH";
 const STOPPED = "run stopped";
 const REMOTE_AGENT = "remote agents are not supported";
+const INVALID_MCP_NAME = "invalid MCP server name";
+/** `mcp__<server>__<tool>`: the server part may hold single underscores, never a double one. */
+const MCP_TOOL = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/;
 /** Hook timeout in seconds: a gate may wait on a human for a long time. A timeout blocks the tool. */
 const GATE_TIMEOUT_S = 24 * 60 * 60;
 
@@ -116,8 +120,48 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
     return action("file_edit", `Edit ${paths[0] ? display(paths[0]) : "(no path)"}`, paths);
   }
   if (isRemoteAgent(tool, input)) return action("other", `Run remote agent: ${str(input.description)}`);
+  const mcp = MCP_TOOL.exec(tool);
+  if (mcp) return action("mcp", `MCP tool ${mcp[2]} on ${mcp[1]}`);
   if (tool.startsWith("mcp__")) return action("mcp", `MCP tool ${tool}`);
   return action("other", `Use ${tool}`);
+}
+
+/**
+ * The Claude Code version whose `${VAR}` expansion in `--mcp-config` was verified (the one bundled with Agent SDK
+ * 0.3.323). A test fails when the installed SDK bundles another, so a bump forces a recheck.
+ */
+export const VERIFIED_CLAUDE_CODE_VERSION = "2.1.323";
+
+/**
+ * The MCP servers for `Options.mcpServers`, and the variables that carry their secrets. Agent SDK 0.3.323 puts
+ * `mcpServers` on Claude Code's command line (`--mcp-config <json>`), where any local process can read it, so every
+ * env and header value is replaced by `${TT_MCP_<server>_<value>}` and the value goes into Claude Code's own env.
+ * Claude Code 2.1.323 (the binary bundled with that SDK) expands `${VAR}` in a `--mcp-config` server's env and
+ * headers from its env (config scope "dynamic", expandVars on; TT_MCP_* is outside its withheld-credential names).
+ * Tools of these servers are named `mcp__<server>__<tool>` and reach the PreToolUse gate like any other tool.
+ *
+ * A stdio MCP server started by Claude Code inherits Claude Code's env: the API key in api_key mode, the run's cloud
+ * grant variables and every other server's TT_MCP_* values, besides its own. An http server receives only its own
+ * headers, so it is the better choice for a connection that carries secrets.
+ */
+export function claudeMcpServers(specs: McpServerSpec[]): { servers: Record<string, McpServerConfig>; env: Record<string, string> } {
+  const env: Record<string, string> = {};
+  const refs = (i: number, values: Record<string, string>) =>
+    Object.fromEntries(
+      Object.entries(values).map(([k, v], j) => {
+        env[`TT_MCP_${i}_${j}`] = v;
+        return [k, `\${TT_MCP_${i}_${j}}`];
+      }),
+    );
+  const servers = Object.fromEntries(
+    specs.map((s, i): [string, McpServerConfig] => [
+      s.serverName,
+      s.transport === "stdio"
+        ? { type: "stdio", command: s.command, args: s.args, env: refs(i, s.env) }
+        : { type: "http", url: s.url, headers: refs(i, s.headers) },
+    ]),
+  );
+  return { servers, env };
 }
 
 const asOutput = (v: unknown): string => {
@@ -159,7 +203,10 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
-    const env = this.env(o.authMode, o.credentials);
+    // The service derives every name; checked again here, before anything reaches Claude Code.
+    if (!o.credentials.mcpServers.every((s) => MCP_SERVER_NAME.test(s.serverName))) return { status: "failed", error: INVALID_MCP_NAME };
+    const mcp = claudeMcpServers(o.credentials.mcpServers);
+    const env = this.env(o.authMode, o.credentials, mcp.env);
     if (typeof env === "string") return { status: "failed", error: env };
     // Subscription mode names the Claude Code bundled with the SDK; Claude Code reads the user's own login itself,
     // never we. api_key mode leaves the choice to the SDK, which uses the same binary. Without a bundled one (the
@@ -216,7 +263,8 @@ export class ClaudeAdapter implements AgentAdapter {
       abortController: controller,
       permissionMode: "default",
       settingSources: [],
-      strictMcpConfig: true, // only our (empty) MCP config: no user, project or plugin servers
+      strictMcpConfig: true, // only the MCP servers selected for this run: no user, project or plugin servers
+      ...(o.credentials.mcpServers.length > 0 && { mcpServers: mcp.servers }),
       persistSession: false, // no transcripts written under the user's Claude config dir
       ...(executable !== null && { pathToClaudeCodeExecutable: executable }),
       hooks: {
@@ -238,8 +286,9 @@ export class ClaudeAdapter implements AgentAdapter {
     o.signal.addEventListener("abort", stop, { once: true });
 
     let result: StartResult | null = null;
+    const seen = { rateLimited: false };
     try {
-      for await (const m of q) result = this.handle(m, o) ?? result;
+      for await (const m of q) result = this.handle(m, o, seen) ?? result;
     } catch (e) {
       if (!o.signal.aborted && failure === null) failure = redact(errorMessage(e));
     } finally {
@@ -250,8 +299,27 @@ export class ClaudeAdapter implements AgentAdapter {
     return result ?? { status: "failed", error: "Claude ended without a result" };
   }
 
-  /** Emits what a message carries; returns the run outcome for a result message. */
-  private handle(m: SDKMessage, o: AdapterStartOptions): StartResult | null {
+  /**
+   * Emits what a message carries; returns the run outcome for a result message. Rate limits come from the SDK's typed
+   * signals (a rejected `rate_limit_event`, an `api_retry` for `rate_limit`); the text of an error result is read only
+   * when neither was seen in this run (`seen`).
+   */
+  private handle(m: SDKMessage, o: AdapterStartOptions, seen: { rateLimited: boolean }): StartResult | null {
+    const rateLimited = (retryAfterS?: number) => {
+      seen.rateLimited = true;
+      o.emit(retryAfterS === undefined ? { type: "rate_limited" } : { type: "rate_limited", retryAfterS });
+    };
+    if (m.type === "rate_limit_event") {
+      if (isRecord(m.rate_limit_info) && m.rate_limit_info.status === "rejected") rateLimited();
+      return null;
+    }
+    if (m.type === "system" && m.subtype === "api_retry") {
+      if (m.error === "rate_limit") {
+        const delay = m.retry_delay_ms;
+        rateLimited(typeof delay === "number" && Number.isFinite(delay) && delay >= 0 ? Math.round(delay / 1000) : undefined);
+      }
+      return null;
+    }
     if (m.type === "assistant") {
       for (const block of m.message.content) {
         if (block.type === "text" && block.text) o.emit({ type: "message", text: block.text });
@@ -269,15 +337,19 @@ export class ClaudeAdapter implements AgentAdapter {
     if (Object.keys(event).length > 0) o.emit({ type: "usage", ...event });
     if (m.subtype === "success" && !m.is_error) return { status: "completed" };
     const detail = m.subtype === "success" ? m.result : m.errors.join("; ");
+    if (!seen.rateLimited && m.subtype !== "error_max_turns" && typeof detail === "string" && RATE_LIMIT_TEXT.test(detail)) rateLimited();
     return { status: "failed", error: redact(detail || m.subtype) };
   }
 
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
-  private env(mode: AdapterStartOptions["authMode"], credentials: RunCredentials): Record<string, string | undefined> | string {
+  private env(mode: AdapterStartOptions["authMode"], credentials: RunCredentials, mcpEnv: Record<string, string>): Record<string, string | undefined> | string {
     if (mode !== "subscription" && mode !== "api_key") return `Unsupported auth mode for Claude: ${mode}`;
-    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome }); // the user's own login, untouched
+    // The run's cloud grant goes into Claude Code's env, which its Bash tool hands to every command (subprocess
+    // scrubbing is off: neither CLAUDE_CODE_SUBPROCESS_ENV_SCRUB nor GITHUB_ACTIONS is ever allowlisted).
+    const extraEnv = credentials.env;
+    if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome, extraEnv, mcpEnv }); // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir });
+    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir, extraEnv, mcpEnv });
   }
 }

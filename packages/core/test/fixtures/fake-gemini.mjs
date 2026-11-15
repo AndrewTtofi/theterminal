@@ -21,6 +21,10 @@
 //     { type: "terminal", command, args?, cwd?, env?, outputByteLimit?, skipWait?: boolean }
 //     { type: "requestPermission", toolCall, options, result?: string }  // result: text content on completion
 //     { type: "ungatedTool", toolCallId?, kind, title, locations?, status? } // in_progress then completed, no gate
+//     { type: "mcpTool", server?, tool, permission?: boolean } // a tool_call named mcp_<server>_<tool> of kind other: asks
+//                                                    // through session/request_permission when permission is true, else runs
+//                                                    // ungated; server defaults to the first session/new mcpServers[].name,
+//                                                    // and the step is skipped when there is none
 //     { type: "update", update, sessionId? }                         // any raw session/update
 //     { type: "request", method, params }                            // any raw client request
 //     { type: "sleep", ms }
@@ -55,6 +59,8 @@ function send(msg) {
 }
 
 let nextId = 1;
+/** The session/new params (logged with every received message), for the mcpTool step. */
+let sessionParams = null;
 const pending = new Map();
 /** A client request; resolves { result } or { error }. */
 function request(method, params) {
@@ -72,7 +78,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function envSnapshot() {
   const picked = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$)/i.test(k)) picked[k] = v;
+    // Provider and cloud names too, so a test can check which credentials a run was (and was not) given.
+    if (/^(GEMINI_|GOOGLE_|VERTEX|GIT_|NO_BROWSER$|AWS_|AZURE_|ARM_|CLOUDSDK_|OPENAI_|ANTHROPIC_)/i.test(k)) picked[k] = v;
   }
   // What the real CLI would read: user-scope settings from GEMINI_CLI_HOME, policies from the --policy argument.
   let settings = null;
@@ -174,6 +181,33 @@ async function runStep(step) {
       update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed", content: [{ type: "content", content: { type: "text", text: "ran" } }] });
       return;
     }
+    case "mcpTool": {
+      const server = step.server ?? sessionParams?.mcpServers?.[0]?.name;
+      if (server === undefined) return;
+      const name = `mcp_${server}_${step.tool}`;
+      const id = `${name}-${nextId++}`;
+      const toolCall = { toolCallId: id, title: name, kind: "other", locations: [], content: [] };
+      let allowed = true;
+      if (step.permission) {
+        update({ sessionUpdate: "tool_call", ...toolCall, status: "pending" });
+        const options = [
+          { optionId: "proceed_always", name: "Allow for this session", kind: "allow_always" },
+          { optionId: "proceed_once", name: "Allow", kind: "allow_once" },
+          { optionId: "cancel", name: "Reject", kind: "reject_once" },
+        ];
+        const p = await request("session/request_permission", { sessionId: SESSION, toolCall, options });
+        allowed = p.result?.outcome?.outcome === "selected" && p.result.outcome.optionId !== "cancel";
+      } else {
+        update({ sessionUpdate: "tool_call", ...toolCall, status: "in_progress" });
+        await sleep(20);
+      }
+      log({ step: "mcpTool", name, allowed });
+      update({
+        sessionUpdate: "tool_call_update", toolCallId: id, status: allowed ? "completed" : "failed",
+        content: [{ type: "content", content: { type: "text", text: allowed ? "done" : "canceled" } }],
+      });
+      return;
+    }
     case "update":
       update(step.update, step.sessionId ?? SESSION);
       return;
@@ -250,6 +284,7 @@ function onMessage(msg) {
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
       return;
     case "session/new":
+      sessionParams = msg.params;
       send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: SESSION, ...(config.modes !== null && { modes: config.modes ?? DEFAULT_MODES }) } });
       return;
     case "session/set_mode":

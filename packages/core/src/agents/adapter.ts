@@ -1,4 +1,5 @@
 import type { ActionKind, AdapterId, AuthMode } from "@theterminal/shared";
+import type { McpServerSpec } from "../connections/mcp.js";
 
 /** An action an agent wants to take. `paths` are the filesystem paths it touches (checked by policy). */
 export type ProposedAction = { tool: string; kind: ActionKind; summary: string; input: unknown; paths: string[] };
@@ -7,7 +8,21 @@ export type AdapterEvent =
   | { type: "message"; text: string }
   | { type: "action_result"; actionId: string; ok: boolean; output: string }
   /** Each a finite number >= 0; absent means not reported. The runner sums each separately per run. */
-  | { type: "usage"; costUsd?: number; inputTokens?: number; outputTokens?: number };
+  | { type: "usage"; costUsd?: number; inputTokens?: number; outputTokens?: number }
+  /**
+   * The provider refused a request for its rate limit, as the adapter observed it (an estimate, not a quota the
+   * provider published). `retryAfterS`: the wait the provider or CLI named, in seconds, when there was one.
+   */
+  | { type: "rate_limited"; retryAfterS?: number };
+
+/** Error text that reads as a rate limit: a heuristic, which is why rate-limit counts are labelled estimates. */
+export const RATE_LIMIT_TEXT = /\b429\b|rate[ _-]?limit/i;
+
+/** The seconds in `retry after <n> second(s)`, or undefined. */
+export function retryAfterSeconds(text: string): number | undefined {
+  const m = /retry after (\d{1,9})\s*s/i.exec(text);
+  return m ? Number(m[1]) : undefined;
+}
 
 export interface AdapterStartOptions {
   cwd: string;
@@ -38,8 +53,18 @@ export interface AdapterStartOptions {
   credentials: RunCredentials;
 }
 
-/** Values from a connection: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini. */
-export type RunCredentials = { apiKey?: string; cliHome?: string; googleCloudProject?: string };
+/**
+ * Values from connections: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini (all
+ * from the provider's own connection); `env`, the merged variables of the cloud grants the Owner selected for this run
+ * (names from CLOUD_ENV_ALLOWLIST, passed to buildChildEnv as `extraEnv`); `mcpServers`, the MCP servers selected.
+ */
+export type RunCredentials = {
+  apiKey?: string;
+  cliHome?: string;
+  googleCloudProject?: string;
+  env: Record<string, string>;
+  mcpServers: McpServerSpec[];
+};
 
 export interface AgentAdapter {
   id: AdapterId;

@@ -28,30 +28,98 @@ describe("connection catalog", () => {
     });
   });
 
-  it("makes only the four 5A providers available, all single", () => {
-    const available = CONNECTION_CATALOG.filter((e) => e.available);
-    expect(available.map((e) => e.provider)).toEqual(["claude", "codex", "gemini", "github"]);
-    for (const e of available) expect(e.single).toBe(true);
-    for (const e of CONNECTION_CATALOG.filter((x) => !x.available)) expect(e.fields).toEqual([]);
+  it("makes every provider available; only the model providers, GitHub and This computer are single", () => {
+    for (const e of CONNECTION_CATALOG) expect(e.available).toBe(true);
+    const single = CONNECTION_CATALOG.filter((e) => e.single).map((e) => e.provider);
+    expect(single).toEqual(["claude", "codex", "gemini", "github", "local_hardware"]);
+  });
+
+  it("keeps every field name unique within its provider and every pattern a valid RegExp source", () => {
+    for (const e of CONNECTION_CATALOG) {
+      const names = e.fields.map((f) => f.name);
+      expect(new Set(names).size).toBe(names.length);
+      for (const f of e.fields) {
+        if (f.pattern !== undefined) expect(() => new RegExp(f.pattern!)).not.toThrow();
+        if (f.format === "pairs") expect([f.storage, f.input]).toEqual(["secret", "multiline"]);
+        if (f.storage === "config") expect(connectionConfigSchema.safeParse({ [f.name]: "x" }).success).toBe(true);
+      }
+    }
   });
 
   it("declares the fields of each available provider", () => {
     const fields = (p: string) =>
       CONNECTION_CATALOG.find((e) => e.provider === p)!.fields.map((f) => [f.name, f.storage, f.required, f.input]);
-    expect(fields("claude")).toEqual([["apiKey", "secret", false, "password"]]);
-    expect(fields("codex")).toEqual([["apiKey", "secret", false, "password"], ["cliHome", "private", false, "path"]]);
+    const budget = [["plan", "config", false, "text"], ["monthlyBudgetUsd", "config", false, "number"]];
+    expect(fields("claude")).toEqual([["apiKey", "secret", false, "password"], ...budget]);
+    expect(fields("codex")).toEqual([["apiKey", "secret", false, "password"], ["cliHome", "private", false, "path"], ...budget]);
     expect(fields("gemini")).toEqual([
       ["apiKey", "secret", false, "password"],
       ["googleCloudProject", "config", false, "text"],
       ["cliHome", "private", false, "path"],
+      ...budget,
     ]);
-    expect(fields("github")).toEqual([["token", "secret", true, "password"]]);
+    expect(fields("github")).toEqual([["token", "secret", true, "password"], ["repo", "config", false, "text"]]);
     const github = CONNECTION_CATALOG.find((e) => e.provider === "github")!;
     expect(github.fields[0]!.help).toBe("A fine-grained personal access token with read access to the repositories you want to see.");
     const codexHome = CONNECTION_CATALOG.find((e) => e.provider === "codex")!.fields[1]!;
     expect(codexHome.help).toBe('Only for "My own ChatGPT plan": the folder where your Codex login lives (CODEX_HOME). Leave empty for the default.');
     const geminiHome = CONNECTION_CATALOG.find((e) => e.provider === "gemini")!.fields[2]!;
     expect(geminiHome.help).toContain("(GEMINI_CLI_HOME)");
+  });
+
+  it("declares the fields of the cloud, MCP and hardware providers, each belonging to its kind", () => {
+    const entry = (p: string) => CONNECTION_CATALOG.find((e) => e.provider === p)!;
+    const fields = (p: string) => entry(p).fields.map((f) => [f.name, f.storage, f.required, f.input]);
+    expect(fields("aws")).toEqual([
+      ["accessKeyId", "secret", true, "password"],
+      ["secretAccessKey", "secret", true, "password"],
+      ["region", "config", true, "text"],
+    ]);
+    expect(fields("gcp")).toEqual([["serviceAccountJson", "secret", true, "multiline"], ["project", "config", true, "text"]]);
+    expect(fields("azure")).toEqual([
+      ["tenantId", "config", true, "text"],
+      ["clientId", "config", true, "text"],
+      ["subscriptionId", "config", true, "text"],
+      ["clientSecret", "secret", true, "password"],
+    ]);
+    expect(fields("mcp_stdio")).toEqual([
+      ["command", "private", true, "text"],
+      ["args", "private", false, "multiline"],
+      ["env", "secret", false, "multiline"],
+    ]);
+    expect(fields("mcp_http")).toEqual([["url", "config", true, "url"], ["headers", "secret", false, "multiline"]]);
+    expect(fields("local_hardware")).toEqual(
+      ["cpu", "cores", "memoryGb", "gpu", "gpuMemoryGb", "platform", "wsl", "detectedAt"].map((n) => [n, "config", false, "text"]),
+    );
+    expect(entry("mcp_stdio").fields[2]!.format).toBe("pairs");
+    expect(entry("mcp_stdio").fields[2]!.help).toBe(
+      "NAME=value, one per line. Stored in your keychain. Values of 8 or more characters are also redacted from agent output, so avoid common words as values.",
+    );
+    expect(entry("mcp_http").fields[1]!.format).toBe("pairs");
+    expect([entry("aws").kind, entry("gcp").kind, entry("azure").kind]).toEqual(["cloud", "cloud", "cloud"]);
+    expect([entry("mcp_stdio").kind, entry("mcp_http").kind, entry("local_hardware").kind]).toEqual(["mcp", "mcp", "hardware"]);
+    expect(entry("aws").description).toBe("Amazon Web Services account, through an IAM access key.");
+    expect(entry("azure").label).toBe("Azure");
+    expect(entry("mcp_http").label).toBe("MCP server (remote)");
+    expect(entry("claude").fields.find((f) => f.name === "monthlyBudgetUsd")!.label).toBe("Monthly budget (USD)");
+  });
+
+  it("checks catalog patterns against example values", () => {
+    const pattern = (p: string, f: string) => {
+      const source = CONNECTION_CATALOG.find((e) => e.provider === p)!.fields.find((x) => x.name === f)!.pattern!;
+      return new RegExp(source);
+    };
+    expect(pattern("aws", "region").test("us-east-1")).toBe(true);
+    expect(pattern("aws", "region").test("nowhere")).toBe(false);
+    expect(pattern("gcp", "project").test("demo-project-1")).toBe(true);
+    expect(pattern("gcp", "project").test("Demo")).toBe(false);
+    expect(pattern("github", "repo").test("octo/example")).toBe(true);
+    expect(pattern("github", "repo").test("octo")).toBe(false);
+    const uuid = pattern("azure", "tenantId");
+    expect(uuid.flags).toBe("");
+    expect(uuid.test("00000000-0000-4000-8000-00000000ABCD")).toBe(true);
+    expect(uuid.test("00000000-0000-4000-8000-00000000abcd")).toBe(true);
+    expect(uuid.test("not-a-uuid")).toBe(false);
   });
 
   it("labels every kind", () => {
@@ -66,6 +134,11 @@ describe("connectionConfigSchema", () => {
   });
   it("accepts googleCloudProject", () => {
     expect(connectionConfigSchema.safeParse({ googleCloudProject: "demo-project" }).success).toBe(true);
+  });
+  it("accepts the 5B config keys", () => {
+    for (const key of ["tenantId", "clientId", "subscriptionId", "region", "project", "repo", "plan", "monthlyBudgetUsd"]) {
+      expect(connectionConfigSchema.safeParse({ [key]: "x" }).success).toBe(true);
+    }
   });
   it("rejects badly shaped keys and long values", () => {
     expect(connectionConfigSchema.safeParse({ Upper: "x" }).success).toBe(false);
@@ -140,6 +213,12 @@ describe("connection.removed, connection.tested, connection.used", () => {
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "api_key" });
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cli_home" });
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials" });
+    ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "mcp_server" });
+    ok("connection.used", {
+      connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials",
+      credential: "aws_session_token", expiresAt: "2026-11-15T12:00:00.000Z",
+    });
+    ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials", credential: "azure_client_secret", expiresAt: null });
   });
   it("rejects invalid payloads", () => {
     bad("connection.removed", { connectionId: "", name: "n" });
@@ -148,5 +227,20 @@ describe("connection.removed, connection.tested, connection.used", () => {
     bad("connection.tested", { connectionId: "c1", name: "n", ok: "yes", message: "" });
     bad("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "other" });
     bad("connection.used", { connectionId: "c1", name: "n", purpose: "api_key" });
+    bad("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials", credential: "password" });
+    bad("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials", expiresAt: "tomorrow" });
+  });
+});
+
+describe("agent.rate_limited", () => {
+  it("accepts a retry delay in whole seconds or null", () => {
+    ok("agent.rate_limited", { runId: "r1", retryAfterS: null });
+    ok("agent.rate_limited", { runId: "r1", retryAfterS: 30 });
+  });
+  it("rejects negative or fractional delays and extra keys", () => {
+    bad("agent.rate_limited", { runId: "r1", retryAfterS: -1 });
+    bad("agent.rate_limited", { runId: "r1", retryAfterS: 1.5 });
+    bad("agent.rate_limited", { runId: "r1", retryAfterS: null, text: "x" });
+    bad("agent.rate_limited", { runId: "r1" });
   });
 });

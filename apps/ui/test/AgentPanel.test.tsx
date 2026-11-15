@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { AgentAction, AgentRun } from "@theterminal/shared";
+import type { AgentAction, AgentRun, Connection } from "@theterminal/shared";
 import { AgentPanel } from "../src/components/AgentPanel";
 
 const run: AgentRun = {
@@ -47,7 +47,7 @@ describe("AgentPanel", () => {
     await userEvent.selectOptions(screen.getByLabelText("Agent"), "fake");
     await userEvent.type(screen.getByLabelText("Prompt"), "hello");
     await userEvent.click(start);
-    expect(onStart).toHaveBeenCalledWith("fake", "hello");
+    expect(onStart).toHaveBeenCalledWith("fake", "hello", []);
   });
 
   it("lists runs with status and cost and shows actions of the selected run", async () => {
@@ -129,5 +129,76 @@ describe("AgentPanel", () => {
     );
     expect((screen.getByRole("option", { name: /Claude \(unavailable\)/ }) as HTMLOptionElement).disabled).toBe(true);
     expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("codex");
+  });
+
+  describe("giving a run access to connections", () => {
+    const conn = (id: string, kind: Connection["kind"], provider: Connection["provider"], name: string, enabled = true): Connection => ({
+      id, kind, provider, name, enabled, config: {}, private: {}, secretFields: [],
+      status: { state: "untested", message: "", testedAt: null }, createdAt: "", updatedAt: "",
+    });
+    const list = [
+      conn("aws-1", "cloud", "aws", "AWS dev"),
+      conn("mcp-1", "mcp", "mcp_http", "Docs"),
+      conn("gcp-1", "cloud", "gcp", "Old GCP", false),
+      conn("llm-1", "llm", "claude", "Claude key"),
+      conn("gh-1", "github", "github", "GitHub"),
+    ];
+    const NOTE = "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.";
+
+    it("lists only enabled cloud and MCP connections, and sends the ones ticked", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <AgentPanel adapters={["claude", "codex"]} connections={list} runs={[]} selectedRunId={null}
+          onStart={onStart} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+      );
+      const group = screen.getByRole("group", { name: "Give this run access to" });
+      const boxes = Array.from(group.querySelectorAll("input[type=checkbox]")).map((b) => (b as HTMLInputElement).labels![0]!.textContent);
+      expect(boxes).toEqual(["AWS dev (cloud account)", "Docs (MCP server)"]);
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await userEvent.click(screen.getByLabelText("AWS dev (cloud account)"));
+      await userEvent.type(screen.getByLabelText("Prompt"), "deploy");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("claude", "deploy", ["aws-1"]);
+    });
+
+    it("with Codex disables the MCP boxes, explains why, and never sends one", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <AgentPanel adapters={["claude", "codex"]} connections={list} runs={[]} selectedRunId={null}
+          onStart={onStart} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+      );
+      await userEvent.click(screen.getByLabelText("Docs (MCP server)"));
+      await userEvent.selectOptions(screen.getByLabelText("Agent"), "codex");
+      expect((screen.getByLabelText("Docs (MCP server)") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByLabelText("AWS dev (cloud account)") as HTMLInputElement).disabled).toBe(false);
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("codex", "go", []);
+    });
+
+    it("with Gemini disables the MCP boxes, explains why, and never sends one", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <AgentPanel adapters={["claude", "gemini"]} connections={list} runs={[]} selectedRunId={null}
+          onStart={onStart} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+      );
+      await userEvent.click(screen.getByLabelText("Docs (MCP server)"));
+      await userEvent.selectOptions(screen.getByLabelText("Agent"), "gemini");
+      expect((screen.getByLabelText("Docs (MCP server)") as HTMLInputElement).disabled).toBe(true);
+      expect(screen.getByText("Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.")).toBeTruthy();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("gemini", "go", []);
+    });
+
+    it("shows no picker when there is nothing to offer", () => {
+      render(
+        <AgentPanel adapters={["claude"]} connections={[list[2]!, list[3]!]} runs={[]} selectedRunId={null}
+          onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+      );
+      expect(screen.queryByRole("group", { name: "Give this run access to" })).toBeNull();
+    });
   });
 });

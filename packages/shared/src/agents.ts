@@ -126,6 +126,8 @@ export const agentPayloadSchemas = {
       error: z.string().max(1000).nullable(),
     })
     .strict(),
+  /** The provider refused a request for its rate limit; `retryAfterS` when it said how long to wait. */
+  "agent.rate_limited": z.object({ runId: id, retryAfterS: z.number().int().nonnegative().nullable() }).strict(),
   "settings.claude_auth_changed": z
     .object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().max(1000) })
     .strict()

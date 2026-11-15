@@ -17,7 +17,11 @@ export type ConnectionField = {
   label: string;
   storage: FieldStorage;
   required: boolean;
-  input: "text" | "password" | "path" | "url" | "multiline";
+  input: "text" | "password" | "path" | "url" | "multiline" | "number";
+  /** "pairs": NAME=value lines. Only with storage "secret" and input "multiline". */
+  format?: "pairs";
+  /** A RegExp source (no flags) the whole value must match. */
+  pattern?: string;
   help?: string;
 };
 
@@ -42,16 +46,36 @@ const cliHomeField = (mode: string, cli: string, variable: string): ConnectionFi
   help: `Only for "${mode}": the folder where your ${cli} login lives (${variable}). Leave empty for the default.`,
 });
 
+/** What the Owner pays for and plans to spend, shown in Capacity. */
+const budgetFields: ConnectionField[] = [
+  {
+    name: "plan", label: "Plan", storage: "config", required: false, input: "text",
+    help: 'What you pay for, in your words: "Max 5x", "Plus", "pay per use". Shown in Capacity.',
+  },
+  {
+    name: "monthlyBudgetUsd", label: "Monthly budget (USD)", storage: "config", required: false, input: "number",
+    help: "Capacity shows this month's spend against it.",
+  },
+];
+
+const UUID = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+const uuidField = (name: string, label: string): ConnectionField => ({
+  name, label, storage: "config", required: true, input: "text", pattern: UUID,
+});
+const hardwareField = (name: string, label: string): ConnectionField => ({
+  name, label, storage: "config", required: false, input: "text",
+});
+
 export const CONNECTION_CATALOG: readonly CatalogEntry[] = [
   {
     provider: "claude", kind: "llm", label: "Claude (Anthropic)",
     description: "Run Claude agents with an Anthropic API key.",
-    fields: [apiKeyField], single: true, available: true,
+    fields: [apiKeyField, ...budgetFields], single: true, available: true,
   },
   {
     provider: "codex", kind: "llm", label: "Codex (OpenAI)",
     description: "Run Codex agents with an OpenAI API key or your own ChatGPT plan.",
-    fields: [apiKeyField, cliHomeField("My own ChatGPT plan", "Codex", "CODEX_HOME")], single: true, available: true,
+    fields: [apiKeyField, cliHomeField("My own ChatGPT plan", "Codex", "CODEX_HOME"), ...budgetFields], single: true, available: true,
   },
   {
     provider: "gemini", kind: "llm", label: "Gemini (Google)",
@@ -60,24 +84,105 @@ export const CONNECTION_CATALOG: readonly CatalogEntry[] = [
       apiKeyField,
       { name: "googleCloudProject", label: "Google Cloud project", storage: "config", required: false, input: "text" },
       cliHomeField("My own Google account", "Gemini CLI", "GEMINI_CLI_HOME"),
+      ...budgetFields,
     ],
     single: true, available: true,
   },
   {
     provider: "github", kind: "github", label: "GitHub",
     description: "See your repositories, pull requests and checks.",
-    fields: [{
-      name: "token", label: "Personal access token", storage: "secret", required: true, input: "password",
-      help: "A fine-grained personal access token with read access to the repositories you want to see.",
-    }],
+    fields: [
+      {
+        name: "token", label: "Personal access token", storage: "secret", required: true, input: "password",
+        help: "A fine-grained personal access token with read access to the repositories you want to see.",
+      },
+      {
+        name: "repo", label: "Repository", storage: "config", required: false, input: "text",
+        help: "owner/name of the repository the GitHub view shows.",
+        pattern: "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$",
+      },
+    ],
     single: true, available: true,
   },
-  { provider: "aws", kind: "cloud", label: "AWS", description: "Amazon Web Services account.", fields: [], single: false, available: false },
-  { provider: "gcp", kind: "cloud", label: "Google Cloud", description: "Google Cloud account.", fields: [], single: false, available: false },
-  { provider: "azure", kind: "cloud", label: "Azure", description: "Microsoft Azure account.", fields: [], single: false, available: false },
-  { provider: "mcp_stdio", kind: "mcp", label: "MCP server (local)", description: "A local MCP server started as a process.", fields: [], single: false, available: false },
-  { provider: "mcp_http", kind: "mcp", label: "MCP server (remote)", description: "A remote MCP server over HTTP.", fields: [], single: false, available: false },
-  { provider: "local_hardware", kind: "hardware", label: "This computer", description: "Local hardware for running models.", fields: [], single: true, available: false },
+  {
+    provider: "aws", kind: "cloud", label: "AWS",
+    description: "Amazon Web Services account, through an IAM access key.",
+    fields: [
+      { name: "accessKeyId", label: "Access key ID", storage: "secret", required: true, input: "password" },
+      { name: "secretAccessKey", label: "Secret access key", storage: "secret", required: true, input: "password" },
+      {
+        name: "region", label: "Region", storage: "config", required: true, input: "text",
+        help: "For example us-east-1.", pattern: "^[a-z]{2}(-[a-z]+)+-\\d$",
+      },
+    ],
+    single: false, available: true,
+  },
+  {
+    provider: "gcp", kind: "cloud", label: "Google Cloud",
+    description: "Google Cloud project, through a service account key.",
+    fields: [
+      {
+        name: "serviceAccountJson", label: "Service account key (JSON)", storage: "secret", required: true, input: "multiline",
+        help: "The JSON key file's contents. Stored in your keychain in pieces.",
+      },
+      { name: "project", label: "Project ID", storage: "config", required: true, input: "text", pattern: "^[a-z][a-z0-9-]{4,28}[a-z0-9]$" },
+    ],
+    single: false, available: true,
+  },
+  {
+    provider: "azure", kind: "cloud", label: "Azure",
+    description: "Microsoft Azure subscription, through a service principal.",
+    fields: [
+      uuidField("tenantId", "Tenant ID"),
+      uuidField("clientId", "Client ID"),
+      uuidField("subscriptionId", "Subscription ID"),
+      { name: "clientSecret", label: "Client secret", storage: "secret", required: true, input: "password" },
+    ],
+    single: false, available: true,
+  },
+  {
+    provider: "mcp_stdio", kind: "mcp", label: "MCP server (local)",
+    description: "A local MCP server the agent's program starts for the run.",
+    fields: [
+      {
+        name: "command", label: "Command", storage: "private", required: true, input: "text",
+        help: "The program to start, for example npx or an absolute path. Never run through a shell.",
+      },
+      { name: "args", label: "Arguments", storage: "private", required: false, input: "multiline", help: "One argument per line." },
+      {
+        name: "env", label: "Environment variables", storage: "secret", required: false, input: "multiline", format: "pairs",
+        help: "NAME=value, one per line. Stored in your keychain. Values of 8 or more characters are also redacted from agent output, so avoid common words as values.",
+      },
+    ],
+    single: false, available: true,
+  },
+  {
+    provider: "mcp_http", kind: "mcp", label: "MCP server (remote)",
+    description: "A remote MCP server over HTTP.",
+    fields: [
+      { name: "url", label: "URL", storage: "config", required: true, input: "url" },
+      {
+        name: "headers", label: "Headers", storage: "secret", required: false, input: "multiline", format: "pairs",
+        help: "Name=value, one per line, for example Authorization=Bearer …",
+      },
+    ],
+    single: false, available: true,
+  },
+  {
+    provider: "local_hardware", kind: "hardware", label: "This computer",
+    description: "What this computer can run. Filled in by detection.",
+    fields: [
+      hardwareField("cpu", "CPU"),
+      hardwareField("cores", "Cores"),
+      hardwareField("memoryGb", "Memory (GB)"),
+      hardwareField("gpu", "GPU"),
+      hardwareField("gpuMemoryGb", "GPU memory (GB)"),
+      hardwareField("platform", "Platform"),
+      hardwareField("wsl", "WSL"),
+      hardwareField("detectedAt", "Detected at"),
+    ],
+    single: true, available: true,
+  },
 ];
 
 export const KIND_LABELS: Record<ConnectionKind, string> = {
@@ -167,7 +272,10 @@ export const connectionPayloadSchemas = {
       connectionId: id,
       name: connectionNameSchema,
       runId: id,
-      purpose: z.enum(["api_key", "cli_home", "cloud_credentials"]),
+      purpose: z.enum(["api_key", "cli_home", "cloud_credentials", "mcp_server"]),
+      /** Which kind of cloud credential the run was given; never its value. */
+      credential: z.enum(["aws_session_token", "aws_static_keys", "gcp_access_token", "azure_client_secret"]).optional(),
+      expiresAt: z.iso.datetime().nullable().optional(),
     })
     .strict(),
   /** A sign-in through the provider's own login command: never its output, account names or emails. */
