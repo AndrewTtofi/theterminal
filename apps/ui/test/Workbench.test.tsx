@@ -39,7 +39,7 @@ const board: Board = {
 };
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
-  status: "running", worktree: "w/run1", costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
+  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
 };
 const pendingAction: PendingAgentAction = {
   id: "p1a", runId: "run1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: {}, status: "pending",

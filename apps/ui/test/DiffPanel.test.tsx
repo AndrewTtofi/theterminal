@@ -142,6 +142,17 @@ describe("DiffPanel", () => {
     await waitFor(() => expect(screen.queryByText("Changes show when the run is stopped or finished.")).toBeNull());
   });
 
+  it("says why an older run's diff cannot be shown, and keeps the tab open", async () => {
+    const { dock } = setup(() => Promise.reject(new ApiError(409, "no_base")));
+    expect(await screen.findByText(/^What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from/)).toBeTruthy();
+    expect(dock.closeQuietly).not.toHaveBeenCalled();
+  });
+
+  it("says git was not run when the workspace's hooks folder was modified", async () => {
+    setup(() => Promise.reject(new ApiError(409, "hooks_modified", { message: "x" })));
+    expect(await screen.findByText("The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.")).toBeTruthy();
+  });
+
   it("says why an unsafe repository's diff cannot be shown", async () => {
     const { dock } = setup(() => Promise.reject(new ApiError(409, "unsafe_repository")));
     expect(await screen.findByText("This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.")).toBeTruthy();

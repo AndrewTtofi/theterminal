@@ -9,7 +9,7 @@ import { shellNav } from "./connections-harness";
 const card = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "active", createdAt: "", updatedAt: "" } as const;
 const run: AgentRun = {
   id: "r1", projectId: "p1", cardId: "c1", adapter: "fake", authMode: "none", prompt: "check the GPU", status: "completed",
-  worktree: "w/r1", costUsd: 0.25, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
+  worktree: "w/r1", base: null, costUsd: 0.25, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
 };
 const owner = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "r1" } as const;

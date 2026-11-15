@@ -2,7 +2,7 @@ import type { AgentRun, LedgerEntry } from "@theterminal/shared";
 
 export const feedRun = (id: string, over: Partial<AgentRun> = {}): AgentRun => ({
   id, projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU", status: "completed",
-  worktree: `w/${id}`, costUsd: null, inputTokens: null, outputTokens: null, error: null,
+  worktree: `w/${id}`, base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null,
   startedAt: "2026-11-15T10:00:00.000Z", finishedAt: null, ...over,
 });
 

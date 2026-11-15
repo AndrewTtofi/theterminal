@@ -326,7 +326,15 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (e.code === "program_not_found") return "That program was not found on this computer's PATH";
     if (e.code === "program_not_allowed") return "Programs inside the project folder, and Windows batch files, cannot be run as an override";
     if (e.code === "worktree_missing") return "This run's working copy no longer exists on this computer";
-    if (e.code === "no_base") return "Could not work out what this run changed";
+    // A run recorded before its starting commit was kept (or whose starting commit is gone): nothing is guessed.
+    if (e.code === "no_base") {
+      return "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.";
+    }
+    // The workspace's own git pins were tampered with, so the server ran no git at all.
+    if (e.code === "gitconfig_modified") {
+      return "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.";
+    }
+    if (e.code === "hooks_modified") return "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.";
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";

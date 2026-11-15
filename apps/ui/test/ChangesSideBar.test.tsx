@@ -153,6 +153,17 @@ describe("ChangesSideBar", () => {
     expect(screen.getByText("Stop the agent first.")).toBeTruthy();
   });
 
+  it("says why an older run's changes cannot be listed while its tree still shows", async () => {
+    setup({ changes: null, changesError: "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view." });
+    expect(screen.getByText(/^What this run changed cannot be shown/)).toBeTruthy();
+    expect(await within(await screen.findByRole("list", { name: "Files" })).findByText("notes.txt")).toBeTruthy();
+  });
+
+  it("words a listing refused because the workspace's git configuration was modified", async () => {
+    setup({ dir: vi.fn(async () => Promise.reject(new ApiError(409, "gitconfig_modified", { message: "x" }))) });
+    expect(await screen.findByText("The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.")).toBeTruthy();
+  });
+
   it("asks for a project first", () => {
     setup({ selectedId: null });
     expect(screen.getByText("Select a project to see what its agents changed.")).toBeTruthy();

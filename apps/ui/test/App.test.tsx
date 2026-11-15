@@ -562,7 +562,7 @@ describe("App ledger scope", () => {
   it("feeds the Agent feed from the project's stream whatever the ledger scope, following the chosen run", async () => {
     m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
     m.listRuns.mockResolvedValue([
-      { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w",
+      { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w", base: null,
         costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
     ]);
     const said = (seq: number, runId: string, text: string): LedgerEntry => ({
@@ -587,7 +587,7 @@ describe("App ledger scope", () => {
     const card = { id: "c9", projectId: "A", title: "Login", stage: "build", status: "todo", createdAt: "" };
     m.getBoard.mockResolvedValue({ ...mk("A"), columns: { ...mk("A").columns, build: [card] } } as Board);
     m.listRuns.mockResolvedValue([
-      { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w",
+      { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w", base: null,
         costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
     ]);
     m.listLedger.mockResolvedValue([

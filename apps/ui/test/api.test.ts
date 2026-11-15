@@ -297,7 +297,23 @@ describe("run changes", () => {
 
   it("words a missing working copy and an unknown starting point", () => {
     expect(errorMessage(new ApiError(404, "worktree_missing"))).toBe("This run's working copy no longer exists on this computer");
-    expect(errorMessage(new ApiError(409, "no_base"))).toBe("Could not work out what this run changed");
+    expect(errorMessage(new ApiError(409, "no_base"))).toBe(
+      "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.",
+    );
+    expect(errorMessage(new ApiError(409, "no_base"), "changes")).toBe(
+      "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.",
+    );
+  });
+
+  it("words the workspace's own git pins having been tampered with, for the changes views and the override alike", () => {
+    for (const context of [undefined, "changes"] as const) {
+      expect(errorMessage(new ApiError(409, "gitconfig_modified", { message: "x" }), context)).toBe(
+        "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.",
+      );
+      expect(errorMessage(new ApiError(409, "hooks_modified", { message: "x" }), context)).toBe(
+        "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.",
+      );
+    }
   });
 
   it("words a live run and an unsafe repository for the changes views", () => {

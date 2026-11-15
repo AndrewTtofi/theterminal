@@ -13,6 +13,7 @@ const run: AgentRun = {
   prompt: "do a thing",
   status: "completed",
   worktree: "w/run1",
+  base: null,
   costUsd: 0.5,
   inputTokens: null,
   outputTokens: null,
