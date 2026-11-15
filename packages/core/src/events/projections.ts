@@ -225,7 +225,9 @@ export class MirroredEntryRefusedError extends Error {
  *
  * The frame was checked before it was committed (`acceptMirroredLine`); this reducer still refuses, rolling the commit
  * back, anything that would let a worker touch state outside the run it was asked to run: a run never requested of
- * that machine, another project, an existing run id, or an action of another run (actions are settled by id alone).
+ * that machine, another project, an existing run id, an action of another run (actions are settled by id alone), and a
+ * start naming a working copy other than the run's own or a card other than the one requested (the files views read
+ * `agent_runs.worktree` under the data folder; the story selects by `card_id`).
  */
 export function applyMirrored(db: Db, e: LedgerEntry): void {
   const p = e.payload as Payload;
@@ -239,6 +241,10 @@ export function applyMirrored(db: Db, e: LedgerEntry): void {
   if (!link) throw new MirroredEntryRefusedError("mirrored entry for a run not requested of that machine");
   const projectOk = inner.projectId === link.project_id || (inner.type === "connection.used" && inner.projectId === null);
   if (!projectOk || e.projectId !== inner.projectId) throw new MirroredEntryRefusedError("mirrored entry outside the run's project");
+  if (inner.type === "agent.started") {
+    if (ip.worktree !== `projects/${link.project_id}/worktrees/${runId}`) throw new MirroredEntryRefusedError("mirrored start naming another working copy");
+    if ((ip.cardId ?? null) !== requestedCardId(db, runId)) throw new MirroredEntryRefusedError("mirrored start naming another card");
+  }
   if (inner.type === "agent.action.requested" || inner.type === "agent.action.decided" || inner.type === "agent.action.completed") {
     const owner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?").get(ip.actionId) as { run_id: string } | undefined;
     const ok = inner.type === "agent.action.requested" ? owner === undefined : owner?.run_id === runId;
@@ -256,6 +262,20 @@ export function applyMirrored(db: Db, e: LedgerEntry): void {
     ? "finished"
     : link.state === "requested" ? "running" : link.state;
   db.prepare("UPDATE link_runs SET last_seq = ?, state = ?, updated_at = ? WHERE run_id = ?").run(inner.seq, state, e.ts, runId);
+}
+
+/**
+ * The card this computer asked a remote run for, as its own `link.run_requested` recorded it (null for none, and for
+ * a run it never requested). Read from the ledger, so a rebuild sees the same answer.
+ */
+export function requestedCardId(db: Db, runId: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT json_extract(payload, '$.cardId') AS card_id FROM ledger WHERE type = 'link.run_requested'
+       AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.runId') = ? ELSE 0 END LIMIT 1`,
+    )
+    .get(runId) as { card_id: string | null } | undefined;
+  return typeof row?.card_id === "string" ? row.card_id : null;
 }
 
 /** The worker entry ids already mirrored for a run, read from the ledger. */

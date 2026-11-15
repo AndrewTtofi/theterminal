@@ -52,6 +52,7 @@ function expectation(over: Partial<FrameExpectation> = {}): FrameExpectation {
     publicKeyDer: worker.publicKeyDer,
     runId: RUN,
     projectId: PROJECT,
+    cardId: null,
     lastSeq: 0,
     seen: () => false,
     actionRunOf: () => null,
@@ -166,6 +167,18 @@ describe("checkFrame (the requester's gate for an untrusted line)", () => {
   it("accepts a connection.used frame with a null project", () => {
     const frame = signFrame(worker, entryOf("connection.used"));
     expect(checkFrame(line(frame), expectation()).ok).toBe(true);
+  });
+
+  it("refuses an agent.started whose working copy is not the run's own, or whose card is not the one requested", () => {
+    const start = PAYLOADS["agent.started"](RUN) as Record<string, unknown>;
+    const startedWith = (over: Record<string, unknown>) => signFrame(worker, entryOf("agent.started", RUN, { payload: { ...start, ...over } }));
+    for (const worktree of [".", "projects/another/repo", "link/incoming", `projects/${PROJECT}/worktrees/other-run`, `Projects/${PROJECT}/worktrees/${RUN}`]) {
+      expect(checkFrame(line(startedWith({ worktree })), expectation())).toEqual({ ok: false, reason: "wrong_worktree" });
+    }
+    expect(checkFrame(line(startedWith({ cardId: "c-foreign" })), expectation())).toEqual({ ok: false, reason: "wrong_card" });
+    expect(checkFrame(line(startedWith({ cardId: null })), expectation({ cardId: "c1" }))).toEqual({ ok: false, reason: "wrong_card" });
+    expect(checkFrame(line(startedWith({ cardId: "c1" })), expectation({ cardId: "c1" })).ok).toBe(true);
+    expect(checkFrame(line(startedWith({})), expectation()).ok).toBe(true);
   });
 
   it("refuses a line over the frame cap before parsing it", () => {

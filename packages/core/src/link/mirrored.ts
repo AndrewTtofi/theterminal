@@ -2,7 +2,7 @@ import { mirrorFrameSchema, type AgentAction, type AgentRun, type LedgerEntry, t
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
-import { getLinkRun, getMachine, MirroredEntryRefusedError } from "../events/projections.js";
+import { getLinkRun, getMachine, MirroredEntryRefusedError, requestedCardId } from "../events/projections.js";
 import { redact } from "../agents/redact.js";
 import { checkFrame, cleanStrings, displayOrigin, verifyFrame, type FrameCheck, type FrameRefusal } from "./mirror.js";
 
@@ -30,6 +30,7 @@ function seenFor(db: Db, runId: string): (originId: string) => boolean {
  */
 export const FATAL_REFUSALS: ReadonlySet<FrameRefusal> = new Set<FrameRefusal>([
   "bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame",
+  "wrong_worktree", "wrong_card",
 ]);
 
 /** A constraint the projection's own tables enforce (a run or action id that already exists, a missing project). */
@@ -50,8 +51,8 @@ function projectionRefused(err: unknown): boolean {
  *   is recorded. Once the link run has failed, every frame is refused (`run_failed`) and nothing is recorded.
  * - The key is the one pinned in the `machines` row of `link_runs.machine_id`, never one a connection presents; an
  *   unpaired machine has no key, so its frames are `bad_signature`.
- * - The cursor is `link_runs.last_seq`, duplicates are looked up in the ledger, and an action's owner is
- *   `agent_actions.run_id`.
+ * - The cursor is `link_runs.last_seq`, duplicates are looked up in the ledger, an action's owner is
+ *   `agent_actions.run_id`, and the card a start must name is the one `link.run_requested` recorded.
  * - A fatal refusal (`FATAL_REFUSALS`) commits `link.run_failed { runId, machineId, error: reason }` in the same
  *   transaction, which fails the link run and the mirrored run. Any other refusal commits nothing.
  * - When the projection refuses a checked frame (a run id that already exists here, say), the commit rolls back and
@@ -70,6 +71,7 @@ export function acceptMirroredLine(db: Db, ledger: Ledger, runId: string, line: 
           publicKeyDer: Buffer.from(machine.publicKey, "base64"),
           runId,
           projectId: link.projectId,
+          cardId: requestedCardId(db, runId),
           lastSeq: link.lastSeq,
           seen: seenFor(db, runId),
           actionRunOf: (actionId) => (actionOwner.get(actionId) as { run_id: string } | undefined)?.run_id ?? null,

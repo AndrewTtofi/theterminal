@@ -64,19 +64,19 @@ export async function remoteRun(runId: string, projectId: string, given?: LinkId
 const emitter = (db: Db, ledger: Ledger) => (type: LedgerEntry["type"], payload: Record<string, unknown>, projectId: string | null) =>
   commitEvent(db, ledger, () => ({ event: { projectId, actor: owner, type, payload }, result: () => undefined }));
 
-/** Records on the requester that the run was sent to `remote`'s machine, in the run's project. */
-export function requestRun(db: Db, ledger: Ledger, remote: RemoteRun): void {
+/** Records on the requester that the run was sent to `remote`'s machine, in the run's project, for `cardId`. */
+export function requestRun(db: Db, ledger: Ledger, remote: RemoteRun, cardId: string | null = null): void {
   emitter(db, ledger)("link.run_requested", {
-    runId: remote.runId, machineId: remote.machineId, adapter: "fake", prompt: "Fix the tests", cardId: null, connectionIds: [],
+    runId: remote.runId, machineId: remote.machineId, adapter: "fake", prompt: "Fix the tests", cardId, connectionIds: [],
   }, remote.projectId);
 }
 
 /** Records on the requester that `remote`'s machine is paired and that the run was sent to it. */
-export function pairAndRequest(db: Db, ledger: Ledger, remote: RemoteRun, name = "GPU box"): void {
+export function pairAndRequest(db: Db, ledger: Ledger, remote: RemoteRun, name = "GPU box", cardId: string | null = null): void {
   emitter(db, ledger)("machine.paired", {
     machineId: remote.machineId, name, publicKey: remote.identity.publicKeyBase64, fingerprint: remote.identity.fingerprint,
     // A closed loopback port: a server that follows or decides the run is refused at once, never resolves a name.
     address: "127.0.0.1:1", role: "entered_code",
   }, null);
-  requestRun(db, ledger, remote);
+  requestRun(db, ledger, remote, cardId);
 }

@@ -38,6 +38,10 @@ export type FrameRefusal =
   | "out_of_order"
   | "duplicate"
   | "foreign_action"
+  /** An `agent.started` naming a working copy other than `projects/<projectId>/worktrees/<runId>`. */
+  | "wrong_worktree"
+  /** An `agent.started` naming a card other than the one this computer asked the run for. */
+  | "wrong_card"
   /** The frame passed every check, but committing it was refused (the projection rolled it back). */
   | "conflict"
   /** The link run has already failed: nothing more of it is accepted. */
@@ -136,6 +140,8 @@ export type FrameExpectation = {
   runId: string;
   /** The run's project on the requester. */
   projectId: string;
+  /** The card this computer asked the run for (`link.run_requested.cardId`); the worker's `agent.started` must name it. */
+  cardId: string | null;
   /** The worker seq of the last committed frame (`link_runs.last_seq`); a frame must come after it. */
   lastSeq: number;
   /** Whether an origin id was already mirrored for this run (Task 8's `mirroredIds`). */
@@ -146,10 +152,19 @@ export type FrameExpectation = {
 
 export type FrameCheck = { ok: true; frame: MirrorFrame } | { ok: false; reason: FrameRefusal };
 
+/** The one working copy a mirrored run may name: the run's own, under its project, relative to the data folder. */
+export function expectedWorktree(projectId: string, runId: string): string {
+  return `projects/${projectId}/worktrees/${runId}`;
+}
+
 /**
  * The requester's gate for one untrusted line of the stream. In order: the byte cap, JSON, the type list, the
  * worker-side schema and bounds, the signature with the pinned key (before any field is trusted), then the run,
  * project, cursor, duplicate and action-ownership checks. Never throws.
+ *
+ * The run's start: the worker reports the working copy and the card, but chooses neither. The working copy is the
+ * run's own under the project (`expectedWorktree`), so the files views here never read another folder of the data
+ * folder; the card is the one this computer asked for, so the run lands in no other card's story.
  *
  * Action ownership: the requester's projection decides and completes actions by id alone, so a frame may only touch
  * an action that its own run requested, and may request only an id that does not exist yet. Frames are checked and
@@ -175,6 +190,11 @@ export function checkFrame(line: string, expect: FrameExpectation): FrameCheck {
     // A worker records connection.used without a project, as every machine does; every agent.* entry has the run's.
     const projectOk = origin.projectId === expect.projectId || (origin.type === "connection.used" && origin.projectId === null);
     if (!projectOk) return { ok: false, reason: "wrong_project" };
+    if (origin.type === "agent.started") {
+      const started = origin.payload as { worktree: string; cardId?: string | null };
+      if (started.worktree !== expectedWorktree(expect.projectId, expect.runId)) return { ok: false, reason: "wrong_worktree" };
+      if ((started.cardId ?? null) !== expect.cardId) return { ok: false, reason: "wrong_card" };
+    }
     if (origin.seq <= expect.lastSeq) return { ok: false, reason: "out_of_order" };
     if (expect.seen(origin.id)) return { ok: false, reason: "duplicate" };
 

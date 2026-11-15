@@ -119,6 +119,9 @@ describe("acceptMirroredLine", () => {
     ["foreign_action", () => remote.line(remote.decided("never-requested-action"))],
     ["invalid_frame", () => "{not json"],
     ["too_large", () => "x".repeat(300_000)],
+    // The worker chooses neither the run's working copy here nor its card: both are what this computer requested.
+    ["wrong_worktree", () => signed({ ...originOf(remote.started()), payload: { ...(remote.started().payload as object), worktree: "." } })],
+    ["wrong_card", () => remote.line(remote.started("card-of-another-project"))],
   ];
   for (const [reason, make] of FATAL_FRAMES) {
     it(`a ${reason} frame ends the run: one link.run_failed, and nothing more is accepted`, async () => {
@@ -126,6 +129,30 @@ describe("acceptMirroredLine", () => {
       fatal(await make(), reason);
     });
   }
+
+  it("refuses an agent.started naming another project's working copy, the upload folder, or a card this computer did not ask for", async () => {
+    const payload = remote.started().payload as Record<string, unknown>;
+    for (const worktree of ["projects/another-project/repo", "link/incoming", `projects/${projectId}/worktrees/another-run`, ""]) {
+      const two = await remoteRun("run-remote-2", projectId, remote.identity);
+      requestRun(db, ledger, two);
+      const started = two.started().payload as Record<string, unknown>;
+      const head = ledger.headSeq();
+      const check = accept(signed({ ...originOf(two.started()), payload: { ...started, worktree } }, two), two.runId);
+      expect(check).toEqual({ ok: false, reason: worktree === "" ? "invalid_payload" : "wrong_worktree" });
+      expect(getRun(db, two.runId)).toBeNull();
+      expect(ledger.headSeq()).toBe(head + 1); // link.run_failed only
+      db.prepare("DELETE FROM link_runs WHERE run_id = ?").run(two.runId);
+    }
+    // The card this computer asked for is the one the worker must report, null included.
+    const three = await remoteRun("run-remote-3", projectId, remote.identity);
+    requestRun(db, ledger, three, "card-1");
+    expect(accept(three.line(three.started(null)), three.runId)).toEqual({ ok: false, reason: "wrong_card" });
+    const four = await remoteRun("run-remote-4", projectId, remote.identity);
+    requestRun(db, ledger, four, "card-1");
+    expect(accept(four.line(four.started("card-1")), four.runId)).toMatchObject({ ok: true });
+    expect(getRun(db, four.runId)).toMatchObject({ cardId: "card-1", worktree: `projects/${projectId}/worktrees/${four.runId}` });
+    expect(payload.worktree).toBe(`projects/${projectId}/worktrees/${remote.runId}`);
+  });
 
   it("an out-of-order or duplicate frame is refused without recording anything, and the next good frame is committed", () => {
     accept(remote.line(remote.started()));

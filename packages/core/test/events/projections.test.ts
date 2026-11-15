@@ -14,7 +14,9 @@ import {
   listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
   rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
-import { pairAndRequest, remoteRun, type RemoteRun } from "../link/remote-fixtures.js";
+import { canonicalJson } from "../../src/ledger/canonical.js";
+import { MirroredEntryRefusedError } from "../../src/events/projections.js";
+import { pairAndRequest, remoteRun, requestRun, type RemoteRun } from "../link/remote-fixtures.js";
 
 describe("workspaceCounts", () => {
   it("sums cost only over runs started on the local calendar day", () => {
@@ -633,14 +635,36 @@ describe("mirrored remote runs (applyMirrored)", () => {
   const tables = ["agent_runs", "agent_actions", "link_runs", "rate_limits"];
   const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
 
-  it("an inner agent.started creates the run with the machine it runs on, and the link run is running at its seq", () => {
-    const started = remote.started("c1");
-    const e = mirror(started);
-    expect(getRun(db, remote.runId)).toMatchObject({
-      id: remote.runId, projectId: PROJECT, cardId: "c1", adapter: "fake", status: "running", machineId: remote.machineId,
-      worktree: `projects/${PROJECT}/worktrees/${remote.runId}`, startedAt: started.ts,
+  it("an inner agent.started creates the run with the machine it runs on, and the link run is running at its seq", async () => {
+    const carded = await remoteRun("run-remote-2", PROJECT, remote.identity);
+    requestRun(db, ledger, carded, "c1");
+    const started = carded.started("c1");
+    const e = mirror(started, carded.machineId, carded);
+    expect(getRun(db, carded.runId)).toMatchObject({
+      id: carded.runId, projectId: PROJECT, cardId: "c1", adapter: "fake", status: "running", machineId: carded.machineId,
+      worktree: `projects/${PROJECT}/worktrees/${carded.runId}`, startedAt: started.ts,
     });
-    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "running", lastSeq: started.seq, updatedAt: e.ts, error: null });
+    expect(getLinkRun(db, carded.runId)).toMatchObject({ state: "running", lastSeq: started.seq, updatedAt: e.ts, error: null });
+  });
+
+  it("refuses an inner agent.started whose working copy or card is not the one this computer requested, and rolls the commit back", () => {
+    const payload = remote.started().payload as Record<string, unknown>;
+    const attempt = (over: Record<string, unknown>) => {
+      const origin = { ...(JSON.parse(remote.line(remote.started())) as { origin: Record<string, unknown> }).origin, payload: { ...payload, ...over } };
+      const signature = remote.identity.sign(Buffer.from(canonicalJson(origin)));
+      return () => emit("link.mirrored", { machineId: remote.machineId, origin, signature }, link, PROJECT);
+    };
+    const head = ledger.headSeq();
+    for (const worktree of [".", "projects/another-project/repo", "link/incoming", `projects/${PROJECT}/worktrees/other-run`]) {
+      expect(attempt({ worktree })).toThrow(MirroredEntryRefusedError);
+    }
+    expect(attempt({ cardId: "c-foreign" })).toThrow(MirroredEntryRefusedError);
+    expect(ledger.headSeq()).toBe(head);
+    expect(getRun(db, remote.runId)).toBeNull();
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "requested", lastSeq: 0 });
+    // The honest entry still lands.
+    mirror(remote.started());
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "running", cardId: null, worktree: `projects/${PROJECT}/worktrees/${remote.runId}` });
   });
 
   it("an inner agent.action.requested is a pending action Needs-you lists, with the project's name", () => {

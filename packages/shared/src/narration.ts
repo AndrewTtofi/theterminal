@@ -568,6 +568,7 @@ const START_CODES = new Set([
 /** Refusals of a frame a correct machine never sends (the requester's FATAL_REFUSALS, and a frame of another run). */
 const FRAME_REFUSALS = new Set([
   "bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame",
+  "wrong_worktree", "wrong_card",
 ]);
 
 /** Why a remote run failed, in fixed words chosen by its recorded code; the code itself is never shown. */
