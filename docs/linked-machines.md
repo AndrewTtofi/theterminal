@@ -1,6 +1,6 @@
 # Linked machines
 
-This page describes how to link two Terminals on one local network, what that lets them do, and what never crosses between them. It also covers local models (Ollama and llama.cpp) and what keeps working without an internet connection. Where a part is still being built, a note in the page source marks it for checking.
+This page describes how to link two Terminals on one local network, what that lets them do, and what never crosses between them. It also covers local models (Ollama and llama.cpp) and what keeps working without an internet connection.
 
 ## What linking is
 
@@ -49,7 +49,7 @@ The Terminal does not do this check for you. After pairing, both screens show a 
 
 ### When the network hides computers
 
-Computers find each other with mDNS, a way for devices on one network to announce themselves without a central server. Some networks and firewalls block it. Then no computer appears in the list, and you type the address shown under the code instead. The announcement carries only `TheTerminal-` and the first eight characters of the machine id, never your computer's name or your user name.
+Computers find each other with mDNS, a way for devices on one network to announce themselves without a central server. Some networks and firewalls block it. Then no computer appears in the list, and you type the address shown under the code instead. Looking for computers happens only while the **Link a machine** panel is open, and stops about a minute after it closes. Other views, such as the Run on list, use only the machines you already paired and look at nothing on the network. The announcement carries only `TheTerminal-` and the first eight characters of the machine id, never your computer's name or your user name.
 
 ## How the link is protected
 
@@ -60,21 +60,23 @@ Computers find each other with mDNS, a way for devices on one network to announc
 
 ## Running on another machine
 
-<!-- verify: this whole section describes remote runs (Tasks 7c and 8b: routes and UI, still being built). Check each statement against the shipped routes, the Run on selector and GET /api/link/verify before merging. -->
+Choose the other computer in **Run on** when you start a run. The list appears once at least one machine is paired. A machine that is offline is listed but cannot be chosen. When you choose one, the connections and local models offered are that machine's, and the agents offered are the ones it has.
 
-Choose the other computer in **Run on** when you start a run. Then:
-
-- The project is copied to that machine as a git bundle (a single file holding the repository). What you committed to the repository crosses, including files an agent wrote there. Your keychain, ledger and token are not in the repository, so they do not.
-- The agent runs there under that machine's own approval gate, with that machine's connections and models. This computer sends only the ids of the connections to use.
-- Decisions are made here and sent there. **The approval happens on the worker**: nothing runs on the other machine unless its own gate asks and a decision for that action arrives. You cannot run a command there that its gate has not approved.
-- Every entry the other machine records about the run comes back signed with its key and is marked `On <machine>`. This computer checks the signature against the key it paired with before it records anything.
-- When the run finishes, the changes arrive here as a bundle and appear in Changes, as for a local run.
+- **Your prompt is cleaned before it is sent.** Secrets are redacted, home folders and email addresses are replaced, and hidden characters are shown visibly. Only the cleaned prompt is recorded and sent.
+- **The project is copied** to that machine as a git bundle (a single file holding the repository). What you committed to the repository crosses, including files an agent wrote there. Your keychain, ledger and token are not in the repository, so they do not.
+- **The run is approved on the machine that runs it.** The agent runs there under that machine's own approval gate, with that machine's connections and models. This computer sends only the ids of the connections to use. Nothing runs on the other machine unless its own gate asks and your decision for that action arrives. You cannot run a command there that its gate has not approved. Your decision is made here, on a card that says "This agent runs on <machine>. Your decision is sent there.", and goes to the worker. If the machine cannot be reached, the card says "Could not reach <machine>. Your decision was not sent." and the action stays waiting.
+- **Every entry comes back signed.** The other machine's entries are checked against the key you paired with before anything is recorded, then shown as `On <machine>`.
+- **Changes come back verified and wait for your review.** When the run finishes, the changes are fetched and checked: the file must be a valid bundle, must start from the project as you sent it, and must not clash with anything here. They then appear in Changes, as for a local run. Until then, the Changes view says "The changes arrive when the run finishes on <machine>". They are never merged automatically: you review them as you would any other run's.
+- **A refused import is recorded and not retried.** If the changes fail those checks, this computer records that it refused them and why ("what it sent could not be read", "they clash with records here", "they do not start from the project as it was sent" or "they name the wrong working copy"). The Changes view and the ledger say so. It does not try again, because the same answer would come back. A failure that may pass, such as the machine being unreachable at that moment, is retried by itself.
 - **The other machine keeps its own record** of what it did. Its ledger holds the run's entries, plus a note that it received the project from you, accepted the run and received your decisions. The project appears there as received from this computer.
-- `GET /api/link/verify` re-checks every mirrored entry against the paired machine's key and tells you if any was altered.
+- **Waiting uploads are limited.** Each machine may leave at most 4 project uploads and 1 GiB waiting on the machine that runs them. An upload that is never started expires after 1 hour and is removed, and the worker clears out old ones when it starts. Past a limit, the start is refused ("too many projects are waiting to start there").
+- `GET /api/link/verify` re-checks every mirrored entry against the paired machine's key and tells you how many it checked and which, if any, were altered.
 
-**If the other machine sends something wrong.** A bad signature, an entry from another run, project or action, or an entry the worker is not allowed to send ends the run here and records it as failed. The Terminal treats a machine that sends these as compromised and does not carry on. Slow or out-of-order frames after a reconnect are not treated this way, and the next good entry is recorded.
+**If the other machine sends something suspicious, the run ends.** A bad signature, an entry from another run, project or action, an entry the worker is not allowed to send, or an entry that is not valid ends the run here and records it as failed ("The run on <machine> stopped: signature check failed"). The Terminal treats a machine that sends these as compromised and does not carry on. Slow or out-of-order entries after a reconnect are not treated this way: the next good entry is recorded.
 
-**You cannot stop or decide a remote run from the local run controls.** The local Stop button and local decisions do not apply to a run that is on another machine. A request to do so is refused and never records a local "finished" entry. Stop and decide through the remote run's own controls. <!-- verify: remote Stop and decision routes and their wording (Tasks 7c and 8b) -->
+**A changed machine key ends the run.** If the machine answers with a different key from the one you paired with, the run ends and is recorded as stopped because the machine's key changed. See "When things go wrong".
+
+**You cannot stop or decide a remote run from your machine except through the worker.** Stop and your decisions on a remote run are sent to the machine that runs it. This computer never records its own "finished" entry or decision for that run: it records only what the worker reports back, signed. The answer to your request is not taken as proof either. If the machine cannot be reached, nothing is recorded and the run carries on there.
 
 ## Local models
 
@@ -109,12 +111,12 @@ These are degraded, with a plain message:
 - connection tests of cloud providers say `Could not reach the provider`;
 - signing in to a provider fails.
 
-**The Offline indicator is a guess, and says so.** The status bar shows `Offline (inferred)` only. The Terminal never contacts a third party to find out. It watches the results of calls you caused (a connection test, a cloud grant, the GitHub view). If one fails because the name could not be found or the network was unreachable, it concludes you are offline. Any answer at all means you are online again. A refused connection or a timeout says nothing, so the state does not change. It never blocks anything.
+**The Offline indicator is a guess, and says so.** The status bar shows `Offline (inferred)` only. The Terminal never contacts a third party to find out. The word "inferred" is part of the label for that reason. It watches the results of calls you caused (a connection test, a cloud grant, the GitHub view). If one fails because the name could not be found or the network was unreachable, it concludes you are offline. Any answer at all means you are online again. A refused connection or a timeout says nothing, so the state does not change. It never blocks anything.
 
 ## When things go wrong
 
-- **A machine shows `offline`.** The last check could not reach it: it is asleep, off, on another network, or linking is off there. It is shown with its last known figures and when it was last seen. Nothing needs doing: the next check, when you open Machines or Capacity, finds it again. A remote run that was already going carries on there, and its entries are collected again after it returns. <!-- verify: resuming of a remote run after the worker comes back (Task 8b UI and 7c routes) -->
-- **A machine's key changed.** If a paired machine answers with a different key from the one you paired with, this is not treated as offline. It could be a reinstall, or someone pretending. The Machines view warns that its key changed. Unlink it and pair again, and compare the fingerprints. <!-- verify: key-mismatch warning in the Machines view and the 409 machine_key_mismatch answer (Task 6b, not yet on the integration branch) -->
+- **A machine shows `offline`.** The last check could not reach it: it is asleep, off, on another network, or linking is off there. It is shown with its last known figures and when it was last seen, or "never seen". Nothing needs doing: the next check, when you open Machines or Capacity, finds it again. A remote run that was already going carries on there. This computer keeps asking for its entries, and carries on from the last one it recorded, so none is recorded twice. While it waits, the machine shows offline. A silent connection (no sign of life for 2 minutes) is treated as lost and opened again. If the run's changes cannot be fetched yet because the machine is unreachable, that is tried again too.
+- **"This machine's key has changed. Unlink it and pair again."** If a paired machine answers with a different key from the one you paired with, this is not treated as offline. It could be a reinstall, or someone pretending. Capacity and the Machines view show that sentence in place of the machine's figures, and any remote run on it ends. Unlink the machine and pair again, and compare the fingerprints.
 - **The keychain is unavailable.** The identity key lives in the OS keychain. If it cannot be read, linking is unavailable: the listener does not start, pairing is refused and Machines says so. Nothing is ever kept as a file instead. Unlock or fix the keychain and reopen the app. If the key is gone while the ledger remembers one, this computer gets a new identity and every machine must be paired again.
 - **The other computer cannot find this one.** Check that linking is on at both ends, that the firewall allowed it, that both are on the same network (guest networks often separate devices) and try the address by hand.
 - **Unlinking.** In **Machines**, choose **Unlink** on a machine and confirm. This computer stops accepting it right away. It is recorded in the ledger, and the other computer still lists the pairing until you unlink there as well. To use it again, pair again.

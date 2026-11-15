@@ -65,7 +65,7 @@ Agent programs get an allowlisted environment only. The Terminal builds it from 
 - In API key mode, the one key for that provider. In sign-in mode, no key at all.
 - The variables of the cloud accounts you ticked for that run, and nothing from any other cloud account (see [Cloud accounts](#cloud-accounts)).
 
-A run on a linked machine gets the environment of that machine only (built there the same way, from its own connections). Nothing from this computer's connections or environment is sent to it: this computer names the connections it wants used, and the other machine decides what they mean. See [Linked machines](linked-machines.md).
+A run on a linked machine gets the environment of that machine only (built there the same way, from its own connections). Nothing from this computer's connections or environment is sent to it: this computer names the connections it wants used, and the other machine decides what they mean. The names of connections that cross are cleaned first, and the run's prompt is cleaned before it is sent. The run is approved on that machine, by its own approval gate. See [Linked machines](linked-machines.md).
 
 Nothing else is passed. Other secrets in your shell, such as cloud keys, npm tokens or GitHub tokens, are not passed to agents, and one provider's key is never given to another provider's agent.
 

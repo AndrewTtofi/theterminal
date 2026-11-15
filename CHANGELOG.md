@@ -28,6 +28,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Emergency override: run one program as you, outside the approval gate and sandbox, after a confirm step and a reason that is checked for secrets. It is always recorded, in red with an OVERRIDE label, and can discard a run's uncommitted work.
 - Documentation: `docs/workspace.md`.
 - Linked machines: pair two Terminals over the local network with a one-time code, run agents on the other machine with its own models and connections, decide from either, and see both machines in Capacity. Local models through Ollama or llama.cpp. Works offline.
+- Linked machines, details: remote runs are approved on the machine that runs them; their changes come back verified and wait for your review, never merged automatically; a refused import is recorded with its reason and not retried; a suspicious entry or a changed machine key ends the run; each machine may leave at most 4 uploads and 1 GiB waiting, expiring after 1 hour; finding computers runs only in the Link a machine panel; prompts are cleaned before they are sent. Documentation: `docs/linked-machines.md`.
 
 ### Changed
 - The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
