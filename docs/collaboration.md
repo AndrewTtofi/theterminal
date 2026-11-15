@@ -102,7 +102,7 @@ The Owner can change this for a project: on the gate's card, **Change who may si
 - With neither, the start is refused with "No API key is configured for ... Ask the Owner to add one in Connections." Nothing is recorded.
 - The agent program is given an empty home folder of its own for its settings, so it cannot find the Owner's saved logins, even by accident.
 
-Collaborators can pick what a run may use, by name; they cannot add one. The Capacity view for non-Owners shows what is available without plans, budgets or the Owner's modes.
+Collaborators can pick what a run may use, by name; they cannot add one. The Capacity view for non-Owners shows what is available without plans, budgets or the Owner's modes; the status bar does not show them the summed monthly budget, and the agents list does not show how each provider is signed in.
 
 ## Who is here
 

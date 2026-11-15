@@ -2,22 +2,18 @@
 node_modules
 **/node_modules
 **/dist
-.git
-.github
-.claude
-.superpowers
+# Every dot folder and dotfile, at any depth: version control, tooling, caches and credentials live there, and the
+# build needs none of them (there is no .npmrc; pnpm reads package.json, pnpm-workspace.yaml and pnpm-lock.yaml).
+.*
+**/.*
 e2e
 docs
 test-results
 playwright-report
-.tmp-data
 apps/desktop/stage
 apps/desktop/release
-apps/desktop/.cache
 **/*.db
 # Never send credentials or keys into the build context.
-.env*
-**/.env*
 *.pem
 **/*.pem
 *.key
