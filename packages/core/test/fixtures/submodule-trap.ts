@@ -1,16 +1,31 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
-import { devNull } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
+/**
+ * An empty file standing in for the global git config, created once per test process. The null device does not
+ * work here: git on Windows cannot open `\\.\nul` as a config file ("unable to access '\\.\nul': Invalid argument").
+ */
+let emptyGitconfig: string | undefined;
+const emptyGlobalConfig = (): string => {
+  if (emptyGitconfig === undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "plain-git-config-"));
+    emptyGitconfig = join(dir, "gitconfig");
+    writeFileSync(emptyGitconfig, "");
+    process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+  }
+  return emptyGitconfig;
+};
+
 /** Plain git as an agent would run it: nothing of the server's GIT_* environment, no global or system config. */
 const plainGit = async (cwd: string, ...args: string[]): Promise<string> => {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
   const { stdout } = await run("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], {
-    cwd, env: { ...env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+    cwd, env: { ...env, GIT_CONFIG_GLOBAL: emptyGlobalConfig(), GIT_CONFIG_NOSYSTEM: "1" },
   });
   return stdout.trim();
 };

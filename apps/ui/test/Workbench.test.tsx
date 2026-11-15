@@ -14,6 +14,7 @@ import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked } from "./gate-fixtures";
 import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
+import { digestsModel, preview, shareModel } from "./share-fixtures";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
   return {
@@ -48,6 +49,12 @@ const pendingAction: PendingAgentAction = {
 const entry: LedgerEntry = {
   seq: 1, id: "e1", ts: "2026-01-01T00:00:00Z", projectId: "p1", actor: { kind: "human", id: "owner" },
   type: "project.created", payload: { name: "Local Model Hub" }, prevHash: "", hash: "",
+};
+
+const STATUS: Status = {
+  runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+  connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
+  machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
 };
 
 function model(over: Partial<AppModel> = {}): AppModel {
@@ -96,6 +103,8 @@ function model(over: Partial<AppModel> = {}): AppModel {
     github: { overview: null, error: null, refresh: vi.fn() },
     capacity: { report: null, error: null, refresh: vi.fn() },
     machines: { overview: null, error: null, refresh: vi.fn() },
+    share: shareModel(),
+    digests: digestsModel(),
     intake: null,
     onStartIntake: vi.fn().mockResolvedValue(true),
     onAnswerIntake: vi.fn().mockResolvedValue(true),
@@ -323,6 +332,40 @@ describe("Workbench", () => {
     expect(container.querySelector('[data-panel="agent_feed"]')).toBeNull();
     const strip = screen.getByRole("region", { name: "Needs you" });
     expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
+  });
+
+  it("keeps a decision card in the strip with the Share view active and the bottom panel closed", async () => {
+    const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+    operator();
+    await userEvent.click(view("Share"));
+    expect(view("Share").getAttribute("aria-pressed")).toBe("true");
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
+  });
+
+  it("previews from the Share view into the Share preview tab, and opens the Daily digest tab", async () => {
+    const share = shareModel({ preview: preview() });
+    const { container } = render(<Workbench model={model({ share })} />);
+    await userEvent.click(view("Share"));
+    expect(screen.getByRole("complementary", { name: "Side bar" }).querySelector(".side-bar-title")?.textContent).toBe("Share");
+    expect(container.querySelector('[data-panel="share"]')).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Preview share page" }));
+    expect(share.onPreview).toHaveBeenCalled();
+    const tab = container.querySelector('[data-panel="share"]');
+    expect(tab?.getAttribute("data-active")).toBe("true");
+    expect(within(tab as HTMLElement).getByRole("region", { name: "Share preview" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Open daily digest" }));
+    const digest = container.querySelector('[data-panel="digest"]');
+    expect(digest?.getAttribute("data-active")).toBe("true");
+    expect(within(digest as HTMLElement).getByRole("region", { name: "Daily digest" })).toBeTruthy();
+  });
+
+  it("opens the Share view from the status bar's sharing item", async () => {
+    render(<Workbench model={model({ status: { ...STATUS, shareLinks: 1 } })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Sharing: 1 link live" }));
+    expect(view("Share").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("reopens and focuses the Board tab when the Board view is selected", async () => {
@@ -611,7 +654,7 @@ describe("Workbench", () => {
     const statusWith = (intakeProjects: Status["intakeProjects"]): Status => ({
       runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
       connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
-      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null },
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
     });
 
     it("opens the Plan intake tab from the Projects side bar", async () => {

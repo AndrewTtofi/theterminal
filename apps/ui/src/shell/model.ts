@@ -7,9 +7,9 @@ import type {
   Board,
   CapacityReport,
   CardStory,
+  DailyDigest,
   DecisionId,
-  MachineCapacity,
-  MachinePresence,
+  DigestDays,
   DirListing,
   FileContent,
   FileDiff,
@@ -19,6 +19,8 @@ import type {
   IntakeAnswer,
   IntakeView,
   LedgerEntry,
+  MachineCapacity,
+  MachinePresence,
   NarrationContext,
   NarrationTopic,
   PendingAgentAction,
@@ -26,10 +28,13 @@ import type {
   Provider,
   QuestionId,
   RunChanges,
+  ShareLink,
+  ShareOptions,
+  ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
 import { innerEntry, runIdOf } from "@theterminal/shared";
-import type { AgentsInfo, LinkOverview, Status } from "../api";
+import type { AgentsInfo, LinkOverview, ShareAddress, SharePreview, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 import type { ViewId } from "./views";
@@ -52,7 +57,7 @@ export type GatePrompt = {
 };
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "machine", "other"];
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "other"];
 
 /**
  * True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. A
@@ -180,6 +185,46 @@ export type WorkbenchModel = {
     paired?: MachinePresence[];
     refreshPaired?: () => void;
   };
+
+  /**
+   * The Share view's data for the selected project. Snapshots and links reload on any share.* entry of the project;
+   * the addresses load when the Share view opens (`loadAddresses`). Changing the options drops the preview, so what
+   * is confirmed is always what was chosen.
+   */
+  share: {
+    options: ShareOptions;
+    onOptionsChange(o: ShareOptions): void;
+    preview: SharePreview | null;
+    previewing: boolean;
+    /**
+     * Generates the page for the Owner to read: true once the preview is shown; false, sending nothing, with no
+     * project or while a preview is being made. A refusal rejects with the server's error.
+     */
+    onPreview(): Promise<boolean>;
+    /**
+     * Saves the previewed page: true once saved, and the preview is dropped (another save needs a new preview);
+     * false, sending nothing, with no preview or while a confirm is in flight. A refusal rejects with the server's
+     * error; a stale or expired preview is dropped first.
+     */
+    onConfirm(): Promise<boolean>;
+    snapshots: ShareSnapshotRecord[];
+    links: ShareLink[];
+    addresses: ShareAddress[];
+    /** The error code of the last failed address load, or null; cleared by a load that succeeds. */
+    addressesError: string | null;
+    loadAddresses(): void;
+    /** The new link's url, shown once; null, sending nothing, with no project. A refusal rejects with the error. */
+    onCreateLink(shareId: string, address: string, ttlMinutes: number): Promise<{ url: string } | null>;
+    /** True once revoked. A refusal rejects with the server's error. */
+    onRevokeLink(id: string): Promise<boolean>;
+  };
+
+  /**
+   * The selected project's daily digests over the last `days`; null while loading. The Daily digest tab calls
+   * `watch` when it mounts and the returned function when it unmounts: digests load when a watcher appears and
+   * reload on the project's entries (coalesced) only while one is there, never while the tab is closed.
+   */
+  digests: { days: DigestDays; onDaysChange(d: DigestDays): void; list: DailyDigest[] | null; watch(): () => void };
 
   /**
    * The selected project's guided intake: null when it has none, undefined while loading. Reloaded on any

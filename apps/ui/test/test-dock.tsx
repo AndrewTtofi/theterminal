@@ -35,6 +35,8 @@ const BUILT_IN: Placed[] = [
   { id: "needs_you", where: "main" },
   { id: "terminal", where: "bottom" },
   { id: "link_machine", where: "main" },
+  { id: "share", where: "main" },
+  { id: "digest", where: "main" },
 ];
 
 /**

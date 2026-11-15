@@ -397,10 +397,43 @@ pre.diff .meta { color: var(--muted); }
 .changes .cleaned, .changes span.row.cleaned { display: block; padding: 2px 4px; color: var(--muted); font-style: italic; cursor: default; }
 pre.diff .line, pre.file .line { content-visibility: auto; contain-intrinsic-size: auto 18px; }
 
+/* Share view: the side bar, the preview tab (the page in a sandboxed frame beside what it leaves out), the digest. */
+.share-side { padding: 8px 0; display: flex; flex-direction: column; gap: 14px; }
+.share-side h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; color: var(--muted); }
+.share-side label { display: block; padding: 2px 0; }
+.share-side select { display: block; margin: 0 0 8px; }
+.share-side .empty { padding: 0; }
+.share-side .note, .share-link-form .note, .share-panel .share-meta { margin: 6px 0; font-size: 12px; color: var(--muted); }
+.share-side li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+.share-row-text { display: block; overflow-wrap: anywhere; }
+.share-row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+.share-row-actions a { color: var(--accent); }
+.share-link-form { margin-top: 6px; padding: 6px; border: 1px solid var(--line-strong); display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.share-link-form select { margin: 0; }
+.share-link-made { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; align-self: stretch; }
+.share-link-made input { flex: 1; min-width: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.share-link-made .note { flex-basis: 100%; color: var(--attention); }
+.share-error { margin: 6px 0 0; color: var(--attention); }
+.share-panel { padding: 8px 12px; height: 100%; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.share-body { flex: 1; display: flex; gap: 12px; min-height: 320px; }
+.share-frame { flex: 1; min-width: 0; border: 1px solid var(--line-strong); background: #ffffff; }
+.share-hidden { flex: 0 0 240px; overflow: auto; font-size: 12px; }
+.share-hidden li { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.share-confirm { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+.share-saved { margin: 8px 0 0; color: var(--ok); }
+.digest-panel { padding: 8px 12px; overflow: auto; height: 100%; }
+.digest-panel select { margin-bottom: 8px; }
+.digest-panel article { margin: 0 0 14px; }
+.digest-summary { margin: 0 0 6px; }
+.digest-panel li { padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.digest-panel time { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.digest-panel li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
+.digest-panel .note { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
 /* Emergency override: red wherever the ledger is shown, after .attention so the red wins on an override line. */
 .override { border-left: 3px solid var(--override); }
 .override .headline, .override > summary { color: var(--override); }
-.ledger li.override, .story li.override, .feed-items li.override { border-left-color: var(--override); padding-left: 6px; }
+.ledger li.override, .story li.override, .feed-items li.override, .digest-panel li.override { border-left-color: var(--override); padding-left: 6px; }
 .terminal-lines li.override { color: var(--override); border-left: 3px solid var(--override); padding-left: 6px; }
 .story li.override .headline { color: var(--override); }
 .override-tag { color: var(--override); font-weight: 700; }

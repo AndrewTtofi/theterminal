@@ -183,4 +183,25 @@ describe("usernameScrubber", () => {
   it("treats regex characters in the name literally", () => {
     expect(usernameScrubber("a+b", { caseless: false })("a+b aab")).toBe("<user> aab");
   });
+
+  it("never rewrites its own placeholder, so scrubbing twice is scrubbing once, even for the name user", () => {
+    const scrub = usernameScrubber("user", { caseless: true });
+    const once = scrub("a user signs in as <user>, not as User");
+    expect(once).toBe("a <user> signs in as <user>, not as <user>");
+    expect(scrub(once)).toBe(once);
+    expect(user("<user> and alice")).toBe("<user> and <user>");
+  });
+
+  it("keeps the placeholders it is told to", () => {
+    const scrub = usernameScrubber("data", { caseless: true, keep: ["<user>", "<data>"] });
+    expect(scrub("<data>/logs by data")).toBe("<data>/logs by <user>");
+    expect(usernameScrubber("data", { caseless: true })("<data>")).toBe("<<user>>");
+  });
+});
+
+describe("usernameScrubber with no placeholders to keep", () => {
+  it("still scrubs: an empty keep list never turns the scrubber off", () => {
+    expect(usernameScrubber("alice", { keep: [] })("by alice")).toBe("by <user>");
+    expect(usernameScrubber("alice", { keep: [""] })("by alice")).toBe("by <user>");
+  });
 });

@@ -41,6 +41,11 @@ const ADDED_AFTER_ZOD_3: readonly EventType[] = [
   "link.mirrored",
   "link.changes_imported",
   "link.changes_refused",
+  "share.confirmed",
+  "share.link_created",
+  "share.revoked",
+  "share.expired",
+  "share.stopped",
 ];
 
 describe("ledger payloads written by zod 3", () => {

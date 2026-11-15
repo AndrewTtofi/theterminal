@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { visibleControls } from "@theterminal/shared";
+import { plural, visibleControls } from "@theterminal/shared";
 import type { CiStatus } from "@theterminal/shared";
 import type { Status } from "../api";
 import { PRESET_LABELS } from "./dock-layout";
@@ -42,6 +42,8 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
   const month = status?.monthCostUsd ?? 0;
   const budget = status?.monthlyBudgetUsd ?? null;
   const conn = status?.connections;
+  /** Share links being served now: while any is live, the bar says so until each is revoked or expires. */
+  const shareLinks = status?.shareLinks ?? 0;
   const connections = conn
     ? `Connections: ${conn.enabled} connected${conn.failed > 0 ? `, ${conn.failed} failed` : ""}`
     : "Connections: 0 connected";
@@ -67,6 +69,11 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
         >
           Needs you: {needsYou}
         </button>
+        {shareLinks > 0 && (
+          <button type="button" className="status-item attention" onClick={() => onSelectView("share")}>
+            {`Sharing: ${plural(shareLinks, "link")} live`}
+          </button>
+        )}
       </div>
       <div className="status-right">
         {conn?.keychain === "unavailable" ? (

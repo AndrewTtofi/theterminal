@@ -21,6 +21,8 @@ export type ConnectionRouteDeps = {
   machines: () => { linked: number; online: number };
   /** The network state inferred from the Owner's own outgoing calls; never makes a call. */
   network: () => NetworkState;
+  /** Share links being served right now: the live listeners, never the projection's rows. */
+  shareLinks: () => number;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -49,7 +51,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, machines, network } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -135,6 +137,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       machines: machines(),
       // Only the fixed fields: the state, when it began and the system code that made it offline. No URL or message.
       network: network(),
+      shareLinks: shareLinks(),
     };
   });
 }

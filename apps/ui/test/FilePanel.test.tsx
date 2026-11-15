@@ -66,7 +66,9 @@ describe("FilePanel", () => {
     expect(p.querySelector("pre.file")).toBeNull();
   });
 
-  it("paints at most 20,000 lines and says how many there are", async () => {
+  // Painting 20,000 lines in jsdom takes about a second alone and several when the other packages' suites load the
+  // same machine (CI runs them in parallel); the default 5 s has cut it off. The cap is what is tested, not the speed.
+  it("paints at most 20,000 lines and says how many there are", { timeout: 30_000 }, async () => {
     const text = Array.from({ length: 25_000 }, (_, i) => `line ${i + 1}`).join("\n");
     setup(async () => fileContent({ size: text.length, text }));
     const p = await panel();

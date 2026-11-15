@@ -31,6 +31,11 @@ import { GateBlockedError, GateNotMetError, stageHasEntryGates, type GateService
 import {
   GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
 } from "../github/client.js";
+import { ShareNotCleanError } from "../share/clean.js";
+import {
+  AddressNotAllowedError, LinkNotActiveError, PreviewNotFoundError, PreviewStaleError, ShareLinkActiveError, ShareTooLargeError,
+  SnapshotMissingError, SnapshotTamperedError,
+} from "../share/errors.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -158,6 +163,19 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof BundleGitLimitError) return reply.code(503).send({ error: "bundle_git_limit" });
   if (err instanceof NoRepoError) return reply.code(409).send({ error: "no_repo" });
   if (err instanceof UploadLimitError) return reply.code(409).send({ error: "upload_limit" });
+  // The share view. Fixed codes only: never a path, an id, or the page.
+  if (err instanceof PreviewNotFoundError) return reply.code(404).send({ error: "preview_not_found" });
+  if (err instanceof PreviewStaleError) return reply.code(409).send({ error: "preview_stale" });
+  if (err instanceof SnapshotMissingError) return reply.code(404).send({ error: "snapshot_missing" });
+  if (err instanceof SnapshotTamperedError) return reply.code(409).send({ error: "snapshot_tampered" });
+  if (err instanceof ShareTooLargeError) return reply.code(409).send({ error: "share_too_large" });
+  if (err instanceof ShareNotCleanError) {
+    log.warn("a share page was refused: it could not be proven clean"); // the page itself is never logged
+    return reply.code(409).send({ error: "share_not_clean" });
+  }
+  if (err instanceof ShareLinkActiveError) return reply.code(409).send({ error: "share_link_active" });
+  if (err instanceof AddressNotAllowedError) return reply.code(400).send({ error: "invalid_input" });
+  if (err instanceof LinkNotActiveError) return reply.code(409).send({ error: "link_not_active" });
   if (err instanceof LedgerReadOnlyError) {
     return reply.code(423).send({ error: "ledger_read_only" });
   }

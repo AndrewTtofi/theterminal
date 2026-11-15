@@ -137,6 +137,11 @@ const MIGRATIONS = [
   CREATE INDEX gate_decisions_card ON gate_decisions (card_id);`,
   // The commit a run's worktree was created at; NULL for runs recorded before it was kept.
   `ALTER TABLE agent_runs ADD COLUMN base TEXT;`,
+  // The share view: confirmed share pages and their links.
+  `CREATE TABLE share_snapshots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, content_hash TEXT NOT NULL, bytes INTEGER NOT NULL, sections TEXT NOT NULL, options TEXT NOT NULL, head_seq INTEGER NOT NULL, confirmed_at TEXT NOT NULL);
+  CREATE INDEX share_snapshots_project ON share_snapshots (project_id);
+  CREATE TABLE share_links (id TEXT PRIMARY KEY, share_id TEXT NOT NULL, project_id TEXT NOT NULL, scope TEXT NOT NULL, port INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT);
+  CREATE INDEX share_links_state ON share_links (state);`,
   // Linked machines: paired machines, runs that cross a link, and the machine a mirrored run executes on.
   `CREATE TABLE machines (
     id TEXT PRIMARY KEY,

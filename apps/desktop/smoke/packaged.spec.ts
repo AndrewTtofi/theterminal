@@ -264,7 +264,12 @@ test("window: opens the workspace on theterminal.localhost with the session cook
     // Not toHaveURL: its failure message would print the bootstrap URL, which carries the session token.
     await waitFor(() => /^http:\/\/theterminal\.localhost:\d+\/$/.test(page.url()), 60_000, "the workspace URL");
     expect(new URL(page.url()).search).toBe("");
-    await expect(page.getByRole("navigation", { name: "Views" }).getByRole("button")).toHaveCount(7);
+    // The activity bar shows every view of the shell (apps/ui/src/shell/views.ts), as e2e/shell.spec.ts checks too.
+    const viewButtons = page.getByRole("navigation", { name: "Views" }).getByRole("button");
+    await expect(viewButtons).toHaveCount(11);
+    expect(await viewButtons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")))).toEqual([
+      "Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "Share", "Learn",
+    ]);
 
     // Only the cookie's attributes are compared, never its value.
     const cookies = (await app.context().cookies()).map(({ name, domain, httpOnly, sameSite }) => ({ name, domain, httpOnly, sameSite }));

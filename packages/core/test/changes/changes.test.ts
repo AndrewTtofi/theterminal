@@ -27,6 +27,12 @@ const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
 const exec = promisify(execFile);
 const testEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
 
+// Every git call here runs through runGit's hardening, five or six git processes each: a run start is about fifty, a
+// view of the changes about forty. Seconds on Windows CI, where a process start is slow and the suite shares two cores;
+// the default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 let dataDir: string;
 let outside: string;
 let db: Db;
@@ -53,8 +59,9 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await runner.shutdown();
-  rmSync(dataDir, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  // Retried: on Windows a git or agent process that was just killed can still hold its working directory (EBUSY).
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 /** Starts a run with the fake adapter (which does nothing) and waits for it to finish. */

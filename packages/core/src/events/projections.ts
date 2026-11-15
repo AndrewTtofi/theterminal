@@ -1,7 +1,7 @@
 import { MIRRORABLE_TYPES } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, LinkRun, LinkRunState, Machine,
-  PendingAgentAction, QuestionId,
+  PendingAgentAction, QuestionId, ShareLink, ShareLinkState, ShareSnapshotRecord,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
@@ -184,6 +184,25 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "link.mirrored":
       applyMirrored(db, e);
       break;
+    case "share.confirmed":
+      db.prepare(
+        `INSERT INTO share_snapshots (id, project_id, content_hash, bytes, sections, options, head_seq, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(p.shareId, e.projectId, p.contentHash, p.bytes, canonicalJson(p.sections), canonicalJson(p.options), p.headSeq, e.ts);
+      break;
+    case "share.link_created":
+      db.prepare(
+        `INSERT INTO share_links (id, share_id, project_id, scope, port, state, created_at, expires_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL)`,
+      ).run(p.linkId, p.shareId, e.projectId, p.scope, p.port, e.ts, p.expiresAt);
+      break;
+    case "share.revoked":
+    case "share.expired":
+    case "share.stopped":
+      db.prepare("UPDATE share_links SET state = ?, ended_at = ? WHERE id = ?").run(
+        SHARE_END_STATES[e.type], e.ts, p.linkId,
+      );
+      break;
     default: // gate.blocked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
@@ -249,6 +268,7 @@ export function mirroredIds(db: Db, runId: string): Set<string> {
     .all(runId) as { id: string }[];
   return new Set(rows.map((r) => r.id));
 }
+const SHARE_END_STATES = { "share.revoked": "revoked", "share.expired": "expired", "share.stopped": "stopped" } as const;
 
 /** An intake event must name an intake of its own project; otherwise the append rolls back instead of writing orphan rows. */
 function requireIntake(db: Db, intakeId: string, projectId: string | null): void {
@@ -300,7 +320,7 @@ function setSetting(db: Db, key: string, value: string): void {
 
 const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
-  "intakes", "intake_answers", "intake_decisions", "gate_decisions", "machines", "link_runs",
+  "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -478,15 +498,25 @@ type GateDecisionRow = {
   from_stage: GateDecision["from"]; to_stage: GateDecision["to"]; reason: string | null; decided_by: string; at: string;
 };
 
+const toGateDecision = (r: GateDecisionRow): GateDecision => ({
+  entryId: r.entry_id, gateId: r.gate_id, projectId: r.project_id, cardId: r.card_id, kind: r.kind,
+  from: r.from_stage, to: r.to_stage, reason: r.reason, decidedBy: r.decided_by, at: r.at,
+});
+
 /** The card's gate sign-offs and waivers, in ledger order. */
 export function listGateDecisions(db: Db, cardId: string): GateDecision[] {
   const rows = db
     .prepare("SELECT * FROM gate_decisions WHERE card_id = ? ORDER BY at, rowid")
     .all(cardId) as GateDecisionRow[];
-  return rows.map((r) => ({
-    entryId: r.entry_id, gateId: r.gate_id, projectId: r.project_id, cardId: r.card_id, kind: r.kind,
-    from: r.from_stage, to: r.to_stage, reason: r.reason, decidedBy: r.decided_by, at: r.at,
-  }));
+  return rows.map(toGateDecision);
+}
+
+/** The project's gate sign-offs and waivers across all its cards, in ledger order. */
+export function listProjectGateDecisions(db: Db, projectId: string): GateDecision[] {
+  const rows = db
+    .prepare("SELECT * FROM gate_decisions WHERE project_id = ? ORDER BY at, rowid")
+    .all(projectId) as GateDecisionRow[];
+  return rows.map(toGateDecision);
 }
 
 /** Sum of reported cost over the project's runs; a run with no reported cost counts as 0, and no runs gives 0. */
@@ -550,4 +580,57 @@ export function listLinkRuns(db: Db, state?: LinkRunState): LinkRun[] {
     ? db.prepare("SELECT * FROM link_runs ORDER BY rowid").all()
     : db.prepare("SELECT * FROM link_runs WHERE state = ? ORDER BY rowid").all(state)) as LinkRunRow[];
   return rows.map(toLinkRun);
+}
+
+type ShareSnapshotRow = {
+  id: string; project_id: string; content_hash: string; bytes: number; sections: string; options: string; head_seq: number;
+  confirmed_at: string;
+};
+const toShareSnapshot = (r: ShareSnapshotRow): ShareSnapshotRecord => ({
+  id: r.id, projectId: r.project_id, contentHash: r.content_hash, bytes: r.bytes, sections: JSON.parse(r.sections),
+  options: JSON.parse(r.options), headSeq: r.head_seq, confirmedAt: r.confirmed_at,
+});
+
+/** The project's confirmed share pages, newest first. */
+export function listShareSnapshots(db: Db, projectId: string): ShareSnapshotRecord[] {
+  const rows = db
+    .prepare("SELECT * FROM share_snapshots WHERE project_id = ? ORDER BY confirmed_at DESC, rowid DESC")
+    .all(projectId) as ShareSnapshotRow[];
+  return rows.map(toShareSnapshot);
+}
+
+export function getShareSnapshot(db: Db, shareId: string): ShareSnapshotRecord | null {
+  const r = db.prepare("SELECT * FROM share_snapshots WHERE id = ?").get(shareId) as ShareSnapshotRow | undefined;
+  return r ? toShareSnapshot(r) : null;
+}
+
+type ShareLinkRow = {
+  id: string; share_id: string; project_id: string; scope: ShareLink["scope"]; port: number; state: ShareLinkState;
+  created_at: string; expires_at: string; ended_at: string | null;
+};
+
+/** Share links, newest first, optionally of one state and one project. */
+export function listShareLinks(db: Db, q: { state?: ShareLinkState; projectId?: string } = {}): ShareLink[] {
+  const where: string[] = [];
+  const params: string[] = [];
+  if (q.state !== undefined) {
+    where.push("state = ?");
+    params.push(q.state);
+  }
+  if (q.projectId !== undefined) {
+    where.push("project_id = ?");
+    params.push(q.projectId);
+  }
+  const rows = db
+    .prepare(`SELECT * FROM share_links${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, rowid DESC`)
+    .all(...params) as ShareLinkRow[];
+  return rows.map((r) => ({
+    id: r.id, shareId: r.share_id, projectId: r.project_id, scope: r.scope, port: r.port, state: r.state,
+    createdAt: r.created_at, expiresAt: r.expires_at, endedAt: r.ended_at,
+  }));
+}
+
+/** Share links the ledger says are active (whether a listener is up is the link manager's to say). */
+export function countActiveShareLinks(db: Db): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM share_links WHERE state = 'active'").get() as { n: number }).n;
 }

@@ -113,9 +113,10 @@ export default async function globalSetup() {
   };
 
   try {
-    // Both servers: secrets in memory (the link identity is never written to the real keychain), the in-process
-    // discovery (no multicast), and a loopback link listener on a free port should a test enable linking.
-    const linkOpts = () => ({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), linkBind: "127.0.0.1", linkPort: 0 });
+    // Every server: secrets in memory (the link identity is never written to the real keychain), the in-process
+    // discovery (no multicast), a loopback link listener on a free port should a test enable linking, and share
+    // links on an ephemeral port, so a run never needs (or holds) the default one.
+    const linkOpts = () => ({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), linkBind: "127.0.0.1", linkPort: 0, sharePort: 0 });
     const board = await createServer({ dataDir: dirs[0]!, port: 47000, uiDir, ...linkOpts() });
     servers.push(board);
     process.env.TT_E2E_URL = board.url;

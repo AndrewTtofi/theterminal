@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_SHARE_OPTIONS } from "@theterminal/shared";
 import type {
-  AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
-  MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
+  AgentAction, AgentRun, Board as BoardData, CapacityReport, DailyDigest, DigestDays, GateEvaluation, GitHubOverview, IntakeView,
+  LedgerEntry, MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, ShareLink, ShareOptions,
+  ShareSnapshotRecord, Stage,
 } from "@theterminal/shared";
 import { innerEntry } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, subscribeLedger } from "./api";
-import type { AgentsInfo, Health, LinkOverview, Status } from "./api";
+import type { AgentsInfo, Health, LinkOverview, ShareAddress, SharePreview, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
@@ -48,6 +50,9 @@ function withStreamed(prev: ScopeLedger, incoming: LedgerEntry[]): ScopeLedger {
   const { entries, trimmed } = appendEntries(prev.entries, incoming, prev.paged ? null : LIVE_CAP);
   return entries === prev.entries ? prev : { ...prev, entries, hasOlder: prev.hasOlder || trimmed };
 }
+
+/** A preview the server no longer accepts (changed, expired or gone): the Owner must preview again. */
+const stalePreview = (e: unknown) => e instanceof ApiError && (e.code === "preview_stale" || e.code === "preview_not_found");
 
 /** How long a run's changes are reused before they are read again. */
 const CHANGES_MEMO_MS = 10_000;
@@ -142,6 +147,24 @@ export function App() {
   const [changes, setChanges] = useState<{ runId: string; changes: RunChanges | null; error: string | null } | null>(null);
   /** Each run's changes as last asked for, and when, so callers within 10 s share one request. */
   const changesMemo = useRef(new Map<string, { at: number; result: Promise<RunChanges> }>());
+  /** The Share view: the options chosen, the preview being read, and the project's saved snapshots and links. */
+  const [shareOptions, setShareOptions] = useState<ShareOptions>(DEFAULT_SHARE_OPTIONS);
+  const [sharePreview, setSharePreview] = useState<SharePreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [shareSnapshots, setShareSnapshots] = useState<ShareSnapshotRecord[]>([]);
+  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
+  const [shareAddresses, setShareAddresses] = useState<ShareAddress[]>([]);
+  const [shareAddressesError, setShareAddressesError] = useState<string | null>(null);
+  const refreshShare = useRef<() => void>(() => {});
+  /** Bumped when the options or the project change, so a preview asked for before is dropped when it arrives. */
+  const previewGen = useRef(0);
+  const previewingRef = useRef(false);
+  const confirming = useRef(false);
+  const [digestDays, setDigestDays] = useState<DigestDays>(7);
+  const [digests, setDigests] = useState<DailyDigest[] | null>(null);
+  const refreshDigests = useRef<() => void>(() => {});
+  /** How many Daily digest tabs are mounted: digests load and reload only while this is above zero. */
+  const digestWatchers = useRef(0);
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -353,6 +376,8 @@ export function App() {
         refresh();
         if (touchesRuns(e)) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
+        if (e.type.startsWith("share.")) refreshShare.current();
+        if (digestWatchers.current > 0) refreshDigests.current();
       });
     });
     return () => {
@@ -393,6 +418,67 @@ export function App() {
       refreshIntake.current = () => {};
     };
   }, [selectedId]);
+
+  // The selected project's saved share snapshots and links; a new project drops the preview being read.
+  useEffect(() => {
+    previewGen.current++;
+    setSharePreview(null);
+    setShareSnapshots([]);
+    setShareLinks([]);
+    if (!selectedId) return;
+    let cancelled = false;
+    const refresh = coalesced(async () => {
+      const [snapshots, links] = await Promise.all([api.listShareSnapshots(selectedId), api.listShareLinks(selectedId)]);
+      if (cancelled) return;
+      setShareSnapshots(snapshots);
+      setShareLinks(links);
+    }, () => cancelled);
+    refreshShare.current = refresh;
+    refresh();
+    return () => {
+      cancelled = true;
+      refreshShare.current = () => {};
+    };
+  }, [selectedId]);
+
+  // The selected project's daily digests over the chosen window: null while they load. Loaded only while a Daily
+  // digest tab is open; the tab asks when it mounts.
+  useEffect(() => {
+    setDigests(null);
+    if (!selectedId) return;
+    let cancelled = false;
+    const refresh = coalesced(async () => {
+      const list = await api.getDigests(selectedId, digestDays);
+      if (!cancelled) setDigests(list);
+    }, () => cancelled);
+    refreshDigests.current = refresh;
+    if (digestWatchers.current > 0) refresh();
+    return () => {
+      cancelled = true;
+      refreshDigests.current = () => {};
+    };
+  }, [selectedId, digestDays]);
+  const watchDigests = useCallback(() => {
+    digestWatchers.current++;
+    refreshDigests.current();
+    return () => {
+      digestWatchers.current--;
+    };
+  }, []);
+
+  // Asked for by the Share view when it opens; a failure keeps the addresses already known and records why.
+  const loadShareAddresses = useCallback(() => {
+    void api.listShareAddresses().then(
+      (a) => {
+        if (!mounted.current) return;
+        setShareAddresses(a);
+        setShareAddressesError(null);
+      },
+      (e: unknown) => {
+        if (mounted.current) setShareAddressesError(e instanceof ApiError ? e.code : "request_failed");
+      },
+    );
+  }, []);
 
   /** Runs an intake change for the selected project and shows the view the server returns; false when refused. */
   const intakeAction = async (
@@ -745,6 +831,71 @@ export function App() {
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
     machines: { ...machines, refresh: refreshMachines, capacity: machineCapacity, paired, refreshPaired },
+    share: {
+      options: shareOptions,
+      onOptionsChange: (o) => {
+        // What is confirmed must be what was chosen: a preview made with other options goes.
+        previewGen.current++;
+        setShareOptions(o);
+        setSharePreview(null);
+      },
+      preview: selectedId ? sharePreview : null,
+      previewing,
+      onPreview: async () => {
+        const projectId = selectedId;
+        if (!projectId || previewingRef.current) return false;
+        previewingRef.current = true;
+        setPreviewing(true);
+        const gen = ++previewGen.current;
+        try {
+          const p = await api.previewShare(projectId, shareOptions);
+          if (gen !== previewGen.current) return false;
+          setSharePreview(p);
+          return true;
+        } finally {
+          previewingRef.current = false;
+          setPreviewing(false);
+        }
+      },
+      onConfirm: async () => {
+        const projectId = selectedId;
+        const p = sharePreview;
+        if (!projectId || !p || confirming.current) return false;
+        confirming.current = true;
+        try {
+          await api.confirmShare(projectId, p.previewId, p.contentHash);
+          // Saved: the preview is done with, so another save needs a new preview, never the same previewId twice.
+          setSharePreview((prev) => (prev?.previewId === p.previewId ? null : prev));
+          refreshShare.current();
+          return true;
+        } catch (e) {
+          if (stalePreview(e)) setSharePreview((prev) => (prev?.previewId === p.previewId ? null : prev));
+          throw e;
+        } finally {
+          confirming.current = false;
+        }
+      },
+      snapshots: selectedId ? shareSnapshots : [],
+      links: selectedId ? shareLinks : [],
+      addresses: shareAddresses,
+      addressesError: shareAddressesError,
+      loadAddresses: loadShareAddresses,
+      onCreateLink: async (shareId, address, ttlMinutes) => {
+        if (!selectedId) return null;
+        const made = await api.createShareLink(shareId, address, ttlMinutes);
+        refreshShare.current();
+        return { url: made.url };
+      },
+      onRevokeLink: async (id) => {
+        try {
+          await api.revokeShareLink(id);
+          return true;
+        } finally {
+          refreshShare.current();
+        }
+      },
+    },
+    digests: { days: digestDays, onDaysChange: setDigestDays, list: selectedId ? digests : null, watch: watchDigests },
     intake: selectedId ? intake : undefined,
     intakeError: selectedId ? intakeError : null,
     onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),

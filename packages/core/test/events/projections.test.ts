@@ -9,8 +9,9 @@ import { commitEvent, commitEvents } from "../../src/events/commit.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting, listActions, listAllPendingActions,
-  listGateDecisions, listLinkRuns, listMachines, listOpenIntakes, listPendingActions, listRuns, mirroredIds, projectSpendUsd,
+  countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting,
+  getShareSnapshot, listActions, listAllPendingActions, listGateDecisions, listLinkRuns, listMachines, listOpenIntakes,
+  listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
   rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
 import { pairAndRequest, remoteRun, type RemoteRun } from "../link/remote-fixtures.js";
@@ -427,8 +428,8 @@ describe("linked-machine projections", () => {
     runId, machineId, adapter: "fake", prompt: "do it", cardId: null, connectionIds: [],
   });
 
-  it("migrates to user_version 9 with the machines and link_runs tables and agent_runs.machine_id", () => {
-    expect(db.pragma("user_version", { simple: true })).toBe(9);
+  it("migrates to user_version 10 with the machines and link_runs tables and agent_runs.machine_id", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(10);
     const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
     expect(columns("machines")).toEqual(["id", "name", "public_key", "fingerprint", "address", "role", "paired_at", "updated_at"]);
     expect(columns("link_runs")).toEqual(["run_id", "machine_id", "direction", "project_id", "state", "last_seq", "error", "updated_at"]);
@@ -525,6 +526,90 @@ describe("linked-machine projections", () => {
     // A rebuild clears the link tables first: rows not backed by the ledger disappear.
     db.prepare("INSERT INTO machines VALUES ('x', 'n', 'k', 'f', 'a:1', 'showed_code', 't', 't')").run();
     db.prepare("INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, updated_at) VALUES ('x', 'm', 'requested', 'p', 'requested', 't')").run();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+});
+
+describe("share projections", () => {
+  const HASH = "a".repeat(64);
+  const DIGEST = "b".repeat(64);
+  const OPTIONS = { includePrompts: false, includeHardware: true, digestDays: 14 };
+  const confirm = (shareId: string, projectId = "p1") =>
+    emit("share.confirmed", {
+      shareId, contentHash: HASH, bytes: 1234, sections: ["overview", "audit"], options: OPTIONS, headSeq: 7,
+    }, human, projectId)!;
+  const link = (linkId: string, shareId: string, projectId = "p1") =>
+    emit("share.link_created", {
+      linkId, shareId, tokenDigest: DIGEST, expiresAt: "2026-11-15T13:00:00.000Z", port: 4100, scope: "local_network",
+    }, human, projectId)!;
+
+  it("share.confirmed inserts a snapshot record with sections and options as canonical JSON", () => {
+    const e = confirm("s1");
+    expect(db.prepare("SELECT * FROM share_snapshots").all()).toEqual([{
+      id: "s1", project_id: "p1", content_hash: HASH, bytes: 1234, sections: '["overview","audit"]',
+      options: '{"digestDays":14,"includeHardware":true,"includePrompts":false}', head_seq: 7, confirmed_at: e.ts,
+    }]);
+    expect(getShareSnapshot(db, "s1")).toEqual({
+      id: "s1", projectId: "p1", contentHash: HASH, bytes: 1234, sections: ["overview", "audit"], options: OPTIONS, headSeq: 7,
+      confirmedAt: e.ts,
+    });
+    expect(getShareSnapshot(db, "nope")).toBeNull();
+  });
+
+  it("listShareSnapshots lists one project's snapshots, newest first", () => {
+    confirm("s1");
+    confirm("s2");
+    confirm("other", "p2");
+    expect(listShareSnapshots(db, "p1").map((s) => s.id)).toEqual(["s2", "s1"]);
+    expect(listShareSnapshots(db, "p3")).toEqual([]);
+  });
+
+  it("share.link_created inserts an active link of the entry's project; revoked, expired and stopped end it", () => {
+    confirm("s1");
+    const created = link("l1", "s1");
+    expect(listShareLinks(db)).toEqual([{
+      id: "l1", shareId: "s1", projectId: "p1", scope: "local_network", port: 4100, state: "active",
+      createdAt: created.ts, expiresAt: "2026-11-15T13:00:00.000Z", endedAt: null,
+    }]);
+    link("l2", "s1");
+    link("l3", "s1");
+    const revoked = emit("share.revoked", { linkId: "l1", reason: "owner" }, human)!;
+    const expired = emit("share.expired", { linkId: "l2" })!;
+    const stopped = emit("share.stopped", { linkId: "l3", reason: "shutdown" })!;
+    const byId = Object.fromEntries(listShareLinks(db).map((l) => [l.id, [l.state, l.endedAt]]));
+    expect(byId).toEqual({ l1: ["revoked", revoked.ts], l2: ["expired", expired.ts], l3: ["stopped", stopped.ts] });
+  });
+
+  it("listShareLinks filters by state and project, newest first", () => {
+    confirm("s1");
+    confirm("s2", "p2");
+    link("l1", "s1");
+    link("l2", "s2", "p2");
+    link("l3", "s1");
+    emit("share.revoked", { linkId: "l3", reason: "too_many_failures" });
+    expect(listShareLinks(db).map((l) => l.id)).toEqual(["l3", "l2", "l1"]);
+    expect(listShareLinks(db, { state: "active" }).map((l) => l.id)).toEqual(["l2", "l1"]);
+    expect(listShareLinks(db, { projectId: "p1" }).map((l) => l.id)).toEqual(["l3", "l1"]);
+    expect(listShareLinks(db, { state: "active", projectId: "p1" }).map((l) => l.id)).toEqual(["l1"]);
+  });
+
+  it("countActiveShareLinks goes from 1 to 0 after share.expired", () => {
+    confirm("s1");
+    link("l1", "s1");
+    expect(countActiveShareLinks(db)).toBe(1);
+    emit("share.expired", { linkId: "l1" });
+    expect(countActiveShareLinks(db)).toBe(0);
+  });
+
+  it("rebuild after confirm, link and revoke equals the live share tables", () => {
+    confirm("s1");
+    link("l1", "s1");
+    link("l2", "s1");
+    emit("share.revoked", { linkId: "l1", reason: "owner" }, human);
+    const dump = () => ["share_snapshots", "share_links"].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY id`).all());
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([1, 2]);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
   });
@@ -688,5 +773,20 @@ describe("mirrored remote runs (applyMirrored)", () => {
     const req = { runId: "no-project", machineId: remote.machineId, adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
     refused(() => emit("link.run_requested", req, human, null));
     expect(getLinkRun(db, "no-project")).toBeNull();
+  });
+});
+
+describe("listProjectGateDecisions", () => {
+  it("lists one project's gate decisions across its cards, in ledger order", () => {
+    const decide = (projectId: string, cardId: string, gateId: GateId) =>
+      emit("gate.waived", {
+        gateId, cardId, from: "build", to: "ship", unmet: ["no_pending_actions"], reason: "Known and accepted for the demo",
+        acknowledgement: ack(gateId), waivedBy: "owner",
+      }, human, projectId);
+    decide("p1", "c1", "ready_to_ship");
+    decide("p2", "c9", "ready_to_ship");
+    decide("p1", "c2", "go_live");
+    expect(listProjectGateDecisions(db, "p1").map((d) => [d.cardId, d.gateId])).toEqual([["c1", "ready_to_ship"], ["c2", "go_live"]]);
+    expect(listProjectGateDecisions(db, "p3")).toEqual([]);
   });
 });

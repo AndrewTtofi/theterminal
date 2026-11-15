@@ -21,7 +21,7 @@ import { CHANGES_REFUSED_PHRASES, MIRRORABLE_TYPES } from "./link.js";
 import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
 export type NarrationTopic =
-  | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "other";
+  | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "share" | "other";
 export type NarrationRefs = {
   cardId?: string;
   runId?: string;
@@ -31,6 +31,8 @@ export type NarrationRefs = {
   gateId?: GateId;
   overrideId?: string;
   machineId?: string;
+  shareId?: string;
+  linkId?: string;
 };
 export type Narration = { headline: string; detail: string | null; topic: NarrationTopic; attention: boolean; refs: NarrationRefs };
 /** What the caller knows beyond the entry: a card's title, a run's adapter, a linked machine's name. Nothing else. */
@@ -117,7 +119,8 @@ const cap = (v: unknown): string => {
   return t.charAt(0).toUpperCase() + t.slice(1);
 };
 
-const adapterLabel = (v: unknown): string => own(ADAPTER_LABELS, v) ?? show(cap(v), 20);
+/** An adapter's display name (`Claude`, `Fake`), or the recorded id clipped and capitalised. */
+export const adapterLabel = (v: unknown): string => own(ADAPTER_LABELS, v) ?? show(cap(v), 20);
 
 function lookup<T>(fn: ((key: string) => T | undefined) | undefined, key: string | undefined): T | undefined {
   return fn && key !== undefined ? fn(key) : undefined;
@@ -171,6 +174,8 @@ function topicOf(type: string): NarrationTopic {
     case "machine":
     case "link":
       return "machine";
+    case "share":
+      return "share";
     default:
       return "other";
   }
@@ -185,6 +190,8 @@ function refsOf(p: Payload): NarrationRefs {
   const intakeId = idOf(p.intakeId);
   const overrideId = idOf(p.overrideId);
   const machineId = idOf(p.machineId);
+  const shareId = idOf(p.shareId);
+  const linkId = idOf(p.linkId);
   const gates = Array.isArray(p.gates) ? p.gates : [];
   const gateId = idOf(p.gateId) ?? (isRecord(gates[0]) ? idOf(gates[0].gateId) : undefined);
   if (cardId) refs.cardId = cardId;
@@ -194,6 +201,8 @@ function refsOf(p: Payload): NarrationRefs {
   if (intakeId) refs.intakeId = intakeId;
   if (overrideId) refs.overrideId = overrideId;
   if (machineId) refs.machineId = machineId;
+  if (shareId) refs.shareId = shareId;
+  if (linkId) refs.linkId = linkId;
   if (gateId && GATES.some((g) => g.id === gateId)) refs.gateId = gateId as GateId;
   return refs;
 }
@@ -517,6 +526,32 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     }
     case "link.changes_imported":
       return { headline: `The run's changes arrived from ${machine(p, ctx)}` };
+    case "share.confirmed": {
+      const sections = Array.isArray(p.sections) ? p.sections.length : 0;
+      return {
+        headline: `${who} confirmed a share page (${plural(sections, "section")}, ${show(p.bytes, 20)} bytes)`,
+        detail: isRecord(p.options) ? JSON.stringify(p.options) : null,
+      };
+    }
+    case "share.link_created": {
+      const where = own<string>({ this_computer: "this computer only", local_network: "the local network" }, p.scope);
+      return {
+        headline: `${who} created a share link for ${where ?? "an unknown scope"}, valid until ${show(p.expiresAt, 40)}`,
+        attention: true,
+      };
+    }
+    case "share.revoked":
+      if (p.reason === "too_many_failures") {
+        return { headline: "A share link was revoked after too many wrong attempts", attention: true };
+      }
+      if (p.reason === "owner") return { headline: `${who} revoked a share link` };
+      return { headline: "A share link was revoked" };
+    case "share.expired":
+      return { headline: "A share link expired" };
+    case "share.stopped": {
+      const how = own<string>({ shutdown: "closed", restart: "restarted" }, p.reason);
+      return { headline: how ? `A share link stopped: The Terminal ${how}` : "A share link stopped" };
+    }
 
     default:
       return { headline: `${who} recorded ${show(e.type, 80)}` };

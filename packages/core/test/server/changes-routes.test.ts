@@ -19,7 +19,8 @@ afterEach(async () => {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  // Retried: on Windows a git or agent process that was just killed can still hold its directory (EBUSY).
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 const base = (s: RunningServer) => `http://127.0.0.1:${s.port}`;

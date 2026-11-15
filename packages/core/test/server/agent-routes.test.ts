@@ -45,7 +45,8 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  // Windows: a git or agent process going away may still hold a file in the directory for a moment.
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 const tmp = () => {
@@ -84,10 +85,20 @@ const json = async <T>(res: Response | Promise<Response>): Promise<T> => (await 
 
 const getRun = (s: RunningServer, runId: string) => json<{ run: AgentRun; actions: AgentAction[] }>(get(s, `/api/runs/${runId}`));
 const pending = (s: RunningServer, projectId: string) => json<AgentAction[]>(get(s, `/api/projects/${projectId}/pending-actions`));
+// A run start creates the project repository and the worktree through runGit, whose hardening checks make five or six
+// git processes of every call: about fifty per start, then the fake agent's process. Seconds on Windows CI, where a
+// process start is slow and the suite shares two cores (a start measured 3.6 s there); the default 5 s is too close.
+const WIN32 = process.platform === "win32";
+const GIT_TEST_TIMEOUT_MS = WIN32 ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+/** How long a route that starts a run or records a decision may take to answer: never the agent's own run time. */
+const BOUNDED_MS = WIN32 ? 10_000 : 3000;
+const WAIT_MS = WIN32 ? 20_000 : 5000;
+
 const untilPending = (s: RunningServer, projectId: string, n = 1) =>
-  vi.waitFor(async () => expect(await pending(s, projectId)).toHaveLength(n), { timeout: 5000, interval: 25 });
+  vi.waitFor(async () => expect(await pending(s, projectId)).toHaveLength(n), { timeout: WAIT_MS, interval: 25 });
 const untilFinished = (s: RunningServer, runId: string) =>
-  vi.waitFor(async () => expect((await getRun(s, runId)).run.status).not.toBe("running"), { timeout: 5000, interval: 25 });
+  vi.waitFor(async () => expect((await getRun(s, runId)).run.status).not.toBe("running"), { timeout: WAIT_MS, interval: 25 });
 
 const read = { tool: "Read", kind: "file_read", summary: "read README", input: { path: "README.md" }, paths: ["README.md"] } as const;
 const shell = { tool: "Bash", kind: "shell", summary: "run tests", input: { command: "npm test" }, paths: [] } as const;
@@ -442,12 +453,12 @@ describe("agent API", { timeout: 15000 }, () => {
     const { s, projectId } = await start([{ propose: { ...shell, paths: [] } }, { throw: "boom" }]);
     let t = Date.now();
     const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" }));
-    expect(Date.now() - t).toBeLessThan(3000);
+    expect(Date.now() - t).toBeLessThan(BOUNDED_MS);
     await untilPending(s, projectId);
     const [action] = await pending(s, projectId);
     t = Date.now();
     expect((await post(s, `/api/actions/${action!.id}/decision`, { decision: "deny" })).status).toBe(200);
-    expect(Date.now() - t).toBeLessThan(3000);
+    expect(Date.now() - t).toBeLessThan(BOUNDED_MS);
 
     await untilFinished(s, run.id);
     const detail = await getRun(s, run.id);
@@ -622,7 +633,7 @@ describe("agent API", { timeout: 15000 }, () => {
       adapters: { fake: new FakeAdapter(script) }, extraSecrets: () => [], dataDir,
     });
     const run = await crashed.start({ kind: "human", id: "owner" }, { projectId, adapter: "fake", prompt: "go" });
-    await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: 5000, interval: 25 });
+    await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: WAIT_MS, interval: 25 });
     db.close();
 
     const s = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore() });

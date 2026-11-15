@@ -109,3 +109,4 @@ export { LinkCapacity } from "./link/capacity.js";
 export type { LinkCapacityDeps } from "./link/capacity.js";
 export { capacityBody } from "./link/protocol/capacity.js";
 export type { CapacityProtocolDeps } from "./link/protocol/capacity.js";
+export * from "./share/index.js";

@@ -77,6 +77,43 @@ describe("Ledger", () => {
     expect(ledger.verify()).toEqual({ ok: false, brokenAtSeq: 2 });
   });
 
+  describe("an own __proto__ key in a payload", () => {
+    const action = (input: unknown): NewLedgerEntry =>
+      ({
+        projectId: "p",
+        actor: { kind: "agent", id: "run-1" },
+        type: "agent.action.requested",
+        payload: { runId: "r1", actionId: "a1", kind: "shell", tool: "Bash", summary: "ls", input },
+      }) as NewLedgerEntry;
+
+    it("is covered by the hash, stored, and read back as data", () => {
+      const input = JSON.parse('{"command":"ls","__proto__":{"polluted":true}}');
+      const appended = ledger.append(action(input));
+      const [read] = ledger.list();
+      const readInput = (read!.payload as { input: Record<string, unknown> }).input;
+      expect(Object.keys(readInput)).toEqual(["__proto__", "command"]);
+      expect(Object.getPrototypeOf(readInput)).toBe(Object.prototype);
+      expect(read).toEqual(appended);
+      expect(ledger.verify()).toEqual({ ok: true, count: 1 });
+      // The same action without the key hashes differently: the key is not free content.
+      const other = new Ledger(openDatabase(":memory:"), { now: () => new Date(appended.ts), newId: () => appended.id });
+      expect(other.append(action({ command: "ls" })).hash).not.toBe(appended.hash);
+    });
+
+    it("smuggled into a stored row out of band fails verification (fail closed)", () => {
+      ledger.append(created(1));
+      ledger.append(action({ command: "ls" }));
+      ledger.append(created(3));
+      expect(ledger.verify()).toEqual({ ok: true, count: 3 });
+      db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+      const stored = (db.prepare("SELECT payload FROM ledger WHERE seq=2").get() as { payload: string }).payload;
+      const smuggled = stored.replace('"input":{', '"input":{"__proto__":{"polluted":true},');
+      expect(smuggled).not.toBe(stored);
+      db.prepare("UPDATE ledger SET payload=? WHERE seq=2").run(smuggled);
+      expect(ledger.verify()).toEqual({ ok: false, brokenAtSeq: 2 });
+    });
+  });
+
   it("list filters by project, afterSeq and limit", () => {
     ledger.append({ ...created(1), projectId: "a" });
     ledger.append({ ...created(2), projectId: "b" });
