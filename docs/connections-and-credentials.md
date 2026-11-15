@@ -36,8 +36,17 @@ On every platform, The Terminal splits any value longer than 2048 bytes into pie
 
 Each AI provider (Claude, Codex, Gemini) can run in one of two modes. You choose per provider.
 
-- **API key mode.** You paste an API key into The Terminal. It is stored in the keychain and given to the agent program only for the run that needs it. You pay the provider per use.
-- **Sign-in mode.** You use your own subscription or account: your Claude subscription, your ChatGPT plan, or your Google account. The Terminal starts the provider's own login command and never reads or stores the login. The provider's program saves its own credentials where it always does, exactly as if you had run the login in a terminal yourself.
+- **API key mode (recommended).** You paste an API key into The Terminal. It is stored in the keychain and given to the agent program only for the run that needs it. You pay the provider per use.
+- **Sign-in mode.** You use your own plan or account. The Terminal starts the provider's own login command and never reads or stores the login. The provider's program saves its own credentials where it always does, exactly as if you had run the login in a terminal yourself.
+
+### Which sign-ins are available
+
+- **Codex: Sign in with ChatGPT is available.** OpenAI allows local open-source apps to use it.
+- **Claude and Gemini: turned off.** Anthropic does not allow other apps to use a Claude plan login without its approval, and Google does not allow other apps to use Gemini CLI's "Sign in with Google". The connection editor shows a short line instead of the sign-in choice. Use an API key.
+
+The server enforces this, not only the screen: while it is off, choosing either mode or starting either sign-in is refused, and a mode you chose earlier is not used. Runs use the API key instead (the ledger keeps what you chose, and the server says so when it starts).
+
+There is a switch for testing and for when a provider allows it, off by default: set `THETERMINAL_RESTRICTED_SIGNIN=1` in the environment that starts The Terminal (the desktop app or `theterminal start`), or pass `--allow-restricted-signin` to `theterminal start`. It is read once, at start. Turning it on is at your own risk under the provider's terms.
 
 ### Signing in from the Connections view
 
