@@ -39,6 +39,12 @@ export type Credential =
   /** `credentialId` = base64url(sha256(publicKey)); `publicKey` base64url of the SPKI DER. */
   | { kind: "key"; credentialId: string; publicKey: string; label: string };
 
+/**
+ * Who is here and what they look at, as the server's presence registry lists it and the event stream sends it. Exactly
+ * these fields: no session id, address, user agent or credential detail.
+ */
+export type PresenceEntry = { personId: string; name: string; role: Role; projectId: string | null; view: string | null; since: string };
+
 /** Who is making a request. Lives here so presence needs no core import; the server's auth module re-exports it. */
 export type Principal = {
   personId: string;

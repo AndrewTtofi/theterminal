@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl, subscribeLedger, type PresenceEntry } from "../src/api";
-import type { LedgerEntry } from "@theterminal/shared";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl, subscribeLedger } from "../src/api";
+import type { LedgerEntry, PresenceEntry } from "@theterminal/shared";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>

@@ -42,7 +42,7 @@ import type {
   ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
-import { CHANGES_REFUSED_PHRASES, ROLE_LABELS, requirementLabel, visibleControls, type Role } from "@theterminal/shared";
+import { CHANGES_REFUSED_PHRASES, ROLE_LABELS, requirementLabel, visibleControls, type PresenceEntry, type Role } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -534,8 +534,6 @@ function requiredWho(e: ApiError): string {
   return "the person it names";
 }
 
-/** Who is here and what they look at, as the server's presence frames carry it. */
-export type PresenceEntry = { personId: string; name: string; role: Role; projectId: string | null; view: string | null; since: string };
 export type PresenceWhere = { projectId: string | null; view: string | null };
 
 /** How often presence() is read for a change, and the heartbeat that keeps a connected person inside the server's 5-minute expiry. */

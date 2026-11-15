@@ -96,6 +96,7 @@ export function registerLedgerStream(
       let windowStart = Date.now();
       let used = 0;
       socket.on("message", (data) => {
+        if (!clients.has(socketId)) return; // revoked or refused and closing: never re-joins
         const now = Date.now();
         if (now - windowStart >= rate.windowMs) {
           windowStart = now;
@@ -109,6 +110,13 @@ export function registerLedgerStream(
           return;
         }
         if (typeof m !== "object" || m === null || (m as { type?: unknown }).type !== "presence") return;
+        // A socket whose slot expired (missed heartbeats) or was dropped comes back on its next presence frame; if the
+        // registry refuses it, the socket goes, as at connect.
+        if (!presence.has(socketId) && !presence.join(socketId, principal)) {
+          clients.delete(socketId);
+          socket.close(1008, "too many connections");
+          return;
+        }
         const { projectId, view } = m as { projectId?: unknown; view?: unknown };
         // The registry checks both values and ignores a malformed pair.
         presence.update(socketId, { projectId: projectId as string | null, view: view as string | null });

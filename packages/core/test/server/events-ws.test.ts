@@ -321,6 +321,50 @@ describe("presence over the ledger stream", () => {
     expect(sweep.mock.calls.length).toBe(calls);
   });
 
+  async function restartWith(reg: PresenceRegistry) {
+    await app.close();
+    const db = openDatabase(":memory:");
+    ledger = new Ledger(db);
+    sessions = new SessionStore(db);
+    app = Fastify();
+    registerAuth(app, { token: TOKEN, port: () => port, hostRule: () => null, sessions, person: (id) => people.get(id) ?? null });
+    registerLedgerStream(app, ledger, undefined, { sessions, presence: reg, sweepMs: 60_000 });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    port = (app.server.address() as { port: number }).port;
+  }
+
+  it("re-joins an expired socket on its next presence frame", async () => {
+    let t = Date.parse("2026-11-15T00:00:00.000Z");
+    const reg = new PresenceRegistry({ now: () => new Date(t), ttlMs: 1000 });
+    await restartWith(reg);
+    const quiet = connectAs("p-viewer");
+    const watcher = connectAs("p-reviewer");
+    await waitFor(() => names(watcher.latest()).length === 2);
+    t += 1000;
+    reg.sweep(); // both expired
+    expect(reg.list()).toEqual([]);
+    quiet.ws.send(JSON.stringify({ type: "presence", projectId: "p1", view: "board" }));
+    await waitFor(() => reg.list().some((p) => p.personId === "p-viewer" && p.view === "board"));
+    watcher.ws.send(JSON.stringify({ type: "presence", projectId: null, view: null }));
+    await waitFor(() => names(watcher.latest()).join() === "Rae,Vic");
+    expect(quiet.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("closes an expired socket with 1008 when its re-join is refused", async () => {
+    let t = Date.parse("2026-11-15T00:00:00.000Z");
+    const reg = new PresenceRegistry({ now: () => new Date(t), ttlMs: 1000, maxSockets: 1 });
+    await restartWith(reg);
+    const first = connectAs("p-viewer");
+    await waitFor(() => first.frames.length === 1);
+    t += 1000; // first expires; a second socket takes the only place
+    const second = connectAs("p-reviewer");
+    await waitFor(() => second.frames.length === 1);
+    first.ws.send(JSON.stringify({ type: "presence", projectId: null, view: "board" }));
+    expect(await first.closed).toEqual({ code: 1008, reason: "too many connections" });
+    expect(second.ws.readyState).toBe(WebSocket.OPEN);
+    expect(names(reg.list())).toEqual(["Rae"]);
+  });
+
   it("GET /api/presence lists the same, for a viewer, from the events-ws plugin alone", async () => {
     const a = connectAs("p-reviewer");
     await waitFor(() => a.frames.length === 1);

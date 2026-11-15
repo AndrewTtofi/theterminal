@@ -171,4 +171,17 @@ describe("PresenceRegistry", () => {
     expect(() => new PresenceRegistry({ maxPerPerson: 0 })).toThrow(RangeError);
     expect(() => new PresenceRegistry({ ttlMs: 0 })).toThrow(RangeError);
   });
+
+  it("has() says whether a socket is held, expiring it first", () => {
+    const { c, reg } = make({ ttlMs: 1000 });
+    expect(reg.has("s1")).toBe(false);
+    reg.join("s1", who("ann"));
+    expect(reg.has("s1")).toBe(true);
+    c.advance(1000);
+    expect(reg.has("s1")).toBe(false);
+    reg.join("s1", who("ann"));
+    expect(reg.has("s1")).toBe(true);
+    reg.leave("s1");
+    expect(reg.has("s1")).toBe(false);
+  });
 });

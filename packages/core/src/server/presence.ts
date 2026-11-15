@@ -1,4 +1,6 @@
-import type { Principal, Role } from "@theterminal/shared";
+import type { PresenceEntry, Principal, Role } from "@theterminal/shared";
+
+export type { PresenceEntry };
 
 /**
  * Who is here and what they look at. In memory only: never written to the ledger, never persisted. An entry holds
@@ -8,8 +10,6 @@ import type { Principal, Role } from "@theterminal/shared";
  * all (a new socket is refused; `join` returns false). A socket not refreshed (`join` or `update`) for `ttlMs` is
  * expired: lazily on every read and write, and by `sweep()`, which the caller runs on a timer to announce expiry.
  */
-export type PresenceEntry = { personId: string; name: string; role: Role; projectId: string | null; view: string | null; since: string };
-
 export type PresenceOptions = { now?: () => Date; maxSockets?: number; maxPerPerson?: number; ttlMs?: number };
 
 const VIEW = /^[a-z_:-]{1,40}$/;
@@ -44,6 +44,12 @@ export class PresenceRegistry {
   get size(): number {
     this.expire();
     return this.sockets.size;
+  }
+
+  /** Whether the socket is held (and not expired). */
+  has(socketId: string): boolean {
+    this.expire();
+    return this.sockets.has(socketId);
   }
 
   /** Adds a socket. False when the global bound refuses it. */
