@@ -116,6 +116,11 @@ describe("eventPayloadSchemas", () => {
       "project.created",
       "settings.claude_auth_changed",
       "settings.provider_auth_changed",
+      "share.confirmed",
+      "share.expired",
+      "share.link_created",
+      "share.revoked",
+      "share.stopped",
     ]);
   });
 });
