@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { AgentRun, DirListing, RunChanges } from "@theterminal/shared";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { AgentRun, DirListing, LedgerEntry, RunChanges } from "@theterminal/shared";
 import { ApiError } from "../src/api";
 import { ChangesSideBar } from "../src/views/ChangesSideBar";
 import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
-import { changes, listing, run1 } from "./changes-fixtures";
+import { changes, listing, run1, runEntry } from "./changes-fixtures";
 import { shellNav } from "./connections-harness";
 
 const run2: AgentRun = { ...run1, id: "run2", adapter: "claude", prompt: "Fix it", status: "running", startedAt: "2026-11-15T11:00:00.000Z" };
@@ -20,7 +20,12 @@ const tree: Record<string, DirListing> = {
 };
 
 function setup(over: Partial<WorkbenchModel> = {}) {
+  const listeners = new Set<(e: LedgerEntry) => void>();
   const model = {
+    subscribeEntries: (cb: (e: LedgerEntry) => void) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
     selectedId: "p1",
     runs: [run1, run2],
     changesRunId: "run1",
@@ -38,7 +43,8 @@ function setup(over: Partial<WorkbenchModel> = {}) {
       <ChangesSideBar />
     </ShellContext.Provider>,
   );
-  return { model, shell };
+  const emit = (e: LedgerEntry) => act(() => listeners.forEach((l) => l(e)));
+  return { model, shell, emit };
 }
 
 describe("ChangesSideBar", () => {
@@ -131,5 +137,74 @@ describe("ChangesSideBar", () => {
   it("says while the changes load", () => {
     setup({ changes: null as RunChanges | null });
     expect(screen.getByText("Loading changes…")).toBeTruthy();
+  });
+
+  it("clips a long prompt without splitting a character made of two code units", () => {
+    const prompt = `${"a".repeat(39)}\u{1F600}\u{1F600}tail`;
+    setup({ runs: [{ ...run1, prompt }] });
+    const label = within(screen.getByRole("combobox", { name: "Run" })).getByRole("option").textContent!;
+    expect(label).toBe(`Fake · ${"a".repeat(39)}\u{1F600}… · completed`);
+  });
+
+  it("says there are too many changes instead of listing or counting a partial list", () => {
+    setup({ changes: changes({ tooMany: true, truncated: true }) });
+    expect(screen.getByText("Too many changes to list here.")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Changed files" })).toBeNull();
+    expect(screen.queryByText(/files? changed/)).toBeNull();
+    expect(screen.queryByText("Showing 500 of more files")).toBeNull();
+  });
+
+  it("shows a changed file whose name was hidden as text that opens nothing", () => {
+    const { model } = setup({
+      changes: changes({ files: [{ path: "[REDACTED]", status: "added", added: 1, deleted: 0, binary: false, cleaned: true }] }),
+    });
+    const list = screen.getByRole("list", { name: "Changed files" });
+    expect(within(list).queryByRole("button")).toBeNull();
+    const hidden = within(list).getByTitle("Name hidden because it looked like a secret or a private path");
+    expect(hidden.textContent).toContain("[REDACTED]");
+    fireEvent.click(hidden);
+    expect(model.onOpenDiff).not.toHaveBeenCalled();
+  });
+
+  it("shows a tree entry whose name was hidden as text that opens nothing", async () => {
+    const { model } = setup({
+      dir: vi.fn(async () =>
+        listing("", [
+          { name: "[REDACTED]", kind: "dir", size: null, cleaned: true },
+          { name: "[REDACTED].txt", kind: "file", size: 3, cleaned: true },
+        ]),
+      ),
+    });
+    const files = await screen.findByRole("list", { name: "Files" });
+    await within(files).findByText("[REDACTED].txt");
+    expect(within(files).queryByRole("button")).toBeNull();
+    expect(files.querySelector("details")).toBeNull();
+    const hidden = within(files).getAllByTitle("Name hidden because it looked like a secret or a private path");
+    expect(hidden).toHaveLength(2);
+    hidden.forEach((h) => fireEvent.click(h));
+    expect(model.onOpenFile).not.toHaveBeenCalled();
+    expect(model.dir).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads the tree's open listings on an entry naming the run, and not for another run", async () => {
+    const { model, emit } = setup();
+    const files = await screen.findByRole("list", { name: "Files" });
+    await within(files).findByText("notes.txt");
+    fireEvent.click(within(files).getByText("src"));
+    await within(files).findByRole("button", { name: "a.ts" });
+    expect(model.dir).toHaveBeenCalledTimes(2);
+    emit(runEntry("agent.finished", "run2"));
+    expect(model.dir).toHaveBeenCalledTimes(2);
+    emit(runEntry("override.completed", "run1"));
+    await waitFor(() => expect(model.dir).toHaveBeenCalledTimes(4));
+    expect(within(files).getByRole("button", { name: "a.ts" })).toBeTruthy();
+  });
+
+  it("offers a retry when a listing fails", async () => {
+    const dir = vi.fn().mockRejectedValueOnce(new ApiError(500, "internal")).mockResolvedValue(tree[""]);
+    setup({ dir });
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("notes.txt")).toBeTruthy();
+    expect(dir).toHaveBeenCalledTimes(2);
   });
 });

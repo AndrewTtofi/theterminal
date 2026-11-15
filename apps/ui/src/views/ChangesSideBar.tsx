@@ -1,19 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MAX_CHANGED_FILES, MAX_DIR_ENTRIES, plural, visibleControls } from "@theterminal/shared";
-import type { AgentRun, ChangeStatus, ChangedFile, DirListing } from "@theterminal/shared";
+import type { AgentRun, ChangeStatus, ChangedFile, DirEntry, DirListing } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../components/AgentPanel";
 import { errorMessage } from "../api";
-import { useShell } from "../shell/model";
+import { namesRun, useShell } from "../shell/model";
 
 const LETTER: Record<ChangeStatus, string> = {
   added: "A", modified: "M", deleted: "D", typechange: "T", untracked: "U", unchanged: "",
 };
 const count = (n: number) => n.toLocaleString("en-US");
 const PROMPT_CLIP = 40;
+/** The title of a file or directory whose name cleaning changed: the name shown is not the real one. */
+const HIDDEN_NAME = "Name hidden because it looked like a secret or a private path";
 
 function runLabel(r: AgentRun): string {
-  const prompt = visibleControls(r.prompt);
-  const clipped = prompt.length > PROMPT_CLIP ? `${prompt.slice(0, PROMPT_CLIP)}…` : prompt;
+  // By code point, so a character made of two UTF-16 units is never cut in half.
+  const chars = Array.from(visibleControls(r.prompt));
+  const clipped = chars.length > PROMPT_CLIP ? `${chars.slice(0, PROMPT_CLIP).join("")}…` : chars.join("");
   return `${ADAPTER_NAMES[r.adapter]} · ${clipped} · ${r.status}`;
 }
 
@@ -28,33 +31,69 @@ function counts(f: ChangedFile) {
   );
 }
 
-/** One directory's entries; a sub-directory loads its own listing the first time it is opened. */
+/**
+ * One directory's entries; a sub-directory loads its own listing the first time it is opened. Each listing on screen
+ * is read again on any agent.* or override.* entry naming the run.
+ */
 function DirList({ runId, path, label }: { runId: string; path: string; label?: string }) {
   const { model } = useShell();
   const [listing, setListing] = useState<DirListing | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const dir = model.dir;
+  const [attempt, setAttempt] = useState(0);
+  const dirRef = useRef(model.dir);
+  dirRef.current = model.dir;
+  const subscribe = model.subscribeEntries;
 
   useEffect(() => {
     let cancelled = false;
-    dir(runId, path).then(
-      (l) => !cancelled && setListing(l),
-      (e: unknown) => !cancelled && setError(errorMessage(e)),
-    );
+    const load = () =>
+      dirRef.current(runId, path).then(
+        (l) => {
+          if (cancelled) return;
+          setListing(l);
+          setError(null);
+        },
+        (e: unknown) => !cancelled && setError(errorMessage(e)),
+      );
+    void load();
+    const unsubscribe = subscribe((e) => {
+      if (namesRun(e, runId)) void load();
+    });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-    // model.dir is rebuilt each render; the run and the path decide what to list.
-  }, [runId, path]);
+  }, [runId, path, attempt, subscribe]);
 
-  if (error !== null) return <p className="note">{error}</p>;
+  if (error !== null) {
+    return (
+      <p className="note">
+        {error}{" "}
+        <button type="button" className="link" onClick={() => setAttempt((a) => a + 1)}>
+          Retry
+        </button>
+      </p>
+    );
+  }
   if (!listing) return <p className="empty">Loading…</p>;
   const child = (name: string) => (path === "" ? name : `${path}/${name}`);
+  /** Never opens an entry whose name was hidden: its path is not a real one. */
+  const openFile = (e: DirEntry) => {
+    if (e.cleaned) return;
+    model.onOpenFile(runId, child(e.name));
+  };
   return (
     <>
       <ul className="tree" aria-label={label}>
         {listing.entries.map((e) => {
           const name = visibleControls(e.name);
+          if (e.cleaned) {
+            return (
+              <li key={e.name} className="cleaned">
+                <span title={HIDDEN_NAME}>{name}</span>
+              </li>
+            );
+          }
           if (e.kind === "dir") return <DirNode key={e.name} runId={runId} path={child(e.name)} name={name} />;
           if (e.kind === "other") {
             return (
@@ -65,7 +104,7 @@ function DirList({ runId, path, label }: { runId: string; path: string; label?: 
           }
           return (
             <li key={e.name}>
-              <button type="button" className="row" onClick={() => model.onOpenFile(runId, child(e.name))}>
+              <button type="button" className="row" onClick={() => openFile(e)}>
                 {name}
               </button>
             </li>
@@ -97,6 +136,11 @@ export function ChangesSideBar() {
   const runs = [...model.runs].sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
   const runId = model.changesRunId;
   const c = model.changes;
+  /** Never opens a file whose name was hidden: its path is not a real one. */
+  const openDiff = (f: ChangedFile) => {
+    if (f.cleaned || runId === null) return;
+    model.onOpenDiff(runId, f.path);
+  };
 
   return (
     <div className="changes">
@@ -125,6 +169,8 @@ export function ChangesSideBar() {
             <p className="note">{model.changesError}</p>
           ) : c === null ? (
             <p className="empty">Loading changes…</p>
+          ) : c.tooMany ? (
+            <p className="note">Too many changes to list here.</p>
           ) : (
             <>
               <p>
@@ -135,12 +181,23 @@ export function ChangesSideBar() {
               <ul className="changed-files" aria-label="Changed files">
                 {c.files.map((f) => {
                   const n = counts(f);
+                  const body = (
+                    <>
+                      <span className={`status status-${f.status}`}>{LETTER[f.status]}</span> {visibleControls(f.path)}
+                      {n !== null && <> {n}</>}
+                    </>
+                  );
                   return (
                     <li key={f.path}>
-                      <button type="button" className="row" onClick={() => model.onOpenDiff(runId, f.path)}>
-                        <span className={`status status-${f.status}`}>{LETTER[f.status]}</span> {visibleControls(f.path)}
-                        {n !== null && <> {n}</>}
-                      </button>
+                      {f.cleaned ? (
+                        <span className="row cleaned" title={HIDDEN_NAME}>
+                          {body}
+                        </span>
+                      ) : (
+                        <button type="button" className="row" onClick={() => openDiff(f)}>
+                          {body}
+                        </button>
+                      )}
                     </li>
                   );
                 })}

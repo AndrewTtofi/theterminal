@@ -61,7 +61,7 @@ export function DiffPanel({ id }: { id: string }) {
       {note !== null ? (
         <div className="empty">
           <p>{note}</p>
-          {data.tooLarge && !data.binary && (
+          {data.tooLarge && !data.binary && data.status !== "deleted" && (
             <button type="button" onClick={() => model.onOpenFile(target.runId, target.path)}>
               Open file
             </button>

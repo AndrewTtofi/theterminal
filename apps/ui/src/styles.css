@@ -323,3 +323,5 @@ pre.diff .add { background: rgba(46, 160, 67, 0.15); }
 pre.diff .del { background: rgba(199, 78, 57, 0.15); }
 pre.diff .hunk { color: var(--accent); background: rgba(0, 120, 212, 0.08); }
 pre.diff .meta { color: var(--muted); }
+.changes .cleaned, .changes span.row.cleaned { display: block; padding: 2px 4px; color: var(--muted); font-style: italic; cursor: default; }
+pre.diff .line, pre.file .line { content-visibility: auto; contain-intrinsic-size: auto 18px; }

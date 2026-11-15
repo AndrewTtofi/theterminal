@@ -72,6 +72,13 @@ describe("DiffPanel", () => {
     expect(model.onOpenFile).toHaveBeenCalledWith("run1", "notes.txt");
   });
 
+  it("offers no file for a too-large change of a deleted file", async () => {
+    setup(async () => fileDiff({ status: "deleted", tooLarge: true, added: 0, deleted: 9000, text: null }));
+    const p = await panel();
+    expect(p.textContent).toContain("This change is too large to show here (0 added, 9000 deleted lines).");
+    expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  });
+
   it("says when the file has not changed in this run", async () => {
     setup(async () => fileDiff({ status: "unchanged", added: 0, deleted: 0, text: "" }));
     const p = await panel();

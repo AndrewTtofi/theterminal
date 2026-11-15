@@ -18,10 +18,23 @@ export const MAX_DIR_ENTRIES = 2000;
 export const MAX_RENDERED_LINES = 20000;
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "typechange" | "untracked" | "unchanged";
-/** `added` and `deleted` are line counts, null for binary and untracked files. */
-export type ChangedFile = { path: string; status: ChangeStatus; added: number | null; deleted: number | null; binary: boolean };
-/** `base` and `head` are full commit ids; `files` are sorted by path. */
-export type RunChanges = { runId: string; base: string; head: string; files: ChangedFile[]; truncated: boolean };
+/**
+ * `added` and `deleted` are line counts, null for binary and untracked files. `cleaned` is set when cleaning changed
+ * the path (it looked like a secret or a private path): the path shown is not the real one, so it opens nothing.
+ */
+export type ChangedFile = {
+  path: string;
+  status: ChangeStatus;
+  added: number | null;
+  deleted: number | null;
+  binary: boolean;
+  cleaned?: true;
+};
+/**
+ * `base` and `head` are full commit ids; `files` are sorted by path. `tooMany` is set when the run changed too much
+ * to list at all: `files` is then partial or empty and must not be counted or summed.
+ */
+export type RunChanges = { runId: string; base: string; head: string; files: ChangedFile[]; truncated: boolean; tooMany?: boolean };
 export type FileDiff = {
   runId: string;
   path: string;
@@ -32,8 +45,11 @@ export type FileDiff = {
   deleted: number | null;
   text: string | null;
 };
-/** `other` is a symlink, socket or anything else that is not a plain file or directory; it is never followed. */
-export type DirEntry = { name: string; kind: "file" | "dir" | "other"; size: number | null };
+/**
+ * `other` is a symlink, socket or anything else that is not a plain file or directory; it is never followed.
+ * `cleaned` is set when cleaning changed the name, which then opens nothing.
+ */
+export type DirEntry = { name: string; kind: "file" | "dir" | "other"; size: number | null; cleaned?: true };
 /** Directories first, then files, each by name; `.git` is never listed. */
 export type DirListing = { runId: string; path: string; entries: DirEntry[]; truncated: boolean };
 export type FileContent = { runId: string; path: string; size: number; binary: boolean; tooLarge: boolean; text: string | null };

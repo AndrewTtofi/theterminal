@@ -47,8 +47,10 @@ export function FilePanel({ id }: { id: string }) {
           )}
           <pre className="file">
             {painted.map((l, i) => (
-              <div key={i} className="line">
-                <span className="ln">{i + 1}</span>
+              <div key={i} className="line" title={`Line ${i + 1}`}>
+                <span className="ln" aria-hidden="true">
+                  {i + 1}
+                </span>
                 <span className="text">{visibleControls(stripAnsi(l))}</span>
               </div>
             ))}

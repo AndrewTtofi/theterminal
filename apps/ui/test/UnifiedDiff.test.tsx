@@ -36,4 +36,31 @@ describe("UnifiedDiff", () => {
     expect(container.querySelector("pre.diff")).not.toBeNull();
     expect(lines(container)).toHaveLength(0);
   });
+
+  it("paints at most 20,000 lines and says how many there are", () => {
+    const text = `@@ -0,0 +1,25000 @@\n${Array.from({ length: 25_000 }, (_, i) => `+line ${i + 1}`).join("\n")}\n`;
+    const { container } = render(<UnifiedDiff text={text} />);
+    expect(lines(container)).toHaveLength(20_000);
+    expect(container.textContent).toContain("Showing the first 20,000 lines of 25,001");
+  });
+
+  it("says nothing about a cap when the diff fits", () => {
+    const { container } = render(<UnifiedDiff text={NOTES_DIFF} />);
+    expect(container.textContent).not.toContain("Showing the first");
+  });
+
+  it("tells screen readers what each row is, and keeps the line numbers out of the read text", () => {
+    const { container } = render(<UnifiedDiff text={NOTES_DIFF} />);
+    const all = lines(container);
+    const add = all.find((l) => l.classList.contains("add"))!;
+    const del = all.find((l) => l.classList.contains("del"))!;
+    const context = all.find((l) => l.classList.contains("context"))!;
+    expect(add.querySelector(".visually-hidden")?.textContent).toBe("Added: ");
+    expect(del.querySelector(".visually-hidden")?.textContent).toBe("Removed: ");
+    expect(context.querySelector(".visually-hidden")).toBeNull();
+    for (const ln of container.querySelectorAll("span.ln")) expect(ln.getAttribute("aria-hidden")).toBe("true");
+    expect(add.getAttribute("title")).toBe("New line 2");
+    expect(del.getAttribute("title")).toBe("Old line 2");
+    expect(context.getAttribute("title")).toBe("Old line 1, new line 1");
+  });
 });
