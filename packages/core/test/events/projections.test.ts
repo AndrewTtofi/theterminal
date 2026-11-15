@@ -1,7 +1,9 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, LINKING_ACK, type GateId, type LedgerEntry } from "@theterminal/shared";
+import {
+  CLAUDE_SUBSCRIPTION_ACK, DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, GATES, INTAKE_VERSION, LINKING_ACK, OWNER_ID, type GateId, type LedgerEntry,
+} from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -12,7 +14,7 @@ import {
   countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting,
   getShareSnapshot, listActions, listAllPendingActions, listGateDecisions, listLinkRuns, listMachines, listOpenIntakes,
   listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
-  rebuildAllProjections, workspaceCounts,
+  rebuildAllProjections, workspaceCounts, getPerson, listPeople, getRemoteState, getGateRequirement, getInviteByHash, listInvites,
 } from "../../src/events/projections.js";
 import { canonicalJson } from "../../src/ledger/canonical.js";
 import { MirroredEntryRefusedError } from "../../src/events/projections.js";
@@ -430,8 +432,8 @@ describe("linked-machine projections", () => {
     runId, machineId, adapter: "fake", prompt: "do it", cardId: null, connectionIds: [],
   });
 
-  it("migrates to user_version 10 with the machines and link_runs tables and agent_runs.machine_id", () => {
-    expect(db.pragma("user_version", { simple: true })).toBe(10);
+  it("migrates past user_version 10 with the machines and link_runs tables and agent_runs.machine_id", () => {
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(10);
     const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
     expect(columns("machines")).toEqual(["id", "name", "public_key", "fingerprint", "address", "role", "paired_at", "updated_at"]);
     expect(columns("link_runs")).toEqual(["run_id", "machine_id", "direction", "project_id", "state", "last_seq", "error", "updated_at"]);
@@ -825,5 +827,115 @@ describe("listProjectGateDecisions", () => {
     decide("p1", "c2", "go_live");
     expect(listProjectGateDecisions(db, "p1").map((d) => [d.cardId, d.gateId])).toEqual([["c1", "ready_to_ship"], ["c2", "go_live"]]);
     expect(listProjectGateDecisions(db, "p3")).toEqual([]);
+  });
+});
+
+describe("people, invites, remote access and gate requirements", () => {
+  const owner = { kind: "human", id: OWNER_ID } as const;
+  const cli = { kind: "system", id: "cli" } as const;
+  const fp = Array.from({ length: 32 }, (_, i) => (i % 16).toString(16).toUpperCase().padStart(2, "0")).join(":");
+  const fp2 = fp.replace(/^00/, "FF");
+  const passkey = { kind: "passkey", credentialId: "cred-1", publicKey: "TESTKEY1", transports: ["usb", "nfc"], label: "Laptop" };
+  const key = { kind: "key", credentialId: "key-2", publicKey: "TESTKEY2", label: "CLI" };
+  const tables = ["people", "credentials", "invites", "remote_state", "gate_requirements"];
+  const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1, 2`).all());
+
+  it("migrates to user_version 11 with the people tables, sessions and credential_state", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(11);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("people")).toEqual(["id", "name", "role", "joined_at", "last_seen_at", "removed_at"]);
+    expect(columns("sessions")).toEqual([
+      "id_hash", "person_id", "listener", "method", "created_at", "last_seen_at", "expires_at", "revoked_at",
+    ]);
+    expect(columns("credential_state")).toEqual(["credential_id", "counter"]);
+  });
+
+  it("the Owner is virtual without a row", () => {
+    expect(getPerson(db, OWNER_ID)).toEqual({
+      id: OWNER_ID, name: "Owner", role: "owner", joinedAt: null, lastSeenAt: null, removedAt: null, credentials: 0,
+    });
+    expect(listPeople(db)).toEqual([getPerson(db, OWNER_ID)]);
+    expect(getPerson(db, "nobody")).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM people").get()).toEqual({ n: 0 });
+  });
+
+  it("remote state is DEFAULT_REMOTE before any entry and follows enabled, certificate_changed and disabled", () => {
+    expect(getRemoteState(db)).toEqual(DEFAULT_REMOTE);
+    emit("remote.enabled", { port: 4400, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp }, cli, null);
+    expect(getRemoteState(db)).toEqual({
+      enabled: true, port: 4400, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp, expiresAt: null,
+    });
+    emit("remote.certificate_changed", { tls: "acme", fingerprint: fp2, domain: "tt.example.org", expiresAt: "2027-02-01T00:00:00.000Z" }, cli, null);
+    expect(getRemoteState(db)).toMatchObject({ enabled: true, port: 4400, tls: "acme", fingerprint: fp2, domain: "tt.example.org", expiresAt: "2027-02-01T00:00:00.000Z" });
+    emit("remote.disabled", {}, owner, null);
+    expect(getRemoteState(db).enabled).toBe(false);
+    // Enabling again with the same certificate keeps its expiry; a new one drops it.
+    emit("remote.enabled", { port: 4400, bind: "127.0.0.1", domain: "tt.example.org", tls: "acme", fingerprint: fp2 }, cli, null);
+    expect(getRemoteState(db).expiresAt).toBe("2027-02-01T00:00:00.000Z");
+    emit("remote.enabled", { port: 4400, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp }, cli, null);
+    expect(getRemoteState(db).expiresAt).toBeNull();
+  });
+
+  it("a gate requirement is the default until set, and null restores it", () => {
+    expect(getGateRequirement(db, "p1", "go_live")).toEqual(DEFAULT_GATE_REQUIREMENT.go_live);
+    emit("gate.requirement_set", { gateId: "go_live", requirement: { personId: "p9" } }, owner, "p1");
+    expect(getGateRequirement(db, "p1", "go_live")).toEqual({ personId: "p9" });
+    expect(getGateRequirement(db, "p2", "go_live")).toEqual(DEFAULT_GATE_REQUIREMENT.go_live);
+    emit("gate.requirement_set", { gateId: "go_live", requirement: { role: "maintainer" } }, owner, "p1");
+    expect(getGateRequirement(db, "p1", "go_live")).toEqual({ role: "maintainer" });
+    emit("gate.requirement_set", { gateId: "go_live", requirement: null }, owner, "p1");
+    expect(getGateRequirement(db, "p1", "go_live")).toEqual(DEFAULT_GATE_REQUIREMENT.go_live);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM gate_requirements").get()).toEqual({ n: 0 });
+  });
+
+  it("an expired invite reads as expired at read time, with no entry", () => {
+    emit("person.invited", { inviteId: "i1", role: "viewer", codeHash: "a".repeat(64), expiresAt: "2026-11-16T00:00:00.000Z" }, owner, null);
+    expect(getInviteByHash(db, "a".repeat(64), new Date("2026-11-15T23:59:59.999Z"))!.status).toBe("pending");
+    expect(getInviteByHash(db, "a".repeat(64), new Date("2026-11-16T00:00:00.000Z"))!.status).toBe("expired");
+    expect(listInvites(db, new Date("2026-11-16T00:00:00.000Z")).map((i) => i.status)).toEqual(["expired"]);
+    expect(getInviteByHash(db, "b".repeat(64))).toBeNull();
+  });
+
+  it("rebuild after the whole people sequence equals the live five tables row for row", () => {
+    const p1 = { kind: "human", id: "p1" } as const;
+    emit("person.invited", { inviteId: "i1", role: "reviewer", codeHash: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" }, owner, null);
+    emit("person.invited", { inviteId: "i2", role: "viewer", codeHash: "b".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" }, owner, null);
+    emit("person.invited", { inviteId: "i3", role: "owner", codeHash: "c".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" }, owner, null);
+    emit("person.invite_revoked", { inviteId: "i2" }, owner, null);
+    emit("person.joined", { personId: "p1", inviteId: "i1", name: "Reviewer One", role: "reviewer", credential: passkey }, p1, null);
+    emit("person.credential_added", { personId: "p1", credential: key }, owner, null);
+    emit("person.credential_removed", { personId: "p1", credentialId: "cred-1" }, owner, null);
+    emit("person.credential_added", { personId: OWNER_ID, credential: { ...key, credentialId: "key-3", publicKey: "TESTKEY3" } }, owner, null);
+    emit("person.renamed", { personId: OWNER_ID, name: "Ana" }, owner, null);
+    emit("person.renamed", { personId: "p1", name: "Reviewer Uno" }, owner, null);
+    emit("person.role_changed", { personId: "p1", from: "reviewer", to: "maintainer" }, owner, null);
+    emit("person.signed_in", { personId: "p1", listener: "remote", method: "key" }, p1, null);
+    emit("person.locked", { personId: "p1", until: "2026-11-15T10:15:00.000Z", failures: 5 }, { kind: "system", id: "auth" }, null);
+    emit("person.removed", { personId: "p1" }, owner, null);
+    emit("remote.enabled", { port: 4318, bind: "0.0.0.0", domain: null, tls: "self_signed", fingerprint: fp }, cli, null);
+    emit("remote.certificate_changed", { tls: "self_signed", fingerprint: fp2, domain: null, expiresAt: "2027-11-15T00:00:00.000Z" }, cli, null);
+    emit("gate.requirement_set", { gateId: "go_live", requirement: { personId: "p1" } }, owner, "p1");
+    emit("gate.requirement_set", { gateId: "payments", requirement: { role: "reviewer" } }, owner, "p1");
+    emit("gate.requirement_set", { gateId: "payments", requirement: null }, owner, "p1");
+
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([2, 3, 3, 1, 1]);
+    expect(db.prepare("SELECT transports FROM credentials WHERE credential_id = 'key-2'").get()).toEqual({ transports: "[]" });
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+    expect(listPeople(db, { includeRemoved: true }).map((p) => [p.id, p.name, p.role])).toEqual([
+      [OWNER_ID, "Ana", "owner"], ["p1", "Reviewer Uno", "maintainer"],
+    ]);
+  });
+
+  it("rebuild leaves sessions and credential_state alone", () => {
+    db.prepare("INSERT INTO credential_state (credential_id, counter) VALUES ('cred-1', 7)").run();
+    db.prepare(
+      `INSERT INTO sessions (id_hash, person_id, listener, method, created_at, last_seen_at, expires_at)
+       VALUES ('h', 'p1', 'local', 'passkey', 'x', 'x', 'x')`,
+    ).run();
+    rebuildAllProjections(db, ledger);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM credential_state").get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 1 });
   });
 });

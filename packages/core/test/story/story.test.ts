@@ -127,6 +127,23 @@ describe("narrationContext", () => {
     expect(ctx.cardTitle!("nope")).toBeUndefined();
     expect(ctx.adapterName!("nope")).toBeUndefined();
   });
+
+  it("names people: a joined person, the Owner, and nobody else", () => {
+    commitEvents(w.db, w.ledger, () => ({
+      events: [
+        { projectId: null, actor: human, type: "person.invited", payload: { inviteId: "i1", role: "reviewer", codeHash: "a".repeat(64), expiresAt: "2026-12-01T00:00:00.000Z" } },
+        {
+          projectId: null, actor: { kind: "human", id: "p1" }, type: "person.joined",
+          payload: { personId: "p1", inviteId: "i1", name: "Reviewer One", role: "reviewer", credential: { kind: "key", credentialId: "key-1", publicKey: "TESTKEY1", label: "CLI" } },
+        },
+      ],
+      result: () => undefined,
+    }));
+    const ctx = narrationContext(w.db);
+    expect(ctx.personName!("p1")).toBe("Reviewer One");
+    expect(ctx.personName!("owner")).toBe("Owner");
+    expect(ctx.personName!("nobody")).toBeUndefined();
+  });
 });
 
 describe("ledgerExportLines", () => {

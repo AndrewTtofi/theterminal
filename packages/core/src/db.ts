@@ -165,6 +165,18 @@ const MIGRATIONS = [
   );
   CREATE INDEX link_runs_machine ON link_runs (machine_id);
   ALTER TABLE agent_runs ADD COLUMN machine_id TEXT;`,
+  // Collaboration: people, their credentials, invites, remote access and gate requirements (projections), plus
+  // sessions and the WebAuthn signature counter (state kept outside the ledger). Session ids are stored only as their
+  // sha256; a key credential's transports are "[]".
+  `CREATE TABLE people (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, joined_at TEXT, last_seen_at TEXT, removed_at TEXT);
+  CREATE TABLE credentials (credential_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, kind TEXT NOT NULL, public_key TEXT NOT NULL, transports TEXT NOT NULL, label TEXT NOT NULL, added_at TEXT NOT NULL, removed_at TEXT);
+  CREATE INDEX credentials_person ON credentials (person_id);
+  CREATE TABLE invites (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, status TEXT NOT NULL, used_by TEXT);
+  CREATE TABLE remote_state (id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL, port INTEGER NOT NULL, bind TEXT NOT NULL, domain TEXT, tls TEXT NOT NULL, fingerprint TEXT, expires_at TEXT);
+  CREATE TABLE gate_requirements (project_id TEXT NOT NULL, gate_id TEXT NOT NULL, requirement TEXT NOT NULL, PRIMARY KEY (project_id, gate_id));
+  CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, person_id TEXT NOT NULL, listener TEXT NOT NULL, method TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT);
+  CREATE INDEX sessions_person ON sessions (person_id);
+  CREATE TABLE credential_state (credential_id TEXT PRIMARY KEY, counter INTEGER NOT NULL);`,
 ];
 
 export type Db = Database.Database;

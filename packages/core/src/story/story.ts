@@ -6,7 +6,7 @@ import type { Db } from "../db.js";
 import { MAX_RUN_IDS, type Ledger } from "../ledger/ledger.js";
 import { canonicalJson } from "../ledger/canonical.js";
 import { requireCard } from "../board/board-service.js";
-import { listActions, listGateDecisions, getRun } from "../events/projections.js";
+import { listActions, listGateDecisions, getPerson, getRun } from "../events/projections.js";
 import { builtInClean, displayEntry, remoteDisplay } from "../link/mirrored.js";
 
 export type { CardStory };
@@ -107,7 +107,10 @@ export function cardStory(db: Db, ledger: Ledger, cardId: string, clean: (s: str
   return { card, runs: runs.map(shown.run), actions: actions.map(shown.action), entries, gateDecisions: listGateDecisions(db, cardId), costUsd, integrity, unreadable };
 }
 
-/** What narration may know beyond an entry: card titles from the board and adapter labels from the runs. */
+/**
+ * What narration may know beyond an entry: card titles from the board, adapter labels from the runs and people's
+ * names (a removed person keeps their name in history; the Owner is `Owner` until renamed).
+ */
 export function narrationContext(db: Db): NarrationContext {
   const title = db.prepare("SELECT title FROM cards WHERE id = ?");
   const adapter = db.prepare("SELECT adapter FROM agent_runs WHERE id = ?");
@@ -117,6 +120,7 @@ export function narrationContext(db: Db): NarrationContext {
       const r = adapter.get(runId) as { adapter: AgentRun["adapter"] } | undefined;
       return r ? ADAPTER_LABELS[r.adapter] : undefined;
     },
+    personName: (id) => getPerson(db, id)?.name,
   };
 }
 

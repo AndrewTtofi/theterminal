@@ -1,7 +1,8 @@
-import { MIRRORABLE_TYPES } from "@theterminal/shared";
+import { DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID } from "@theterminal/shared";
 import type {
-  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, LinkRun, LinkRunState, Machine,
-  PendingAgentAction, QuestionId, ShareLink, ShareLinkState, ShareSnapshotRecord,
+  AgentAction, AgentRun, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
+  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, QuestionId, RemoteState, Role, ShareLink, ShareLinkState,
+  ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
@@ -211,7 +212,76 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         SHARE_END_STATES[e.type], e.ts, p.linkId,
       );
       break;
-    default: // gate.blocked, conversation entries, link.project_received and link.decision_received project nothing
+    case "person.invited":
+      db.prepare(
+        `INSERT INTO invites (id, code_hash, role, created_at, expires_at, status, used_by) VALUES (?, ?, ?, ?, ?, 'pending', NULL)`,
+      ).run(p.inviteId, p.codeHash, p.role, e.ts, p.expiresAt);
+      break;
+    case "person.invite_revoked":
+      db.prepare("UPDATE invites SET status = 'revoked' WHERE id = ? AND status = 'pending'").run(p.inviteId);
+      break;
+    case "person.joined":
+      db.prepare(
+        "INSERT INTO people (id, name, role, joined_at, last_seen_at, removed_at) VALUES (?, ?, ?, ?, NULL, NULL)",
+      ).run(p.personId, p.name, p.role, e.ts);
+      insertCredential(db, p.personId, p.credential, e.ts);
+      db.prepare("UPDATE invites SET status = 'used', used_by = ? WHERE id = ?").run(p.personId, p.inviteId);
+      break;
+    case "person.credential_added":
+      if (p.personId === OWNER_ID) insertOwnerRow(db);
+      insertCredential(db, p.personId, p.credential, e.ts);
+      break;
+    case "person.credential_removed":
+      db.prepare("UPDATE credentials SET removed_at = ? WHERE credential_id = ? AND person_id = ? AND removed_at IS NULL").run(
+        e.ts, p.credentialId, p.personId,
+      );
+      break;
+    case "person.renamed":
+      if (p.personId === OWNER_ID) insertOwnerRow(db);
+      db.prepare("UPDATE people SET name = ? WHERE id = ?").run(p.name, p.personId);
+      break;
+    case "person.role_changed":
+      db.prepare("UPDATE people SET role = ? WHERE id = ?").run(p.to, p.personId);
+      break;
+    case "person.removed":
+      db.prepare("UPDATE people SET removed_at = ? WHERE id = ? AND removed_at IS NULL").run(e.ts, p.personId);
+      break;
+    case "person.signed_in":
+      db.prepare("UPDATE people SET last_seen_at = ? WHERE id = ?").run(e.ts, p.personId);
+      break;
+    case "remote.enabled":
+      // The expiry stays only while the certificate does: a new fingerprint's expiry comes with certificate_changed.
+      db.prepare(
+        `INSERT INTO remote_state (id, enabled, port, bind, domain, tls, fingerprint, expires_at) VALUES (1, 1, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET enabled = 1, port = excluded.port, bind = excluded.bind, domain = excluded.domain,
+           tls = excluded.tls,
+           expires_at = CASE WHEN fingerprint IS excluded.fingerprint THEN expires_at ELSE NULL END,
+           fingerprint = excluded.fingerprint`,
+      ).run(p.port, p.bind, p.domain, p.tls, p.fingerprint);
+      break;
+    case "remote.disabled":
+      db.prepare("UPDATE remote_state SET enabled = 0 WHERE id = 1").run();
+      break;
+    case "remote.certificate_changed":
+      db.prepare(
+        `INSERT INTO remote_state (id, enabled, port, bind, domain, tls, fingerprint, expires_at) VALUES (1, 0, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET tls = excluded.tls, fingerprint = excluded.fingerprint, domain = excluded.domain,
+           expires_at = excluded.expires_at`,
+      ).run(DEFAULT_REMOTE.port, DEFAULT_REMOTE.bind, p.domain, p.tls, p.fingerprint, p.expiresAt);
+      break;
+    case "gate.requirement_set":
+      // The payload carries no projectId: the entry's is the project.
+      if (e.projectId === null) throw new Error("gate requirement without a project");
+      if (p.requirement === null) {
+        db.prepare("DELETE FROM gate_requirements WHERE project_id = ? AND gate_id = ?").run(e.projectId, p.gateId);
+      } else {
+        db.prepare(
+          `INSERT INTO gate_requirements (project_id, gate_id, requirement) VALUES (?, ?, ?)
+           ON CONFLICT(project_id, gate_id) DO UPDATE SET requirement = excluded.requirement`,
+        ).run(e.projectId, p.gateId, canonicalJson(p.requirement));
+      }
+      break;
+    default: // gate.blocked, person.locked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
 }
@@ -342,6 +412,21 @@ function insertLinkRun(
   ).run(runId, machineId, direction, projectId, state, ts);
 }
 
+/** A credential row; a key credential has no transports and stores "[]". */
+function insertCredential(db: Db, personId: string, c: Credential, ts: string): void {
+  db.prepare(
+    `INSERT INTO credentials (credential_id, person_id, kind, public_key, transports, label, added_at, removed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+  ).run(c.credentialId, personId, c.kind, c.publicKey, JSON.stringify(c.kind === "passkey" ? c.transports : []), c.label, ts);
+}
+
+/** The Owner's row, made the first time something about the Owner is recorded (the Owner is virtual before that). */
+function insertOwnerRow(db: Db): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO people (id, name, role, joined_at, last_seen_at, removed_at) VALUES (?, 'Owner', 'owner', NULL, NULL, NULL)",
+  ).run(OWNER_ID);
+}
+
 function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
@@ -349,6 +434,8 @@ function setSetting(db: Db, key: string, value: string): void {
 const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
   "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
+  // Not sessions or credential_state: neither is in the ledger.
+  "people", "credentials", "invites", "remote_state", "gate_requirements",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -661,4 +748,107 @@ export function listShareLinks(db: Db, q: { state?: ShareLinkState; projectId?: 
 /** Share links the ledger says are active (whether a listener is up is the link manager's to say). */
 export function countActiveShareLinks(db: Db): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM share_links WHERE state = 'active'").get() as { n: number }).n;
+}
+
+type PersonRow = {
+  id: string; name: string; role: Role; joined_at: string | null; last_seen_at: string | null; removed_at: string | null;
+  credentials: number;
+};
+const PERSON_SELECT = `SELECT p.*, (SELECT COUNT(*) FROM credentials c WHERE c.person_id = p.id AND c.removed_at IS NULL) AS credentials
+  FROM people p`;
+const toPerson = (r: PersonRow): Person => ({
+  id: r.id, name: r.name, role: r.role, joinedAt: r.joined_at, lastSeenAt: r.last_seen_at, removedAt: r.removed_at,
+  credentials: r.credentials,
+});
+/** The Owner before anything about them is recorded: every ledger before collaboration already names `owner`. */
+const VIRTUAL_OWNER: Person = {
+  id: OWNER_ID, name: "Owner", role: "owner", joinedAt: null, lastSeenAt: null, removedAt: null, credentials: 0,
+};
+
+/** A person, removed or not; the Owner always exists (virtual until a row is recorded). */
+export function getPerson(db: Db, id: string): Person | null {
+  const r = db.prepare(`${PERSON_SELECT} WHERE p.id = ?`).get(id) as PersonRow | undefined;
+  if (r) return toPerson(r);
+  return id === OWNER_ID ? { ...VIRTUAL_OWNER } : null;
+}
+
+/** The Owner first (once, the row when there is one), then everyone else by when they joined. */
+export function listPeople(db: Db, opts: { includeRemoved?: boolean } = {}): Person[] {
+  const rows = db
+    .prepare(`${PERSON_SELECT} WHERE p.id <> ?${opts.includeRemoved ? "" : " AND p.removed_at IS NULL"} ORDER BY p.joined_at, p.rowid`)
+    .all(OWNER_ID) as PersonRow[];
+  return [getPerson(db, OWNER_ID)!, ...rows.map(toPerson)];
+}
+
+type CredentialRow = {
+  credential_id: string; person_id: string; kind: Credential["kind"]; public_key: string; transports: string; label: string;
+};
+const toCredential = (r: CredentialRow): Credential =>
+  r.kind === "passkey"
+    ? { kind: "passkey", credentialId: r.credential_id, publicKey: r.public_key, transports: JSON.parse(r.transports), label: r.label }
+    : { kind: "key", credentialId: r.credential_id, publicKey: r.public_key, label: r.label };
+
+/** A person's credentials that are not removed, oldest first. */
+export function listCredentials(db: Db, personId: string): Credential[] {
+  const rows = db
+    .prepare("SELECT * FROM credentials WHERE person_id = ? AND removed_at IS NULL ORDER BY added_at, rowid")
+    .all(personId) as CredentialRow[];
+  return rows.map(toCredential);
+}
+
+/** A credential someone may sign in with: null when it, or its person, is removed (or unknown). */
+export function findCredential(db: Db, credentialId: string): (Credential & { personId: string }) | null {
+  const r = db
+    .prepare(
+      `SELECT c.* FROM credentials c JOIN people p ON p.id = c.person_id
+       WHERE c.credential_id = ? AND c.removed_at IS NULL AND p.removed_at IS NULL`,
+    )
+    .get(credentialId) as CredentialRow | undefined;
+  return r ? { ...toCredential(r), personId: r.person_id } : null;
+}
+
+type InviteRow = {
+  id: string; code_hash: string; role: Role; created_at: string; expires_at: string; status: Invite["status"]; used_by: string | null;
+};
+/** A pending invite past its expiry reads as `expired`; no entry records that. */
+const toInvite = (r: InviteRow, now: Date): Invite => ({
+  id: r.id, role: r.role, createdAt: r.created_at, expiresAt: r.expires_at,
+  status: r.status === "pending" && Date.parse(r.expires_at) <= now.getTime() ? "expired" : r.status,
+});
+
+export function getInviteByHash(db: Db, codeHash: string, now: Date = new Date()): Invite | null {
+  const r = db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(codeHash) as InviteRow | undefined;
+  return r ? toInvite(r, now) : null;
+}
+
+export function getInvite(db: Db, inviteId: string, now: Date = new Date()): Invite | null {
+  const r = db.prepare("SELECT * FROM invites WHERE id = ?").get(inviteId) as InviteRow | undefined;
+  return r ? toInvite(r, now) : null;
+}
+
+/** Every invite, newest first. */
+export function listInvites(db: Db, now: Date = new Date()): Invite[] {
+  const rows = db.prepare("SELECT * FROM invites ORDER BY created_at DESC, rowid DESC").all() as InviteRow[];
+  return rows.map((r) => toInvite(r, now));
+}
+
+type RemoteRow = {
+  enabled: number; port: number; bind: string; domain: string | null; tls: TlsMode; fingerprint: string | null; expires_at: string | null;
+};
+
+/** Remote access as the ledger records it; DEFAULT_REMOTE before any entry. */
+export function getRemoteState(db: Db): RemoteState {
+  const r = db.prepare("SELECT * FROM remote_state WHERE id = 1").get() as RemoteRow | undefined;
+  if (!r) return { ...DEFAULT_REMOTE };
+  return {
+    enabled: r.enabled === 1, port: r.port, bind: r.bind, domain: r.domain, tls: r.tls, fingerprint: r.fingerprint, expiresAt: r.expires_at,
+  };
+}
+
+/** Who may sign a project's gate off: what was set for it, else the gate's default. */
+export function getGateRequirement(db: Db, projectId: string, gateId: GateId): GateRequirement {
+  const r = db.prepare("SELECT requirement FROM gate_requirements WHERE project_id = ? AND gate_id = ?").get(projectId, gateId) as
+    | { requirement: string }
+    | undefined;
+  return r ? (JSON.parse(r.requirement) as GateRequirement) : { ...DEFAULT_GATE_REQUIREMENT[gateId] };
 }
