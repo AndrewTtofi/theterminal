@@ -57,6 +57,7 @@ export function DecisionCard({ action, projectName, onDecide }: Props) {
     <article className="decision-card" aria-label={`Decision: ${visibleControls(action.summary)}`}>
       {projectName !== undefined && <p className="project-name">{projectName}</p>}
       <h3>Agent wants to {actionPhrase(action)}</h3>
+      <h4>What this means</h4>
       <p className="means">{ACTION_KIND_MEANS[action.kind] ?? ACTION_KIND_MEANS.other}</p>
       {command !== null && <pre className="command">{command}</pre>}
       <details>

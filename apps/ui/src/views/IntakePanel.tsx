@@ -32,6 +32,8 @@ export function IntakePanel(_props: { id: string }) {
       setExpanded(false);
       return;
     }
+    // An approved plan folds the answers away, so a reopened plan opens on its plan.
+    if (step === "completed") setExpanded(false);
     // A first load is not a step change; nor is a change the Owner did not make here.
     if (prev.step === undefined || step === undefined || prev.step === step) return;
     const active = document.activeElement;

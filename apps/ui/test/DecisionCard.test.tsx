@@ -30,6 +30,8 @@ describe("DecisionCard", () => {
 
   it("says what the kind of action means, and keeps the summary in its label", () => {
     const { container } = render(<DecisionCard action={action} onDecide={vi.fn()} />);
+    const heading = screen.getByRole("heading", { level: 4, name: "What this means" });
+    expect(heading.nextElementSibling).toBe(container.querySelector("p.means"));
     expect(container.querySelector("p.means")?.textContent).toBe(
       "Runs a program on this computer, inside the agent's working copy. It can read and change files there and reach the network.",
     );

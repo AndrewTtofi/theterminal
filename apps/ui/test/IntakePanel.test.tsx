@@ -243,5 +243,16 @@ describe("IntakePanel", () => {
       expect(document.activeElement).toBe(existing);
       expect(within(panel).getByRole("textbox", { name: /Is there anything that already exists/ })).toBe(existing);
     });
+
+    it("folds the answers away once the plan is approved, so a reopened plan opens on its plan", async () => {
+      const decided = { first_version: "smallest", hosting: "local" } as const;
+      const { show, panel } = setup(intakeView(ALL_ANSWERS, decided));
+      await userEvent.click(within(panel).getByRole("button", { name: "Change your answers" }));
+      expect(within(panel).getByRole("button", { name: "Change your answers" }).getAttribute("aria-expanded")).toBe("true");
+      show(intakeView(ALL_ANSWERS, decided, { completed: true }));
+      expect(document.activeElement).toBe(heading());
+      show(intakeView(ALL_ANSWERS, decided));
+      expect(within(panel).getByRole("button", { name: "Change your answers" }).getAttribute("aria-expanded")).toBe("false");
+    });
   });
 });
