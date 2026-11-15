@@ -8,6 +8,7 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_HTTP", "THETERMINAL_SECRET_STORE",
@@ -456,5 +457,74 @@ describe("GET /api/status network (inferred from the Owner's own calls)", { time
     const status = await get(s, "/api/status");
     expect(status.status).toBe(200);
     expect(((await status.json()) as { network: Network }).network).toMatchObject({ state: "offline", lastError: "ENOTFOUND" });
+  });
+});
+
+describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
+  async function startSeeded() {
+    for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]) delete process.env[k];
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-conn-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
+    running.push(s);
+    const asRole = (role: "viewer" | "reviewer" | "maintainer") => ({ cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]! });
+    const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
+      fetch(base(s) + path, {
+        method, headers: { ...asRole(role), ...(body !== undefined && { "content-type": "application/json" }) },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      });
+    return { s, theirs };
+  }
+
+  it("GET /api/connections is a summary for a maintainer: id, kind, provider, name, enabled and the test state; the Owner gets everything but values", async () => {
+    const { s, theirs } = await startSeeded();
+    const added = (await (await addClaude(s, { config: { plan: "Max 5x" } })).json()) as Connection;
+    const res = await theirs("maintainer", "GET", "/api/connections");
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    for (const field of ["config", "private", "secretFields", KEY, "Max 5x"]) expect(text).not.toContain(field);
+    const list = JSON.parse(text) as Record<string, unknown>[];
+    expect(list).toEqual([{ id: added.id, kind: "llm", provider: "claude", name: "Claude", enabled: true, status: { state: "untested", message: "", testedAt: null } }]);
+    const owners = (await json<Connection[]>(get(s, "/api/connections")))[0]!;
+    expect(owners).toMatchObject({ id: added.id, config: { plan: "Max 5x" }, secretFields: ["apiKey"], private: {} });
+    expect(JSON.stringify(owners)).not.toContain(KEY);
+  });
+
+  it("a maintainer may not read one connection, change it or test it", async () => {
+    const { s, theirs } = await startSeeded();
+    const added = (await (await addClaude(s)).json()) as Connection;
+    for (const [method, path, body] of [
+      ["GET", `/api/connections/${added.id}`, undefined],
+      ["PATCH", `/api/connections/${added.id}`, { enabled: false }],
+      ["POST", `/api/connections/${added.id}/test`, undefined],
+      ["DELETE", `/api/connections/${added.id}`, undefined],
+      ["POST", "/api/connections", { kind: "llm", provider: "codex", name: "Codex" }],
+      ["GET", "/api/connections/catalog", undefined],
+      ["GET", "/api/connections/signin-status", undefined],
+    ] as const) {
+      const res = await theirs("maintainer", method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect(await res.json()).toEqual({ error: "forbidden", required: "owner" });
+    }
+    expect((await json<Connection[]>(get(s, "/api/connections")))[0]).toMatchObject({ enabled: true });
+  });
+
+  it("GET /api/status for a collaborator is trimmed: counts only, no keychain state and nothing about remote access", async () => {
+    const { s, theirs } = await startSeeded();
+    await addClaude(s);
+    const owners = await json<Record<string, unknown>>(get(s, "/api/status"));
+    expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+    for (const role of ["viewer", "reviewer", "maintainer"] as const) {
+      const res = await theirs(role, "GET", "/api/status");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.connections).toEqual({ enabled: 1, failed: 0 });
+      expect(body).not.toHaveProperty("remote");
+      expect(JSON.stringify(body)).not.toContain("keychain");
+      expect(Object.keys(body).sort()).toEqual(
+        ["ci", "connections", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "monthlyBudgetUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
+      );
+    }
   });
 });

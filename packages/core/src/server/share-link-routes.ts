@@ -1,14 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { ShareAddress, ShareLinkManager } from "../share/link-server.js";
+import { actorOf, needs } from "./auth.js";
 
 export type ShareLinkRouteDeps = {
   links: ShareLinkManager;
   /** The addresses a link may bind, offered fresh on each request (interfaces come and go). */
   addresses: () => ShareAddress[];
 };
-
-const actor = { kind: "human", id: "owner" } as const;
 
 // Shapes only: the manager checks the address against what is offered and the duration against TTL_MINUTES.
 const createBody = z.object({ address: z.string().min(1).max(64), ttlMinutes: z.number().int() }).strict();
@@ -24,18 +23,19 @@ type Params = { Params: { id: string } };
 export function registerShareLinkRoutes(app: FastifyInstance, deps: ShareLinkRouteDeps): void {
   const { links, addresses } = deps;
 
-  app.get("/api/share/addresses", async () => addresses());
+  // The addresses are LAN detail and creating or revoking a link is what leaves the machine: the Owner's.
+  app.get("/api/share/addresses", needs("owner"), async () => addresses());
 
-  app.post<Params>("/api/share/snapshots/:id/links", async (req, reply) => {
+  app.post<Params>("/api/share/snapshots/:id/links", needs("owner"), async (req, reply) => {
     const { address, ttlMinutes } = createBody.parse(req.body);
-    const { link, url } = await links.create(actor, req.params.id, address, ttlMinutes);
+    const { link, url } = await links.create(actorOf(req), req.params.id, address, ttlMinutes);
     return reply.code(201).send({ link, url });
   });
 
-  app.get("/api/share/links", async (req) => links.list(listQuery.parse(req.query).projectId));
+  app.get("/api/share/links", needs("viewer"), async (req) => links.list(listQuery.parse(req.query).projectId));
 
-  app.delete<Params>("/api/share/links/:id", async (req, reply) => {
-    await links.revoke(actor, req.params.id);
+  app.delete<Params>("/api/share/links/:id", needs("owner"), async (req, reply) => {
+    await links.revoke(actorOf(req), req.params.id);
     return reply.code(204).send();
   });
 }

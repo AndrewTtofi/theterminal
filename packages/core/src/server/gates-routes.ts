@@ -1,9 +1,12 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { gatePayloadSchemas } from "@theterminal/shared";
-import { NotFoundError } from "../board/board-service.js";
-import { GateRequirementError, type GateService, type Signer } from "../gates/service.js";
+import type { GateService, Signer } from "../gates/service.js";
+import { needs } from "./auth.js";
 import { sendError } from "./routes.js";
+
+/** The gate errors' mapping lives with the rest of the error map; kept here for the callers that import it from the gate routes. */
+export { sendGateError } from "./routes.js";
 
 export type GateRouteDeps = {
   gates: GateService;
@@ -19,18 +22,6 @@ const requirementInput = gatePayloadSchemas["gate.requirement_set"];
 type Params = { Params: { id: string; gateId: string } };
 
 /**
- * The errors this plugin's routes and the move route raise over requirements: fixed codes, the gate and its
- * requirement only (a person id at most, never a name). Null for any other error.
- */
-export function sendGateError(err: unknown, reply: FastifyReply): FastifyReply | null {
-  if (err instanceof GateRequirementError) {
-    return reply.code(403).send({ error: "gate_requires", gateId: err.gateId, requirement: err.requirement });
-  }
-  if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
-  return null;
-}
-
-/**
  * Gate requirements: the Owner says who may sign a project's gate. An encapsulated plugin with its own error
  * handler, so routes.ts's map stays as it is; the auth hook's role table applies as to every route, and the
  * handler checks the Owner again itself.
@@ -38,9 +29,9 @@ export function sendGateError(err: unknown, reply: FastifyReply): FastifyReply |
 export function registerGateRoutes(app: FastifyInstance, deps: GateRouteDeps): void {
   const { gates, principal } = deps;
   void app.register(async (scope) => {
-    scope.setErrorHandler((err, _req, reply) => sendGateError(err, reply) ?? sendError(err, reply, scope.log));
+    scope.setErrorHandler((err, _req, reply) => sendError(err, reply, scope.log));
 
-    scope.put<Params>("/api/projects/:id/gates/:gateId/requirement", async (req, reply) => {
+    scope.put<Params>("/api/projects/:id/gates/:gateId/requirement", needs("owner"), async (req, reply) => {
       const who = principal(req);
       if (who === null) return reply.code(401).send({ error: "unauthorized" });
       if (who.role !== "owner") return reply.code(403).send({ error: "forbidden", required: "owner" });

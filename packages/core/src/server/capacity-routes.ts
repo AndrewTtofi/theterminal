@@ -3,6 +3,7 @@ import type { AuthMode, CapacityReport, HardwareInfo, LocalEngine, MachineCapaci
 import { capacityReport } from "../capacity/report.js";
 import type { ConnectionService } from "../connections/service.js";
 import type { Db } from "../db.js";
+import { actorOf, needs } from "./auth.js";
 
 export type CapacityRouteDeps = {
   db: Db;
@@ -19,7 +20,6 @@ export type CapacityRouteDeps = {
   now?: () => number;
 };
 
-const actor = { kind: "human", id: "owner" } as const;
 const LOCAL_ENGINES_TTL_MS = 30_000;
 
 /** Capacity: usage per provider, budgets, observed rate limits and this computer. Errors are mapped in routes.ts. */
@@ -46,15 +46,16 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
     });
   };
 
-  app.get("/api/capacity", async (): Promise<CapacityReport> => {
+  // Usage, budgets, this computer and the linked machines; connections appear by id, kind, provider and name only.
+  app.get("/api/capacity", needs("viewer"), async (): Promise<CapacityReport> => {
     const [machines, engines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
     return local(machines, engines);
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.
-  app.post("/api/capacity/detect", async (): Promise<HardwareInfo> => {
+  app.post("/api/capacity/detect", needs("owner"), async (req): Promise<HardwareInfo> => {
     const [info] = await Promise.all([hardware(), detect()]);
-    await connections.writeHardware(actor, info);
+    await connections.writeHardware(actorOf(req), info);
     return info;
   });
 

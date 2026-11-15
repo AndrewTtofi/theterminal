@@ -8,6 +8,7 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { holdPort } from "../link/helpers.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -253,5 +254,34 @@ describe("link routes", { timeout: 30_000 }, () => {
     }
     // Nothing was recorded or started.
     expect((await ledger(s)).map((e) => e.type)).toEqual(["machine.identity_created"]);
+  });
+});
+
+describe("who may see and change linking", { timeout: 15000 }, () => {
+  it("a viewer may not read the overview or the machines; a reviewer verifies the mirrored entries; the Owner's writes are recorded as the Owner", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-link-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const s = await start({ dataDir });
+    const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
+      fetch(`http://127.0.0.1:${s.port}${path}`, {
+        method,
+        headers: { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]!, ...(body !== undefined && { "content-type": "application/json" }) },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      });
+    for (const path of ["/api/link", "/api/link/machines"]) {
+      const res = await theirs("viewer", "GET", path);
+      expect(res.status, path).toBe(403);
+      expect(await res.json()).toEqual({ error: "forbidden", required: "owner" });
+    }
+    expect((await theirs("viewer", "GET", "/api/link/verify")).status).toBe(403);
+    const verify = await theirs("reviewer", "GET", "/api/link/verify");
+    expect(verify.status).toBe(200);
+    const rename = await theirs("maintainer", "POST", "/api/link/name", { name: "Theirs" });
+    expect(rename.status).toBe(403);
+
+    expect((await send(s, "POST", "/api/link/name", { name: "Study" })).status).toBe(200);
+    const entries = await ledger(s);
+    expect(entries.find((e) => e.type === "machine.named")!.actor).toEqual({ kind: "human", id: "owner" });
   });
 });

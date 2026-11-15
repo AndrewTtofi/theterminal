@@ -6,10 +6,9 @@ import type { Ledger } from "../ledger/ledger.js";
 import { projectDigests } from "../share/digests.js";
 import { SHARE_HEADER_CSP } from "../share/render.js";
 import type { ShareService } from "../share/service.js";
+import { actorOf, needs } from "./auth.js";
 
 export type ShareRouteDeps = { db: Db; ledger: Ledger; share: ShareService };
-
-const actor = { kind: "human", id: "owner" } as const;
 
 const previewBody = shareOptionsSchema.partial();
 const confirmBody = z
@@ -40,27 +39,28 @@ function sendPage(reply: FastifyReply, html: string): FastifyReply {
 export function registerShareRoutes(app: FastifyInstance, deps: ShareRouteDeps): void {
   const { db, ledger, share } = deps;
 
-  app.post<Params>("/api/projects/:id/share/preview", async (req) => {
+  // Only the Owner decides what leaves the machine: the preview and the confirm are theirs; the saved pages anyone's.
+  app.post<Params>("/api/projects/:id/share/preview", needs("owner"), async (req) => {
     const options = { ...DEFAULT_SHARE_OPTIONS, ...previewBody.parse(req.body ?? {}) };
     const p = await share.preview(req.params.id, options);
     return { previewId: p.previewId, contentHash: p.contentHash, bytes: p.bytes, expiresAt: p.expiresAt, html: p.html, snapshot: p.snapshot };
   });
 
-  app.post<Params>("/api/projects/:id/share/confirm", async (req, reply) => {
+  app.post<Params>("/api/projects/:id/share/confirm", needs("owner"), async (req, reply) => {
     const { previewId, contentHash } = confirmBody.parse(req.body);
-    return reply.code(201).send(share.confirm(actor, req.params.id, previewId, contentHash));
+    return reply.code(201).send(share.confirm(actorOf(req), req.params.id, previewId, contentHash));
   });
 
-  app.get<Params>("/api/projects/:id/share/snapshots", async (req) => share.list(req.params.id));
+  app.get<Params>("/api/projects/:id/share/snapshots", needs("viewer"), async (req) => share.list(req.params.id));
 
-  app.get<Params>("/api/share/snapshots/:id", async (req, reply) => sendPage(reply, share.readHtml(req.params.id)));
+  app.get<Params>("/api/share/snapshots/:id", needs("viewer"), async (req, reply) => sendPage(reply, share.readHtml(req.params.id)));
 
-  app.get<Params>("/api/share/snapshots/:id/download", async (req, reply) => {
+  app.get<Params>("/api/share/snapshots/:id/download", needs("viewer"), async (req, reply) => {
     const html = share.readHtml(req.params.id); // the id passed the id check, so it is safe in the file name
     return sendPage(reply.header("content-disposition", `attachment; filename="theterminal-share-${req.params.id.slice(0, 8)}.html"`), html);
   });
 
-  app.get<Params>("/api/projects/:id/digests", async (req) =>
+  app.get<Params>("/api/projects/:id/digests", needs("viewer"), async (req) =>
     projectDigests(db, ledger, req.params.id, digestsQuery.parse(req.query).days),
   );
 }

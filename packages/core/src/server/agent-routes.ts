@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   ADAPTERS,
   MACHINE_ID,
+  OWNER_ID,
   PROVIDER_ACKS,
   PROVIDERS,
   agentPayloadSchemas,
@@ -17,6 +18,7 @@ import type { Db } from "../db.js";
 import { getRun, listAllPendingActions, listPendingActions } from "../events/projections.js";
 import { remoteDisplay } from "../link/mirrored.js";
 import type { RemoteRunService } from "../link/remote-runs.js";
+import { actorOf, needs } from "./auth.js";
 
 export type AgentRouteDeps = {
   db: Db;
@@ -39,13 +41,11 @@ export type AgentRouteDeps = {
 
 export type ApiKeySource = "connection" | "environment" | "none";
 
-const actor = { kind: "human", id: "owner" } as const;
-
 const startBody = z.object({
   adapter: z.enum(ADAPTERS),
   prompt: agentPayloadSchemas["agent.started"].shape.prompt, // same bounds as the recorded event
   cardId: z.string().min(1).max(200).nullable().optional(),
-  /** Cloud and MCP connections the Owner gives this run. */
+  /** Cloud and MCP connections given to this run, by id: a maintainer sees their names and may name them too. */
   connectionIds: z.array(z.string().min(1).max(200)).max(10).optional(),
   /** A paired machine to run on (its connections are the ones given); absent runs here. */
   machineId: z.string().regex(MACHINE_ID).optional(),
@@ -67,29 +67,37 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
   };
 
-  app.get("/api/agents", async () => ({
-    adapters,
-    providers: Object.fromEntries(
-      PROVIDERS.map((p) => [p, { mode: settings.getMode(p), available: available(p), apiKey: apiKey(p) }]),
-    ) as Record<Provider, { mode: AuthMode; available: boolean; apiKey: ApiKeySource }>,
-    acks: PROVIDER_ACKS,
-  }));
+  // The Owner learns where each provider's key would come from and reads the acknowledgements; a collaborator
+  // learns only which agents exist, their modes and whether their programs are there.
+  app.get("/api/agents", needs("viewer"), async (req) => {
+    const owner = req.principal?.personId === OWNER_ID;
+    return {
+      adapters,
+      providers: Object.fromEntries(
+        PROVIDERS.map((p) => [p, { mode: settings.getMode(p), available: available(p), ...(owner && { apiKey: apiKey(p) }) }]),
+      ) as Record<Provider, { mode: AuthMode; available: boolean; apiKey?: ApiKeySource }>,
+      ...(owner && { acks: PROVIDER_ACKS }),
+    };
+  });
 
-  app.post("/api/settings/provider-auth", async (req) => {
+  app.post("/api/settings/provider-auth", needs("owner"), async (req) => {
     const body = providerAuthBody.parse(req.body);
-    settings.setMode(actor, body.provider, body.mode, body.acknowledgement);
+    settings.setMode(actorOf(req), body.provider, body.mode, body.acknowledgement);
     return { provider: body.provider, mode: settings.getMode(body.provider) };
   });
 
   // Alias of provider-auth for provider "claude", kept for compatibility.
-  app.post("/api/settings/claude-auth", async (req) => {
+  app.post("/api/settings/claude-auth", needs("owner"), async (req) => {
     const body = authBody.parse(req.body);
-    settings.setMode(actor, "claude", body.mode, body.acknowledgement);
+    settings.setMode(actorOf(req), "claude", body.mode, body.acknowledgement);
     return { mode: settings.getMode("claude") };
   });
 
-  app.post<{ Params: { id: string } }>("/api/projects/:id/runs", async (req, reply) => {
+  // Anyone but the Owner runs on an API key, here and on a linked machine: never on the Owner's logins.
+  app.post<{ Params: { id: string } }>("/api/projects/:id/runs", needs("maintainer"), async (req, reply) => {
     const body = startBody.parse(req.body);
+    const actor = actorOf(req);
+    const forceApiKey = actor.id !== OWNER_ID;
     if (body.machineId !== undefined) {
       if (!remoteRuns) throw new NotFoundError("machine", body.machineId);
       const run = await remoteRuns.start(actor, {
@@ -99,6 +107,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
         prompt: body.prompt,
         ...(body.cardId !== undefined && { cardId: body.cardId }),
         ...(body.connectionIds !== undefined && { connectionIds: body.connectionIds }),
+        forceApiKey,
       });
       return reply.code(201).send(shown.run(run));
     }
@@ -108,38 +117,42 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
       prompt: body.prompt,
       ...(body.cardId !== undefined && { cardId: body.cardId }),
       ...(body.connectionIds !== undefined && { connectionIds: body.connectionIds }),
+      forceApiKey,
     });
     return reply.code(201).send(run);
   });
 
-  app.get<{ Params: { id: string } }>("/api/projects/:id/runs", async (req) => {
+  app.get<{ Params: { id: string } }>("/api/projects/:id/runs", needs("viewer"), async (req) => {
     requireProject(req.params.id);
     return runner.listRuns(req.params.id).map(shown.run);
   });
 
-  app.get<{ Params: { id: string } }>("/api/projects/:id/pending-actions", async (req) => {
+  app.get<{ Params: { id: string } }>("/api/projects/:id/pending-actions", needs("viewer"), async (req) => {
     requireProject(req.params.id);
     return listPendingActions(db, req.params.id).map(shown.action);
   });
 
-  app.get("/api/pending-actions", async () => listAllPendingActions(db).map(shown.action));
+  app.get("/api/pending-actions", needs("viewer"), async () => listAllPendingActions(db).map(shown.action));
 
-  app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => {
+  app.get<{ Params: { id: string } }>("/api/runs/:id", needs("viewer"), async (req) => {
     const { run, actions } = runner.getRun(req.params.id);
     return { run: shown.run(run), actions: actions.map(shown.action) };
   });
 
   // A run on a linked machine is stopped and decided there: the request goes to the worker, and nothing is recorded
   // here until its entries arrive. The local runner refuses such a run itself (RemoteRunError), as a last guard.
-  app.post<{ Params: { id: string } }>("/api/runs/:id/stop", async (req) => {
+  // The same role is needed for a run wherever it executes, and the person asking is the one recorded.
+  app.post<{ Params: { id: string } }>("/api/runs/:id/stop", needs("maintainer"), async (req) => {
+    const actor = actorOf(req);
     const run = getRun(db, req.params.id);
     if (run && run.machineId !== null && remoteRuns) return shown.run(await remoteRuns.stop(actor, run));
     runner.stop(actor, req.params.id);
     return shown.run(runner.getRun(req.params.id).run);
   });
 
-  app.post<{ Params: { id: string } }>("/api/actions/:id/decision", async (req) => {
+  app.post<{ Params: { id: string } }>("/api/actions/:id/decision", needs("reviewer"), async (req) => {
     const body = decisionBody.parse(req.body);
+    const actor = actorOf(req);
     const owner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?").get(req.params.id) as { run_id: string } | undefined;
     const run = owner ? getRun(db, owner.run_id) : null;
     if (run && run.machineId !== null && remoteRuns) {

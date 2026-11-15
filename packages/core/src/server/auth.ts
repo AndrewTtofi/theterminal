@@ -204,13 +204,25 @@ export function clientKey(ip: string): string {
 
 const FORBIDDEN = (required: Role) => ({ error: "forbidden", required });
 
-/** A preHandler refusing anyone below `min` with 403 `{ error: "forbidden", required: min }` (401 with no principal). */
-export function requireRole(min: Role): preHandlerAsyncHookHandler {
-  return async (request, reply) => {
+/** The role a `requireRole` preHandler checks, readable on the handler itself (tests compare it with the table). */
+export type RoleGuard = preHandlerAsyncHookHandler & { readonly role: Role };
+
+/**
+ * A preHandler refusing anyone below `min` with 403 `{ error: "forbidden", required: min }` (401 with no principal).
+ * Every route carries one: the hook's table decides first, and this check holds even on an app without the hook.
+ */
+export function requireRole(min: Role): RoleGuard {
+  const guard: preHandlerAsyncHookHandler = async (request, reply) => {
     const p = request.principal;
     if (!p) return reply.code(401).send({ error: "unauthorized" });
     if (!atLeast(p.role, min)) return reply.code(403).send(FORBIDDEN(min));
   };
+  return Object.assign(guard, { role: min });
+}
+
+/** Route options with the role check: `app.get(url, needs("viewer"), handler)`. */
+export function needs(min: Role): { preHandler: RoleGuard } {
+  return { preHandler: requireRole(min) };
 }
 
 /** The signed-in person as the actor of what a route records. */

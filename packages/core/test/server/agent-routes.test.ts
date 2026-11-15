@@ -21,6 +21,10 @@ import { createServer, repairSharedGitconfig, type RunningServer } from "../../s
 import { AwsRejectedError, fakeSts, type StsCaller } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
+import { narrate, type LedgerEntry, type Role } from "@theterminal/shared";
+import type { RemoteRunService } from "../../src/link/remote-runs.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { asPrincipal, fakeAuth } from "../fixtures/principal.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
@@ -600,6 +604,7 @@ describe("agent API", { timeout: 15000 }, () => {
     });
     const app = Fastify();
     try {
+      fakeAuth(app);
       registerRoutes(app, { board, gates: new GateService({ db, ledger }), ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
       registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false, apiKey: () => "none" });
       await runner.shutdown();
@@ -795,5 +800,195 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ adapter: "fake", prompt: "go", connectionIds: [] }),
     });
     expect(anonymous.status).toBe(401);
+  });
+});
+
+describe("collaborators run agents on API keys and are named on what they do", { timeout: 20_000 }, () => {
+  const AZURE = {
+    kind: "cloud", provider: "azure", name: "Azure dev",
+    config: {
+      tenantId: "00000000-0000-0000-0000-00000000aaaa", clientId: "00000000-0000-0000-0000-00000000bbbb",
+      subscriptionId: "00000000-0000-0000-0000-00000000cccc",
+    },
+    secrets: { clientSecret: "TESTKEY-azure-secret-0000000000" },
+  };
+  const AZURE_SECRET = AZURE.secrets.clientSecret;
+
+  /** A server with the three collaborators signed in, the fake adapter (when `script` is given) and one project. */
+  async function startSeeded(script?: FakeStep[] | null, opts: Parameters<typeof start>[1] = {}) {
+    if (script !== null) {
+      process.env.THETERMINAL_FAKE_AGENT = "1";
+      if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
+    }
+    const dataDir = tmp();
+    const cookies = seedPeople(dataDir);
+    const s = await createServer({
+      dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...opts,
+    });
+    running.push(s);
+    const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
+    const as = (role: Role): Record<string, string> =>
+      role === "owner" ? { authorization: `Bearer ${s.token}` } : { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]! };
+    const send = (role: Role, method: string, path: string, body?: unknown) =>
+      fetch(base(s) + path, {
+        method, headers: { ...as(role), ...(body !== undefined && { "content-type": "application/json" }) },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      });
+    return { s, projectId: project.id, dataDir, send };
+  }
+  const ledgerOf = (s: RunningServer) => json<LedgerEntry[]>(get(s, "/api/ledger"));
+
+  it("a maintainer starts a fake run with a cloud connection by id: recorded as theirs, the connection used, the output redacted", async () => {
+    const shellWithSecret: FakeStep[] = [{ propose: { ...shell, paths: [] }, result: { ok: true, output: `the secret is ${AZURE_SECRET}` } }];
+    const { s, projectId, send } = await startSeeded(shellWithSecret, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const responses: string[] = [];
+    const added = await send("owner", "POST", "/api/connections", AZURE);
+    responses.push(await added.clone().text());
+    const { id: azureId } = (await added.json()) as { id: string };
+
+    const res = await send("maintainer", "POST", `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", connectionIds: [azureId] });
+    responses.push(await res.clone().text());
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    await untilPending(s, projectId);
+    const [action] = await pending(s, projectId);
+    const decided = await send("maintainer", "POST", `/api/actions/${action!.id}/decision`, { decision: "allow" });
+    responses.push(await decided.clone().text());
+    expect(decided.status).toBe(200);
+    await untilFinished(s, run.id);
+
+    const entries = await ledgerOf(s);
+    responses.push(JSON.stringify(entries));
+    expect(entries.find((e) => e.type === "agent.started")).toMatchObject({ actor: { kind: "human", id: "p-maintainer" }, payload: { runId: run.id } });
+    expect(entries.filter((e) => e.type === "connection.used").map((e) => e.payload)).toEqual([
+      { connectionId: azureId, name: "Azure dev", runId: run.id, purpose: "cloud_credentials", credential: "azure_client_secret", expiresAt: null },
+    ]);
+    expect(entries.find((e) => e.type === "agent.action.decided" && (e.payload as { actionId: string }).actionId === action!.id)).toMatchObject({
+      actor: { kind: "human", id: "p-maintainer" }, payload: { by: "human" },
+    });
+    const completed = entries.find((e) => e.type === "agent.action.completed")!;
+    expect((completed.payload as { output: string }).output).toBe("the secret is [REDACTED]");
+    const detail = await send("maintainer", "GET", `/api/runs/${run.id}`);
+    responses.push(await detail.text());
+    for (const text of responses) expect(text).not.toContain(AZURE_SECRET);
+  });
+
+  it("a maintainer's Codex run uses the Owner's API key even when the provider is set to a ChatGPT plan; without a key it is 409", async () => {
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([{ message: "Done." }]);
+    const { s, projectId, send } = await startSeeded(script);
+    const mode = await send("owner", "POST", "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.codex });
+    expect(mode.status).toBe(200);
+
+    const noKey = await send("maintainer", "POST", `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" });
+    expect(noKey.status).toBe(409);
+    expect(await noKey.json()).toEqual({ error: "api_key_required", provider: "codex" });
+    expect(await json<AgentRun[]>(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
+
+    const added = await send("owner", "POST", "/api/connections", { kind: "llm", provider: "codex", name: "Codex", secrets: { apiKey: FAKE_OPENAI_KEY } });
+    expect(added.status).toBe(201);
+    const theirs = await send("maintainer", "POST", `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" });
+    expect(theirs.status).toBe(201);
+    const run = (await theirs.json()) as AgentRun;
+    expect(run).toMatchObject({ adapter: "codex", authMode: "api_key" });
+    await untilFinished(s, run.id);
+    expect((await getRun(s, run.id)).run.status).toBe("completed");
+
+    const owners = await send("owner", "POST", `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" });
+    expect(owners.status).toBe(201);
+    expect((await owners.json()) as AgentRun).toMatchObject({ adapter: "codex", authMode: "chatgpt" });
+    expect(await (await get(s, "/api/ledger")).text()).not.toContain(FAKE_OPENAI_KEY);
+  });
+
+  it("a reviewer decides an action and is named for it; a viewer may not decide", async () => {
+    const { s, projectId, send } = await startSeeded(script);
+    const run = await json<AgentRun>(post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go" }));
+    await untilPending(s, projectId);
+    const [action] = await pending(s, projectId);
+    const refused = await send("viewer", "POST", `/api/actions/${action!.id}/decision`, { decision: "allow" });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "forbidden", required: "reviewer" });
+
+    const res = await send("reviewer", "POST", `/api/actions/${action!.id}/decision`, { decision: "allow" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as AgentAction).toMatchObject({ id: action!.id, status: "allowed", decidedBy: "human" });
+    await untilFinished(s, run.id);
+    const entry = (await ledgerOf(s)).find((e) => e.type === "agent.action.decided" && (e.payload as { actionId: string }).actionId === action!.id)!;
+    expect(entry).toMatchObject({ actor: { kind: "human", id: "p-reviewer" }, payload: { decision: "allow", by: "human" } });
+    const names: Record<string, string> = Object.fromEntries(COLLABORATORS.map((p) => [p.id, p.name]));
+    expect(narrate(entry, { personName: (id) => names[id] }).headline).toBe("Reviewer One allowed it");
+  });
+
+  it("GET /api/agents tells a collaborator the adapters and modes, never where the Owner's keys come from or the acknowledgements", async () => {
+    const { send } = await startSeeded(script);
+    const theirs = (await (await send("maintainer", "GET", "/api/agents")).json()) as { providers: Record<string, Record<string, unknown>>; acks?: unknown };
+    expect(theirs.acks).toBeUndefined();
+    for (const p of Object.values(theirs.providers)) {
+      expect(Object.keys(p).sort()).toEqual(["available", "mode"]);
+    }
+    const owners = (await (await send("owner", "GET", "/api/agents")).json()) as { providers: Record<string, Record<string, unknown>>; acks: unknown };
+    expect(owners.acks).toEqual(PROVIDER_ACKS);
+    expect(owners.providers.claude).toMatchObject({ apiKey: "none" });
+  });
+
+  it("runs on a linked machine: a maintainer's start reaches remoteRuns.start on API keys only, decisions and stops carry the person", async () => {
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const board = new BoardService(db, ledger);
+    const projectId = board.createProject({ kind: "human", id: "owner" }, { name: "P" }).id;
+    const machineId = "a".repeat(32);
+    db.prepare(
+      `INSERT INTO agent_runs (id, project_id, card_id, adapter, auth_mode, prompt, status, worktree, base, started_at, machine_id)
+       VALUES ('rr1', ?, NULL, 'fake', 'none', 'go', 'running', 'w/rr1', NULL, '2026-01-01T00:00:00.000Z', ?)`,
+    ).run(projectId, machineId);
+    db.prepare(
+      `INSERT INTO agent_actions (id, run_id, kind, tool, summary, input, status, decided_by, reason, output, requested_at, decided_at)
+       VALUES ('ra1', 'rr1', 'shell', 'Bash', 'run', '{}', 'pending', NULL, '', NULL, '2026-01-01T00:00:00.000Z', NULL)`,
+    ).run();
+    const remoteRun = { id: "rr1", machineId } as unknown as AgentRun;
+    const remoteRuns = {
+      start: vi.fn(async () => remoteRun),
+      decide: vi.fn(async () => ({ id: "ra1", runId: "rr1", status: "allowed" }) as unknown as AgentAction),
+      stop: vi.fn(async () => remoteRun),
+    };
+    const runner = new AgentRunner({
+      db, ledger, worktrees: new WorktreeManager(tmp()), broker: new ApprovalBroker(), adapters: {}, extraSecrets: () => [], dataDir: tmp(),
+    });
+    const app = Fastify();
+    try {
+      fakeAuth(app);
+      registerRoutes(app, { board, gates: new GateService({ db, ledger }), ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
+      registerAgentRoutes(app, {
+        db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false, apiKey: () => "none",
+        remoteRuns: remoteRuns as unknown as RemoteRunService,
+      });
+      const body = { adapter: "fake", prompt: "go", machineId, connectionIds: ["c1"] };
+      const theirs = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, headers: asPrincipal("m1", "maintainer"), payload: body });
+      expect(theirs.statusCode).toBe(201);
+      expect(remoteRuns.start).toHaveBeenLastCalledWith({ kind: "human", id: "m1" }, {
+        projectId, machineId, adapter: "fake", prompt: "go", connectionIds: ["c1"], forceApiKey: true,
+      });
+      const owners = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: body });
+      expect(owners.statusCode).toBe(201);
+      expect(remoteRuns.start).toHaveBeenLastCalledWith({ kind: "human", id: "owner" }, expect.objectContaining({ forceApiKey: false }));
+      const reviewers = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, headers: asPrincipal("r1", "reviewer"), payload: body });
+      expect(reviewers.statusCode).toBe(403);
+
+      const decided = await app.inject({ method: "POST", url: "/api/actions/ra1/decision", headers: asPrincipal("r1", "reviewer"), payload: { decision: "allow" } });
+      expect(decided.statusCode).toBe(200);
+      expect(remoteRuns.decide).toHaveBeenCalledWith({ kind: "human", id: "r1" }, expect.objectContaining({ id: "rr1", machineId }), "ra1", "allow", "");
+      const viewerDecides = await app.inject({ method: "POST", url: "/api/actions/ra1/decision", headers: asPrincipal("v1", "viewer"), payload: { decision: "allow" } });
+      expect(viewerDecides.statusCode).toBe(403);
+
+      const reviewerStops = await app.inject({ method: "POST", url: "/api/runs/rr1/stop", headers: asPrincipal("r1", "reviewer") });
+      expect(reviewerStops.statusCode).toBe(403);
+      expect(remoteRuns.stop).not.toHaveBeenCalled();
+      const stopped = await app.inject({ method: "POST", url: "/api/runs/rr1/stop", headers: asPrincipal("m1", "maintainer") });
+      expect(stopped.statusCode).toBe(200);
+      expect(remoteRuns.stop).toHaveBeenCalledWith({ kind: "human", id: "m1" }, expect.objectContaining({ id: "rr1", machineId }));
+    } finally {
+      await app.close();
+      db.close();
+    }
   });
 });

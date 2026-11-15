@@ -31,6 +31,7 @@ import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
+import { registerGateRoutes } from "./gates-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { wireLink } from "./link-wiring.js";
 import type { LinkService } from "../link/service.js";
@@ -65,7 +66,7 @@ import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
 import { redact, secretEnvValues } from "../agents/redact.js";
-import { AgentRunner } from "../agents/runner.js";
+import { API_KEY_ENV, AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
@@ -415,9 +416,6 @@ export function selectLocalEngines(
   return realLocalEngines;
 }
 
-/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
-const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
-
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -557,9 +555,10 @@ export async function createServer(opts: {
       extraEnv: fakeLoginEnv(),
       // Minted cloud values too: the runner keeps every one for the life of the process (declared below; read lazily).
       secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
-      record: (provider, ok) =>
+      // Recorded as the person who started the login (the route names them from the principal).
+      record: (provider, ok, actor) =>
         commitEvent(db, ledger, () => ({
-          event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
+          event: { projectId: null, actor, type: "connection.signin", payload: { provider, ok } },
           result: () => undefined,
         })),
     });
@@ -663,6 +662,7 @@ export async function createServer(opts: {
       });
       registerLedgerStream(app, ledger, cleanMirrored, { sessions: people.sessions });
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
+      registerGateRoutes(app, { gates, principal: (req) => req.principal });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,

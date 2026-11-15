@@ -14,10 +14,12 @@ export type { CardStory } from "@theterminal/shared";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
 export {
-  registerAuth, TOKEN_COOKIE, SESSION_COOKIE, PUBLIC_ROUTE, PUBLIC_ROUTES, ROUTE_ROLES, APP_HOST, routeKey, requireRole, actorOf,
+  registerAuth, TOKEN_COOKIE, SESSION_COOKIE, PUBLIC_ROUTE, PUBLIC_ROUTES, ROUTE_ROLES, APP_HOST, routeKey, requireRole, needs, actorOf,
   assertRoutesHaveRoles, sessionCookieOptions, clientKey, listenerOf, remoteHostAllowed,
 } from "./server/auth.js";
-export type { AuthDeps, HostRule, Principal } from "./server/auth.js";
+export type { AuthDeps, HostRule, Principal, RoleGuard } from "./server/auth.js";
+export { registerGateRoutes, sendGateError } from "./server/gates-routes.js";
+export type { GateRouteDeps } from "./server/gates-routes.js";
 export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export { DataDirInUseError } from "./server/data-dir-lock.js";
@@ -47,8 +49,8 @@ export {
   DecisionNotApplicableError, NoIntakeError,
 } from "./intake/service.js";
 export type { IntakeServiceDeps, IntakeProjectDecisions, RecordedTextDeps } from "./intake/service.js";
-export { GateService, GateBlockedError, GateNotMetError } from "./gates/service.js";
-export type { GateServiceDeps } from "./gates/service.js";
+export { GateService, GateBlockedError, GateNotMetError, GateRequirementError } from "./gates/service.js";
+export type { GateServiceDeps, Signer } from "./gates/service.js";
 export { gateFacts, evaluateConditions } from "./gates/conditions.js";
 export { registerIntakeRoutes } from "./server/intake-routes.js";
 export type { IntakeRouteDeps } from "./server/intake-routes.js";

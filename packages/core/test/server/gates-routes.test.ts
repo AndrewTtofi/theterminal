@@ -1,22 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import type { NewLedgerEntry, Role } from "@theterminal/shared";
+import Fastify, { type FastifyInstance } from "fastify";
+import type { NewLedgerEntry } from "@theterminal/shared";
 import { commitEvents } from "../../src/events/commit.js";
-import { GateRequirementError, GateService, type Signer } from "../../src/gates/service.js";
+import { GateRequirementError, GateService } from "../../src/gates/service.js";
 import { registerGateRoutes } from "../../src/server/gates-routes.js";
 import { human, world, type World } from "../gates/setup.js";
+import { TEST_PRINCIPAL, asNobody, fakeAuth } from "../fixtures/principal.js";
 
 let w: World;
 let app: FastifyInstance;
 let gates: GateService;
-
-/** The test's principal comes from a header: `<personId>:<role>`; none means no principal. */
-const principalOf = (req: FastifyRequest): Signer | null => {
-  const h = req.headers["x-test-principal"];
-  if (typeof h !== "string") return null;
-  const [personId, role] = h.split(":");
-  return { personId: personId!, role: role as Role };
-};
 
 beforeEach(async () => {
   w = world();
@@ -32,7 +25,8 @@ beforeEach(async () => {
     result: () => undefined,
   }));
   app = Fastify();
-  registerGateRoutes(app, { gates, principal: principalOf });
+  fakeAuth(app); // the principal comes from the TEST_PRINCIPAL header: `<personId>:<role>`, or `none`
+  registerGateRoutes(app, { gates, principal: (req) => req.principal });
   await app.ready();
 });
 
@@ -43,7 +37,7 @@ afterEach(async () => {
 const put = (body: unknown, who: string | null = "owner:owner", projectId = w.planned, gateId = "ready_to_ship") =>
   app.inject({
     method: "PUT", url: `/api/projects/${projectId}/gates/${gateId}/requirement`, payload: body as object,
-    headers: who === null ? {} : { "x-test-principal": who },
+    headers: who === null ? asNobody : { [TEST_PRINCIPAL]: who },
   });
 
 describe("PUT /api/projects/:id/gates/:gateId/requirement", () => {
