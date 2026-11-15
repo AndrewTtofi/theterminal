@@ -1,16 +1,24 @@
 /**
  * The Electron main process: starts the core server as a child on a real Node, then shows it in a locked-down
  * window (or, with `--headless`, writes a ready file and shows nothing). Nothing from core runs inside Electron.
+ *
+ * - One app per data folder: the single-instance lock lives in the profile. A second launch on the same folder
+ *   exits 0 silently, even when its other flags (`--port`, `--headless`, `--ready-file`) differ; it only brings the
+ *   first instance's window forward.
+ * - Quitting stops the server over IPC (`server.stop()`). A headless launch is asked to quit with SIGINT or SIGTERM.
+ *   On Windows a killed or force-closed host gets no signal: the server then relies on core's own shutdown when its
+ *   IPC channel disconnects. Callers that stop a headless app (the smoke suite) must check no `cli.js` is left.
  */
 import { execFile } from "node:child_process";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, Menu, session, shell, type MenuItemConstructorOptions } from "electron";
 import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, serverArgs, serverLogFile, type Layout } from "./layout.js";
-import { externalUrl, isAppUrl } from "./navigation.js";
+import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
+import { writeReadyFile } from "./ready-file.js";
 import { fallbackMacPath, loginShellPath, serverEnv } from "./server-env.js";
 import { ServerStartError, startServer, type ServerHandle } from "./server-process.js";
 
@@ -36,7 +44,8 @@ function boot(): void {
   let dataDir: string;
   try {
     dataDir = desktopDataDir(app.getPath("appData"), args.dataDir);
-    mkdirSync(profileDir(dataDir), { recursive: true });
+    // Owner-only: the profile holds the session cookie.
+    mkdirSync(profileDir(dataDir), { recursive: true, mode: 0o700 });
     // Before the lock: the lock lives in the profile, so it is per data folder.
     app.setPath("userData", profileDir(dataDir));
   } catch (err) {
@@ -59,6 +68,7 @@ function run(args: DesktopArgs, dataDir: string): void {
   let win: BrowserWindow | null = null;
   let quitting = false;
   let stopping = false;
+  let restartOffered = false;
 
   app.on("second-instance", () => {
     if (!win) return;
@@ -98,6 +108,11 @@ function run(args: DesktopArgs, dataDir: string): void {
   };
 
   void app.whenReady().then(async () => {
+    // Before any web contents exists, so none is ever unguarded.
+    hardenSession(session.defaultSession);
+    app.on("web-contents-created", (_event, contents) =>
+      hardenContents(contents, { appPort: () => ready?.port, openExternal: (url) => void shell.openExternal(url) }),
+    );
     try {
       const env = await buildServerEnv(layout);
       if (quitting) return;
@@ -114,7 +129,9 @@ function run(args: DesktopArgs, dataDir: string): void {
       return;
     }
     if (quitting) return;
-    void server.exited.then(() => onUnexpectedExit());
+    void server.exited
+      .then(() => offerRestart("The Terminal's server stopped unexpectedly."))
+      .catch((err: unknown) => process.stderr.write(`${(err as Error).message}\n`));
 
     if (args.headless) {
       if (process.platform === "darwin") app.dock?.hide();
@@ -128,22 +145,24 @@ function run(args: DesktopArgs, dataDir: string): void {
       }
       return;
     }
-    session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
     setMenu(ready);
     win = createWindow(ready);
   });
 
-  async function onUnexpectedExit(): Promise<void> {
-    if (quitting) return;
+  /** Tells the user something broke and offers Restart or Quit. Headless, it prints the message and exits 1. */
+  async function offerRestart(message: string): Promise<void> {
+    if (quitting || restartOffered) return;
+    restartOffered = true;
     if (args.headless) {
-      process.stderr.write("The Terminal's server stopped unexpectedly.\n");
+      process.stderr.write(`${message}\n`);
       app.exit(1);
       return;
     }
+    if (win && !win.isDestroyed() && !win.isVisible()) win.show();
     const options = {
       type: "error" as const,
       title: TITLE,
-      message: "The Terminal's server stopped unexpectedly.",
+      message,
       buttons: ["Restart", "Quit"],
       defaultId: 0,
       cancelId: 1,
@@ -163,19 +182,12 @@ function run(args: DesktopArgs, dataDir: string): void {
       title: TITLE,
       webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
     });
-    const openExternally = (url: string) => {
-      const external = externalUrl(url);
-      if (external !== null) void shell.openExternal(external);
-    };
-    w.webContents.setWindowOpenHandler(({ url }) => {
-      openExternally(url);
-      return { action: "deny" };
+    // Navigation, new windows and webviews are locked down by hardenContents (web-contents-created).
+    forgetBootstrapUrl(w.webContents, r.port);
+    w.webContents.on("did-fail-load", (_event, errorCode, _description, _url, isMainFrame) => {
+      if (isFatalLoadFailure(errorCode, isMainFrame)) void offerRestart("The Terminal's window could not load.");
     });
-    w.webContents.on("will-navigate", (event, url) => {
-      if (isAppUrl(url, r.port)) return;
-      event.preventDefault();
-      openExternally(url);
-    });
+    w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
     w.once("ready-to-show", () => w.show());
     w.on("closed", () => {
       if (win === w) win = null;
@@ -212,13 +224,6 @@ function probe(file: string, probeArgs: string[], opts: { timeout: number }): Pr
     // execFile ignores a stdio option: end stdin so an rc file that reads input gets EOF.
     child.stdin?.end();
   });
-}
-
-/** Written atomically, so a reader never sees half a file. It never holds the token. */
-function writeReadyFile(file: string, r: ReadyMessage): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ loopbackUrl: r.loopbackUrl, port: r.port }), { mode: 0o600 });
-  renameSync(tmp, file);
 }
 
 /** Electron's default menu, with Open in Browser in the File menu. */
