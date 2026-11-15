@@ -1,7 +1,10 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
@@ -136,22 +139,32 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
   const events: AdapterEvent[] = [];
   let n = 0;
   const abort = new AbortController();
+  // Settled by the first gate call and the first event: a test awaits these instead of polling with a deadline,
+  // which a slow process start (Windows CI) can overrun.
+  let onGated!: () => void;
+  let onEmitted!: () => void;
+  const gated = new Promise<void>((r) => (onGated = r));
+  const emitted = new Promise<void>((r) => (onEmitted = r));
   const opts: AdapterStartOptions = {
     cwd: worktree, projectId: "p1", prompt: "do it", authMode, signal: abort.signal,
     gate: async (a) => {
       proposed.push(a);
+      onGated();
       const d = { ...(await decide(a)), actionId: `act-${++n}` };
       decisions.push(d);
       return d;
     },
-    emit: (e) => events.push(e),
+    emit: (e) => {
+      events.push(e);
+      onEmitted();
+    },
     recordDenied: async (a, reason) => {
       denied.push([a, reason]);
     },
     clean: (t) => t,
     credentials: {},
   };
-  return { opts, proposed, decisions, denied, events, abort };
+  return { opts, proposed, decisions, denied, events, abort, gated, emitted };
 }
 
 /** Spawns the fake through node and remembers the child, so a test can check it was killed. */
@@ -167,6 +180,41 @@ function fakeSpawn() {
 
 function adapter(extra: { spawn?: typeof nodeSpawn; apiKey?: () => string | undefined; bin?: () => string | null } = {}) {
   return new GeminiAdapter({ dataDir: outside, command: { file: process.execPath, args: [FAKE] }, apiKey: () => FAKE_KEY, fakeEnv: fakeAgentEnv(), ...extra });
+}
+
+/**
+ * An in-process ACP agent that answers initialize and then, at session/new, ends stdout and exits before writing any
+ * stderr. `tail` is written to stderr (which then ends) only after stdout's end has been delivered and every callback
+ * it queued has run; null keeps stderr open, as a grandchild that inherited it would.
+ */
+function lateStderrSpawn(tail: string | null) {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdin, stdout, stderr, pid: 4242, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+    stdinLines: [] as LogEntry[], stdoutEnded: false,
+    kill: () => true,
+  });
+  const close = () => setImmediate(() => child.emit("close", child.exitCode, null));
+  stdout.once("end", () => {
+    child.stdoutEnded = true;
+    child.exitCode = 1;
+    child.emit("exit", 1, null);
+    if (tail === null) return close();
+    setImmediate(() => {
+      stderr.end(tail);
+      stderr.once("close", close);
+    });
+  });
+  createInterface({ input: stdin }).on("line", (line) => {
+    const msg = JSON.parse(line) as LogEntry;
+    child.stdinLines.push(msg);
+    if (msg.method === "initialize") stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }) + "\n");
+    else if (msg.method === "session/new") stdout.end();
+  });
+  const spawn = (() => child) as unknown as typeof nodeSpawn;
+  return { spawn, child };
 }
 
 const exited = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
@@ -310,6 +358,28 @@ describe("GeminiAdapter", () => {
     script({ config: { exitAt: "session/new" }, steps: [] });
     const r = await adapter().start(harness(policyGate(), "google").opts);
     expect(r).toEqual({ status: "failed", error: "Gemini exited unexpectedly: fake gemini: exiting at session/new" });
+  });
+
+  it("keeps the stderr tail of an early exit when stderr arrives after stdout has ended and the process has exited", async () => {
+    // The OS gives no order between the stdout and stderr pipes: here stdout ends and the process exits before any
+    // stderr is delivered, which arrives only once every callback queued by stdout's end has run.
+    const { spawn, child } = lateStderrSpawn("fake gemini: died after exit\n");
+    const r = await adapter({ spawn }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Gemini exited unexpectedly: fake gemini: died after exit" });
+    expect(child.stdinLines.map((l) => l.method)).toEqual(["initialize", "session/new"]);
+  });
+
+  it("reports an early exit without a tail when stderr stays open past the grace period", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { spawn, child } = lateStderrSpawn(null); // a grandchild holding stderr open: it never ends
+      const done = adapter({ spawn }).start(harness().opts);
+      await vi.waitFor(() => expect(child.stdoutEnded).toBe(true));
+      await vi.advanceTimersByTimeAsync(60_000); // past the stderr grace and the kill grace, without real waiting
+      expect(await done).toEqual({ status: "failed", error: "Gemini exited unexpectedly" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses a prompt that gemini would run as a slash or shell command, without starting it", async () => {
@@ -1364,26 +1434,31 @@ describe("GeminiAdapter", () => {
     const { spawn, children } = fakeSpawn();
     const h = harness();
     const done = adapter({ spawn }).start(h.opts);
-    await vi.waitFor(() => expect(h.events).toHaveLength(1));
+    await h.emitted;
+    expect(h.events).toHaveLength(1);
     h.abort.abort();
     expect(await done).toEqual({ status: "failed", error: "run stopped" });
     await waitExit(children[0]!);
   });
 
-  it("a gate that waits is cut off by abort: the pending write is denied and nothing is written", async () => {
-    const path = join(worktree, "notes.md");
-    script([{ type: "write", path, content: "x" }]);
-    const { spawn, children } = fakeSpawn();
-    let release: (() => void) | undefined;
-    const h = harness(() => new Promise<GateResult>((resolve) => (release = () => resolve({ decision: "deny", reason: "run stopped" }))));
-    const done = adapter({ spawn }).start(h.opts);
-    await vi.waitFor(() => expect(h.proposed).toHaveLength(1));
-    h.abort.abort();
-    release!();
-    expect(await done).toEqual({ status: "failed", error: "run stopped" });
-    await waitExit(children[0]!);
-    expect(existsSync(path)).toBe(false);
-  });
+  // The slow variant starts later than vi.waitFor's default 1 s deadline, as gemini can on a loaded Windows runner.
+  for (const [label, startDelayMs] of [["", 0], [" (gemini slow to start)", 1500]] as const) {
+    it(`a gate that waits is cut off by abort: the pending write is denied and nothing is written${label}`, async () => {
+      const path = join(worktree, "notes.md");
+      script({ config: { startDelayMs }, steps: [{ type: "write", path, content: "x" }] });
+      const { spawn, children } = fakeSpawn();
+      let release: (() => void) | undefined;
+      const h = harness(() => new Promise<GateResult>((resolve) => (release = () => resolve({ decision: "deny", reason: "run stopped" }))));
+      const done = adapter({ spawn }).start(h.opts);
+      await h.gated;
+      expect(h.proposed).toHaveLength(1);
+      h.abort.abort();
+      release!();
+      expect(await done).toEqual({ status: "failed", error: "run stopped" });
+      await waitExit(children[0]!);
+      expect(existsSync(path)).toBe(false);
+    });
+  }
 
   it("messages are flushed before tool results so the ledger keeps their order; a trailing word is held until after", async () => {
     script([

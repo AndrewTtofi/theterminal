@@ -23,6 +23,21 @@ const stop = async (s: RunningServer) => {
   running.splice(running.indexOf(s), 1);
   await s.close();
 };
+/**
+ * Opens the server's db for out-of-band edits, first proving the server let go of it: with no busy wait, an exclusive
+ * lock fails at once (SQLITE_BUSY) while any other connection is still open, instead of silently waiting it out.
+ */
+const openReleased = (dataDir: string) => {
+  const db = new Database(join(dataDir, "ledger.db"), { timeout: 0 });
+  try {
+    db.pragma("locking_mode = EXCLUSIVE");
+    db.exec("BEGIN EXCLUSIVE; COMMIT");
+  } catch (err) {
+    db.close();
+    throw err;
+  }
+  return db;
+};
 const tmp = (name = "tt-") => mkdtempSync(join(tmpdir(), name));
 const auth = (s: RunningServer) => ({ authorization: `Bearer ${s.token}` });
 const base = (s: RunningServer) => `http://127.0.0.1:${s.port}`;
@@ -45,7 +60,11 @@ const rawGet = (port: number, path: string, host = `127.0.0.1:${port}`) =>
     req.end();
   });
 
-describe("createServer", () => {
+// Most tests here start a server, stop it and start another on the same files: several SQLite opens, fsyncs and
+// WAL/SHM file creations and deletions each. On a loaded Windows runner, where file operations are scanned and
+// retried, that has taken over 5 s (the default). openReleased shows no lock is left behind to wait on, so this is
+// slowness alone: these get a longer, still bounded, timeout.
+describe("createServer", { timeout: 30_000 }, () => {
   it("persists data and the token across restarts", async () => {
     const dataDir = tmp();
     const a = await start({ dataDir, port: 0 });
@@ -85,7 +104,7 @@ describe("createServer", () => {
     await post(a, "/api/projects", { name: "P", pitch: "x" });
     await stop(a);
 
-    const db = new Database(join(dataDir, "ledger.db"));
+    const db = openReleased(dataDir);
     db.exec("DROP TRIGGER ledger_no_update; DROP TRIGGER ledger_no_delete;");
     db.prepare("UPDATE ledger SET payload = ? WHERE seq = 1").run('{"tampered":true}');
     db.close();
@@ -101,7 +120,7 @@ describe("createServer", () => {
 
   /** Open the server's db directly, triggers dropped, for out-of-band edits. */
   const tamper = (dataDir: string, fn: (db: Database.Database) => void) => {
-    const db = new Database(join(dataDir, "ledger.db"));
+    const db = openReleased(dataDir);
     db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
     fn(db);
     db.close();
@@ -115,6 +134,15 @@ describe("createServer", () => {
   };
   const getBoard = async (s: RunningServer, projectId: string) =>
     (await fetch(`${base(s)}/api/projects/${projectId}/board`, { headers: auth(s) })).json();
+
+  it("close() lets go of the database at once, so it can be reopened exclusively with no wait", async () => {
+    const dataDir = tmp();
+    const a = await start({ dataDir, port: 0 });
+    expect(() => openReleased(dataDir)).toThrow(expect.objectContaining({ code: "SQLITE_BUSY" })); // the probe works
+    await post(a, "/api/projects", { name: "P", pitch: "x" });
+    await stop(a);
+    openReleased(dataDir).close();
+  });
 
   it("rebuilds projections at startup, undoing direct edits to the cards table", async () => {
     const dataDir = tmp();
