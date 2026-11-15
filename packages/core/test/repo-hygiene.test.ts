@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
-/** Bidi controls, zero-width and other invisible characters: in source they must be written as escapes. */
-const HIDDEN = /[‪-‮⁦-⁩​-‏﻿؜⁠-⁤­]/u;
+/** Bidi controls, zero-width, line/paragraph separators, tag characters and other invisibles: write them as escapes. */
+const HIDDEN = /[\u{202A}-\u{202E}\u{2066}-\u{2069}\u{200B}-\u{200F}\u{FEFF}\u{061C}\u{2060}-\u{2064}\u{00AD}\u{180E}\u{2028}\u{2029}\u{E0000}-\u{E007F}]/u;
 
 describe("repository text", () => {
   it("holds no raw bidi or invisible characters", () => {

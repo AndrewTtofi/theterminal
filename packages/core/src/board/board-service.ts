@@ -47,6 +47,7 @@ export function requireCard(db: Db, id: string): Card {
 }
 
 const NAME_LIMITS = { min: 1, max: 120 };
+const PITCH_LIMITS = { min: 0, max: 500 };
 const TITLE_LIMITS = { min: 1, max: 200 };
 
 export type BoardServiceOptions = {
@@ -74,9 +75,10 @@ export class BoardService {
 
   createProject(actor: Actor, input: { name: string; pitch?: string }): Project {
     const parsed = projectInputSchema.parse(input);
-    // Trimmed, scrubbed of paths and the username, and refused (SecretInTextError) when it holds a secret.
+    // Trimmed, scrubbed of paths and the username, and refused (SecretInTextError) when it holds a secret. The pitch
+    // may be empty (its default).
     const name = this.recorded.text("name", parsed.name, NAME_LIMITS);
-    const { pitch } = parsed;
+    const pitch = this.recorded.text("pitch", parsed.pitch, PITCH_LIMITS);
     const projectId = this.newId();
     return this.command(() => ({
       event: { projectId, actor, type: "project.created", payload: { projectId, name, pitch } },

@@ -161,6 +161,19 @@ describe("names and titles are recorded text", () => {
     expect(JSON.stringify(ledger.list())).not.toContain("Hunter2Pass");
   });
 
+  it("checks and scrubs the pitch too, which may stay empty", () => {
+    expect(() => board.createProject(human, { name: "Club", pitch: `key ${SECRET}` })).toThrow(SecretInTextError);
+    expect(() => board.createProject(human, { name: "Club", pitch: `ask ${bearing}` })).toThrow(SecretInTextError);
+    expect(ledger.headSeq()).toBe(0);
+    expect(board.createProject(human, { name: "Club" }).pitch).toBe("");
+    expect(board.createProject(human, { name: "Club", pitch: "   " }).pitch).toBe("");
+    expect(board.createProject(human, { name: "Club", pitch: `notes in ${homedir()}/club by clubuser` }).pitch).toBe(
+      "notes in ~/club by <user>",
+    );
+    expect(() => board.createProject(human, { name: "Club", pitch: "x".repeat(501) })).toThrow();
+    expect(JSON.stringify(ledger.list())).not.toContain("TESTKEY");
+  });
+
   it("scrubs paths and the username from names and titles", () => {
     const p = board.createProject(human, { name: `  clubuser in ${homedir()}/club  ` });
     expect(p.name).toBe("<user> in ~/club");

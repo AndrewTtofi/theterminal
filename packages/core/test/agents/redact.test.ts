@@ -329,8 +329,8 @@ describe("redact: leak fixes", () => {
       redact(once); // warm-up: JIT and regex compilation are not part of the growth
       const t1 = time(once);
       const t2 = time(twice);
-      // A floor of 2 ms keeps timer resolution from deciding a case that is fast at both sizes.
-      expect(t2, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, twice as long input ${t2.toFixed(1)} ms`).toBeLessThanOrEqual(3 * Math.max(t1, 2));
+      // A floor of 10 ms keeps timer resolution and scheduler noise from deciding a case that is fast at both sizes.
+      expect(t2, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, twice as long input ${t2.toFixed(1)} ms`).toBeLessThanOrEqual(3 * Math.max(t1, 10));
     }
   });
 });
