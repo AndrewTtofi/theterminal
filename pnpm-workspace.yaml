@@ -32,4 +32,4 @@ overrides:
   # mature ones. The selectors are scoped to the lines that are too new, so a later line is not pinned down.
   "axios@>=1.21 <1.22": 1.21.0
   "follow-redirects@>=1.16 <1.17": 1.16.2
-  "node-forge@>=1.4 <1.5": 1.4.2
+  "node-forge@>=1.4 <1.5": 1.4.3
