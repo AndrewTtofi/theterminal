@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import {
   OVERRIDE_OUTPUT_CHARS, OverrideBusyError, OverrideService, ProgramNotAllowedError, ProgramNotFoundError, type OverrideDeps,
 } from "../../src/override/service.js";
+import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
@@ -414,7 +415,7 @@ describe("discard", () => {
     expect(done.payload).toMatchObject({ ok: true, exitCode: 0, signal: null, timedOut: false });
     expect(readFileSync(join(wt, "kept.txt"), "utf8")).toBe("committed\n");
     expect(existsSync(join(wt, "new"))).toBe(false);
-    const changes = await listChanges({ db, dataDir, worktrees, clean: (id, s, max) => runner.cleanFor(id)(s, max) }, run.id);
+    const changes = await listChanges(depsWith(), run.id);
     expect(changes.files.map((f) => f.path)).toEqual(["kept.txt"]);
     expect(service.active(run.id)).toBe(false);
   });
@@ -423,6 +424,31 @@ describe("discard", () => {
     const result = await service.discard(owner, run.id, REASON);
     expect(result.files).toBe(0);
     expect(completedFor(result.overrideId)!.payload).toMatchObject({ ok: true });
+  });
+
+  it("counts a rename on the working-tree side once (final review, Minor 4)", async () => {
+    writeFileSync(join(wt, "a.txt"), "content\n");
+    await git(["add", "-A"]);
+    await git(["commit", "--no-verify", "-m", "agent work"]);
+    renameSync(join(wt, "a.txt"), join(wt, "b.txt"));
+    await git(["add", "-N", "b.txt"]); // porcelain v1 shows ` R a.txt -> b.txt`: one entry with an extra field
+    const result = await service.discard(owner, run.id, REASON);
+    expect(result.files).toBe(1);
+    expect(existsSync(join(wt, "a.txt"))).toBe(true);
+    expect(existsSync(join(wt, "b.txt"))).toBe(false);
+  });
+
+  it.runIf(posix)("never recurses into a planted submodule, so its filter driver never runs; plain git does (final review, Important 1)", async () => {
+    const trap = await plantSubmoduleTrap(wt, outside);
+    writeFileSync(join(wt, "scratch.txt"), "x\n");
+    const result = await service.discard(owner, run.id, REASON);
+    expect(completedFor(result.overrideId)!.payload).toMatchObject({ ok: true });
+    expect(existsSync(join(wt, "scratch.txt"))).toBe(false);
+    expect(trap.ran()).toBe(false);
+    expect(existsSync(trap.inner)).toBe(false); // nothing was restored inside the submodule
+    // Control: the same repository under plain git recurses and runs the driver.
+    await plainGit(wt, "reset", "--hard", "HEAD");
+    expect(trap.ran()).toBe(true);
   });
 
   it("refuses a short reason or a secret in it", async () => {

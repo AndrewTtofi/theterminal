@@ -49,8 +49,19 @@ export class HooksDirModifiedError extends Error {
   }
 }
 
-/** Given to every runGit call: no pager, no fsmonitor program, paths printed as they are. */
-export const GIT_COMMON_ARGS = ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"] as const;
+/**
+ * Given to every runGit call, before the subcommand: no pager; no fsmonitor program; paths printed as they are; no
+ * recursion into submodules (a nested repository's own configuration is never scanned, so a reset or checkout that
+ * entered it could run its filter driver) and no submodule summaries; replace objects ignored (`git replace` in the
+ * shared repository would otherwise substitute what every diff and rev-parse sees); and `core.bigFileThreshold`
+ * pinned to git's default, so a planted `core.bigFileThreshold=1` cannot make every text file read as binary.
+ */
+export const GIT_COMMON_ARGS = [
+  "--no-pager", "--no-replace-objects",
+  "-c", "core.fsmonitor=false", "-c", "core.quotePath=false",
+  "-c", "submodule.recurse=false", "-c", "status.submoduleSummary=false",
+  "-c", "core.bigFileThreshold=512m",
+] as const;
 export const GIT_TIMEOUT_MS = 30_000;
 export const GIT_MAX_BUFFER = 2 * 1024 * 1024;
 /** An always-empty directory inside dataDir that runGit names as `core.hooksPath`, so no hook ever runs. */
@@ -290,7 +301,8 @@ export class WorktreeManager {
 
   /**
    * Runs git in `cwd`, which may be a tree or repository an agent controlled, so nothing in it may make git run a
-   * program: GIT_COMMON_ARGS (no pager, no fsmonitor), `core.hooksPath` set to an always-empty directory,
+   * program: GIT_COMMON_ARGS (no pager, no fsmonitor, no submodule recursion, no replace objects, the default
+   * big-file threshold), `core.hooksPath` set to an always-empty directory,
    * `commit.gpgsign=false` (no signing program), `core.attributesFile` set to an always-empty file, `--attr-source`
    * set to the empty tree when git supports it (2.40+), and every filter driver named in the repository's
    * configuration or in any `.gitattributes` (the top level of `cwd`, and every one in HEAD's tree) set to empty
@@ -503,7 +515,12 @@ export class WorktreeManager {
     return repo;
   }
 
-  async createRunWorktree(projectId: string, runId: string): Promise<{ absPath: string; relPath: string }> {
+  /**
+   * Creates the run's worktree on a new branch `run/<runId>` from the project repository's HEAD and returns its path
+   * and `base`, the commit it was created at, read from the new worktree itself: the fork point for every later view
+   * of what the run changed, recorded with the run so nothing the agent can move (a branch, a replace ref) changes it.
+   */
+  async createRunWorktree(projectId: string, runId: string): Promise<{ absPath: string; relPath: string; base: string }> {
     assertId("projectId", projectId);
     assertId("runId", runId);
     return this.serialize(projectId, async () => {
@@ -511,8 +528,10 @@ export class WorktreeManager {
       const absPath = join(this.dataDir, "projects", projectId, "worktrees", runId);
       mkdirSync(dirname(absPath), { recursive: true });
       await this.runGit(repo, ["worktree", "add", "-b", `run/${runId}`, absPath]);
+      const base = (await this.runGit(absPath, ["rev-parse", "--verify", "HEAD"])).trim();
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) throw new Error("the new worktree has no commit to fork from");
       const relPath = relative(this.dataDir, absPath).split(sep).join("/");
-      return { absPath, relPath };
+      return { absPath, relPath, base };
     });
   }
 

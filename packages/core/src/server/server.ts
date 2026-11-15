@@ -500,7 +500,7 @@ export async function createServer(opts: {
       });
       registerIntakeRoutes(app, { intake });
       registerStoryRoutes(app, { db, ledger });
-      registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean });
+      registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,

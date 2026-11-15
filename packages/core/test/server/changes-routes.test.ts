@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -123,8 +123,9 @@ describe("changes routes", { timeout: 20000 }, () => {
 
   it("404 worktree_missing when the working copy is gone, 409 no_base without a fork point", async () => {
     const { s, run, wt, dataDir } = await start();
+    expect(run.base).toMatch(/^[0-9a-f]{40,64}$/);
     const repoGit = join(dataDir, "projects", run.projectId, "repo", ".git");
-    writeFileSync(join(repoGit, "HEAD"), "ref: refs/heads/nowhere\n");
+    rmSync(join(repoGit, "objects", run.base!.slice(0, 2), run.base!.slice(2)), { force: true }); // the recorded fork commit is gone
     const nb = await get(s, `/api/runs/${run.id}/changes`);
     expect(nb.status).toBe(409);
     expect(await nb.json()).toEqual({ error: "no_base" });
@@ -147,6 +148,29 @@ describe("changes routes", { timeout: 20000 }, () => {
       error: "unsafe_repository",
       message: "This repository's git configuration includes other files, which The Terminal does not allow",
     });
+  });
+
+  it("409 gitconfig_modified / hooks_modified when the workspace's own git pins were tampered with, never 500", async () => {
+    const { s, run, dataDir } = await start();
+    const hooks = join(dataDir, ".theterminal-empty-hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\n");
+    const h = await get(s, `/api/runs/${run.id}/changes`);
+    expect(h.status).toBe(409);
+    expect(await h.json()).toEqual({ error: "hooks_modified", message: expect.any(String) });
+    rmSync(join(hooks, "pre-commit"));
+
+    const cfg = join(dataDir, ".theterminal-empty-gitconfig");
+    chmodSync(cfg, 0o644);
+    writeFileSync(cfg, "[core]\n\tfsmonitor = true\n");
+    for (const route of ["changes", "diff?path=notes.txt"]) {
+      const g = await get(s, `/api/runs/${run.id}/${route}`);
+      expect(g.status, route).toBe(409);
+      expect(await g.json()).toEqual({ error: "gitconfig_modified", message: expect.any(String) });
+    }
+    const d = await post(s, `/api/runs/${run.id}/override/discard`, { reason: "the agent left the build broken" });
+    expect(d.status).toBe(409);
+    expect(await d.json()).toEqual({ error: "gitconfig_modified", message: expect.any(String) });
   });
 
   it("401 without the cookie", async () => {

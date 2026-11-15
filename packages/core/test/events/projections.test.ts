@@ -152,6 +152,17 @@ describe("agent projections", () => {
     expect(listRuns(db, "p1")).toEqual(live);
   });
 
+  it("projects the fork commit `base` from agent.started, NULL for entries without it, and rebuilds the same rows", () => {
+    const base = "b".repeat(40);
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r1", base });
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r2" }); // before the fork was kept
+    expect(getRun(db, "r1")!.base).toBe(base);
+    expect(getRun(db, "r2")!.base).toBeNull();
+    const live = listRuns(db, "p1");
+    rebuildAllProjections(db, ledger);
+    expect(listRuns(db, "p1")).toEqual(live);
+  });
+
   it("projects agent.rate_limited into rate_limits with the run's adapter, and rebuilds the same rows", () => {
     emit("agent.started", { runId: "r1", adapter: "codex", authMode: "api_key", prompt: "p", cardId: null, worktree: "wt/r1" });
     emit("agent.rate_limited", { runId: "r1", retryAfterS: 12 });

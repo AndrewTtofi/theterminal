@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_CHANGED_FILES, MAX_FILE_BYTES, type AgentRun } from "@theterminal/shared";
+import type { AgentAdapter } from "../../src/agents/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
@@ -14,8 +15,10 @@ import {
   NoBaseError, RunActiveError, WorktreeMissingError, fileDiff, isGitSegment, listChanges, listDir, readFile, runWorktree, type ChangesDeps,
 } from "../../src/changes/changes.js";
 import { openDatabase, type Db } from "../../src/db.js";
+import { commitEvent } from "../../src/events/commit.js";
 import { getRun, listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
+import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
@@ -42,9 +45,8 @@ beforeEach(async () => {
     db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { fake: new FakeAdapter([]) },
     extraSecrets: () => [KEY], dataDir, username: "someuser",
   });
-  run = await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
-  await vi.waitFor(() => expect(getRun(db, run.id)!.status).not.toBe("running"), { timeout: 5000 });
-  deps = { db, dataDir, worktrees, clean: (id, s, max) => runner.cleanFor(id)(s, max) };
+  run = await startRun(projectId);
+  deps = { db, dataDir, worktrees, clean: (id, s, max) => runner.cleanFor(id)(s, max), settling: (id) => runner.settling(id) };
   wt = join(dataDir, run.worktree);
 });
 afterEach(async () => {
@@ -53,15 +55,24 @@ afterEach(async () => {
   rmSync(outside, { recursive: true, force: true });
 });
 
+/** Starts a run with the fake adapter (which does nothing) and waits for it to finish. */
+const startRun = async (projectId: string) => {
+  const r = await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+  await vi.waitFor(() => expect(getRun(db, r.id)!.status).not.toBe("running"), { timeout: 5000 });
+  return r;
+};
 const write = (rel: string, content: string | Buffer) => writeFileSync(join(wt, rel), content);
-/** Commits `files` to the project repository and moves the run's branch onto it, so they are part of the fork point. */
-const advanceBase = async (files: Record<string, string>) => {
+/** Commits `files` to the project repository, then starts a fresh run from that commit, so they are part of its fork point. */
+const startWithBase = async (files: Record<string, string>) => {
   const repo = worktrees.repoPath(run.projectId);
   for (const [rel, content] of Object.entries(files)) writeFileSync(join(repo, rel), content);
   await worktrees.runGit(repo, ["add", "-A"]);
   await worktrees.runGit(repo, ["commit", "--no-verify", "-m", "base"]);
-  await worktrees.runGit(wt, ["reset", "--hard", (await worktrees.runGit(repo, ["rev-parse", "HEAD"])).trim()]);
+  run = await startRun(run.projectId);
+  wt = join(dataDir, run.worktree);
 };
+/** The project repository's checked-out branch, as the agent could name it to `update-ref`. */
+const mainBranch = async () => (await worktrees.runGit(worktrees.repoPath(run.projectId), ["symbolic-ref", "HEAD"])).trim();
 const commitAll = async () => {
   await worktrees.runGit(wt, ["add", "-A"]);
   await worktrees.runGit(wt, ["commit", "--no-verify", "-m", "agent work"]);
@@ -86,7 +97,9 @@ describe("a live run", () => {
         gitCalls++;
         return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
       };
-      const d: ChangesDeps = { ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max) };
+      const d: ChangesDeps = {
+        ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max), settling: (id) => live.settling(id),
+      };
       writeFileSync(join(dataDir, r.worktree, "notes.txt"), "x\n");
       const message = "Changes show when the run is stopped or finished.";
       await expect(listChanges(d, r.id)).rejects.toThrow(new RunActiveError());
@@ -98,10 +111,54 @@ describe("a live run", () => {
 
       live.stop(owner, r.id);
       await vi.waitFor(() => expect(getRun(db, r.id)!.status).toBe("stopped"), { timeout: 5000 });
+      await vi.waitFor(() => expect(live.settling(r.id)).toBe(false), { timeout: 5000 });
       expect((await listChanges(d, r.id)).files.map((f) => f.path)).toEqual(["notes.txt"]);
       expect(readFile(d, r.id, "notes.txt").text).toBe("x\n");
       expect(gitCalls).toBeGreaterThan(0);
     } finally {
+      await live.shutdown();
+    }
+  });
+
+  it("refuses every view while a stopped run's agent may still be writing (settling), without starting git", async () => {
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: AgentAdapter = {
+      id: "fake",
+      start: async () => {
+        await returned; // ignores the abort until released
+        return { status: "completed" };
+      },
+    };
+    const live = new AgentRunner({
+      db, ledger: new Ledger(db), worktrees, broker: new ApprovalBroker(), dataDir, extraSecrets: () => [KEY], username: "someuser", adapters: { fake: slow },
+    });
+    try {
+      const r = await live.start(owner, { projectId: run.projectId, adapter: "fake", prompt: "slow" });
+      live.stop(owner, r.id);
+      expect(getRun(db, r.id)!.status).toBe("stopped");
+      expect(live.settling(r.id)).toBe(true);
+      let gitCalls = 0;
+      const counting: GitRunner = async (args, cwd, opts) => {
+        gitCalls++;
+        return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+      };
+      const d: ChangesDeps = {
+        ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max), settling: (id) => live.settling(id),
+      };
+      writeFileSync(join(dataDir, r.worktree, "notes.txt"), "x\n");
+      await expect(listChanges(d, r.id)).rejects.toBeInstanceOf(RunActiveError);
+      await expect(fileDiff(d, r.id, "notes.txt")).rejects.toBeInstanceOf(RunActiveError);
+      expect(() => listDir(d, r.id, "")).toThrow(RunActiveError);
+      expect(() => readFile(d, r.id, "notes.txt")).toThrow(RunActiveError);
+      expect(gitCalls).toBe(0);
+      release();
+      await vi.waitFor(() => expect(live.settling(r.id)).toBe(false));
+      expect((await listChanges(d, r.id)).files.map((f) => f.path)).toEqual(["notes.txt"]);
+    } finally {
+      release();
       await live.shutdown();
     }
   });
@@ -127,7 +184,7 @@ describe("listChanges", () => {
   });
 
   it("compares with the fork point: committed and uncommitted edits, deletions and binary files", async () => {
-    await advanceBase({ "a.txt": "one\ntwo\n", "gone.txt": "bye\n" });
+    await startWithBase({ "a.txt": "one\ntwo\n", "gone.txt": "bye\n" });
     write("img.bin", Buffer.from([1, 0, 2, 0]));
     await commitAll();
     write("a.txt", "one\nTWO\n");
@@ -151,11 +208,103 @@ describe("listChanges", () => {
     expect(c.files[0]!.path).toBe("f000.txt");
   });
 
-  it("fails closed with NoBaseError when the fork point cannot be found", async () => {
-    rmSync(join(worktrees.repoPath(run.projectId), ".git", "refs", "heads"), { recursive: true, force: true });
-    rmSync(join(worktrees.repoPath(run.projectId), ".git", "packed-refs"), { force: true });
+  it("does not depend on the project repository's HEAD: a broken HEAD still lists against the recorded fork commit", async () => {
+    write("notes.txt", "x\n");
     writeFileSync(join(worktrees.repoPath(run.projectId), ".git", "HEAD"), "ref: refs/heads/nowhere\n");
+    const c = await listChanges(deps, run.id);
+    expect(c.base).toBe(run.base);
+    expect(c.files.map((f) => f.path)).toEqual(["notes.txt"]);
+  });
+});
+
+describe("the fork point is the commit recorded when the run started (final review, Important 2)", () => {
+  /** The agent's own git, as a gated shell action would run it, in the run's worktree. */
+  const agentGit = (...args: string[]) => plainGit(wt, ...args);
+
+  it("records the project repository's HEAD at the start as the run's base and diffs against it", async () => {
+    const repoHead = (await worktrees.runGit(worktrees.repoPath(run.projectId), ["rev-parse", "HEAD"])).trim();
+    expect(run.base).toBe(repoHead);
+    expect(getRun(db, run.id)!.base).toBe(repoHead);
+    write("notes.txt", "x\n");
+    const c = await listChanges(deps, run.id);
+    expect(c.base).toBe(repoHead);
+    expect(c.head).toBe(repoHead);
+  });
+
+  it("still shows committed work after the agent moves the project branch onto its own commit (update-ref)", async () => {
+    await startWithBase({ "a.txt": "one\n" });
+    write("a.txt", "one\ntwo\n");
+    write("new.txt", "new\n");
+    await commitAll();
+    await agentGit("update-ref", await mainBranch(), "HEAD");
+    const c = await listChanges(deps, run.id);
+    expect(c.base).toBe(run.base);
+    expect(c.files.map((f) => [f.path, f.status])).toEqual([["a.txt", "modified"], ["new.txt", "added"]]);
+    expect((await fileDiff(deps, run.id, "a.txt")).text).toContain("+two");
+  });
+
+  it("ignores replace objects the agent plants for the fork commit (git replace)", async () => {
+    await startWithBase({ "a.txt": "one\n" });
+    write("a.txt", "one\ntwo\n");
+    await commitAll();
+    await agentGit("replace", run.base!, "HEAD");
+    const c = await listChanges(deps, run.id);
+    expect(c.files).toEqual([{ path: "a.txt", status: "modified", added: 1, deleted: 0, binary: false }]);
+    expect((await fileDiff(deps, run.id, "a.txt")).text).toContain("+two");
+  });
+
+  it("keeps text files readable as text when the agent sets core.bigFileThreshold=1 in the shared configuration", async () => {
+    await startWithBase({ "a.txt": "one\n" });
+    write("a.txt", "one\ntwo\n");
+    write("b.txt", "b\n");
+    await commitAll();
+    await agentGit("config", "core.bigFileThreshold", "1");
+    const c = await listChanges(deps, run.id);
+    expect(c.files).toEqual([
+      { path: "a.txt", status: "modified", added: 1, deleted: 0, binary: false },
+      { path: "b.txt", status: "added", added: 1, deleted: 0, binary: false },
+    ]);
+    const d = await fileDiff(deps, run.id, "a.txt");
+    expect(d).toMatchObject({ binary: false, added: 1, deleted: 0 });
+    expect(d.text).toContain("+two");
+  });
+
+  it("a run recorded before the fork commit was kept fails closed with NoBaseError; its files are still browsable", async () => {
+    const legacy = await worktrees.createRunWorktree(run.projectId, "legacy-run");
+    const ledger = new Ledger(db);
+    commitEvent(db, ledger, () => ({
+      event: {
+        projectId: run.projectId, actor: owner, type: "agent.started",
+        payload: { runId: "legacy-run", adapter: "fake", authMode: "none", prompt: "old", cardId: null, worktree: legacy.relPath },
+      },
+      result: () => undefined,
+    }));
+    commitEvent(db, ledger, () => ({
+      event: { projectId: run.projectId, actor: owner, type: "agent.finished", payload: { runId: "legacy-run", status: "completed", costUsd: null, error: null } },
+      result: () => undefined,
+    }));
+    expect(getRun(db, "legacy-run")!.base).toBeNull();
+    writeFileSync(join(legacy.absPath, "notes.txt"), "x\n");
+    await expect(listChanges(deps, "legacy-run")).rejects.toBeInstanceOf(NoBaseError);
+    await expect(fileDiff(deps, "legacy-run", "notes.txt")).rejects.toBeInstanceOf(NoBaseError);
+    expect(listDir(deps, "legacy-run", "").entries.map((e) => e.name)).toEqual(["notes.txt"]);
+    expect(readFile(deps, "legacy-run", "notes.txt").text).toBe("x\n");
+  });
+
+  it("fails closed with NoBaseError when the recorded fork commit is no longer in the repository", async () => {
+    const objects = join(worktrees.repoPath(run.projectId), ".git", "objects");
+    rmSync(join(objects, run.base!.slice(0, 2), run.base!.slice(2)), { force: true });
     await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(NoBaseError);
+  });
+
+  it.skipIf(process.platform === "win32")("never recurses into a planted submodule, so its filter driver never runs", async () => {
+    const trap = await plantSubmoduleTrap(wt, outside);
+    write("notes.txt", "x\n");
+    const c = await listChanges(deps, run.id);
+    expect(c.files.map((f) => f.path)).toEqual(expect.arrayContaining([".gitmodules", "notes.txt"]));
+    await fileDiff(deps, run.id, ".gitmodules");
+    expect(trap.ran()).toBe(false);
+    expect(existsSync(trap.inner)).toBe(false);
   });
 });
 
@@ -169,7 +318,7 @@ describe("fileDiff", () => {
   });
 
   it("diffs a tracked file against the fork point, and an unchanged one is empty", async () => {
-    await advanceBase({ "same.txt": "same\n" });
+    await startWithBase({ "same.txt": "same\n" });
     write("a.txt", "one\ntwo\n");
     await commitAll();
     write("a.txt", `one\nkey=${KEY}\n`);

@@ -7,7 +7,7 @@ import { AlreadyDecidedError } from "../agents/approvals.js";
 import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/changes.js";
-import { UnsafeGitConfigError } from "../agents/worktrees.js";
+import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError } from "../agents/worktrees.js";
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
 import {
@@ -99,6 +99,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof ProgramNotAllowedError) return reply.code(400).send({ error: "program_not_allowed" });
     if (err instanceof OverridesShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
     if (err instanceof UnsafeGitConfigError) return reply.code(409).send({ error: "unsafe_repository", message: err.message });
+    // The workspace's own git pins were tampered with, so git was not run: fixed text, never a path or fs error.
+    if (err instanceof SharedGitconfigModifiedError) {
+      return reply.code(409).send({ error: "gitconfig_modified", message: "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it." });
+    }
+    if (err instanceof HooksDirModifiedError) {
+      return reply.code(409).send({ error: "hooks_modified", message: "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again." });
+    }
     if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
     if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
     // The explanation is a fixed sentence naming a field, never the text.

@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
+import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 import {
   EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, GitTimeoutError, SharedGitconfigModifiedError, UnsafeGitConfigError,
   WorktreeManager,
@@ -385,8 +386,12 @@ describe("WorktreeManager", () => {
       const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
       const fake: GitRunner = async (args, cwd, opts) => {
         calls.push({ args, opts });
-        if (args.includes("--absolute-git-dir")) return join(realpathSync.native(cwd), ".git");
-        if (args.includes("--verify")) throw new Error("no HEAD yet");
+        const inWorktree = basename(dirname(cwd)) === "worktrees"; // the new worktree, which this fake never creates
+        if (args.includes("--absolute-git-dir")) return join(inWorktree ? cwd : realpathSync.native(cwd), ".git");
+        if (args.includes("--verify")) {
+          if (inWorktree) return `${"a".repeat(40)}\n`; // the new worktree's HEAD: the run's fork commit
+          throw new Error("no HEAD yet");
+        }
         return "";
       };
       const m = new WorktreeManager(dataDir, fake);
@@ -601,6 +606,33 @@ describe("WorktreeManager", () => {
       await new WorktreeManager(dataDir, fake).runGit(outside, ["status"]);
       const last = calls.at(-1)!;
       for (const n of ["deep", "top"]) expect(last).toContain(`filter.${n}.smudge=`);
+    });
+  });
+
+  describe("submodules, replace objects and the big-file threshold (final review)", () => {
+    it("every call disables submodule recursion and summaries, replace objects, and pins core.bigFileThreshold", () => {
+      const args = [...GIT_COMMON_ARGS];
+      const pairs = args.flatMap((a, i) => (a === "-c" ? [args[i + 1]] : []));
+      expect(pairs).toEqual(expect.arrayContaining(["submodule.recurse=false", "status.submoduleSummary=false", "core.bigFileThreshold=512m"]));
+      expect(args).toContain("--no-replace-objects");
+      // Global options only, before the subcommand: nothing here names a subcommand or takes an operand.
+      for (const a of args) expect(a === "-c" || a.startsWith("--") || a.includes("=")).toBe(true);
+    });
+
+    it.skipIf(process.platform === "win32")("never recurses into a planted submodule on reset, checkout or status, so its filter driver never runs; plain git does", async () => {
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      const trap = await plantSubmoduleTrap(wt.absPath, outside);
+      await mgr.runGit(wt.absPath, ["reset", "--hard", "HEAD"]);
+      expect(trap.ran()).toBe(false);
+      expect(existsSync(trap.inner)).toBe(false); // nothing was restored inside the submodule
+      await mgr.runGit(wt.absPath, ["checkout", "--", "."]);
+      await mgr.runGit(wt.absPath, ["status", "--porcelain=v1", "-z"]);
+      await mgr.runGit(wt.absPath, ["diff", "--numstat", "HEAD~1"]);
+      expect(trap.ran()).toBe(false);
+      // Control: plain git with the same repository recurses and runs the driver.
+      await plainGit(wt.absPath, "reset", "--hard", "HEAD");
+      expect(trap.ran()).toBe(true);
+      expect(existsSync(trap.inner)).toBe(true);
     });
   });
 });

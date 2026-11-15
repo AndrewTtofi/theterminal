@@ -302,7 +302,7 @@ export class AgentRunner {
         type: "agent.started",
         payload: {
           runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub, runSecrets),
-          cardId, worktree: wt.relPath,
+          cardId, worktree: wt.relPath, base: wt.base,
         },
       },
       result: () => getRun(db, runId)!,

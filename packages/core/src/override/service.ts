@@ -147,7 +147,10 @@ function notStarted(e: unknown): string {
   return `the program could not be started${typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? ` (${code})` : ""}`;
 }
 
-/** Counts the entries of `git status --porcelain=v1 -z`: a rename or copy carries its source as an extra field. */
+/**
+ * Counts the entries of `git status --porcelain=v1 -z`: a rename or copy, on the index side (`R `) or the working
+ * tree side (` R`), carries its source as an extra field.
+ */
 function countStatus(out: string): number {
   const fields = out.split("\0");
   let n = 0;
@@ -155,7 +158,7 @@ function countStatus(out: string): number {
     const f = fields[i]!;
     if (f.length < 4) continue;
     n++;
-    if (f[0] === "R" || f[0] === "C") i++;
+    if (/[RC]/.test(f.slice(0, 2))) i++;
   }
   return n;
 }
@@ -280,8 +283,10 @@ export class OverrideService {
   }
 
   /**
-   * Drops the working copy's uncommitted changes (`git reset --hard HEAD`, then `git clean -fd`) and keeps the
-   * agent's commits. `files` counts the uncommitted entries git reported before. Resolves after override.completed.
+   * Drops the working copy's uncommitted changes (`git reset --hard --no-recurse-submodules HEAD`, then
+   * `git clean -fd`) and keeps the agent's commits. Neither enters a nested repository: its own configuration, which
+   * the worktree manager never scans, could name a filter driver that a recursing reset would run as the Owner.
+   * `files` counts the uncommitted entries git reported before. Resolves after override.completed.
    */
   async discard(actor: Actor, runId: string, reason: string): Promise<{ overrideId: string; files: number }> {
     if (actor.kind !== "human") throw new HumanRequiredError();
@@ -302,7 +307,7 @@ export class OverrideService {
     }
     let completion: Completion;
     try {
-      const reset = await git(["reset", "--hard", "HEAD"]);
+      const reset = await git(["reset", "--hard", "--no-recurse-submodules", "HEAD"]);
       const clean = await git(["clean", "-fd"]);
       completion = { ok: true, exitCode: 0, signal: null, timedOut: false, output: this.cleanOutput(runId, reset + clean) };
     } catch (e) {

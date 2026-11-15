@@ -14,10 +14,11 @@ import {
 } from "../agents/worktrees.js";
 
 /**
- * Read-only views of a run's working copy: what it changed compared with its fork point, one file's diff, a
- * directory listing and a file's text. Every path goes through `resolveInside`, `.git` is never listed or served,
- * every git call goes through `runGit` (no hooks, filters, textconv or external diff), and every string served
- * passes the run's cleaning before any limit is applied. Limits are in bytes of UTF-8 where they say bytes.
+ * Read-only views of a run's working copy: what it changed compared with its fork point (the commit recorded when
+ * its worktree was created), one file's diff, a directory listing and a file's text. Every path goes through
+ * `resolveInside`, `.git` is never listed or served, every git call goes through `runGit` (no hooks, filters,
+ * textconv, external diff, submodule recursion or replace objects), and every string served passes the run's
+ * cleaning before any limit is applied. Limits are in bytes of UTF-8 where they say bytes.
  */
 
 /** The run's working copy no longer exists on disk. */
@@ -28,7 +29,10 @@ export class WorktreeMissingError extends Error {
   }
 }
 
-/** The fork point of the run's branch from the project repository's HEAD could not be found. */
+/**
+ * The run's fork point cannot be used: the run was recorded before the fork commit was kept with it, or that commit
+ * is no longer in the repository. Nothing is guessed in its place.
+ */
 export class NoBaseError extends Error {
   constructor() {
     super("could not determine what this run changed");
@@ -40,8 +44,8 @@ export class NoBaseError extends Error {
 export const RUN_ACTIVE_MESSAGE = "Changes show when the run is stopped or finished.";
 
 /**
- * The run is live (`running`, which includes waiting on a decision): its working copy is still changing, so none of
- * its views is served and no git process is started on it.
+ * The run is live (`running`, which includes waiting on a decision, or stopped but its agent process not yet gone):
+ * its working copy may still be changing, so none of its views is served and no git process is started on it.
  */
 export class RunActiveError extends Error {
   constructor(message = RUN_ACTIVE_MESSAGE) {
@@ -56,6 +60,8 @@ export type ChangesDeps = {
   worktrees: WorktreeManager;
   /** The run's cleaning: redact, scrub paths, redact, then truncate to `max` characters. */
   clean: (runId: string, s: string, max: number) => string;
+  /** Whether a run's agent may still be writing (runner.settling): true until its adapter has returned. */
+  settling: (runId: string) => boolean;
 };
 
 /** Bytes read to decide whether a file is binary (a NUL byte in them). */
@@ -91,13 +97,14 @@ const isRefusal = (e: unknown): boolean =>
   e instanceof UnsafeGitConfigError || e instanceof HooksDirModifiedError || e instanceof SharedGitconfigModifiedError;
 
 /**
- * The worktree of a run that is not live: NotFoundError for an unknown run, RunActiveError while it runs (checked
- * before anything touches its worktree), then runWorktree's checks.
+ * The worktree of a run that is not live: NotFoundError for an unknown run, RunActiveError while it runs or while
+ * its stopped agent may still be writing (`settling`), both checked before anything touches its worktree, then
+ * runWorktree's checks.
  */
 function stoppedRunWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; abs: string } {
   const run = getRun(deps.db, runId);
   if (!run) throw new NotFoundError("run", runId);
-  if (run.status === "running") throw new RunActiveError();
+  if (run.status === "running" || deps.settling(runId)) throw new RunActiveError();
   return runWorktree(deps, runId);
 }
 
@@ -143,8 +150,9 @@ function confine(deps: ChangesDeps, runId: string, abs: string, path: string): {
  *
  * A residual race remains in principle: a parent directory swapped for a symlink after the last check but while
  * the file is read. It needs something writing into the worktree during the request, and every view refuses a live
- * run (RunActiveError) before touching its worktree, so the only writer that could do it, the run's agent, has
- * stopped. (A human override, Task 3, is exclusive with the run and runs as the Owner.)
+ * or settling run (RunActiveError) before touching its worktree, so the run's agent process has returned. A process
+ * the agent left behind in the background is not covered by that check. (A human override, Task 3, is exclusive
+ * with the run and runs as the Owner.)
  */
 function openChecked(deps: ChangesDeps, abs: string, rel: string, resolved: string): { fd: number; size: number } | null {
   let before;
@@ -253,14 +261,22 @@ export async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string)
   return (args) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs });
 }
 
-/** The fork point (`merge-base HEAD <repo HEAD>`) and the run's HEAD; NoBaseError when either cannot be found. */
-async function forkPoint(deps: ChangesDeps, run: AgentRun, git: WorktreeGit): Promise<{ base: string; head: string }> {
+/**
+ * The fork point and the run's HEAD. The fork point is the commit recorded with the run when its worktree was created
+ * (`run.base`), never recomputed: a `merge-base` against the project repository's branch would follow that branch
+ * wherever the agent moved it (`update-ref`, `branch -f` through the shared common dir), and every committed change
+ * would vanish from the view. The recorded commit must still be a commit in the repository (checked with
+ * `cat-file -e`, replace objects ignored by GIT_COMMON_ARGS). A run recorded before the fork commit was kept has no
+ * `base`; it gets NoBaseError, not a guess, since any ref-derived base is state the agent can move. Its directory
+ * listing and file views, which need no base, still work.
+ */
+async function forkPoint(run: AgentRun, git: WorktreeGit): Promise<{ base: string; head: string }> {
+  const base = run.base;
+  if (base === null || !COMMIT_ID.test(base)) throw new NoBaseError();
   try {
-    const repoHead = (await deps.worktrees.runGit(deps.worktrees.repoPath(run.projectId), ["rev-parse", "--verify", "HEAD"])).trim();
-    if (!COMMIT_ID.test(repoHead)) throw new NoBaseError();
-    const base = (await git(["merge-base", "HEAD", repoHead])).trim();
+    await git(["cat-file", "-e", `${base}^{commit}`]);
     const head = (await git(["rev-parse", "--verify", "HEAD"])).trim();
-    if (!COMMIT_ID.test(base) || !COMMIT_ID.test(head)) throw new NoBaseError();
+    if (!COMMIT_ID.test(head)) throw new NoBaseError();
     return { base, head };
   } catch (e) {
     if (isRefusal(e)) throw e;
@@ -307,7 +323,7 @@ async function untrackedPaths(git: WorktreeGit, only?: string): Promise<string[]
 export async function listChanges(deps: ChangesDeps, runId: string): Promise<RunChanges> {
   const { run, abs } = stoppedRunWorktree(deps, runId);
   const git = await verifiedGit(deps, run, abs);
-  const { base, head } = await forkPoint(deps, run, git);
+  const { base, head } = await forkPoint(run, git);
   let tracked: Map<string, ChangedFile>;
   let untracked: string[];
   try {
@@ -344,7 +360,7 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
   const { resolved, rel } = confine(deps, runId, abs, path);
   if (rel === "") throw notFound();
   const git = await verifiedGit(deps, run, abs);
-  const { base } = await forkPoint(deps, run, git);
+  const { base } = await forkPoint(run, git);
   const shown = deps.clean(runId, rel, PATH_MAX);
   const answer = (d: Omit<FileDiff, "runId" | "path">): FileDiff => ({ runId, path: shown, ...d });
   /** Cleans first, then applies the byte cap: over it the diff is tooLarge with no text, never cut. */
