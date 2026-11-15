@@ -91,6 +91,18 @@ describe("parseTheme", () => {
   });
 });
 
+describe("readabilityIssues", () => {
+  it("checks every solid text and background pair the interface draws", () => {
+    const c = resolveColors(byId("ice"));
+    const flat = (keys: (keyof typeof c)[], v: string) => ({ ...c, ...Object.fromEntries(keys.map((k) => [k, v])) });
+    const pairs = (colors: typeof c) => readabilityIssues(colors).map((i) => i.pair);
+    expect(pairs(flat(["on-attention", "attention"], "#777777"))).toContain("on-attention on attention");
+    expect(pairs(flat(["status-fg", "status"], "#777777"))).toContain("status-fg on status");
+    expect(pairs(flat(["badge-fg", "badge"], "#777777"))).toContain("badge-fg on badge");
+    expect(pairs(flat(["badge-fg", "danger"], "#777777"))).toContain("badge-fg on danger");
+  });
+});
+
 describe("alpha", () => {
   it("is allowed only on translucent overlay keys", () => {
     expect(ALPHA_KEYS).toEqual(["glow", "status-hover", "diff-add", "diff-del", "diff-hunk"]);
@@ -118,6 +130,19 @@ describe("resolveColors", () => {
   });
   it("fills missing keys from Light for light themes", () => {
     expect(resolveColors(base({ base: "light" })).bg).toBe(byId("light").colors.bg);
+  });
+  it("falls back attention and its text together when the text on a Needs-you background is unreadable", () => {
+    const ice = byId("ice").colors;
+    const t = base({ colors: { "on-attention": ice.attention } });
+    expect(safetyFallbacks(t)).toEqual(["attention", "on-attention"]);
+    expect(resolveColors(t)["on-attention"]).toBe(ice["on-attention"]);
+    expect(resolveColors(t).attention).toBe(ice.attention);
+  });
+  it("falls back the Needs-you text with an unreadable attention colour", () => {
+    const ice = byId("ice").colors;
+    const t = base({ colors: { attention: ice.bg, "on-attention": "#ffffff" } });
+    expect(safetyFallbacks(t)).toEqual(["attention", "on-attention"]);
+    expect(resolveColors(t)["on-attention"]).toBe(ice["on-attention"]);
   });
   it("replaces an invisible safety colour with the base value", () => {
     const t = base({ colors: { override: byId("ice").colors.bg } });

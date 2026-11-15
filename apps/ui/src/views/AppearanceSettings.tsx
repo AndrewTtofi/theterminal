@@ -36,8 +36,17 @@ const PAIRS: Record<string, { label: string; key?: ThemeKey }> = {
   "attention on bg": { label: "Needs you on background", key: "attention" },
   "danger on bg": { label: "Danger on background", key: "danger" },
   "on-accent on accent": { label: "Button text on accent" },
+  "on-attention on attention": { label: "Text on Needs you", key: "attention" },
+  "status-fg on status": { label: "Status bar text" },
+  "badge-fg on badge": { label: "Badge text" },
+  "badge-fg on danger": { label: "Banner text on danger" },
 };
-const SAFETY_LABELS: Partial<Record<ThemeKey, string>> = { attention: "Needs you", danger: "Danger", override: "Override" };
+const SAFETY_LABELS: Partial<Record<ThemeKey, string>> = {
+  attention: "Needs you",
+  "on-attention": "Text on Needs you",
+  danger: "Danger",
+  override: "Override",
+};
 
 const BUILTIN_IDS = new Set(BUILTIN_THEMES.map((t) => t.id));
 const builtinBase = (base: Theme["base"]) => BUILTIN_THEMES.find((t) => t.id === (base === "light" ? "light" : DEFAULT_THEME_ID))!;

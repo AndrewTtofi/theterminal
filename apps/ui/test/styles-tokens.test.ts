@@ -12,7 +12,7 @@ const ICE: Record<string, string> = {
   input: "#1a1f2b", activity: "#090b10", "activity-fg": "#6f7a8f", "activity-active": "#e8ecf3",
   accent: "#4fc3d9", "accent-hover": "#6fd0e2", "on-accent": "#041217", focus: "#4fc3d9", hover: "#171c27", selected: "#1d2433", glow: "#4fc3d966",
   status: "#12303a", "status-fg": "#d7f3f9", "status-hover": "#ffffff1f", badge: "#4fc3d9", "badge-fg": "#041217",
-  attention: "#e3a33b", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6578", running: "#4fc3d9",
+  attention: "#e3a33b", "on-attention": "#1a1000", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6578", running: "#4fc3d9",
   "error-bg": "#3a1519", "error-fg": "#f5c6cb", "warning-bg": "#33290f", "warning-fg": "#f1deb0", "warning-line": "#7a6320",
   "diff-add": "#3fb97f26", "diff-del": "#e5534b26", "diff-hunk": "#4fc3d914",
 };
@@ -27,6 +27,13 @@ describe("styles.css tokens", () => {
     for (const [k, v] of Object.entries(ICE)) {
       const m = new RegExp(`--${k}:\\s*([^;]+);`).exec(rootBlock);
       expect(m?.[1]?.trim().toLowerCase(), `--${k}`).toBe(v);
+    }
+  });
+  it("puts on-attention text on every attention background", () => {
+    const rule = (sel: string) => new RegExp(`${sel.replace(/[.[\]"()]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+    for (const sel of [".status-item.attention", ".status-item .attention", '.layout-item .layout-save [role="alert"]']) {
+      expect(rule(sel), sel).toMatch(/background: var\(--attention\)/);
+      expect(rule(sel), sel).toMatch(/color: var\(--on-attention\)/);
     }
   });
   it("uses font properties", () => {

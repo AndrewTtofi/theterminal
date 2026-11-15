@@ -20,10 +20,10 @@
 - **Readability (WCAG 2.x contrast):**
   - `fg` on `bg` is at least 4.5:1;
   - `accent`, `attention` and `danger` on `bg` are each at least 3:1;
-  - `on-accent` on `accent` is at least 4.5:1.
+  - `on-accent` on `accent`, `on-attention` on `attention`, `status-fg` on `status`, `badge-fg` on `badge` and `badge-fg` on `danger` (the banner) are each at least 4.5:1.
 
   Every built-in theme passes, and a test enforces it.
-- **Safety colours fail closed:** when a theme is applied, `attention`, `danger` or `override` below 3:1 against `bg` is replaced by the base theme's value.
+- **Safety colours fail closed:** when a theme is applied, `attention`, `danger` or `override` below 3:1 against `bg` is replaced by the base theme's value; `attention` and `on-attention` are replaced together when either that check or `on-attention` on `attention` (4.5:1) fails.
 - **Storage keys** (localStorage, each read and write wrapped in try/catch like `layout-store.ts`):
   - `tt.theme.v1`: the chosen theme id;
   - `tt.themes.v1`: the person's own themes, at most 20.
@@ -39,7 +39,7 @@
 bg fg fg-strong muted line line-strong panel input activity activity-fg activity-active
 accent accent-hover on-accent focus hover selected glow
 status status-fg status-hover badge badge-fg
-attention danger danger-hover ok override idle running
+attention on-attention danger danger-hover ok override idle running
 error-bg error-fg warning-bg warning-fg warning-line diff-add diff-del diff-hunk
 ```
 
@@ -48,6 +48,7 @@ New keys replace today's hard-coded values in `styles.css`:
 | New key | Replaces |
 |---|---|
 | `on-accent` | button text, now `var(--status-fg)` |
+| `on-attention` | text on an attention background (status-bar Needs-you items, the over-budget figure, the layout-save error), now `var(--status-fg)` |
 | `status-hover` | `rgba(255,255,255,0.12)` |
 | `idle` | `#6e6e6e` |
 | `running` | `#3794ff` |
@@ -66,7 +67,7 @@ bg #0d1016  fg #cdd3df  fg-strong #e8ecf3  muted #8a93a6  line #1f2533  line-str
 input #1a1f2b  activity #090b10  activity-fg #6f7a8f  activity-active #e8ecf3
 accent #4fc3d9  accent-hover #6fd0e2  on-accent #041217  focus #4fc3d9  hover #171c27  selected #1d2433  glow #4fc3d966
 status #12303a  status-fg #d7f3f9  status-hover #ffffff1f  badge #4fc3d9  badge-fg #041217
-attention #e3a33b  danger #e5534b  danger-hover #f06b63  ok #3fb97f  override #ff5c5c  idle #5c6578  running #4fc3d9
+attention #e3a33b  on-attention #1a1000  danger #e5534b  danger-hover #f06b63  ok #3fb97f  override #ff5c5c  idle #5c6578  running #4fc3d9
 error-bg #3a1519  error-fg #f5c6cb  warning-bg #33290f  warning-fg #f1deb0  warning-line #7a6320
 diff-add #3fb97f26  diff-del #e5534b26  diff-hunk #4fc3d914
 ```

@@ -4,7 +4,7 @@ export const THEME_KEYS = [
   "bg", "fg", "fg-strong", "muted", "line", "line-strong", "panel", "input", "activity", "activity-fg", "activity-active",
   "accent", "accent-hover", "on-accent", "focus", "hover", "selected", "glow",
   "status", "status-fg", "status-hover", "badge", "badge-fg",
-  "attention", "danger", "danger-hover", "ok", "override", "idle", "running",
+  "attention", "on-attention", "danger", "danger-hover", "ok", "override", "idle", "running",
   "error-bg", "error-fg", "warning-bg", "warning-fg", "warning-line", "diff-add", "diff-del", "diff-hunk",
 ] as const;
 export type ThemeKey = (typeof THEME_KEYS)[number];
@@ -115,6 +115,12 @@ const READABILITY: { pair: string; fg: ThemeKey; bg: ThemeKey; min: number }[] =
   { pair: "attention on bg", fg: "attention", bg: "bg", min: 3 },
   { pair: "danger on bg", fg: "danger", bg: "bg", min: 3 },
   { pair: "on-accent on accent", fg: "on-accent", bg: "accent", min: 4.5 },
+  // Needs-you items in the status bar, the over-budget figure and the layout-save error are all this pair.
+  { pair: "on-attention on attention", fg: "on-attention", bg: "attention", min: 4.5 },
+  { pair: "status-fg on status", fg: "status-fg", bg: "status", min: 4.5 },
+  { pair: "badge-fg on badge", fg: "badge-fg", bg: "badge", min: 4.5 },
+  // The emergency banner.
+  { pair: "badge-fg on danger", fg: "badge-fg", bg: "danger", min: 4.5 },
 ];
 
 export function readabilityIssues(colors: Record<ThemeKey, string>): { pair: string; ratio: number; min: number }[] {
@@ -137,7 +143,7 @@ const ice: Theme = {
     input: "#1a1f2b", activity: "#090b10", "activity-fg": "#6f7a8f", "activity-active": "#e8ecf3",
     accent: "#4fc3d9", "accent-hover": "#6fd0e2", "on-accent": "#041217", focus: "#4fc3d9", hover: "#171c27", selected: "#1d2433", glow: "#4fc3d966",
     status: "#12303a", "status-fg": "#d7f3f9", "status-hover": "#ffffff1f", badge: "#4fc3d9", "badge-fg": "#041217",
-    attention: "#e3a33b", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6578", running: "#4fc3d9",
+    attention: "#e3a33b", "on-attention": "#1a1000", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6578", running: "#4fc3d9",
     ...ERR_DARK, "diff-add": "#3fb97f26", "diff-del": "#e5534b26", "diff-hunk": "#4fc3d914",
   },
 };
@@ -149,7 +155,7 @@ const phosphor: Theme = {
     input: "#17202a", activity: "#080b0f", "activity-fg": "#6d7e79", "activity-active": "#e6efec",
     accent: "#4cc38a", "accent-hover": "#6bd0a0", "on-accent": "#04140c", focus: "#4cc38a", hover: "#151d25", selected: "#1b2630", glow: "#4cc38a66",
     status: "#11301f", "status-fg": "#d6f5e5", "status-hover": "#ffffff1f", badge: "#4cc38a", "badge-fg": "#04140c",
-    attention: "#e3a33b", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6b66", running: "#4aa8e0",
+    attention: "#e3a33b", "on-attention": "#1a1000", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#3fb97f", override: "#ff5c5c", idle: "#5c6b66", running: "#4aa8e0",
     ...ERR_DARK, "diff-add": "#4cc38a26", "diff-del": "#e5534b26", "diff-hunk": "#4cc38a14",
   },
 };
@@ -161,7 +167,7 @@ const amber: Theme = {
     input: "#1e1a14", activity: "#0a0907", "activity-fg": "#7d7363", "activity-active": "#f1ebe0",
     accent: "#f0a43a", "accent-hover": "#f5b85e", "on-accent": "#1a0f00", focus: "#f0a43a", hover: "#1a1612", selected: "#251f17", glow: "#f0a43a66",
     status: "#3a2a0e", "status-fg": "#fbe7c4", "status-hover": "#ffffff1f", badge: "#f0a43a", "badge-fg": "#1a0f00",
-    attention: "#e8d04a", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#6fbf5f", override: "#ff5c5c", idle: "#6b6254", running: "#5fb0e0",
+    attention: "#e8d04a", "on-attention": "#1a1400", danger: "#e5534b", "danger-hover": "#f06b63", ok: "#6fbf5f", override: "#ff5c5c", idle: "#6b6254", running: "#5fb0e0",
     ...ERR_DARK, "diff-add": "#6fbf5f26", "diff-del": "#e5534b26", "diff-hunk": "#f0a43a14",
   },
 };
@@ -173,7 +179,7 @@ const classic: Theme = {
     input: "#313131", activity: "#181818", "activity-fg": "#858585", "activity-active": "#e7e7e7",
     accent: "#0078d4", "accent-hover": "#026ec1", "on-accent": "#ffffff", focus: "#0078d4", hover: "#2a2d2e", selected: "#37373d", glow: "#0078d466",
     status: "#007acc", "status-fg": "#ffffff", "status-hover": "#ffffff1f", badge: "#0078d4", "badge-fg": "#ffffff",
-    attention: "#cc6d00", danger: "#c74e39", "danger-hover": "#b3412e", ok: "#2ea043", override: "#f14c4c", idle: "#6e6e6e", running: "#3794ff",
+    attention: "#cc6d00", "on-attention": "#000000", danger: "#c74e39", "danger-hover": "#b3412e", ok: "#2ea043", override: "#f14c4c", idle: "#6e6e6e", running: "#3794ff",
     "error-bg": "#4a1d22", "error-fg": "#f5c6cb", "warning-bg": "#3d3112", "warning-fg": "#f1deb0", "warning-line": "#7a6320",
     "diff-add": "#2ea04326", "diff-del": "#c74e3926", "diff-hunk": "#0078d414",
   },
@@ -186,7 +192,7 @@ const light: Theme = {
     input: "#ffffff", activity: "#e9eef3", "activity-fg": "#5b6675", "activity-active": "#0b1218",
     accent: "#0a7ea4", "accent-hover": "#086785", "on-accent": "#ffffff", focus: "#0a7ea4", hover: "#edf1f5", selected: "#dde6ee", glow: "#0a7ea44d",
     status: "#0a7ea4", "status-fg": "#ffffff", "status-hover": "#ffffff2e", badge: "#0a7ea4", "badge-fg": "#ffffff",
-    attention: "#9a5b00", danger: "#c0392b", "danger-hover": "#a02f23", ok: "#1f7a4d", override: "#d1242f", idle: "#6b7585", running: "#0a7ea4",
+    attention: "#9a5b00", "on-attention": "#ffffff", danger: "#c0392b", "danger-hover": "#a02f23", ok: "#1f7a4d", override: "#d1242f", idle: "#6b7585", running: "#0a7ea4",
     "error-bg": "#fde7e9", "error-fg": "#6b1a21", "warning-bg": "#fff4d6", "warning-fg": "#5c4306", "warning-line": "#e0c46c",
     "diff-add": "#1f7a4d26", "diff-del": "#c0392b26", "diff-hunk": "#0a7ea414",
   },
@@ -199,7 +205,7 @@ const highContrast: Theme = {
     input: "#000000", activity: "#000000", "activity-fg": "#d0d0d0", "activity-active": "#ffd400",
     accent: "#ffd400", "accent-hover": "#ffe14d", "on-accent": "#000000", focus: "#ffffff", hover: "#1a1a1a", selected: "#2b2b2b", glow: "#ffd40080",
     status: "#ffd400", "status-fg": "#000000", "status-hover": "#00000033", badge: "#ffd400", "badge-fg": "#000000",
-    attention: "#ff9f1a", danger: "#ff5555", "danger-hover": "#ff7777", ok: "#4ade80", override: "#ff4040", idle: "#a0a0a0", running: "#4db8ff",
+    attention: "#ff9f1a", "on-attention": "#000000", danger: "#ff5555", "danger-hover": "#ff7777", ok: "#4ade80", override: "#ff4040", idle: "#a0a0a0", running: "#4db8ff",
     "error-bg": "#330000", "error-fg": "#ffd0d0", "warning-bg": "#2b2100", "warning-fg": "#ffe9a8", "warning-line": "#ffd400",
     "diff-add": "#4ade8040", "diff-del": "#ff555540", "diff-hunk": "#ffd40026",
   },
@@ -208,6 +214,8 @@ const highContrast: Theme = {
 export const BUILTIN_THEMES: readonly Theme[] = [ice, phosphor, amber, classic, light, highContrast];
 
 const SAFETY_KEYS: readonly ThemeKey[] = ["attention", "danger", "override"];
+/** Text drawn on a safety colour: it falls back together with that colour when either is unreadable. */
+const SAFETY_TEXT: Partial<Record<ThemeKey, ThemeKey>> = { attention: "on-attention" };
 
 function baseColors(t: Theme): Record<ThemeKey, string> {
   return (t.base === "light" ? light : ice).colors as Record<ThemeKey, string>;
@@ -223,10 +231,20 @@ function fill(t: Theme): Record<ThemeKey, string> {
   return out;
 }
 
-/** Safety colours (attention, danger, override) under 3:1 against bg are replaced by the base theme's value. */
+/**
+ * Safety colours (attention, danger, override) under 3:1 against bg are replaced by the base theme's value. Attention
+ * and its text (on-attention) are replaced together when either check fails, including on-attention under 4.5:1 on
+ * attention, so a Needs-you item is never unreadable.
+ */
 export function safetyFallbacks(t: Theme): ThemeKey[] {
   const c = fill(t);
-  return SAFETY_KEYS.filter((k) => contrastRatio(c[k], c.bg) < 3);
+  const out: ThemeKey[] = [];
+  for (const k of SAFETY_KEYS) {
+    const text = SAFETY_TEXT[k];
+    const bad = contrastRatio(c[k], c.bg) < 3 || (text !== undefined && contrastRatio(c[text], c[k]) < 4.5);
+    if (bad) out.push(k, ...(text !== undefined ? [text] : []));
+  }
+  return out;
 }
 
 export function resolveColors(t: Theme): Record<ThemeKey, string> {

@@ -78,11 +78,11 @@ Rules:
 
 - body text on its background is at least 4.5:1;
 - the accent, "needs you" and danger colours are at least 3:1 against the background;
-- button text on the accent colour is at least 4.5:1.
+- button text on the accent colour, text on a "needs you" background, status-bar text, badge text and banner text on the danger colour are each at least 4.5:1.
 
 Built-in themes must pass, and a test enforces it. For user themes the checks are mostly advisory: the editor shows a warning naming the pair and its ratio.
 
-The safety colours are the exception, and they fail closed. When a theme is applied, any of "needs you" (attention), danger or override that is below 3:1 against the background is replaced by the base theme's value, and the editor says so. An imported theme can therefore never hide an approval request, a danger sign or the OVERRIDE label.
+The safety colours are the exception, and they fail closed. When a theme is applied, any of "needs you" (attention), danger or override that is below 3:1 against the background is replaced by the base theme's value, and the editor says so. The text drawn on a "needs you" background falls back with it, and both fall back when that text is below 4.5:1. An imported theme can therefore never hide an approval request, a danger sign or the OVERRIDE label.
 
 ## Choosing and making themes
 

@@ -25,6 +25,7 @@
   --badge: #4fc3d9;
   --badge-fg: #041217;
   --attention: #e3a33b;
+  --on-attention: #1a1000;
   --danger: #e5534b;
   --danger-hover: #f06b63;
   --ok: #3fb97f;
@@ -99,7 +100,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .status-bar { height: 22px; flex: none; display: flex; justify-content: space-between; align-items: stretch; background: var(--status); color: var(--status-fg); font-size: 12px; font-family: var(--font-mono); }
 .status-left, .status-right { display: flex; align-items: stretch; }
 .status-item { display: flex; align-items: center; padding: 0 8px; white-space: nowrap; }
-.status-item.attention { background: var(--attention); }
+.status-item.attention { background: var(--attention); color: var(--on-attention); }
 .status-bar button.status-item { background: none; color: inherit; border-radius: 0; padding: 0 8px; }
 .status-bar button.status-item:hover { background: var(--status-hover); }
 .layout-item { gap: 6px; }
@@ -108,7 +109,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .layout-item button { height: 18px; padding: 0 6px; font-size: 12px; background: none; color: inherit; border: 1px solid var(--status-hover); border-radius: 2px; }
 .layout-item button:disabled { opacity: 0.5; }
 .layout-save { display: flex; align-items: center; gap: 6px; }
-.layout-item .layout-save [role="alert"] { background: var(--attention); color: var(--status-fg); padding: 0 6px; }
+.layout-item .layout-save [role="alert"] { background: var(--attention); color: var(--on-attention); padding: 0 6px; }
 
 /* Needs-you strip: outside the dock so decisions show in every layout. */
 .needs-you { flex: none; max-height: 40vh; overflow: auto; border-bottom: 2px solid var(--attention); background: var(--panel); padding: 8px 16px; }
@@ -336,7 +337,8 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 /* A machine that did not answer its last check: the values are the last it sent. */
 .capacity-machines-table tr.offline td, .capacity-side section.offline { color: var(--muted); }
 .capacity-footer { color: var(--muted); margin: 8px 0 0; }
-.status-item .attention { color: var(--attention); }
+/* Over budget: a Needs-you chip, since attention text alone is unreadable on some status bars. */
+.status-item .attention { background: var(--attention); color: var(--on-attention); padding: 0 4px; border-radius: 2px; }
 abbr[title] { text-decoration: underline dotted; cursor: help; }
 
 /* Plan intake: the side bar's state line, the strip's notices, the tab and its decision cards. */
