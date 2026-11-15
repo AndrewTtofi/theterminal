@@ -1,5 +1,6 @@
 import {
-  ADAPTERS, GATES, GATE_IDS, HIDDEN_BY_DEFAULT, HIDDEN_HARDWARE_LINE, HIDDEN_PROMPTS_LINE, STAGES, adapterLabel, applicableDecisions, dailyDigests, narrate, utcDay,
+  ADAPTERS, GATES, GATE_IDS, HIDDEN_BY_DEFAULT, HIDDEN_HARDWARE_LINE, HIDDEN_PROMPTS_LINE, OWNER_ID, STAGES, adapterLabel, applicableDecisions, dailyDigests, narrate,
+  requirementLabel, utcDay,
   type AdapterId, type AgentRun, type Answers, type Ask, type Basis, type CiStatus, type Connection, type DecisionItem,
   type Evidence, type Figure, type GateId, type HardwareInfo, type HistoryDay, type LedgerEntry, type NarrationContext,
   type ReadinessRow, type ShareNumbers, type ShareOptions, type ShareSnapshot, type Stage, type WaitingItem,
@@ -7,7 +8,7 @@ import {
 } from "@theterminal/shared";
 import { NotFoundError } from "../board/board-service.js";
 import type { Db } from "../db.js";
-import { getIntake, listPendingActions, listProjectGateDecisions, listRuns, type IntakeState } from "../events/projections.js";
+import { getIntake, getPerson, listPendingActions, listProjectGateDecisions, listRuns, type IntakeState } from "../events/projections.js";
 import type { GateService } from "../gates/service.js";
 import type { Ledger, VerifyResult } from "../ledger/ledger.js";
 import { narrationContext } from "../story/story.js";
@@ -143,12 +144,22 @@ function workforce(runs: AgentRun[]): WorkforceRow[] {
   return rows;
 }
 
-function decisionItem(e: LedgerEntry, ctx: NarrationContext): DecisionItem {
+/** What the page calls someone no longer on record. */
+export const FORMER_COLLABORATOR = "a former collaborator";
+
+/** Who decided: the gate entry's signer or waiver, else the entry's actor. */
+function deciderOf(e: LedgerEntry): string {
+  const p = payloadOf(e);
+  const named = e.type === "gate.signed_off" ? str(p.signedBy) : e.type === "gate.waived" ? str(p.waivedBy) : "";
+  return named !== "" ? named : e.actor.id;
+}
+
+function decisionItem(e: LedgerEntry, ctx: NarrationContext, nameOf: (id: string) => string): DecisionItem {
   const p = payloadOf(e);
   const kind: DecisionItem["kind"] =
     e.type === "intake.decided" ? "intake" : e.type === "gate.signed_off" ? "gate_sign_off" : e.type === "gate.waived" ? "gate_waiver" : "action";
   const reason = kind === "intake" ? orNull(str(p.rationale)) : kind === "gate_sign_off" ? null : orNull(str(p.reason));
-  return { kind, headline: narrate(e, ctx).headline, by: "Owner", at: e.ts, reason, evidence: evidenceOf(e) };
+  return { kind, headline: narrate(e, ctx).headline, by: nameOf(deciderOf(e)), at: e.ts, reason, evidence: evidenceOf(e) };
 }
 
 function historyOf(entries: LedgerEntry[]): HistoryDay[] {
@@ -212,6 +223,10 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
   const integrity = deps.integrity();
   const entries = projectEntries(ledger, projectId, integrity);
   const ctx = narrationContext(db);
+  // A removed person keeps their name in history; an id nobody holds gets a fixed phrase, never the id.
+  const nameOf = (id: string): string => getPerson(db, id)?.name ?? FORMER_COLLABORATOR;
+  // Actions and plan decisions are a reviewer's or above (the role table), whoever is named on a gate.
+  const assignee = requirementLabel({ role: "reviewer" }, nameOf);
   const cards = db
     .prepare("SELECT id, title, stage, status FROM cards WHERE project_id = ? ORDER BY created_at, rowid")
     .all(projectId) as CardRow[];
@@ -245,15 +260,15 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
         headline: entry ? narrate(entry, ctx).headline : "An agent is waiting for a decision",
         since: a.requestedAt,
         cardTitle: cardId === null ? null : (titleOf.get(cardId) ?? null),
-        assignee: "Owner",
+        assignee,
       };
     }),
-    ...undecided.map((d): WaitingItem => ({ kind: "intake", headline: `Decide: ${d.question}`, since: null, cardTitle: null, assignee: "Owner" })),
+    ...undecided.map((d): WaitingItem => ({ kind: "intake", headline: `Decide: ${d.question}`, since: null, cardTitle: null, assignee })),
   ].slice(0, SHARE_LIMITS.waiting);
 
   // Decisions, newest first.
   const allDecisions = entries.filter(isDecision).reverse();
-  const decisions = allDecisions.slice(0, SHARE_LIMITS.decisions).map((e) => decisionItem(e, ctx));
+  const decisions = allDecisions.slice(0, SHARE_LIMITS.decisions).map((e) => decisionItem(e, ctx, nameOf));
 
   // Headline numbers.
   const spendUsd = spendOf(runs);
@@ -327,7 +342,7 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
     options: { includePrompts: options.includePrompts, includeHardware: options.includeHardware, digestDays: options.digestDays },
     hidden,
     project: { name: project.name, pitch: project.pitch, createdAt: project.created_at },
-    owner: "Owner",
+    owner: nameOf(OWNER_ID),
     progress,
     currentStage,
     numbers,
