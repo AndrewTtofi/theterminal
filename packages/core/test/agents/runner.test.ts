@@ -27,6 +27,12 @@ const owner = { kind: "human", id: "owner" } as const;
 const EXTRA_SECRET = "extra-secret-value-0001";
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
 
+// A run start creates the project repository and the worktree through runGit, whose hardening checks make five or six
+// git processes of every call: about fifty per start, then the adapter's own process. Seconds on Windows CI, where a
+// process start is slow and the suite shares two cores; the default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 let dataDir: string;
 let db: Db;
 let ledger: Ledger;
@@ -43,7 +49,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await Promise.all(runners.splice(0).map((r) => r.shutdown()));
-  rmSync(dataDir, { recursive: true, force: true });
+  // Retried: on Windows a git or agent process that was just killed can still hold its working directory (EBUSY).
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 function makeRunner(
@@ -251,6 +258,16 @@ describe("AgentRunner with the FakeAdapter", () => {
       status: "completed",
       input: { a: { api_key: "[REDACTED]", label: "holder" }, b: { password: "[REDACTED]", note: "key [REDACTED]" } },
     });
+  });
+
+  it("cleanFor(runId) scrubs the run's worktree to '.' and redacts secrets after the run has finished", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const clean = runner.cleanFor(run.id);
+    const abs = join(dataDir, run.worktree);
+    expect(clean(`see ${join(abs, "notes.txt")} and ${EXTRA_SECRET}`, 1000)).toBe(`see .${sep}notes.txt and [REDACTED]`);
+    expect(() => runner.cleanFor("no-such-run")).toThrow(NotFoundError);
   });
 
   it("records the worktree, dataDir and home directory as '.', '<data>' and '~'", async () => {
@@ -939,5 +956,31 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
       UnsupportedConnectionError,
     );
     noRun();
+  });
+});
+
+describe("AgentRunner.settling", () => {
+  it("stays true after a stop until the adapter has returned", async () => {
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Ignores the abort until released, as a CLI slow to exit does.
+    const slow: AgentAdapter = {
+      id: "fake",
+      start: async () => {
+        await returned;
+        return { status: "completed" };
+      },
+    };
+    const runner = makeRunner({ fake: slow });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+    expect(runner.settling(run.id)).toBe(true);
+    runner.stop(owner, run.id);
+    expect(getRun(db, run.id)!.status).toBe("stopped");
+    expect(runner.settling(run.id)).toBe(true);
+    release();
+    await vi.waitFor(() => expect(runner.settling(run.id)).toBe(false));
+    expect(runner.settling("no-such-run")).toBe(false);
   });
 });

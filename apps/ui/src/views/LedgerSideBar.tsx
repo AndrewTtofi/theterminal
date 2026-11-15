@@ -13,6 +13,7 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   agent: "Agents",
   decision: "Decisions",
   gate: "Gates",
+  override: "Overrides",
   intake: "Intake",
   connection: "Connections",
   settings: "Settings",
@@ -46,7 +47,12 @@ export function LedgerSideBar() {
         <legend>Show</legend>
         {LEDGER_TOPICS.map((t) => (
           <label key={t}>
-            <input type="checkbox" checked={model.ledgerTopics.includes(t)} onChange={(e) => toggle(t, e.target.checked)} />
+            {t === "override" ? (
+              // Overrides are exceptions to the rules and always shown, so this box cannot be cleared.
+              <input type="checkbox" checked disabled readOnly />
+            ) : (
+              <input type="checkbox" checked={model.ledgerTopics.includes(t)} onChange={(e) => toggle(t, e.target.checked)} />
+            )}
             {TOPIC_LABELS[t]}
           </label>
         ))}

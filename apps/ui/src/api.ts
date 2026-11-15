@@ -14,6 +14,9 @@ import type {
   ConnectionProvider,
   GitHubOverview,
   DecisionId,
+  DirListing,
+  FileContent,
+  FileDiff,
   GateDecisionInput,
   GateEvaluation,
   HardwareInfo,
@@ -24,6 +27,7 @@ import type {
   Project,
   Provider,
   QuestionId,
+  RunChanges,
   Stage,
 } from "@theterminal/shared";
 
@@ -148,6 +152,32 @@ export const api = {
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
+  /** False only when the server answers 404 for the run; true when it exists or the check failed for another reason. */
+  runExists: async (runId: string): Promise<boolean> => {
+    try {
+      await request<unknown>(`/api/runs/${enc(runId)}`);
+      return true;
+    } catch (e) {
+      return !(e instanceof ApiError && e.status === 404);
+    }
+  },
+  /** What the run changed against its starting point; 404 `worktree_missing`, 409 `no_base`. */
+  getRunChanges: (runId: string) => request<RunChanges>(`/api/runs/${enc(runId)}/changes`),
+  /** One file's diff, relative to the run's working copy. */
+  getRunDiff: (runId: string, path: string) => request<FileDiff>(`/api/runs/${enc(runId)}/diff?path=${enc(path)}`),
+  /** One directory of the run's working copy; `""` is its top. */
+  listRunDir: (runId: string, path: string) => request<DirListing>(`/api/runs/${enc(runId)}/files?path=${enc(path)}`),
+  /** One file's text from the run's working copy. */
+  getRunFile: (runId: string, path: string) => request<FileContent>(`/api/runs/${enc(runId)}/file?path=${enc(path)}`),
+  /**
+   * Runs a program as the Owner in the run's working copy (emergency override); resolves once it has started and
+   * been recorded. 409 `run_active` / `override_busy`, 400 `program_not_found` / `program_not_allowed` / `secret_in_text`.
+   */
+  overrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) =>
+    request<{ overrideId: string }>(`/api/runs/${enc(runId)}/override/command`, { method: "POST", body: i }),
+  /** Drops the run's uncommitted changes (emergency override); `files` is how many uncommitted files there were. */
+  overrideDiscard: (runId: string, reason: string) =>
+    request<{ overrideId: string; files: number }>(`/api/runs/${enc(runId)}/override/discard`, { method: "POST", body: { reason } }),
   stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
   listPendingActions: (projectId: string) =>
     request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),
@@ -158,11 +188,19 @@ export const api = {
       body: reason ? { decision, reason } : { decision },
     }),
   health: () => request<Health>("/api/health"),
-  /** A project's entries, or every project's when `projectId` is null. */
-  listLedger: (projectId: string | null, afterSeq = 0, limit = 500) =>
-    request<LedgerEntry[]>(
-      `/api/ledger?${projectId === null ? "" : `projectId=${encodeURIComponent(projectId)}&`}afterSeq=${afterSeq}&limit=${limit}`,
-    ),
+  /**
+   * A page of a project's entries, or every project's when `projectId` is null, in ascending seq order: those after
+   * `afterSeq`, or the newest `limit` before `beforeSeq`.
+   */
+  listLedger: (projectId: string | null, q: { afterSeq?: number; beforeSeq?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (projectId !== null) params.set("projectId", projectId);
+    if (q.afterSeq !== undefined) params.set("afterSeq", String(q.afterSeq));
+    if (q.beforeSeq !== undefined) params.set("beforeSeq", String(q.beforeSeq));
+    if (q.limit !== undefined) params.set("limit", String(q.limit));
+    const query = params.toString().replace(/\+/g, "%20");
+    return request<LedgerEntry[]>(query === "" ? "/api/ledger" : `/api/ledger?${query}`);
+  },
   listConnections: () => request<Connection[]>("/api/connections"),
   getConnectionCatalog: () => request<CatalogEntry[]>("/api/connections/catalog"),
   addConnection: (i: NewConnection) => request<Connection>("/api/connections", { method: "POST", body: i }),
@@ -237,11 +275,18 @@ export function exportLedgerUrl(projectId: string | null): string {
 }
 
 /**
+ * Said in place of a run's changes, files or diffs while it runs. The server refuses to read a live run's working
+ * copy (the agent can still change its files and its git settings), so they show once the run is stopped or finished.
+ */
+export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finished.";
+
+/**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
- * conflict as the plan being open already.
+ * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
+ * cannot be read yet.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
@@ -272,6 +317,24 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
+    if (context === "changes" && e.code === "run_active") return LIVE_RUN_CHANGES;
+    if (e.code === "run_active") return "Stop the agent first: it is still working in this run";
+    if (e.code === "unsafe_repository") {
+      return "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.";
+    }
+    if (e.code === "override_busy") return "An override is already running for this run";
+    if (e.code === "program_not_found") return "That program was not found on this computer's PATH";
+    if (e.code === "program_not_allowed") return "Programs inside the project folder, and Windows batch files, cannot be run as an override";
+    if (e.code === "worktree_missing") return "This run's working copy no longer exists on this computer";
+    // A run recorded before its starting commit was kept (or whose starting commit is gone): nothing is guessed.
+    if (e.code === "no_base") {
+      return "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.";
+    }
+    // The workspace's own git pins were tampered with, so the server ran no git at all.
+    if (e.code === "gitconfig_modified") {
+      return "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.";
+    }
+    if (e.code === "hooks_modified") return "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.";
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";

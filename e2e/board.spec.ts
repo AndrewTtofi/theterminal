@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { operatorLayout } from "./support.js";
 
 test("full board + ledger flow served by core", async ({ page, browser }) => {
   const url = process.env.TT_E2E_URL!;
@@ -12,6 +13,7 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await page.getByLabel("New project name").fill("Local Model Hub");
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "Local Model Hub" })).toHaveClass(/selected/);
+  await operatorLayout(page);
 
   // 3. add a card to Design and move it to Build (no gate stands between them; a move out of Plan needs a plan)
   await page.getByLabel("Add card to Design").fill("Detect GPU");

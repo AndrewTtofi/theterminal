@@ -24,12 +24,18 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Card stories: everything that happened to a card, with its plan, gate decisions and estimated cost, plus the ledger's integrity check.
 - Audit export of the ledger as NDJSON, with an integrity header, gap lines for unreadable or missing entries, and a trailer.
 - Documentation: `docs/glass-box.md`.
+- Rich workspace: a read-only Changes view with diff and file tabs (limits shown plainly, secret-looking names hidden, nothing from the repository is ever run), agent feed, Terminal and Conversation tabs, Learn topics with context, Guided and Operator layouts with up to 10 saved layouts, and paging for the ledger.
+- Emergency override: run one program as you, outside the approval gate and sandbox, after a confirm step and a reason that is checked for secrets. It is always recorded, in red with an OVERRIDE label, and can discard a run's uncommitted work.
+- Documentation: `docs/workspace.md`.
 
 ### Changed
+- The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
+- Runs recorded before this version show no Changes list or diffs, because the commit they started from was not kept. Their files can still be browsed under Files, and the emergency override still works for them.
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.
 - Streamed agent text is held back just enough to redact secrets that arrive split across chunks, including private key blocks, YAML secret blocks and partial markers around tool calls.
 
 ### Security
+- The Changes view, diffs and the emergency override's discard read a run's working copy with a hardened git: it never recurses into submodules, ignores replacement objects (`git replace`), compares a run's changes with the commit it started from (recorded when its working copy was created, rather than a branch the agent could move), and never reads the run's own index, so marks the agent can set in it (`skip-worktree`, `assume-unchanged`, a sparse checkout, an untracked cache) cannot hide a changed file from the views or from the discard, which rebuilds the index before it resets. If The Terminal's own empty git configuration or hooks folder was modified, the views and the discard answer with a message naming the cause instead of failing.
 - Upgraded zod to 4.6.6 (memory exhaustion on oversized constrained collections) and Vitest to 4.1.12 (code injection and path traversal in Vitest and `@vitest/mocker`; Vitest no longer depends on the vulnerable tinypool). Existing ledger entries still parse, and API validation errors still never echo the request.
 
 ### Added (project)

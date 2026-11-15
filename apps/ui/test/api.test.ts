@@ -109,6 +109,30 @@ describe("connections api", () => {
   });
 });
 
+describe("override api", () => {
+  it("posts a command and a discard to the run's override routes", async () => {
+    const f = respond(201, { overrideId: "o1" });
+    expect(await api.overrideCommand("r/1", { program: "git", args: ["status"], reason: "The agent broke the build" })).toEqual({ overrideId: "o1" });
+    expect(call(f, 0)[0]).toBe("/api/runs/r%2F1/override/command");
+    expect(call(f, 0)[1].method).toBe("POST");
+    expect(JSON.parse(String(call(f, 0)[1].body))).toEqual({ program: "git", args: ["status"], reason: "The agent broke the build" });
+    const g = respond(200, { overrideId: "o2", files: 2 });
+    expect(await api.overrideDiscard("r1", "The agent broke the build")).toEqual({ overrideId: "o2", files: 2 });
+    expect(call(g, 0)[0]).toBe("/api/runs/r1/override/discard");
+    expect(JSON.parse(String(call(g, 0)[1].body))).toEqual({ reason: "The agent broke the build" });
+  });
+
+  it("words the override refusals", () => {
+    expect(errorMessage(new ApiError(409, "run_active"))).toBe("Stop the agent first: it is still working in this run");
+    expect(errorMessage(new ApiError(409, "override_busy"))).toBe("An override is already running for this run");
+    expect(errorMessage(new ApiError(400, "program_not_found"))).toBe("That program was not found on this computer's PATH");
+    expect(errorMessage(new ApiError(400, "program_not_allowed"))).toBe(
+      "Programs inside the project folder, and Windows batch files, cannot be run as an override",
+    );
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
+  });
+});
+
 describe("errorMessage", () => {
   it("maps the connection errors", () => {
     expect(errorMessage(new ApiError(409, "conflict"))).toBe("Already connected");
@@ -239,5 +263,82 @@ describe("gates and stories api", () => {
     );
     expect(errorMessage(new ApiError(409, "stage_gated"))).toBe("Add the card to an earlier stage, then move it, so its readiness checks run.");
     expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
+  });
+});
+
+describe("runExists", () => {
+  it("is false only when the server answers 404 for the run", async () => {
+    let f = respond(200, { run: { id: "r/1" }, actions: [] });
+    expect(await api.runExists("r/1")).toBe(true);
+    expect(call(f, 0)[0]).toBe("/api/runs/r%2F1");
+    f = respond(404, { error: "not_found" });
+    expect(await api.runExists("r1")).toBe(false);
+    respond(500, { error: "internal" });
+    expect(await api.runExists("r1")).toBe(true);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    expect(await api.runExists("r1")).toBe(true);
+  });
+});
+
+describe("run changes", () => {
+  it("reads the changes, a diff, a directory and a file, with the path encoded", async () => {
+    const f = respond(200, {});
+    await api.getRunChanges("run 1");
+    await api.getRunDiff("run1", "src/a b.ts");
+    await api.listRunDir("run1", "");
+    await api.getRunFile("run1", "src/a&b.ts");
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/runs/run%201/changes",
+      "/api/runs/run1/diff?path=src%2Fa%20b.ts",
+      "/api/runs/run1/files?path=",
+      "/api/runs/run1/file?path=src%2Fa%26b.ts",
+    ]);
+  });
+
+  it("words a missing working copy and an unknown starting point", () => {
+    expect(errorMessage(new ApiError(404, "worktree_missing"))).toBe("This run's working copy no longer exists on this computer");
+    expect(errorMessage(new ApiError(409, "no_base"))).toBe(
+      "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.",
+    );
+    expect(errorMessage(new ApiError(409, "no_base"), "changes")).toBe(
+      "What this run changed cannot be shown: it was recorded before The Terminal kept the commit it started from, or that commit is gone. Its files can still be browsed under Files in the Changes view.",
+    );
+  });
+
+  it("words the workspace's own git pins having been tampered with, for the changes views and the override alike", () => {
+    for (const context of [undefined, "changes"] as const) {
+      expect(errorMessage(new ApiError(409, "gitconfig_modified", { message: "x" }), context)).toBe(
+        "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it.",
+      );
+      expect(errorMessage(new ApiError(409, "hooks_modified", { message: "x" }), context)).toBe(
+        "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again.",
+      );
+    }
+  });
+
+  it("words a live run and an unsafe repository for the changes views", () => {
+    expect(errorMessage(new ApiError(409, "run_active", { message: "x" }), "changes")).toBe("Changes show when the run is stopped or finished.");
+    expect(errorMessage(new ApiError(409, "unsafe_repository"), "changes")).toBe(
+      "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.",
+    );
+    expect(errorMessage(new ApiError(409, "unsafe_repository"))).toBe(
+      "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.",
+    );
+    // An override refused for a live run keeps its own wording.
+    expect(errorMessage(new ApiError(409, "run_active"))).toBe("Stop the agent first: it is still working in this run");
+  });
+});
+
+describe("ledger pages", () => {
+  it("asks for a page after, or the newest page before, a seq, for one project or every project", async () => {
+    const f = respond(200, []);
+    await api.listLedger("p 1", { beforeSeq: 8, limit: 500 });
+    await api.listLedger(null, { afterSeq: 3 });
+    await api.listLedger(null, {});
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/ledger?projectId=p%201&beforeSeq=8&limit=500",
+      "/api/ledger?afterSeq=3",
+      "/api/ledger",
+    ]);
   });
 });

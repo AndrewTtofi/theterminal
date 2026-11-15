@@ -5,7 +5,7 @@ import type { GitHubOverview } from "@theterminal/shared";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { GitHubSideBar } from "../src/views/GitHubSideBar";
-import { fakeDock } from "./connections-harness";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const html = "https://github.com/octo-org/example";
 const overview = (over: Partial<GitHubOverview> = {}): GitHubOverview => ({
@@ -28,14 +28,14 @@ const overview = (over: Partial<GitHubOverview> = {}): GitHubOverview => ({
 
 function renderSideBar(github: Partial<WorkbenchModel["github"]>) {
   const refresh = vi.fn();
-  const selectView = vi.fn();
+  const nav = { ...shellNav(), showView: vi.fn() };
   const model = { github: { overview: null, error: null, refresh, ...github } } as unknown as WorkbenchModel;
   render(
-    <ShellContext.Provider value={{ model, dock: () => fakeDock(), selectView }}>
+    <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...nav }}>
       <GitHubSideBar />
     </ShellContext.Provider>,
   );
-  return { refresh, selectView };
+  return { refresh, showView: nav.showView };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -70,10 +70,10 @@ describe("GitHubSideBar", () => {
   });
 
   it("asks to connect GitHub and opens Connections", async () => {
-    const { selectView } = renderSideBar({ error: "github_not_connected" });
+    const { showView } = renderSideBar({ error: "github_not_connected" });
     expect(screen.getByText("Connect GitHub and set a repository in Connections.")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Open Connections" }));
-    expect(selectView).toHaveBeenCalledWith("connections");
+    expect(showView).toHaveBeenCalledWith("connections");
   });
 
   it.each([

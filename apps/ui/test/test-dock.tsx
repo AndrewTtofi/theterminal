@@ -1,50 +1,125 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import type { DockApi, DockPanelId } from "../src/shell/Dock";
+import { PRESET_LABELS } from "../src/shell/dock-layout";
+import type { PresetId } from "../src/shell/dock-layout";
+import { saveNamedLayout } from "../src/shell/layout-store";
+import { ShellContext } from "../src/shell/model";
+import type { ShellContextValue } from "../src/shell/model";
 
-const DEFAULT: { id: DockPanelId; where: "main" | "bottom" }[] = [
+export { diffPanelId, filePanelId, parsePanelPath } from "../src/shell/dock-layout";
+
+type Placed = { id: DockPanelId; where: "main" | "bottom" };
+
+const PRESETS: Record<PresetId, Placed[]> = {
+  guided: [
+    { id: "board", where: "main" },
+    { id: "conversation", where: "main" },
+  ],
+  operator: [
+    { id: "board", where: "main" },
+    { id: "capacity", where: "main" },
+    { id: "terminal", where: "bottom" },
+    { id: "agent_feed", where: "bottom" },
+    { id: "ledger", where: "bottom" },
+  ],
+};
+/** Built-in panels focus() opens when absent. */
+const BUILT_IN: Placed[] = [
   { id: "board", where: "main" },
   { id: "agent_feed", where: "bottom" },
   { id: "ledger", where: "bottom" },
-];
-/** Built-in panels focus() opens when absent: the defaults, and the Capacity and Plan intake tabs, not open by default. */
-const BUILT_IN: { id: DockPanelId; where: "main" | "bottom" }[] = [
-  ...DEFAULT, { id: "capacity", where: "main" }, { id: "intake", where: "main" },
+  { id: "capacity", where: "main" },
+  { id: "intake", where: "main" },
+  { id: "conversation", where: "main" },
+  { id: "needs_you", where: "main" },
+  { id: "terminal", where: "bottom" },
 ];
 
-/** The DockApi of the most recently mounted TestDock, so tests can close panels as the Owner would. */
-export const testDock: { api: DockApi | null } = { api: null };
+/**
+ * The DockApi and shell context of the most recently mounted TestDock, so tests can act as the Owner would.
+ * Set `restore` before rendering to start from those panels, as if a saved layout had been restored.
+ */
+export const testDock: { api: DockApi | null; shell: ShellContextValue | null; restore: Placed[] | null } = {
+  api: null,
+  shell: null,
+  restore: null,
+};
 
 /**
  * A flat stand-in for the dockview wrapper (jsdom cannot lay dockview out): every open panel renders
- * in a `div[data-panel=<id>]`, and the DockApi tracks which panels are open and whether the bottom is shown.
+ * in a `div[data-panel=<id>]`, and the DockApi tracks which panels are open, whether the bottom is shown,
+ * the layout's name and the layouts saved in this session.
  */
 export function Dock(props: { panels: Record<string, ComponentType<{ id: string }>>; onReady(api: DockApi): void; layoutKey: string }) {
-  const [open, setOpen] = useState(DEFAULT);
+  testDock.shell = useContext(ShellContext);
+  const [open, setOpen] = useState<Placed[]>(() => testDock.restore ?? PRESETS.guided);
   const [bottomShown, setBottomShown] = useState(true);
   const [active, setActive] = useState<DockPanelId | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
 
   useEffect(() => {
+    let name = "Guided";
+    const listeners = new Set<(name: string) => void>();
+    const saved = new Map<string, Placed[]>();
+    const setName = (next: string) => {
+      name = next;
+      for (const fn of listeners) fn(next);
+    };
+    const add = (p: Placed) => {
+      if (openRef.current.some((o) => o.id === p.id)) return;
+      openRef.current = [...openRef.current, p];
+      setOpen(openRef.current);
+      setName("Custom");
+    };
+    const replace = (panels: Placed[], next: string) => {
+      openRef.current = panels;
+      setOpen(panels);
+      setBottomShown(true);
+      setName(next);
+    };
     const api: DockApi = {
       open: (id, _title, where) => {
-        setOpen((prev) => (prev.some((p) => p.id === id) ? prev : [...prev, { id, where }]));
+        add({ id, where });
         setActive(id);
       },
       // Like the real dock, focusing a closed built-in panel reopens it.
       focus: (id) => {
         const builtIn = BUILT_IN.find((p) => p.id === id);
-        if (builtIn) setOpen((prev) => (prev.some((p) => p.id === id) ? prev : [...prev, builtIn]));
+        if (builtIn) add(builtIn);
         setActive(id);
       },
-      close: (id) => setOpen((prev) => prev.filter((p) => p.id !== id)),
-      reset: () => {
-        setOpen(DEFAULT);
-        setBottomShown(true);
+      close: (id) => {
+        if (!openRef.current.some((p) => p.id === id)) return;
+        openRef.current = openRef.current.filter((p) => p.id !== id);
+        setOpen(openRef.current);
+        setName("Custom");
       },
+      closeQuietly: (id) => {
+        openRef.current = openRef.current.filter((p) => p.id !== id);
+        setOpen(openRef.current);
+      },
+      reset: () => replace(PRESETS.guided, "Guided"),
       toggleBottom: () => setBottomShown((v) => !v),
       panelIds: () => openRef.current.map((p) => p.id),
+      applyPreset: (preset) => replace(PRESETS[preset], PRESET_LABELS[preset]),
+      applySaved: (n) => {
+        const panels = saved.get(n);
+        if (panels) replace(panels, n);
+      },
+      // Like the real dock, the store validates and writes first: a refusal throws before the name changes.
+      saveAs: (n) => {
+        saveNamedLayout(n, openRef.current);
+        saved.set(n, openRef.current);
+        setName(n);
+      },
+      savedNames: () => [...saved.keys()],
+      currentName: () => name,
+      onNameChange: (fn) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
     };
     testDock.api = api;
     props.onReady(api);

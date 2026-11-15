@@ -134,12 +134,18 @@ export class Ledger {
   /**
    * Entries in seq order. `cardId` and `runIds` keep the entries whose payload names that card or one of those
    * runs (their union when both are given); an empty `runIds` names no run. At most MAX_RUN_IDS run ids.
+   * With `beforeSeq`, only entries with a smaller seq, and the newest `limit` of them (still returned in ascending
+   * order); it combines with `afterSeq`.
    */
   list(
-    q: { projectId?: string; afterSeq?: number; limit?: number; cardId?: string; runIds?: string[] } = {},
+    q: { projectId?: string; afterSeq?: number; beforeSeq?: number; limit?: number; cardId?: string; runIds?: string[] } = {},
   ): LedgerEntry[] {
     const where: string[] = ["seq > ?"];
     const params: unknown[] = [q.afterSeq ?? 0];
+    if (q.beforeSeq !== undefined) {
+      where.push("seq < ?");
+      params.push(q.beforeSeq);
+    }
     if (q.projectId !== undefined) {
       where.push("project_id = ?");
       params.push(q.projectId);
@@ -161,11 +167,14 @@ export class Ledger {
       where.push(about.length > 0 ? `CASE WHEN json_valid(payload) THEN (${about.join(" OR ")}) ELSE 0 END` : "0");
     }
     params.push(q.limit ?? 500);
-    const rows = this.db
-      .prepare(`SELECT * FROM ledger WHERE ${where.join(" AND ")} ORDER BY seq ASC LIMIT ?`)
+    const order = q.beforeSeq === undefined ? "ASC" : "DESC";
+    const fetched = this.db
+      .prepare(`SELECT * FROM ledger WHERE ${where.join(" AND ")} ORDER BY seq ${order} LIMIT ?`)
       .all(...params) as Row[];
-    // Stop at the first row whose payload cannot be parsed (a tampered entry): serve what precedes it,
-    // consistent with treating the ledger as read-only from the break.
+    const rows = order === "ASC" ? fetched : fetched.reverse();
+    // Stop at the first row whose payload cannot be parsed (a tampered entry): serve what precedes it in this page,
+    // consistent with treating the ledger as read-only from the break. A backwards page is put in ascending order
+    // first, so it too serves only the entries before the break.
     const entries: LedgerEntry[] = [];
     for (const row of rows) {
       try {

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
-  NarrationContext, NarrationTopic, PendingAgentAction, Project, Stage,
+  NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, api, blockedGates, errorMessage, subscribeLedger } from "./api";
+import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
-import { LEDGER_TOPICS } from "./shell/model";
-import type { GatePrompt, LedgerScope, WorkbenchModel } from "./shell/model";
+import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
+import type { OverrideOutcome } from "./shell/model";
+import type { AppModel, GatePrompt, LedgerScope } from "./shell/model";
+import { LIVE_CAP, appendEntries, batcher, prependEntries } from "./ledger-buffer";
 import { useConnections } from "./use-connections";
 
 /** Shown in the strip when the server refused the gate decisions because the conditions changed. */
@@ -16,6 +18,33 @@ const GATE_REFRESHED = "Something changed: a condition is no longer met. The che
 
 /** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
 const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
+
+/** How many ledger entries one request loads: the newest page first, then older pages on request. */
+const LEDGER_FETCH = 500;
+
+/** The newest page of a project's ledger (every project's for null), and the head to stream from after it. */
+async function newestLedgerPage(projectId: string | null): Promise<{ page: LedgerEntry[]; headSeq: number }> {
+  const { headSeq } = await api.health();
+  const page = await api.listLedger(projectId, { beforeSeq: headSeq + 1, limit: LEDGER_FETCH });
+  return { page, headSeq };
+}
+
+/**
+ * One ledger scope's loaded entries (ascending seq). `hasOlder`: the server may hold older ones. `paged`: the Owner
+ * has paged older entries in, so the stream no longer trims to `LIVE_CAP`. `loading` and `error` describe the
+ * older-page request.
+ */
+type ScopeLedger = { entries: LedgerEntry[]; hasOlder: boolean; paged: boolean; loading: boolean; error: string | null };
+const EMPTY_SCOPE: ScopeLedger = { entries: [], hasOlder: false, paged: false, loading: false, error: null };
+
+/** Streamed entries added to a scope: trimmed to the newest `LIVE_CAP` unless the Owner paged older ones in. */
+function withStreamed(prev: ScopeLedger, incoming: LedgerEntry[]): ScopeLedger {
+  const { entries, trimmed } = appendEntries(prev.entries, incoming, prev.paged ? null : LIVE_CAP);
+  return entries === prev.entries ? prev : { ...prev, entries, hasOlder: prev.hasOlder || trimmed };
+}
+
+/** How long a run's changes are reused before they are read again. */
+const CHANGES_MEMO_MS = 10_000;
 
 /** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
 function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
@@ -54,10 +83,19 @@ export function App() {
   /** The selected project as of the latest render, so a late intake answer for another project is dropped. */
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
-  const [entries, setEntries] = useState<LedgerEntry[]>([]);
+  const [projectLedger, setProjectLedger] = useState<ScopeLedger>(EMPTY_SCOPE);
+  const entries = projectLedger.entries;
   const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
   const [ledgerTopics, setLedgerTopics] = useState<NarrationTopic[]>(LEDGER_TOPICS);
-  const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
+  const [allLedger, setAllLedger] = useState<ScopeLedger>(EMPTY_SCOPE);
+  /** Bumped each time a scope's entries are loaded afresh, so an older page asked for before is dropped. */
+  const projectLoad = useRef(0);
+  const allLoad = useRef(0);
+  /** Bumped on each older-page request of a scope, so only the newest request ends its loading state. */
+  const projectOlderReq = useRef(0);
+  const allOlderReq = useRef(0);
+  /** The run the Agent feed and the Terminal follow; null follows every run of the project. */
+  const [feedRunId, setFeedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const refreshAgents = useRef<() => void>(() => {});
@@ -77,10 +115,23 @@ export function App() {
   /** The gated move waiting on the Owner, with the project of its card. */
   const [gate, setGate] = useState<(GatePrompt & { projectId: string }) | null>(null);
   const gateRef = useRef(gate);
+  /**
+   * True while a gated move is being sent, and the ids of actions whose decision is being sent: a second request
+   * meanwhile (a double click, or another copy of the same card) answers false instead of reaching the server.
+   */
+  const resolvingGate = useRef(false);
+  const deciding = useRef(new Set<string>());
+  /** The runs whose override is being sent; see overrideAction. */
+  const overriding = useRef(new Set<string>());
   gateRef.current = gate;
   const refreshGateRef = useRef<() => void>(() => {});
   /** Listeners for every new ledger entry (the story tabs), fed by the stream from the ledger head. */
   const entryListeners = useRef(new Set<(e: LedgerEntry) => void>());
+  /** The run picked in the Changes view; null follows the selected run. */
+  const [pickedChangesRun, setPickedChangesRun] = useState<string | null>(null);
+  const [changes, setChanges] = useState<{ runId: string; changes: RunChanges | null; error: string | null } | null>(null);
+  /** Each run's changes as last asked for, and when, so callers within 10 s share one request. */
+  const changesMemo = useRef(new Map<string, { at: number; result: Promise<RunChanges> }>());
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -225,20 +276,24 @@ export function App() {
     }, () => cancelled);
     refreshRef.current = refresh;
     setBoard(null);
-    setEntries([]);
+    setProjectLedger(EMPTY_SCOPE);
+    setFeedRunId(null);
+    const load = ++projectLoad.current;
+    projectOlderReq.current++;
+    // Streamed entries are applied together, at most every 50 ms, so a burst renders once.
+    const stream = batcher<LedgerEntry>((batch) => setProjectLedger((prev) => withStreamed(prev, batch)));
     // Board and ledger load independently, so one failing does not hide the other.
     void run(async () => {
       const initialBoard = await api.getBoard(selectedId);
       if (!cancelled) setBoard(initialBoard);
     });
     void run(async () => {
-      const initial = await api.listLedger(selectedId);
-      if (cancelled) return;
-      setEntries(initial);
-      const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
-      unsubscribe = subscribeLedger(lastSeq, (e) => {
+      const { page, headSeq } = await newestLedgerPage(selectedId);
+      if (cancelled || load !== projectLoad.current) return;
+      setProjectLedger({ ...EMPTY_SCOPE, entries: page, hasOlder: page.length === LEDGER_FETCH });
+      unsubscribe = subscribeLedger(headSeq, (e) => {
         if (e.projectId !== selectedId) return;
-        setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+        stream.push(e);
         refresh();
         if (e.type.startsWith("agent.")) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
@@ -248,6 +303,7 @@ export function App() {
       cancelled = true;
       refreshRef.current = () => {};
       unsubscribe();
+      stream.cancel();
     };
   }, [selectedId, run]);
 
@@ -300,26 +356,72 @@ export function App() {
     }
   };
 
+  /** Sends an emergency override; a refusal comes back worded, for the form to show where the Owner is looking. */
+  /**
+   * Sends one override of `runId`. While one of the run's overrides is being sent, another (a double click, or the
+   * other form) answers a refusal without reaching the server, as decisions and gated moves do.
+   */
+  const overrideAction = async <T extends object>(runId: string, send: () => Promise<T>): Promise<OverrideOutcome<T>> => {
+    if (overriding.current.has(runId)) return { ok: false, error: "An override of this run is already being sent" };
+    overriding.current.add(runId);
+    try {
+      return { ok: true, ...(await send()) };
+    } catch (e) {
+      return { ok: false, error: errorMessage(e) };
+    } finally {
+      overriding.current.delete(runId);
+    }
+  };
+
   // The "All projects" ledger scope loads and streams every project's entries while it is chosen.
   useEffect(() => {
     if (ledgerScope !== "all") return;
     let cancelled = false;
     let unsubscribe = () => {};
-    setAllEntries([]);
+    setAllLedger(EMPTY_SCOPE);
+    const load = ++allLoad.current;
+    allOlderReq.current++;
+    const stream = batcher<LedgerEntry>((batch) => setAllLedger((prev) => withStreamed(prev, batch)));
     void run(async () => {
-      const initial = await api.listLedger(null);
-      if (cancelled) return;
-      setAllEntries(initial);
-      const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
-      unsubscribe = subscribeLedger(lastSeq, (e) => {
-        setAllEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
-      });
+      const { page, headSeq } = await newestLedgerPage(null);
+      if (cancelled || load !== allLoad.current) return;
+      setAllLedger({ ...EMPTY_SCOPE, entries: page, hasOlder: page.length === LEDGER_FETCH });
+      unsubscribe = subscribeLedger(headSeq, (e) => stream.push(e));
     });
     return () => {
       cancelled = true;
       unsubscribe();
+      stream.cancel();
     };
   }, [ledgerScope, run]);
+
+  /**
+   * Puts the page before the oldest loaded entry of a scope (every project's, or the selected project's) in front,
+   * one request per scope at a time. A failure is kept on the scope for its panel to show; a request overtaken by a
+   * reload or a newer request changes nothing when it ends.
+   */
+  const loadOlder = async (all: boolean): Promise<void> => {
+    const projectId = all ? null : selectedId;
+    const scope = all ? allLedger : projectLedger;
+    const set = all ? setAllLedger : setProjectLedger;
+    if ((!all && projectId === null) || scope.entries.length === 0 || scope.loading) return;
+    const load = all ? allLoad : projectLoad;
+    const req = all ? allOlderReq : projectOlderReq;
+    const at = load.current;
+    const token = ++req.current;
+    const current = () => load.current === at && req.current === token;
+    const oldest = scope.entries.reduce((min, e) => Math.min(min, e.seq), Infinity);
+    set((prev) => ({ ...prev, loading: true, error: null }));
+    try {
+      const page = await api.listLedger(projectId, { beforeSeq: oldest, limit: LEDGER_FETCH });
+      if (!current()) return;
+      set((prev) => ({
+        ...prev, entries: prependEntries(page, prev.entries), hasOlder: page.length === LEDGER_FETCH, paged: true, loading: false,
+      }));
+    } catch (e) {
+      if (current()) set((prev) => ({ ...prev, loading: false, error: errorMessage(e) }));
+    }
+  };
 
   // A gate belongs to the project it was raised in: choosing another project closes it.
   useEffect(() => setGate(null), [selectedId]);
@@ -330,6 +432,65 @@ export function App() {
       entryListeners.current.delete(onEntry);
     };
   }, []);
+
+  // The Changes view's run: the one picked there, else the selected run, else the project's newest.
+  const newestRunId = useMemo(
+    () => runs.reduce<AgentRun | null>((n, r) => (n === null || r.startedAt > n.startedAt ? r : n), null)?.id ?? null,
+    [runs],
+  );
+  const changesRunId = selectedId ? (pickedChangesRun ?? selectedRunId ?? newestRunId) : null;
+  useEffect(() => setPickedChangesRun(null), [selectedId]);
+
+  /** A run's changes, from memory when asked for under 10 s ago (unless `fresh`); a failed read is not kept. */
+  const [runChanges] = useState(() => (runId: string, fresh = false): Promise<RunChanges> => {
+    const now = Date.now();
+    const kept = changesMemo.current.get(runId);
+    if (!fresh && kept && now - kept.at < CHANGES_MEMO_MS) return kept.result;
+    const result = api.getRunChanges(runId);
+    const memo = { at: now, result };
+    changesMemo.current.set(runId, memo);
+    result.catch(() => {
+      if (changesMemo.current.get(runId) === memo) changesMemo.current.delete(runId);
+    });
+    return result;
+  });
+
+  /** True while the Changes run is live: the server refuses its changes, so none are asked for until it ends. */
+  const changesLive = runIsLive(runs, changesRunId);
+  useEffect(() => {
+    if (changesRunId === null) {
+      setChanges(null);
+      return;
+    }
+    const runId = changesRunId;
+    if (changesLive) {
+      // The runs list says when it ends, and this effect then reads the changes.
+      setChanges({ runId, changes: null, error: LIVE_RUN_CHANGES });
+      return;
+    }
+    let cancelled = false;
+    setChanges({ runId, changes: null, error: null });
+    let fresh = false;
+    const refresh = coalesced(async () => {
+      const read = fresh;
+      fresh = true;
+      try {
+        const c = await runChanges(runId, read);
+        if (!cancelled) setChanges({ runId, changes: c, error: null });
+      } catch (e) {
+        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error: errorMessage(e, "changes") }));
+      }
+    }, () => cancelled);
+    refresh();
+    const unsubscribe = subscribeEntries((e) => {
+      if (namesRun(e, runId)) refresh();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [changesRunId, changesLive, runChanges, subscribeEntries]);
+
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
     const { projectId: _projectId, ...prompt } = gate;
@@ -350,7 +511,7 @@ export function App() {
   const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>
     setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change(prev) } : prev));
 
-  const model: WorkbenchModel = {
+  const model: AppModel = {
     projects,
     selectedId,
     onSelectProject: setSelectedId,
@@ -394,7 +555,8 @@ export function App() {
     gate: gatePrompt,
     onResolveGate: async (decisions) => {
       const g = gateRef.current;
-      if (!g) return false;
+      if (!g || resolvingGate.current) return false;
+      resolvingGate.current = true;
       try {
         setError(null);
         await api.moveCard(g.cardId, g.to, decisions);
@@ -419,6 +581,8 @@ export function App() {
           setError(errorMessage(e));
         }
         return false;
+      } finally {
+        resolvingGate.current = false;
       }
     },
     onCancelGate: () => setGate(null),
@@ -439,6 +603,7 @@ export function App() {
           ...(connectionIds.length > 0 && { connectionIds }),
         });
         setSelectedRunId(started.id);
+        setFeedRunId(started.id);
         refreshAgents.current();
         return true;
       } catch (e) {
@@ -446,7 +611,11 @@ export function App() {
         return false;
       }
     },
-    onSelectRun: setSelectedRunId,
+    onSelectRun: (runId) => {
+      setSelectedRunId(runId);
+      // Picking a run in the Agents view follows it in the Agent feed and the Terminal.
+      if (runId !== null) setFeedRunId(runId);
+    },
     onStopRun: (runId) =>
       void run(async () => {
         await api.stopRun(runId);
@@ -454,14 +623,28 @@ export function App() {
       }),
     pending,
     onDecide: async (id, decision, reason) => {
+      if (deciding.current.has(id)) return false;
+      deciding.current.add(id);
       try {
         await api.decideAction(id, decision, reason);
       } finally {
+        deciding.current.delete(id);
         refreshPending.current();
         refreshAgents.current();
       }
     },
-    entries: ledgerScope === "all" ? allEntries : entries,
+    entries: ledgerScope === "all" ? allLedger.entries : entries,
+    projectEntries: entries,
+    feedRunId,
+    onFollowRun: setFeedRunId,
+    ledgerHasOlder: (ledgerScope === "all" ? allLedger : projectLedger).hasOlder,
+    ledgerOlder: {
+      loading: (ledgerScope === "all" ? allLedger : projectLedger).loading,
+      error: (ledgerScope === "all" ? allLedger : projectLedger).error,
+    },
+    onLoadOlderLedger: () => loadOlder(ledgerScope === "all"),
+    projectOlder: { hasOlder: projectLedger.hasOlder, loading: projectLedger.loading, error: projectLedger.error },
+    onLoadOlderProject: () => loadOlder(false),
     ledgerScope,
     onLedgerScopeChange: setLedgerScope,
     ledgerTopics,
@@ -495,6 +678,17 @@ export function App() {
     onDecideIntake: (decisionId, chosen, rationale) => intakeAction((id) => api.decideIntake(id, decisionId, chosen, rationale)),
     onCompleteIntake: () => intakeAction((id) => api.completeIntake(id)),
     onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason), "reopen"),
+    runExists: api.runExists,
+    changesRunId,
+    onSelectChangesRun: setPickedChangesRun,
+    changes: changes?.runId === changesRunId ? changes.changes : null,
+    changesError: changes?.runId === changesRunId ? changes.error : null,
+    runChanges,
+    onOverrideCommand: (runId, i) => overrideAction(runId, () => api.overrideCommand(runId, i)),
+    onOverrideDiscard: (runId, reason) => overrideAction(runId, () => api.overrideDiscard(runId, reason)),
+    dir: api.listRunDir,
+    file: api.getRunFile,
+    diff: api.getRunDiff,
   };
 
   return (

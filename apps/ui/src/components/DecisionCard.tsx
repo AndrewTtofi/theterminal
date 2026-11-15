@@ -1,13 +1,18 @@
-import { useState } from "react";
-import { ACTION_KIND_MEANS, actionPhrase, visibleControls } from "@theterminal/shared";
+import { useContext, useId, useState } from "react";
+import { ACTION_KIND_MEANS, ACTION_TOPIC, actionPhrase, visibleControls } from "@theterminal/shared";
 import type { AgentAction } from "@theterminal/shared";
 import { ApiError } from "../api";
+import { ShellContext } from "../shell/model";
 
 type Props = {
   action: AgentAction;
   /** The project the action belongs to, shown when the card may sit beside other projects' cards. */
   projectName?: string;
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown> | void;
+  /** Shows the "More context" button, which opens the Needs-you tab; absent on cards already there. */
+  onMore?: () => void;
+  /** A copy of a card the strip shows: no Allow or Deny here, only a pointer to the strip, so it is decided once. */
+  readOnly?: boolean;
 };
 
 /** For an input the core recorded as truncated, how many characters the card cannot show; else null. */
@@ -31,7 +36,10 @@ function shellCommand(action: AgentAction): string | null {
   return typeof command === "string" ? visibleControls(command) : null;
 }
 
-export function DecisionCard({ action, projectName, onDecide }: Props) {
+export function DecisionCard({ action, projectName, onDecide, onMore, readOnly = false }: Props) {
+  // Outside the shell (a card on its own) there is no Learn view to open, so no link.
+  const openLearn = useContext(ShellContext)?.openLearn;
+  const headingId = useId();
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,16 +64,37 @@ export function DecisionCard({ action, projectName, onDecide }: Props) {
   return (
     <article className="decision-card" aria-label={`Decision: ${visibleControls(action.summary)}`}>
       {projectName !== undefined && <p className="project-name">{visibleControls(projectName)}</p>}
-      <h3>Agent wants to {actionPhrase(action)}</h3>
+      <h3 id={headingId}>Agent wants to {actionPhrase(action)}</h3>
       <h4>What this means</h4>
       <p className="means">{ACTION_KIND_MEANS[action.kind] ?? ACTION_KIND_MEANS.other}</p>
+      {(openLearn || onMore) && (
+        <p className="decision-links">
+          {openLearn && (
+            <button
+              type="button"
+              className="link"
+              aria-describedby={headingId}
+              onClick={() => openLearn(ACTION_TOPIC[action.kind] ?? ACTION_TOPIC.other)}
+            >
+              Learn more
+            </button>
+          )}
+          {onMore && (
+            <button type="button" className="link" aria-describedby={headingId} onClick={onMore}>
+              More context
+            </button>
+          )}
+        </p>
+      )}
       {command !== null && <pre className="command">{command}</pre>}
       <details>
         <summary>Details</summary>
         <pre>{visibleControls(JSON.stringify(action.input, null, 2) ?? "")}</pre>
       </details>
       {hidden !== null && <p className="note">{hidden} characters hidden — full input not shown</p>}
-      {denying ? (
+      {readOnly ? (
+        <p className="note">Decide in the strip above</p>
+      ) : denying ? (
         <div className="decision-actions">
           <label>
             Reason (optional)

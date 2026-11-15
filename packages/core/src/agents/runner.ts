@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
@@ -220,6 +221,8 @@ function scrubJson(v: unknown, scrub: Scrub): unknown {
  */
 export class AgentRunner {
   private readonly sessions = new Map<string, Session>();
+  /** Runs whose adapter has not returned yet, even after a stop has closed their session. */
+  private readonly unsettled = new Set<string>();
   private readonly newId: () => string;
   /** Scrubs dataDir, the home directory and the username, for strings recorded outside a live run. */
   private readonly scrub: Scrub;
@@ -299,7 +302,7 @@ export class AgentRunner {
         type: "agent.started",
         payload: {
           runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub, runSecrets),
-          cardId, worktree: wt.relPath,
+          cardId, worktree: wt.relPath, base: wt.base,
         },
       },
       result: () => getRun(db, runId)!,
@@ -389,6 +392,14 @@ export class AgentRunner {
     return listActions(db, runId).find((a) => a.id === actionId)!;
   }
 
+  /**
+   * True from a run's start until its adapter has returned. A stopped run is no longer `running` at once, but its
+   * agent process may still be writing into the working copy until then.
+   */
+  settling(runId: string): boolean {
+    return this.unsettled.has(runId);
+  }
+
   stop(_actor: Actor, runId: string): void {
     if (!getRun(this.deps.db, runId)) throw new NotFoundError("run", runId);
     this.close(runId, "stopped", null, "run stopped");
@@ -402,6 +413,18 @@ export class AgentRunner {
     const run = getRun(this.deps.db, runId);
     if (!run) throw new NotFoundError("run", runId);
     return { run, actions: listActions(this.deps.db, runId) };
+  }
+
+  /**
+   * The cleaning this run's recorded text gets (redact, scrub paths, redact, then truncate to `max`), for text read
+   * from its working copy: the live session's scrubber and secrets while it runs, else a scrubber for its worktree.
+   */
+  cleanFor(runId: string): (s: string, max: number) => string {
+    const run = getRun(this.deps.db, runId);
+    if (!run) throw new NotFoundError("run", runId);
+    const s = this.sessions.get(runId);
+    const scrub = s?.scrub ?? this.runScrubber(join(this.deps.dataDir, run.worktree));
+    return (text, max) => this.clean(text, max, scrub, s?.secrets);
   }
 
   /** After a restart nothing is waiting any more: deny every pending action and fail every running run. */
@@ -455,6 +478,7 @@ export class AgentRunner {
       secrets,
     };
     this.sessions.set(run.id, session);
+    this.unsettled.add(run.id);
     session.done = (async () => {
       let status: FinishStatus;
       let error: string | null = null;
@@ -484,7 +508,7 @@ export class AgentRunner {
       } finally {
         this.sessions.delete(run.id);
       }
-    })();
+    })().finally(() => this.unsettled.delete(run.id));
   }
 
   /** Records a proposal through the same snapshot, redaction and scrub as every action; returns what was recorded. */

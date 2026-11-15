@@ -373,6 +373,61 @@ describe("narrate: gates", () => {
   });
 });
 
+describe("narrate: override", () => {
+  const fake: NarrationContext = { adapterName: (id) => (id === "r1" ? "fake" : undefined) };
+  const reason = "Checking the override path end to end";
+  const command = (over: Record<string, unknown> = {}) =>
+    entry("override.command", { overrideId: "o1", runId: "r1", program: "node", args: ["-e", 'console.log("hi")'], cwd: ".", reason, ...over });
+  const completed = (over: Record<string, unknown>) =>
+    entry(
+      "override.completed",
+      { overrideId: "o1", runId: "r1", ok: true, exitCode: 0, signal: null, timedOut: false, durationMs: 5, output: "hi\n", ...over },
+      runner,
+    );
+
+  it("narrates a command in red with the exact words", () => {
+    const out = n(command(), fake);
+    expect(out.headline).toBe(
+      'OVERRIDE: Owner ran "node -e console.log(\\"hi\\")" in the Fake agent\'s working copy: Checking the override path end to end',
+    );
+    expect(out.detail).toBe(JSON.stringify({ program: "node", args: ["-e", 'console.log("hi")'], cwd: "." }, null, 2));
+    expect(out.topic).toBe("override");
+    expect(out.attention).toBe(true);
+    expect(out.refs).toEqual({ runId: "r1", overrideId: "o1" });
+    expect(h(command({ runId: "r9" }), fake)).toBe(
+      'OVERRIDE: Owner ran "node -e console.log(\\"hi\\")" in the agent\'s working copy: Checking the override path end to end',
+    );
+  });
+
+  it("clips the command at 80 characters and keeps the reason", () => {
+    const out = h(command({ program: "git", args: ["x".repeat(100)] }), fake);
+    expect(out).toBe(`OVERRIDE: Owner ran "git ${"x".repeat(76)}…" in the Fake agent's working copy: ${reason}`);
+    expect(h(command({ args: [] }), fake)).toBe(`OVERRIDE: Owner ran "node" in the Fake agent's working copy: ${reason}`);
+  });
+
+  it("narrates a discard", () => {
+    const out = n(entry("override.discard", { overrideId: "o2", runId: "r1", reason, files: 1 }), fake);
+    expect(out.headline).toBe(`OVERRIDE: Owner discarded 1 changed file(s) of the Fake agent's run: ${reason}`);
+    expect(out.topic).toBe("override");
+    expect(out.attention).toBe(true);
+    expect(out.refs).toEqual({ runId: "r1", overrideId: "o2" });
+  });
+
+  it("narrates how the override ended, with the output as detail", () => {
+    const ok = n(completed({}), fake);
+    expect(ok.headline).toBe("Override finished (exit 0)");
+    expect(ok.detail).toBe("hi\n");
+    expect(ok.topic).toBe("override");
+    expect(ok.attention).toBe(true);
+    expect(ok.refs).toEqual({ runId: "r1", overrideId: "o1" });
+    expect(h(completed({ ok: false, exitCode: null, signal: "SIGKILL", timedOut: true }))).toBe("Override killed after 10 minutes");
+    expect(h(completed({ ok: false, exitCode: 2 }))).toBe("Override failed (exit 2)");
+    expect(h(completed({ ok: false, exitCode: null, signal: "SIGTERM" }))).toBe("Override failed (signal SIGTERM)");
+    expect(h(completed({ ok: false, exitCode: null, signal: null, output: "workspace restarted" }))).toBe("Override failed (exit unknown)");
+    expect(n(completed({ output: "" })).detail).toBeNull();
+  });
+});
+
 describe("narrate: robustness", () => {
   it("falls back for an unknown type", () => {
     const out = n(entry("future.event", { x: 1 }));
@@ -458,7 +513,7 @@ describe("narrate: robustness", () => {
       error: long, costUsd: 1e15, message: long, changes: { secretsSet: Array(50).fill(long) }, provider: long,
       credential: "aws_static_keys", runId: long, idea: long, questionId: "existing", answer: long, decisionId: "payments_scope",
       chosen: long, rationale: long, summaryText: long, cards: [], gates: Array(10).fill({ gateId: long }), gateId: long,
-      retryAfterS: 1e15,
+      retryAfterS: 1e15, program: long, args: Array(64).fill(long), cwd: long, files: 1e15, exitCode: 1e15, signal: long,
     };
     const actors: Actor[] = [owner, { kind: "human", id: long }, agentActor, policy, runner];
     for (const type of [...Object.keys(eventPayloadSchemas), "future.event." + long]) {
@@ -642,7 +697,16 @@ describe("narration.ts purity", () => {
     expect(source.match(/^\s*import\b/gm)?.length).toBe(imports.length);
     expect(imports.length).toBeGreaterThan(0);
     for (const spec of imports) {
-      expect(["./intake.js", "./gates.js", "./agents.js", "./domain.js", "./connections.js", "./text.js"]).toContain(spec);
+      expect([
+        "./intake.js",
+        "./gates.js",
+        "./agents.js",
+        "./domain.js",
+        "./connections.js",
+        "./text.js",
+        "./override.js",
+        "./learn.js",
+      ]).toContain(spec);
     }
     expect(source).not.toMatch(/\bimport\s*\(/);
     expect(source).not.toMatch(/\brequire\s*\(/);

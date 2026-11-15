@@ -7,6 +7,7 @@ import { IntakePanel } from "../src/views/IntakePanel";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { ALL_ANSWERS, APPROVED_AT, intakeView } from "./intake-fixtures";
+import { shellNav } from "./connections-harness";
 
 const NOTICE =
   "What you write here is recorded permanently in this project's ledger. Do not paste passwords, keys or other people's personal details.";
@@ -23,7 +24,7 @@ function setup(intake: IntakeView | null | undefined, over: Partial<WorkbenchMod
     ...over,
   } as unknown as WorkbenchModel;
   const ui = (m: WorkbenchModel) => (
-    <ShellContext.Provider value={{ model: m, dock: () => null, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model: m, dock: () => null, ...shellNav() }}>
       <IntakePanel id="intake" />
     </ShellContext.Provider>
   );

@@ -22,6 +22,13 @@ describe("agent.started", () => {
       bad("agent.started", { ...started, worktree: w });
     }
   });
+  it("accepts an optional fork commit `base` of 40 or 64 hex digits and nothing else", () => {
+    ok("agent.started", { ...started, base: "a".repeat(40) });
+    ok("agent.started", { ...started, base: "0123456789abcdef".repeat(4) });
+    for (const base of ["", "HEAD", "A".repeat(40), "a".repeat(39), "a".repeat(41), "a".repeat(63), null]) {
+      bad("agent.started", { ...started, base });
+    }
+  });
   it("rejects empty or oversize prompt, unknown adapter, extra keys", () => {
     bad("agent.started", { ...started, prompt: "" });
     bad("agent.started", { ...started, prompt: "x".repeat(20001) });

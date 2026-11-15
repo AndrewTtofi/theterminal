@@ -1,10 +1,12 @@
 import type { ComponentType, KeyboardEvent, PointerEvent } from "react";
 import { AgentsSideBar } from "../views/AgentsSideBar";
 import { CapacitySideBar } from "../views/CapacitySideBar";
+import { ChangesSideBar } from "../views/ChangesSideBar";
 import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
 import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
+import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
@@ -17,11 +19,13 @@ const KEY_STEP = 20;
 const CONTENT: Record<ViewId, ComponentType> = {
   board: ProjectsSideBar,
   agents: AgentsSideBar,
+  changes: ChangesSideBar,
   needs_you: NeedsYouSideBar,
   ledger: LedgerSideBar,
   connections: ConnectionsSideBar,
   github: GitHubSideBar,
   capacity: CapacitySideBar,
+  learn: LearnSideBar,
 };
 
 export const clampWidth = (w: number) => Math.min(SIDE_BAR_MAX, Math.max(SIDE_BAR_MIN, Math.round(w)));

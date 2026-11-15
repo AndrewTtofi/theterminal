@@ -26,6 +26,11 @@ export type AgentRun = {
   status: RunStatus;
   /** Relative to dataDir. */
   worktree: string;
+  /**
+   * The commit the run's worktree was created at (the project repository's HEAD then): the fork point every view of
+   * what the run changed is compared with. Null for runs recorded before it was kept; those have no change view.
+   */
+  base: string | null;
   costUsd: number | null;
   /** Totals the provider reported for the run (estimates); null when it reported none. */
   inputTokens: number | null;
@@ -90,6 +95,8 @@ export const agentPayloadSchemas = {
       prompt: z.string().min(1).max(20000),
       cardId: z.string().max(200).nullable(),
       worktree: relativeWorktree,
+      // The fork commit (a full SHA-1 or SHA-256 id). Absent in entries written before it was recorded.
+      base: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "must be a full commit id").optional(),
     })
     .strict(),
   "agent.message": z.object({ runId: id, text: z.string().max(4000) }).strict(),

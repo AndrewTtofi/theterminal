@@ -26,6 +26,7 @@ vi.mock("../src/api", () => ({
     getAgents: vi.fn(),
     listRuns: vi.fn(),
     getRun: vi.fn(),
+    runExists: vi.fn(),
     listPendingActions: vi.fn(),
     listAllPendingActions: vi.fn(),
     decideAction: vi.fn(),
@@ -47,6 +48,12 @@ vi.mock("../src/api", () => ({
     reopenIntake: vi.fn(),
     getCardGates: vi.fn(),
     getCardStory: vi.fn(),
+    getRunChanges: vi.fn(),
+    getRunDiff: vi.fn(),
+    listRunDir: vi.fn(),
+    getRunFile: vi.fn(),
+    overrideCommand: vi.fn(),
+    overrideDiscard: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     constructor(readonly status: number, readonly code: string, readonly detail?: unknown) {
@@ -54,6 +61,7 @@ vi.mock("../src/api", () => ({
     }
   },
   errorMessage: vi.fn(() => "err"),
+  LIVE_RUN_CHANGES: "Changes show when the run is stopped or finished.",
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
@@ -72,8 +80,10 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { ApiError, api, errorMessage } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
+import { testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
+import { changes, fileDiff, listing, run1, runEntry } from "./changes-fixtures";
 
 const mk = (id: string): Board => ({
   project: { id, name: `Project ${id}`, pitch: "", createdAt: "" },
@@ -90,8 +100,15 @@ const AGENTS: AgentsInfo = {
   acks: { claude: "claude ack", codex: "codex ack", gemini: "gemini ack" },
 };
 
+/** Switches to the Operator layout, whose bottom panel holds the Ledger (Guided, the default, has none). */
+async function operatorLayout() {
+  await waitFor(() => expect(testDock.api).not.toBeNull());
+  act(() => testDock.api!.applyPreset("operator"));
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
+  testDock.api = null;
   h.onEntry = undefined;
   h.subs.clear();
   m.getStatus.mockResolvedValue({
@@ -249,7 +266,7 @@ describe("App initial load", () => {
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     expect(await screen.findByRole("heading", { name: "Project A" })).toBeTruthy();
-    expect(await screen.findByRole("status")).toBeTruthy();
+    expect((await screen.findAllByRole("status")).some((s) => s.classList.contains("error"))).toBe(true);
   });
 });
 
@@ -269,7 +286,8 @@ describe("App needs-you strip", () => {
     m.listAllPendingActions.mockResolvedValue([pendingAction("a1", "A", "run ls"), pendingAction("b1", "B", "run make")]);
     render(<App />);
     const strip = await screen.findByRole("region", { name: "Needs you" });
-    expect(screen.getByText("Select or create a project.")).toBeTruthy();
+    // The Board and the Conversation both ask for a project.
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
     const cards = strip.querySelectorAll("article");
     expect([...cards].map((c) => c.getAttribute("aria-label"))).toEqual(["Decision: run ls", "Decision: run make"]);
     expect(cards[0]!.textContent).toContain("Project A");
@@ -299,6 +317,24 @@ describe("App needs-you strip", () => {
     expect(m.listAllPendingActions).toHaveBeenCalledTimes(1);
   });
 
+  it("sends one decision when the same action is decided twice at once", async () => {
+    let resolve!: () => void;
+    m.decideAction.mockReturnValue(new Promise<never>((r) => (resolve = r as () => void)));
+    render(<App />);
+    await waitFor(() => expect(testDock.shell).not.toBeNull());
+    const { onDecide } = testDock.shell!.model;
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    act(() => {
+      first = onDecide("a1", "allow");
+      second = onDecide("a1", "allow");
+    });
+    expect(await second).toBe(false);
+    expect(m.decideAction).toHaveBeenCalledTimes(1);
+    resolve();
+    await act(async () => void (await first));
+  });
+
   it("refreshes the strip after a decision", async () => {
     m.listAllPendingActions.mockResolvedValueOnce([pendingAction("a1", "A", "run ls")]).mockResolvedValue([]);
     m.decideAction.mockResolvedValue({} as never);
@@ -319,7 +355,8 @@ describe("App provider settings", () => {
     render(<App />);
     await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
-    expect(screen.getByText("Select or create a project.")).toBeTruthy();
+    // The Board and the Conversation both ask for a project.
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
   });
 
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
@@ -397,24 +434,160 @@ describe("App ledger scope", () => {
       Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
     );
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
 
     await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
     await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
-    expect(m.listLedger).toHaveBeenCalledWith(null);
+    expect(m.listLedger).toHaveBeenCalledWith(null, { beforeSeq: 8, limit: 500 });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(2));
 
     await userEvent.click(screen.getByRole("radio", { name: "This project" }));
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
   });
 
+  it("loads the newest page before the head, then pages older entries in with beforeSeq", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => entry(from + i, "A", `P${from + i}`));
+    m.listLedger.mockImplementation(async (_projectId, q) => (q.beforeSeq === 8 ? page(601, 500) : page(501, 100)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    expect(m.listLedger).toHaveBeenCalledWith("A", { beforeSeq: 8, limit: 500 });
+    const older = () => within(ledger()).getByRole("button", { name: "Show older entries" });
+    await userEvent.click(older());
+    await userEvent.click(older());
+    expect(within(ledger()).getAllByRole("listitem")).toHaveLength(500);
+    await userEvent.click(older());
+    expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(600));
+    // A short page means the start of the ledger: nothing older to ask for.
+    expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull();
+  });
+
+  it("loads the project's older entries from the Conversation, even under the All-projects ledger scope", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const page = (from: number, n: number, projectId: string | null) =>
+      Array.from({ length: n }, (_, i) => entry(from + i, projectId ?? "A", `P${from + i}`));
+    m.listLedger.mockImplementation(async (projectId, q) => (q.beforeSeq === 1101 ? page(601, 500, projectId) : page(501, 100, projectId)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 1100 });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const conversation = () => screen.getByRole("region", { name: "Conversation" });
+    await within(conversation()).findByRole("button", { name: "Load older" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await waitFor(() => expect(m.listLedger).toHaveBeenCalledWith(null, { beforeSeq: 1101, limit: 500 }));
+    await userEvent.click(within(conversation()).getByRole("button", { name: "Load older" }));
+    expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 });
+    await waitFor(() => expect(within(conversation()).queryByRole("button", { name: "Load older" })).toBeNull());
+  });
+
+  const page = (from: number, n: number, projectId = "A") => Array.from({ length: n }, (_, i) => entry(from + i, projectId, `P${from + i}`));
+  const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+  const older = () => within(ledger()).getByRole("button", { name: "Show older entries" }) as HTMLButtonElement;
+  async function openLedger(health = 1100) {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: health });
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+  }
+
+  it("applies streamed entries together, a moment after they arrive", async () => {
+    m.listLedger.mockResolvedValue([entry(1, "A", "P1")]);
+    await openLedger(1);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+    act(() => {
+      for (const seq of [2, 3, 4]) h.onEntry!(entry(seq, "A", `P${seq}`));
+    });
+    expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(4));
+  });
+
+  it("keeps the entries that streamed in when an older page is put in front", async () => {
+    m.listLedger.mockImplementation(async (_p, q) => (q.beforeSeq === 1101 ? page(601, 500) : page(101, 500)));
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    act(() => h.onEntry!(entry(1101, "A", "P1101")));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")[0]!.textContent).toContain("P1101"));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 }));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    const lines = within(ledger()).getAllByRole("listitem");
+    expect(lines).toHaveLength(1001);
+    expect(lines[0]!.textContent).toContain("P1101");
+    expect(lines[1000]!.textContent).toContain("P101");
+  });
+
+  it("disables Show older entries while a page loads, and a stale load does not end a newer one", async () => {
+    const pending: Array<(v: LedgerEntry[]) => void> = [];
+    m.listLedger.mockImplementation((projectId, q) =>
+      q.beforeSeq === 1101 ? Promise.resolve(page(601, 500, projectId ?? "A")) : new Promise((resolve) => pending.push(resolve)),
+    );
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(older().disabled).toBe(true));
+    // Another scope, and its own older page, while the first is still out.
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    expect(older().disabled).toBe(false);
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => pending[0]!(page(101, 500)));
+    expect(older().disabled).toBe(true);
+    await act(async () => pending[1]!(page(101, 10)));
+    await waitFor(() => expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull());
+  });
+
+  it("says inline when an older page could not be loaded, and lets the Owner try again", async () => {
+    m.listLedger.mockImplementation(async (_p, q) => {
+      if (q.beforeSeq === 1101) return page(601, 500);
+      throw new ApiError(500, "internal");
+    });
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    expect((await within(ledger()).findByRole("alert")).textContent).toBe("Older entries could not be loaded: err");
+    expect(older().disabled).toBe(false);
+  });
+
+  it("feeds the Agent feed from the project's stream whatever the ledger scope, following the chosen run", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([
+      { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w", base: null,
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+    ]);
+    const said = (seq: number, runId: string, text: string): LedgerEntry => ({
+      ...entry(seq, "A", "x"), type: "agent.message", actor: { kind: "agent", id: runId }, payload: { runId, text },
+    });
+    m.listLedger.mockImplementation(async (projectId) => (projectId === null ? [] : [said(1, "r1", "one"), said(2, "r2", "two")]));
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    act(() => testDock.api!.focus("agent_feed"));
+    const feed = () => screen.getByRole("region", { name: "Agent feed" });
+    await waitFor(() => expect(within(feed()).getAllByRole("listitem")).toHaveLength(2));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await userEvent.selectOptions(within(feed()).getByRole("combobox", { name: "Follow" }), "r1");
+    expect(within(feed()).getAllByRole("listitem").map((li) => li.querySelector(".headline")?.textContent)).toEqual([
+      'The Fake agent said: "one"',
+    ]);
+  });
+
   it("narrates with the card titles on the board and the adapters of the runs", async () => {
     const card = { id: "c9", projectId: "A", title: "Login", stage: "build", status: "todo", createdAt: "" };
     m.getBoard.mockResolvedValue({ ...mk("A"), columns: { ...mk("A").columns, build: [card] } } as Board);
     m.listRuns.mockResolvedValue([
-      { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w",
+      { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w", base: null,
         costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
     ]);
     m.listLedger.mockResolvedValue([
@@ -422,6 +595,7 @@ describe("App ledger scope", () => {
       { ...entry(2, "A", "x"), type: "agent.message", actor: { kind: "agent", id: "r1" }, payload: { runId: "r1", text: "hi" } },
     ]);
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(ledger().textContent).toContain('Owner moved "Login" from Build to Ship'));
@@ -434,6 +608,7 @@ describe("App ledger scope", () => {
       Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
     );
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
@@ -527,6 +702,27 @@ describe("App readiness gates", () => {
     await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
   });
 
+  it("sends one move when the gated move is resolved twice at once", async () => {
+    m.getCardGates.mockResolvedValue([shipMet()]);
+    let resolve!: (v: unknown) => void;
+    m.moveCard.mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    await openA();
+    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await screen.findByRole("article", { name: "Gate: Ready to ship" });
+    const { onResolveGate } = testDock.shell!.model;
+    const decisions = [{ gateId: "ready_to_ship" as const, decision: "sign_off" as const, acknowledgement: "x" }];
+    let first!: Promise<boolean>;
+    let second!: Promise<boolean>;
+    act(() => {
+      first = onResolveGate(decisions);
+      second = onResolveGate(decisions);
+    });
+    expect(await second).toBe(false);
+    expect(m.moveCard).toHaveBeenCalledTimes(1);
+    resolve({ ...login, stage: "ship" });
+    expect(await act(async () => await first)).toBe(true);
+  });
+
   it("refreshes the checklist and keeps the card when a condition stopped holding", async () => {
     m.getCardGates.mockResolvedValueOnce([shipMet()]).mockResolvedValue([shipBlocked()]);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_not_met", { gateId: "ready_to_ship", unmet: ["The plan has been approved"] }));
@@ -595,9 +791,10 @@ describe("App readiness gates", () => {
     m.startRun.mockResolvedValue({ id: "r1" } as never);
     await openA();
     await userEvent.click(within(views()).getByRole("button", { name: "Agents" }));
-    await userEvent.selectOptions(await screen.findByLabelText("Card (optional)"), "Login");
-    await userEvent.type(screen.getByLabelText("Prompt"), "add sign-in");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(await screen.findByRole("region", { name: "Agents" }));
+    await userEvent.selectOptions(await agents.findByLabelText("Card (optional)"), "Login");
+    await userEvent.type(agents.getByLabelText("Prompt"), "add sign-in");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.startRun).toHaveBeenCalledWith("A", { adapter: "claude", prompt: "add sign-in", cardId: "c1" });
   });
 
@@ -642,5 +839,156 @@ describe("App readiness gates", () => {
     m.getBoard.mockResolvedValue(mk("B"));
     await userEvent.click(screen.getByRole("button", { name: "Project B" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+  });
+});
+
+describe("App Changes view", () => {
+  const run2 = { ...run1, id: "run2", startedAt: "2026-11-15T11:00:00.000Z", prompt: "Newer" };
+
+  async function openChanges() {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, run2]);
+    m.getRunChanges.mockImplementation(async (runId) => changes({ runId }));
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    m.getRunDiff.mockImplementation(async () => fileDiff({ status: "added", added: 1, deleted: 0 }));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+  }
+
+  it("shows the newest run's changes until a run is picked, then the picked one's", async () => {
+    await openChanges();
+    expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
+    expect(m.getRunChanges).toHaveBeenCalledWith("run2");
+    expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Run" }), "run1");
+    await waitFor(() => expect(m.getRunChanges).toHaveBeenCalledWith("run1"));
+  });
+
+  it("opens a changed file's diff in a tab, reusing the run's changes it already has", async () => {
+    await openChanges();
+    const list = await screen.findByRole("list", { name: "Changed files" });
+    await userEvent.click(within(list).getByRole("button", { name: /notes\.txt/ }));
+    expect(await screen.findByRole("region", { name: "Diff: notes.txt" })).toBeTruthy();
+    expect(m.getRunDiff).toHaveBeenCalledWith("run2", "notes.txt");
+    expect(testDock.api!.panelIds()).toContain("diff:run2:notes.txt");
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads the changes on an agent or override entry naming the run, and not for another run", async () => {
+    await openChanges();
+    await screen.findByText("1 file changed · +1 −0");
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+    act(() => h.onEntry!(runEntry("agent.finished", "run1")));
+    act(() => h.onEntry!(runEntry("card.created", "run2")));
+    await act(async () => {});
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+    m.getRunChanges.mockResolvedValueOnce(changes({ runId: "run2", files: [] }));
+    act(() => h.onEntry!(runEntry("override.completed", "run2")));
+    expect(await screen.findByText("0 files changed · +0 −0")).toBeTruthy();
+  });
+
+  it("asks nothing about a live run's changes, however many of its entries arrive, and reads them once it finishes", async () => {
+    const live = { ...run2, status: "running" as const };
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, live]);
+    m.getRunChanges.mockImplementation(async (runId) => changes({ runId }));
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    for (let seq = 8; seq < 13; seq++) act(() => h.onEntry!({ ...runEntry("agent.message", "run2"), seq, projectId: "A" }));
+    await act(async () => {});
+    expect(m.getRunChanges).not.toHaveBeenCalled();
+    expect(m.listRunDir).not.toHaveBeenCalled();
+
+    m.listRuns.mockResolvedValue([run1, { ...run2, status: "completed" as const }]);
+    act(() => h.onEntry!({ ...runEntry("agent.finished", "run2"), seq: 13, projectId: "A" }));
+    expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
+    expect(m.getRunChanges).toHaveBeenCalledWith("run2");
+    expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+  });
+
+  it("discards through the override route, shows a refusal inside the form and the server's count after", async () => {
+    vi.mocked(errorMessage).mockImplementation(() => "Stop the agent first: it is still working in this run");
+    const refusal = new ApiError(409, "run_active");
+    m.overrideDiscard.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ overrideId: "o1", files: 2 });
+    await openChanges();
+    await screen.findByText("1 file changed · +1 −0");
+    await userEvent.click(screen.getByText("Emergency override"));
+    const form = screen.getByRole("group", { name: "Discard this run's changes" });
+    await userEvent.click(within(form).getByRole("button", { name: "Discard…" }));
+    await userEvent.type(within(form).getByLabelText("Why? (required, at least 10 characters)"), "The agent broke the build");
+    await userEvent.click(within(form).getByRole("button", { name: /^Discard (\d|uncommitted)/ }));
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm discard" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe("Stop the agent first: it is still working in this run");
+    expect(m.overrideDiscard).toHaveBeenCalledWith("run2", "The agent broke the build");
+    expect(errorMessage).toHaveBeenCalledWith(refusal);
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm discard" }));
+    await waitFor(() =>
+      expect(within(form).getByRole("status").textContent).toBe(
+        "Recorded: 2 uncommitted files discarded. Watch the Ledger or the Terminal for the result.",
+      ),
+    );
+    expect(within(form).queryByRole("alert")).toBeNull();
+  });
+
+  it("sends one override of a run at a time: a second request meanwhile is refused without reaching the server", async () => {
+    let finish!: () => void;
+    m.overrideCommand.mockReturnValue(new Promise((r) => (finish = () => r({ overrideId: "o1" }))));
+    m.overrideDiscard.mockResolvedValue({ overrideId: "o2", files: 0 });
+    render(<App />);
+    await waitFor(() => expect(testDock.shell).not.toBeNull());
+    const { onOverrideCommand, onOverrideDiscard } = testDock.shell!.model;
+    const input = { program: "git", args: ["status"], reason: "The agent broke the build" };
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    let third!: Promise<unknown>;
+    act(() => {
+      first = onOverrideCommand("run1", input);
+      second = onOverrideCommand("run1", input);
+      third = onOverrideDiscard("run1", "The agent broke the build");
+    });
+    expect(await second).toEqual({ ok: false, error: "An override of this run is already being sent" });
+    expect(await third).toEqual({ ok: false, error: "An override of this run is already being sent" });
+    expect(m.overrideCommand).toHaveBeenCalledTimes(1);
+    expect(m.overrideDiscard).not.toHaveBeenCalled();
+    finish();
+    await act(async () => void (await first));
+    expect(await first).toEqual({ ok: true, overrideId: "o1" });
+    // Once the first is answered, the next one is sent.
+    await act(async () => void (await testDock.shell!.model.onOverrideDiscard("run1", "The agent broke the build")));
+    expect(m.overrideDiscard).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs a command through the override route", async () => {
+    m.overrideCommand.mockResolvedValue({ overrideId: "o1" });
+    await openChanges();
+    await userEvent.click(screen.getByText("Emergency override"));
+    const form = screen.getByRole("group", { name: "Run a command in this run's working copy" });
+    await userEvent.type(within(form).getByLabelText("Program"), "git");
+    await userEvent.type(within(form).getByLabelText("Arguments (one per line)"), "status");
+    await userEvent.type(within(form).getByLabelText("Why? (required, at least 10 characters)"), "The agent broke the build");
+    await userEvent.click(within(form).getByRole("button", { name: "Run as override" }));
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm and run" }));
+    await waitFor(() =>
+      expect(m.overrideCommand).toHaveBeenCalledWith("run2", { program: "git", args: ["status"], reason: "The agent broke the build" }),
+    );
+  });
+
+  it("words a failed load", async () => {
+    vi.mocked(errorMessage).mockImplementation(() => "This run's working copy no longer exists on this computer");
+    m.getRunChanges.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1]);
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
+    expect(errorMessage).toHaveBeenCalledWith(expect.any(ApiError), "changes");
   });
 });

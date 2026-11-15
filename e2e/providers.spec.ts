@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { headlines, line, lineMatching, RUN_FINISHED } from "./support.js";
+import { headlines, line, lineMatching, RUN_FINISHED, operatorLayout } from "./support.js";
 
 // The agent server runs the fake Codex and Gemini CLIs (packages/core/test/fixtures) with the scripts set in global-setup.ts.
 
@@ -7,6 +7,7 @@ async function openProject(page: Page, name: string) {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
+  await operatorLayout(page);
   return page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
 }
 

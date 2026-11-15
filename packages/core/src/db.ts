@@ -135,6 +135,8 @@ const MIGRATIONS = [
     at TEXT NOT NULL
   );
   CREATE INDEX gate_decisions_card ON gate_decisions (card_id);`,
+  // The commit a run's worktree was created at; NULL for runs recorded before it was kept.
+  `ALTER TABLE agent_runs ADD COLUMN base TEXT;`,
 ];
 
 export type Db = Database.Database;

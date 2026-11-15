@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { narrate } from "@theterminal/shared";
 import type { LedgerEntry } from "@theterminal/shared";
-import { LedgerPanel, describeEntry } from "../src/components/LedgerPanel";
+import { LEDGER_PAGE, LedgerPanel, describeEntry } from "../src/components/LedgerPanel";
 
 const base = { id: "x", ts: "2026-01-01T10:00:00Z", projectId: "p1", prevHash: "", hash: "" };
 const owner = { kind: "human", id: "owner" } as const;
@@ -252,6 +252,36 @@ describe("LedgerPanel narration and raw record", () => {
     expect(aside.textContent).not.toContain("Detect GPU");
   });
 
+  it("never hides an override, whatever topics are chosen", () => {
+    const override = entry(2, "override.discard", { overrideId: "o1", runId: "r1", reason: "The agent broke the build", files: 2 });
+    render(<LedgerPanel topics={["gate"]} entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" }), override]} />);
+    const aside = screen.getByRole("complementary", { name: "Ledger" });
+    const items = within(aside).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain("OVERRIDE: Owner discarded 2 changed file(s) of the agent's run: The agent broke the build");
+    expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
+  });
+
+  it("paints override entries red with a text label, and strips terminal codes from their output", () => {
+    const run = { overrideId: "o1", runId: "r1" };
+    const command = entry(1, "override.command", { ...run, program: "git", args: ["status"], cwd: ".", reason: "The agent broke the build" });
+    const done = entry(2, "override.completed", {
+      ...run, ok: true, exitCode: 0, signal: null, timedOut: false, durationMs: 5, output: "\u001b[31mclean\u001b[0m",
+    });
+    const card = entry(3, "card.created", { title: "Detect GPU", stage: "plan" });
+    render(<LedgerPanel entries={[command, done, card]} />);
+    const items = within(screen.getByRole("complementary", { name: "Ledger" })).getAllByRole("listitem");
+    const [cardItem, doneItem, commandItem] = items;
+    expect(commandItem.classList.contains("override")).toBe(true);
+    expect(commandItem.querySelector(".headline")!.textContent).toMatch(/^OVERRIDE: Owner ran "git status"/);
+    expect(commandItem.querySelector(".override-tag")).toBeNull();
+    expect(doneItem.classList.contains("override")).toBe(true);
+    expect(doneItem.querySelector(".override-tag")!.textContent).toBe("OVERRIDE");
+    expect(doneItem.querySelector("pre")!.textContent).toMatch(/^clean\n/);
+    expect(cardItem.classList.contains("override")).toBe(false);
+    expect(cardItem.querySelector(".override-tag")).toBeNull();
+  });
+
   it("labels each Raw summary with its headline", () => {
     render(<LedgerPanel entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" })]} />);
     const summary = screen.getByRole("listitem").querySelector("summary")!;
@@ -269,5 +299,56 @@ describe("LedgerPanel narration and raw record", () => {
     expect(screen.getByText("1 entry needing attention is hidden by the topic filter")).toBeTruthy();
     rerender(<LedgerPanel entries={[requested(2)]} />);
     expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
+  });
+});
+
+describe("LedgerPanel paging", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => entry(i + 1, "project.created", { name: `P${i + 1}` }));
+  const items = () => within(screen.getByRole("complementary", { name: "Ledger" })).getAllByRole("listitem");
+  const older = () => screen.getByRole("button", { name: "Show older entries" });
+
+  it("paints the newest 200, grows by 200, then asks for older entries when it has shown them all", () => {
+    const onLoadOlder = vi.fn();
+    render(<LedgerPanel entries={many(450)} hasOlder onLoadOlder={onLoadOlder} />);
+    expect(LEDGER_PAGE).toBe(200);
+    expect(items()).toHaveLength(200);
+    expect(items()[0]!.textContent).toContain("P450");
+    fireEvent.click(older());
+    expect(items()).toHaveLength(400);
+    fireEvent.click(older());
+    expect(items()).toHaveLength(450);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    fireEvent.click(older());
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an override however far back it is, whatever topics are chosen", () => {
+    const override = entry(1, "override.discard", { overrideId: "o1", runId: "run1", reason: "The agent broke the build", files: 2 });
+    const cards = Array.from({ length: 450 }, (_, i) => entry(i + 2, "card.created", { cardId: `c${i}`, title: `T${i}`, stage: "plan" }));
+    const agents = Array.from({ length: 50 }, (_, i) => entry(i + 452, "agent.message", { runId: "run1", text: "hi" }, { kind: "agent", id: "run1" }));
+    render(<LedgerPanel entries={[override, ...cards, ...agents]} topics={["board"]} hasOlder={false} onLoadOlder={vi.fn()} />);
+    expect(items()).toHaveLength(200);
+    fireEvent.click(older());
+    fireEvent.click(older());
+    expect(items()).toHaveLength(451);
+    const last = items()[450]!;
+    expect(last.classList.contains("override")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Show older entries" })).toBeNull();
+  });
+
+  it("disables the button while older entries load, and says inline when they could not", () => {
+    const { rerender } = render(<LedgerPanel entries={many(10)} hasOlder onLoadOlder={vi.fn()} loadingOlder />);
+    expect((older() as HTMLButtonElement).disabled).toBe(true);
+    rerender(<LedgerPanel entries={many(10)} hasOlder onLoadOlder={vi.fn()} olderError="Something went wrong" />);
+    expect((older() as HTMLButtonElement).disabled).toBe(false);
+    expect(within(screen.getByRole("complementary", { name: "Ledger" })).getByRole("alert").textContent).toBe(
+      "Older entries could not be loaded: Something went wrong",
+    );
+  });
+
+  it("offers no older entries once everything is shown and the server has no more", () => {
+    render(<LedgerPanel entries={many(150)} hasOlder={false} onLoadOlder={vi.fn()} />);
+    expect(items()).toHaveLength(150);
+    expect(screen.queryByRole("button", { name: "Show older entries" })).toBeNull();
   });
 });

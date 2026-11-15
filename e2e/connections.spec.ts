@@ -1,6 +1,6 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { redact } from "../packages/core/dist/index.js";
-import { line, lineMatching, RUN_FINISHED } from "./support.js";
+import { line, lineMatching, RUN_FINISHED, operatorLayout } from "./support.js";
 
 // The agent server keeps secrets in memory and answers connection tests with a stub that looks for TESTKEY (see
 // global-setup.ts). Its fake agent's shell step prints this same key, bare, once allowed. The key matches no built-in
@@ -103,6 +103,7 @@ async function removeConnection(editor: Locator) {
 test("adds a Claude connection, tests it, and never sees the key in a response or a WebSocket frame", async ({ page }) => {
   const watch = watchForLeaks(page);
   await page.goto(process.env.TT_E2E_AGENT_URL!);
+  await operatorLayout(page);
   const since = await latestSeq(page);
 
   const editor = await addClaude(page);
@@ -158,6 +159,7 @@ test("a stored key is redacted from agent output, and stays redacted after the c
   await page.getByLabel("New project name").fill(project);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: project })).toHaveClass(/selected/);
+  await operatorLayout(page);
 
   const editor = await addClaude(page);
   await runAndAllowShell(page, "Print the key", 1);

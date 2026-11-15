@@ -30,9 +30,9 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       break;
     case "agent.started":
       db.prepare(
-        `INSERT INTO agent_runs (id, project_id, card_id, adapter, auth_mode, prompt, status, worktree, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
-      ).run(p.runId, e.projectId, p.cardId, p.adapter, p.authMode, p.prompt, p.worktree, e.ts);
+        `INSERT INTO agent_runs (id, project_id, card_id, adapter, auth_mode, prompt, status, worktree, base, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`,
+      ).run(p.runId, e.projectId, p.cardId, p.adapter, p.authMode, p.prompt, p.worktree, p.base ?? null, e.ts);
       break;
     case "agent.finished":
       db.prepare(
@@ -205,7 +205,7 @@ export function getSetting(db: Db, key: string): string | null {
 
 type RunRow = {
   id: string; project_id: string; card_id: string | null; adapter: AgentRun["adapter"];
-  auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string;
+  auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
   started_at: string; finished_at: string | null;
 };
@@ -217,7 +217,7 @@ type ActionRow = {
 
 const toRun = (r: RunRow): AgentRun => ({
   id: r.id, projectId: r.project_id, cardId: r.card_id, adapter: r.adapter, authMode: r.auth_mode,
-  prompt: r.prompt, status: r.status, worktree: r.worktree, costUsd: r.cost_usd,
+  prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
   startedAt: r.started_at, finishedAt: r.finished_at,
 });

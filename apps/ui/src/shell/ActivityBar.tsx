@@ -21,11 +21,13 @@ const svg = (children: ReactNode) => (
 const ICONS: Record<ViewId, ReactNode> = {
   board: svg(<><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="11" rx="1" /><rect x="17" y="4" width="4" height="7" rx="1" /></>),
   agents: svg(<><rect x="5" y="8" width="14" height="11" rx="2" /><path d="M12 8V4M9 13h.01M15 13h.01M9.5 16h5" /></>),
+  changes: svg(<><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M12 7v6M9 10h6M9 17h6" /></>),
   needs_you: svg(<><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7" /><path d="M10 19a2 2 0 0 0 4 0" /></>),
   ledger: svg(<><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v4h4M9 11h7M9 15h7M9 19h4" /></>),
   connections: svg(<><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z" /><path d="M12 16v5" /></>),
   github: svg(<><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" /><path d="M6 7v10M18 11c0 4-6 3-11 6.5" /></>),
   capacity: svg(<><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>),
+  learn: svg(<><path d="M12 6C10 4.5 7 4 3 4v14c4 0 7 .5 9 2 2-1.5 5-2 9-2V4c-4 0-7 .5-9 2z" /><path d="M12 6v14" /></>),
 };
 
 const BADGES: Partial<Record<ViewId, keyof Pick<Props, "running" | "pending">>> = { agents: "running", needs_you: "pending" };

@@ -31,12 +31,22 @@ export async function showAllProjects(page: Page) {
   await page.getByRole("radio", { name: "All projects" }).check();
 }
 
-/** Opens the agent server and creates (and selects) a project. */
+/**
+ * Chooses the Operator layout, whose bottom panel holds the Terminal, the Agent feed and the Ledger. The default
+ * layout (Guided) has no bottom panel, so every spec that reads the Ledger or the Agent feed tab chooses this first.
+ */
+export async function operatorLayout(page: Page) {
+  await statusBar(page).getByRole("combobox", { name: "Layout" }).selectOption({ label: "Operator" });
+  await expect(page.getByRole("tab", { name: "Ledger" })).toBeVisible();
+}
+
+/** Opens the agent server, creates (and selects) a project, and chooses the Operator layout. */
 export async function openProject(page: Page, name: string) {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+  await operatorLayout(page);
 }
 
 /** Opens a catalog entry's editor from the Connections view (a new connection, or the existing one). */
@@ -100,6 +110,18 @@ export function runStatuses(page: Page, projectName: string): Promise<string[]> 
   }, projectName);
 }
 
+/** The id of the project's newest run, read from the API in the page. */
+export function newestRunId(page: Page, projectName: string): Promise<string> {
+  return page.evaluate(async (name) => {
+    const projects = (await (await fetch("/api/projects")).json()) as { id: string; name: string }[];
+    const project = projects.find((p) => p.name === name)!;
+    const runs = (await (await fetch(`/api/projects/${encodeURIComponent(project.id)}/runs`)).json()) as { id: string; startedAt: string }[];
+    const newest = [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    if (!newest) throw new Error(`no run in ${name}`);
+    return newest.id;
+  }, projectName);
+}
+
 /** Selects the agent in the Agents view and fills the prompt; the caller ticks connections and starts it. */
 export async function prepareRun(page: Page, adapter: "fake" | "codex" | "gemini", prompt: string) {
   await openView(page, "Agents");
@@ -109,6 +131,18 @@ export async function prepareRun(page: Page, adapter: "fake" | "codex" | "gemini
 
 export const startRun = (page: Page) => page.getByRole("button", { name: "Start agent" }).click();
 
+/** The Needs-you strip above the dock, where decisions are taken (the Needs-you tab shows read-only copies). */
+export const needsYouStrip = (page: Page) => page.getByRole("region", { name: "Needs you", exact: true });
+
+/**
+ * The strip's card for the decision with this summary in the named project. The strip shows every project's pending
+ * decisions, so a card another spec left pending would otherwise match too.
+ */
+export const decisionCard = (page: Page, summary: string, projectName: string) =>
+  needsYouStrip(page)
+    .getByRole("article", { name: `Decision: ${summary}` })
+    .filter({ has: page.locator(".project-name", { hasText: new RegExp(`^${escape(projectName)}$`) }) });
+
 /** Clicks Allow on the decision card with this summary, once it appears. */
 export async function allow(page: Page, summary: string) {
   const card = page.getByRole("article", { name: `Decision: ${summary}` });
@@ -117,9 +151,43 @@ export async function allow(page: Page, summary: string) {
   await expect(card).toHaveCount(0);
 }
 
+/** The seq of the last ledger entry of every project, read in the page (it carries the cookie). */
+export function latestSeq(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    let last = 0;
+    for (;;) {
+      const res = await fetch(`/api/ledger?afterSeq=${last}&limit=500`);
+      if (!res.ok) throw new Error(`GET /api/ledger: ${res.status}`);
+      const entries = (await res.json()) as { seq: number }[];
+      if (entries.length === 0) return last;
+      last = entries[entries.length - 1]!.seq;
+    }
+  });
+}
+
+/**
+ * Whether `body` is ledger JSON (an entry, or an array of them) in which every entry holding `secret` has `seq` at
+ * most `since`. Earlier specs let the fake agent print the Claude test key before the spec stored it, when it was not
+ * yet a secret: those entries are not leaks, and the ledger keeps serving them.
+ */
+function onlyEntriesBefore(body: string, secret: string, since: number): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const entries: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  return entries.every((e) => {
+    if (typeof e !== "object" || e === null || typeof (e as { seq?: unknown }).seq !== "number") return false;
+    return !JSON.stringify(e).includes(secret) || (e as { seq: number }).seq <= since;
+  });
+}
+
 /**
  * Collects every response body and WebSocket frame of the page, to check that none contains any of `secrets`.
- * `check()` awaits the pending body reads, so none is still in flight when the test asserts.
+ * `check()` awaits the pending body reads, so none is still in flight when the test asserts. Given `since` (a ledger
+ * seq read when the test began), ledger entries recorded up to it are not counted: see `onlyEntriesBefore`.
  */
 export function watchForLeaks(page: Page, secrets: string[]) {
   const seen: { source: string; body: string }[] = [];
@@ -140,10 +208,14 @@ export function watchForLeaks(page: Page, secrets: string[]) {
     });
   });
   return {
-    async check() {
+    async check(since?: number) {
       await Promise.all(reads);
       expect(reads.length).toBeGreaterThan(0);
-      const leaks = seen.flatMap(({ source, body }) => secrets.filter((s) => body.includes(s)).map((s) => `${s} in ${source}`));
+      const leaks = seen.flatMap(({ source, body }) =>
+        secrets
+          .filter((s) => body.includes(s) && (since === undefined || !onlyEntriesBefore(body, s, since)))
+          .map((s) => `${s} in ${source}`),
+      );
       expect(leaks).toEqual([]);
     },
   };

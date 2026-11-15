@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { narrate, plural, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, NarrationContext, NarrationTopic } from "@theterminal/shared";
+import { stripAnsi } from "./text";
 
 /** The plain-language headline of one entry; kept for callers and tests. */
 export const describeEntry = (e: LedgerEntry, ctx?: NarrationContext): string => narrate(e, ctx).headline;
@@ -26,31 +27,100 @@ export function canonicalPayload(payload: unknown): string {
   }
 }
 
-/** The raw record under a headline: the narration's detail, when it has one, then the payload. Text only. */
-function rawRecord(detail: string | null, payload: unknown): string {
+/** True for an override.* entry: painted red, with a text label, in every list of ledger entries. */
+export const isOverride = (e: LedgerEntry): boolean => e.type.startsWith("override.");
+
+/** The class of an entry's line: `attention` when it needs the Owner's eye, `override` for an override. */
+export function entryClass(e: LedgerEntry, attention: boolean): string | undefined {
+  const names = [attention && "attention", isOverride(e) && "override"].filter(Boolean);
+  return names.length > 0 ? names.join(" ") : undefined;
+}
+
+/**
+ * The text label that says an override is one without relying on its colour: shown before the headline of an
+ * override entry whose headline does not already start with `OVERRIDE`.
+ */
+export function OverrideTag({ entry, headline }: { entry: LedgerEntry; headline: string }) {
+  if (!isOverride(entry) || headline.startsWith("OVERRIDE")) return null;
+  return (
+    <>
+      <span className="override-tag">OVERRIDE</span>{" "}
+    </>
+  );
+}
+
+/**
+ * The raw record under a headline: the narration's detail, when it has one, then the payload. Text only; an
+ * override's detail is a program's output, so its terminal codes are stripped first.
+ */
+function rawRecord(detail: string | null, payload: unknown, override: boolean): string {
   const json = canonicalPayload(payload);
-  return visibleControls(detail === null ? json : `${detail}\n\n${json}`);
+  const shown = detail !== null && override ? stripAnsi(detail) : detail;
+  return visibleControls(shown === null ? json : `${shown}\n\n${json}`);
 }
 
 /** An entry's raw record, folded under its headline; the summary's accessible name says which entry it belongs to. */
-export function RawRecord({ headline, detail, payload }: { headline: string; detail: string | null; payload: unknown }) {
+export function RawRecord({
+  headline,
+  detail,
+  payload,
+  override = false,
+}: {
+  headline: string;
+  detail: string | null;
+  payload: unknown;
+  /** True for an override entry, whose detail is program output. */
+  override?: boolean;
+}) {
   return (
     <details className="raw">
       <summary aria-label={`Raw record: ${headline}`}>Raw</summary>
-      <pre>{rawRecord(detail, payload)}</pre>
+      <pre>{rawRecord(detail, payload, override)}</pre>
     </details>
   );
 }
 
-export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; topics?: NarrationTopic[]; ctx?: NarrationContext }) {
+/** How many entries the ledger panel paints at first, and how many more each "Show older entries" adds. */
+export const LEDGER_PAGE = 200;
+
+/**
+ * The ledger, newest first. It paints the newest `LEDGER_PAGE` entries the topic filter keeps, `LEDGER_PAGE` more on
+ * each "Show older entries"; once every loaded entry is painted and `hasOlder` says the server has more, the button
+ * asks for them with `onLoadOlder` instead.
+ */
+export function LedgerPanel({
+  entries,
+  topics,
+  ctx,
+  hasOlder = false,
+  onLoadOlder,
+  loadingOlder = false,
+  olderError = null,
+}: {
+  entries: LedgerEntry[];
+  topics?: NarrationTopic[];
+  ctx?: NarrationContext;
+  hasOlder?: boolean;
+  onLoadOlder?: () => void;
+  /** True while older entries are being fetched: the button waits. */
+  loadingOlder?: boolean;
+  /** Why the last fetch of older entries failed, shown under the list; null when it did not. */
+  olderError?: string | null;
+}) {
+  const [shown, setShown] = useState(LEDGER_PAGE);
   // Narrating every entry is the costly part: redone only when the entries or the context change, not per filter.
   const narrated = useMemo(
     () => [...entries].sort((a, b) => b.seq - a.seq).map((e) => ({ e, n: narrate(e, ctx) })),
     [entries, ctx],
   );
-  const inTopics = ({ n }: { n: { topic: NarrationTopic } }) => topics === undefined || topics.includes(n.topic);
-  const shown = narrated.filter(inTopics);
+  // Overrides are always shown, whatever the filter says.
+  const inTopics = ({ n }: { n: { topic: NarrationTopic } }) =>
+    topics === undefined || n.topic === "override" || topics.includes(n.topic);
+  const kept = narrated.filter(inTopics);
+  const painted = kept.slice(0, shown);
   const hiddenAttention = narrated.filter((x) => x.n.attention && !inTopics(x)).length;
+  const more = shown < kept.length;
+  const older = () => (more ? setShown((n) => n + LEDGER_PAGE) : onLoadOlder?.());
   return (
     <aside className="ledger" aria-label="Ledger">
       <h2>Ledger</h2>
@@ -60,13 +130,24 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
         </p>
       )}
       <ul>
-        {shown.map(({ e, n }) => (
-          <li key={e.seq} className={n.attention ? "attention" : undefined}>
-            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <span className="headline">{n.headline}</span>
-            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} />
+        {painted.map(({ e, n }) => (
+          <li key={e.seq} className={entryClass(e, n.attention)}>
+            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <OverrideTag entry={e} headline={n.headline} />
+            <span className="headline">{n.headline}</span>
+            <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} override={isOverride(e)} />
           </li>
         ))}
       </ul>
+      {(more || (hasOlder && onLoadOlder)) && (
+        <button type="button" className="link older" onClick={older} disabled={!more && loadingOlder}>
+          Show older entries
+        </button>
+      )}
+      {olderError !== null && (
+        <p className="note" role="alert">
+          Older entries could not be loaded: {olderError}
+        </p>
+      )}
     </aside>
   );
 }

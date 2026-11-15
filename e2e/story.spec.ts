@@ -4,6 +4,7 @@ import {
   addCard,
   allow,
   anonymousUrl,
+  decisionCard,
   gateCard,
   ledgerItems,
   line,
@@ -45,8 +46,8 @@ test("a card's story tells what happened in plain language, its decisions and wh
   await prepareRun(page, "fake", "Check the login page");
   await page.getByLabel("Card (optional)").selectOption({ label: "Login" });
   await startRun(page);
-  const decision = page.getByRole("article", { name: "Decision: Run: nvidia-smi" });
-  await expect(decision.getByRole("heading", { name: "What this means" })).toBeVisible();
+  const decision = decisionCard(page, "Run: nvidia-smi", name);
+  await expect(decision.getByRole("heading", { name: "What this means", level: 4 })).toBeVisible();
   await expect(decision.getByText(SHELL_MEANS)).toBeVisible();
   await allow(page, "Run: nvidia-smi");
   await expect(lineMatching(ledgerItems(page), RUN_FINISHED("Fake"))).toHaveCount(1);

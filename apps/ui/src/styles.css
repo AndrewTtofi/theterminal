@@ -23,6 +23,7 @@
   --badge: #0078d4;
   --danger: #c74e39;
   --ok: #2ea043;
+  --override: #f14c4c;      /* emergency overrides, always with an OVERRIDE label too */
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
@@ -73,6 +74,13 @@ legend { color: var(--muted); padding: 0 4px; }
 .status-item.attention { background: var(--attention); }
 .status-bar button.status-item { background: none; color: inherit; border-radius: 0; padding: 0 8px; }
 .status-bar button.status-item:hover { background: rgba(255, 255, 255, 0.12); }
+.layout-item { gap: 6px; }
+.layout-item select, .layout-item input { height: 18px; padding: 0 4px; font-size: 12px; background: var(--input); color: var(--fg); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 2px; }
+.layout-item input { width: 120px; }
+.layout-item button { height: 18px; padding: 0 6px; font-size: 12px; background: none; color: inherit; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 2px; }
+.layout-item button:disabled { opacity: 0.5; }
+.layout-save { display: flex; align-items: center; gap: 6px; }
+.layout-item .layout-save [role="alert"] { background: var(--attention); color: var(--status-fg); padding: 0 6px; }
 
 /* Needs-you strip: outside the dock so decisions show in every layout. */
 .needs-you { flex: none; max-height: 40vh; overflow: auto; border-bottom: 2px solid var(--attention); background: var(--panel); padding: 8px 16px; }
@@ -84,9 +92,9 @@ legend { color: var(--muted); padding: 0 4px; }
 .projects button:hover:not(:disabled) { background: var(--hover); }
 .projects button.selected { background: var(--selected); color: var(--fg-strong); }
 .projects input, .column input { width: 100%; }
-.agent-panel label { display: block; margin-bottom: 8px; }
-.agent-panel select { display: block; width: 100%; margin-top: 2px; }
-.agent-panel textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
+.start-run label { display: block; margin-bottom: 8px; }
+.start-run select { display: block; width: 100%; margin-top: 2px; }
+.start-run textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
 .run-connections { border: 1px solid var(--line-strong); margin: 0 0 8px; padding: 4px 8px; }
 .run-connections legend { color: var(--muted); padding: 0 4px; }
 .run-connections label { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
@@ -169,14 +177,50 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .ledger li { padding: 3px 0; border-bottom: 1px solid var(--line); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .ledger time { color: var(--muted); }
 .ledger > h2 { display: none; }
-.feed-run { margin: 0 0 8px; color: var(--fg-strong); }
 .run-actions li { padding: 2px 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .ledger li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
-.action-status { color: var(--muted); }
-.run-messages li { padding: 2px 0; font-size: 12px; white-space: pre-wrap; }
 details.raw > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
 details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); padding: 6px; margin: 2px 0 4px; white-space: pre-wrap; word-break: break-word; }
-.feed-error { color: var(--danger); }
+.ledger .older { margin: 6px 0; font-size: 12px; }
+/* Agent feed and Terminal: the list scrolls inside the tab, so the follow select and the footer stay in view. */
+.agent-feed, .terminal { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 6px; }
+.feed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.feed-head .note { margin: 0; font-size: 12px; color: var(--muted); }
+/* The follow hook keeps the reading position itself when old items are dropped, so the browser's anchoring is off. */
+.feed-items, .terminal-lines { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; margin: 0; padding: 0; list-style: none; }
+.feed-items:focus-visible, .terminal-lines:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.feed-items li { padding: 3px 0; border-bottom: 1px solid var(--line); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.feed-items time { color: var(--muted); }
+.feed-items li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
+.agent-feed .live { margin: 0; font-size: 12px; color: var(--muted); }
+.agent-feed .jump, .terminal .jump { align-self: center; font-size: 12px; }
+
+/* Conversation: the asks and answers scroll; the Ask form stays below them. */
+.conversation { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; padding: 8px 12px; }
+.conversation .thread { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; margin: 0; padding: 0; list-style: none; }
+.conversation .thread:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.conversation .thread > li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.conversation article header { display: flex; gap: 8px; align-items: baseline; }
+.conversation article h3 { margin: 0; }
+.conversation article time, .conversation .result { color: var(--muted); font-size: 12px; }
+.conversation blockquote { margin: 6px 0; padding: 4px 8px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation .agent-says { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation .result { margin: 6px 0 4px; }
+.conversation .actions { display: flex; gap: 6px; }
+.conversation .jump { align-self: center; font-size: 12px; }
+.conversation .ask { border-top: 1px solid var(--line-strong); padding-top: 8px; }
+.conversation .ask > .note { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.conversation .older { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.conversation .older p { margin: 0; color: var(--muted); }
+.start-run .started { margin: 4px 0 0; min-height: 1em; font-size: 12px; color: var(--muted); }
+.board-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+.board-head .spend { margin: 0; color: var(--muted); font-size: 12px; }
+.terminal-lines { background: var(--panel); padding: 6px 8px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.terminal-lines li { white-space: pre-wrap; word-break: break-word; }
+.terminal-lines .term-command, .terminal-lines .term-typed { color: var(--fg-strong); }
+.terminal-lines .term-output, .terminal-lines .term-override_output { color: var(--fg); }
+.terminal-lines .term-denied, .terminal-lines .failed { color: var(--danger); }
+.terminal > .note { margin: 0; font-size: 12px; color: var(--muted); }
 
 /* Messages */
 .banner { background: var(--danger); color: #fff; padding: 6px 16px; font-weight: 600; }
@@ -281,3 +325,85 @@ abbr[title] { text-decoration: underline dotted; cursor: help; }
 .story .reason { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
 .story time { font-size: 12px; color: var(--muted); }
 .ledger > .note { margin: 2px 0 4px; font-size: 12px; color: var(--attention); }
+
+/* The Changes view: run picker, changed files and the read-only file tree */
+.changes select { width: 100%; margin-bottom: 6px; }
+.changes p { margin: 4px 0; }
+.changes .note { font-size: 12px; color: var(--muted); }
+.changes h2 { margin-top: 12px; }
+.changes ul { list-style: none; margin: 0; padding: 0; }
+.changes ul.tree ul.tree { padding-left: 12px; }
+.changes button.row { display: block; width: 100%; text-align: left; background: none; color: inherit; padding: 2px 4px; border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.changes button.row:hover:not(:disabled) { background: var(--hover); }
+.changes summary { padding: 2px 4px; cursor: pointer; }
+.changes summary:hover { background: var(--hover); }
+.changes li.other { padding: 2px 4px 2px 16px; color: var(--muted); font-style: italic; }
+.changes .status { display: inline-block; width: 1em; font-weight: 600; color: var(--muted); }
+.changes .status-added, .changes .status-untracked { color: var(--ok); }
+.changes .status-deleted { color: var(--danger); }
+button.link { background: none; color: var(--accent); padding: 0; border-radius: 0; }
+button.link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.added { color: var(--ok); }
+.deleted { color: var(--danger); }
+
+/* Diff and file tabs: plain text, read-only */
+.file-view { display: flex; flex-direction: column; min-height: 100%; }
+.file-head { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.file-head .file-path { color: var(--fg-strong); font-weight: 600; }
+.file-view > .note { margin: 0 0 8px; font-size: 12px; color: var(--attention); }
+.file-view > .empty button { margin-top: 8px; }
+pre.diff, pre.file { margin: 0; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; tab-size: 4; }
+pre.diff .line, pre.file .line { display: flex; white-space: pre; }
+pre.diff .ln, pre.file .ln { flex: none; width: 4.5em; padding-right: 8px; text-align: right; color: var(--muted); user-select: none; }
+pre.diff .text, pre.file .text { flex: 1; }
+pre.diff .add { background: rgba(46, 160, 67, 0.15); }
+pre.diff .del { background: rgba(199, 78, 57, 0.15); }
+pre.diff .hunk { color: var(--accent); background: rgba(0, 120, 212, 0.08); }
+pre.diff .meta { color: var(--muted); }
+.changes .cleaned, .changes span.row.cleaned { display: block; padding: 2px 4px; color: var(--muted); font-style: italic; cursor: default; }
+pre.diff .line, pre.file .line { content-visibility: auto; contain-intrinsic-size: auto 18px; }
+
+/* Emergency override: red wherever the ledger is shown, after .attention so the red wins on an override line. */
+.override { border-left: 3px solid var(--override); }
+.override .headline, .override > summary { color: var(--override); }
+.ledger li.override, .story li.override, .feed-items li.override { border-left-color: var(--override); padding-left: 6px; }
+.terminal-lines li.override { color: var(--override); border-left: 3px solid var(--override); padding-left: 6px; }
+.story li.override .headline { color: var(--override); }
+.override-tag { color: var(--override); font-weight: 700; }
+details.override { padding: 4px 0 4px 8px; margin-top: 12px; }
+details.override > summary { cursor: pointer; font-weight: 600; }
+details.override label { display: block; margin-top: 6px; font-size: 12px; }
+details.override input, details.override textarea { width: 100%; }
+.override-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.override-confirm { border: 1px solid var(--override); padding: 6px; margin-top: 6px; }
+.override-confirm ol { margin: 0; padding-left: 20px; }
+.override-confirm code { white-space: pre-wrap; word-break: break-all; }
+.override-confirm:focus { outline: 1px solid var(--focus); outline-offset: 1px; }
+.override-error { color: var(--override); font-weight: 600; }
+details.override [role="status"]:empty { margin: 0; }
+
+.learn-side { display: flex; flex-direction: column; gap: 4px; }
+.learn-side input[type="search"] { width: 100%; margin-bottom: 4px; }
+.learn-side h2 { margin: 12px 0 4px; font-size: 12px; text-transform: none; letter-spacing: normal; color: var(--fg-strong); }
+.learn-side h3 { margin: 8px 0 2px; font-size: 11px; color: var(--muted); font-weight: 600; }
+.learn-topic { padding: 2px 0; }
+.learn-topic > summary { cursor: pointer; }
+.learn-topic > p { margin: 4px 0 6px 12px; font-size: 12px; line-height: 1.5; }
+.learn-topic.read > summary { color: var(--muted); }
+.learn-footer { font-size: 11px; margin-top: 12px; }
+.learn-side ul { list-style: none; margin: 0; padding: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Needs-you tab: each decision with its context */
+.needs-you-panel { padding: 8px 16px; overflow: auto; height: 100%; box-sizing: border-box; }
+.needs-you-panel h2 { color: var(--attention); }
+.decision-card .decision-links { display: flex; gap: 12px; margin: 0 0 6px; font-size: 12px; }
+.decision-context { margin: 0 0 6px; padding: 0 8px 8px; }
+.decision-context h4 { margin: 6px 0 4px; }
+.decision-context .note { margin: 4px 0; font-size: 12px; color: var(--muted); }
+pre.proposed { overflow: auto; max-height: 320px; background: var(--panel); padding: 6px; margin: 0; }
+pre.proposed > span { display: block; white-space: pre; }
+pre.proposed .add { background: rgba(46, 160, 67, 0.15); }
+pre.proposed .del { background: rgba(199, 78, 57, 0.15); }
+.agent-said { margin: 4px 0; padding-left: 18px; }
+.agent-said li { white-space: pre-wrap; }

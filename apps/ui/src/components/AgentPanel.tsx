@@ -1,7 +1,6 @@
-import { useState } from "react";
-import { KIND_LABELS, visibleControls } from "@theterminal/shared";
 import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
-import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE } from "../api";
+import { runCost } from "./cost";
+import { StartRunForm } from "./StartRunForm";
 
 export const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
@@ -13,7 +12,8 @@ export const KIND_ICON: Record<ActionKind, string> = {
   other: "•",
 };
 
-export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
+/** Re-exported for the panels that name adapters. */
+export { ADAPTER_NAMES } from "./StartRunForm";
 
 type Props = {
   adapters: AdapterId[];
@@ -33,97 +33,17 @@ type Props = {
   onStop: (runId: string) => void;
 };
 
-export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · $${r.costUsd.toFixed(2)}`);
+/** ` · $0.50 (estimate)`, with its basis; nothing for a run that reported no cost. */
+export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · ${runCost(r)}`);
 export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
 export function AgentPanel({ adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
-  const [adapter, setAdapter] = useState<AdapterId | "">("");
-  const [prompt, setPrompt] = useState("");
-  const [picked, setPicked] = useState<string[]>([]);
-  const [cardId, setCardId] = useState("");
-  const [starting, setStarting] = useState(false);
-  // Every provider's program ships with The Terminal, so an unavailable one means a broken install.
-  const available = (a: AdapterId) => {
-    const info = a === "fake" ? undefined : providers?.[a];
-    return !info || info.available;
-  };
-  const chosen = adapter || adapters.find(available) || "";
   const selected = runs.find((r) => r.id === selectedRunId);
-  const offered = connections.filter((c) => c.enabled && (c.kind === "cloud" || c.kind === "mcp"));
-  // Codex and Gemini get no MCP server: a ticked one stays ticked for another agent, but is never sent.
-  const noMcpNote = chosen === "codex" ? CODEX_MCP_NOTE : chosen === "gemini" ? GEMINI_MCP_NOTE : null;
-  const usable = (c: Connection) => !(noMcpNote !== null && c.kind === "mcp");
-  const connectionIds = offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id);
 
   return (
     <section className="agent-panel" aria-label="Agents">
       <h2>Agents</h2>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!chosen || !prompt.trim() || starting) return;
-          setStarting(true);
-          // A card that left the project since it was chosen is not sent.
-          const card = cards.some((c) => c.id === cardId) ? cardId : "";
-          const started = card ? onStart(chosen, prompt.trim(), connectionIds, card) : onStart(chosen, prompt.trim(), connectionIds);
-          void Promise.resolve(started)
-            .then((ok) => {
-              if (ok !== false) setPrompt("");
-            })
-            .catch(() => {})
-            .finally(() => setStarting(false));
-        }}
-      >
-        <label>
-          Agent
-          <select value={chosen} onChange={(e) => setAdapter(e.target.value as AdapterId)}>
-            {adapters.map((a) => (
-              <option key={a} value={a} disabled={!available(a)}>
-                {ADAPTER_NAMES[a]}
-                {available(a) ? "" : " (unavailable)"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Card (optional)
-          <select value={cardId} onChange={(e) => setCardId(e.target.value)}>
-            <option value="">No card</option>
-            {cards.map((c) => (
-              <option key={c.id} value={c.id}>
-                {visibleControls(c.title)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Prompt
-          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} maxLength={20000} />
-        </label>
-        {offered.length > 0 && (
-          <fieldset className="run-connections">
-            <legend>Give this run access to</legend>
-            {offered.map((c) => (
-              <label key={c.id}>
-                <input
-                  type="checkbox"
-                  checked={picked.includes(c.id) && usable(c)}
-                  disabled={!usable(c)}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    setPicked((prev) => (on ? [...prev, c.id] : prev.filter((id) => id !== c.id)));
-                  }}
-                />
-                {c.name} ({KIND_LABELS[c.kind]})
-              </label>
-            ))}
-            {noMcpNote !== null && offered.some((c) => c.kind === "mcp") && <p className="note">{noMcpNote}</p>}
-          </fieldset>
-        )}
-        <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
-          Start agent
-        </button>
-      </form>
+      <StartRunForm adapters={adapters} providers={providers} cards={cards} connections={connections} onStart={onStart} />
       <ul className="runs">
         {runs.map((r) => (
           <li key={r.id}>

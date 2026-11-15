@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
-import type { AgentAction, AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
+import type { AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
 
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { Workbench } from "../src/shell/Workbench";
-import type { WorkbenchModel } from "../src/shell/model";
+import type { DockPanelId } from "../src/shell/Dock";
+import type { AppModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
 import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked } from "./gate-fixtures";
@@ -38,11 +39,7 @@ const board: Board = {
 };
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
-  status: "running", worktree: "w/run1", costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
-};
-const action: AgentAction = {
-  id: "a1", runId: "run1", kind: "file_read", tool: "Read", summary: "read README.md", input: {},
-  status: "allowed", decidedBy: "policy", reason: "", output: null, requestedAt: "", decidedAt: null,
+  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
 };
 const pendingAction: PendingAgentAction = {
   id: "p1a", runId: "run1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: {}, status: "pending",
@@ -53,7 +50,7 @@ const entry: LedgerEntry = {
   type: "project.created", payload: { name: "Local Model Hub" }, prevHash: "", hash: "",
 };
 
-function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
+function model(over: Partial<AppModel> = {}): AppModel {
   return {
     projects: [board.project],
     selectedId: "p1",
@@ -81,6 +78,14 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     pending: [],
     onDecide: vi.fn(),
     entries: [entry],
+    projectEntries: [entry],
+    feedRunId: null,
+    onFollowRun: vi.fn(),
+    ledgerHasOlder: false,
+    onLoadOlderLedger: vi.fn(async () => {}),
+    ledgerOlder: { loading: false, error: null },
+    projectOlder: { hasOlder: false, loading: false, error: null },
+    onLoadOlderProject: vi.fn(async () => {}),
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
     ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
@@ -101,6 +106,17 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onCancelGate: vi.fn(),
     story: vi.fn().mockReturnValue(new Promise(() => {})),
     subscribeEntries: () => () => {},
+    runExists: vi.fn().mockResolvedValue(true),
+    changesRunId: null,
+    onSelectChangesRun: vi.fn(),
+    changes: null,
+    changesError: null,
+    runChanges: vi.fn().mockReturnValue(new Promise(() => {})),
+    dir: vi.fn().mockReturnValue(new Promise(() => {})),
+    file: vi.fn().mockReturnValue(new Promise(() => {})),
+    diff: vi.fn().mockReturnValue(new Promise(() => {})),
+    onOverrideCommand: vi.fn(async () => ({ ok: true as const })),
+    onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 0 })),
     ...over,
   };
 }
@@ -108,7 +124,13 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
 const views = () => screen.getByRole("navigation", { name: "Views" });
 const view = (name: string) => within(views()).getByRole("button", { name });
 
-beforeEach(() => localStorage.clear());
+/** Switches the TestDock to the Operator preset, which shows the Agent feed and the Ledger in the bottom panel. */
+const operator = () => act(() => testDock.api!.applyPreset("operator"));
+
+beforeEach(() => {
+  localStorage.clear();
+  testDock.restore = null;
+});
 
 describe("Workbench", () => {
   it("lays out the activity bar, side bar, dock and status bar, with the Board view first", () => {
@@ -134,9 +156,10 @@ describe("Workbench", () => {
     render(<Workbench model={model()} />);
     await userEvent.click(view("Agents"));
     expect(view("Agents").getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("combobox", { name: "Agent" })).toBeTruthy();
-    expect(screen.getByLabelText("Prompt")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start agent" })).toBeTruthy();
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    expect(agents.getByRole("combobox", { name: "Agent" })).toBeTruthy();
+    expect(agents.getByLabelText("Prompt")).toBeTruthy();
+    expect(agents.getByRole("button", { name: "Start agent" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Projects" })).toBeNull();
 
     await userEvent.click(view("Board"));
@@ -156,20 +179,28 @@ describe("Workbench", () => {
     const m = model();
     render(<Workbench model={m} />);
     await userEvent.click(view("Agents"));
-    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    await userEvent.type(agents.getByLabelText("Prompt"), "hello");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", []);
   });
 
-  it("shows the selected run's actions in the Agent feed panel", () => {
-    const { container } = render(<Workbench model={model({ selectedRunId: "run1", runActions: [action] })} />);
+  it("shows the project's agent entries in the Agent feed panel and its commands in the Terminal panel", () => {
+    const requested: LedgerEntry = {
+      ...entry, seq: 2, id: "e2", actor: { kind: "agent", id: "run1" }, type: "agent.action.requested",
+      payload: { runId: "run1", actionId: "a1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" } },
+    };
+    const { container } = render(<Workbench model={model({ projectEntries: [entry, requested] })} />);
+    operator();
     const feed = container.querySelector<HTMLElement>('[data-panel="agent_feed"]')!;
-    expect(within(feed).getByText(/Detect GPU/)).toBeTruthy();
-    expect(within(feed).getByRole("listitem").textContent).toMatch(/Allowed to read read README\.md.*allowed · decided by policy/);
+    expect(within(feed).getByRole("listitem").textContent).toContain('wants to run the command "nvidia-smi"');
+    const terminal = container.querySelector<HTMLElement>('[data-panel="terminal"]')!;
+    expect(within(terminal).getByRole("listitem").textContent).toBe("$ nvidia-smi");
   });
 
   it("keeps the ledger in an aside labelled Ledger in the bottom panel", () => {
     const { container } = render(<Workbench model={model()} />);
+    operator();
     const panel = container.querySelector<HTMLElement>('[data-panel="ledger"]')!;
     const aside = within(panel).getByRole("complementary", { name: "Ledger" });
     expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created the project "Local Model Hub"');
@@ -219,8 +250,16 @@ describe("Workbench", () => {
       testDock.api!.open("connection:c1", "Claude (Anthropic)", "main");
     });
     expect(container.querySelector('[data-panel="connection:gone"]')).toBeTruthy();
+    act(() => testDock.api!.applyPreset("operator"));
+    act(() => {
+      testDock.api!.open("connection:gone", "Claude (Anthropic)", "main");
+      testDock.api!.open("connection:c1", "Claude (Anthropic)", "main");
+    });
+    act(() => testDock.api!.saveAs("Mine"));
     rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, list: [conn] }) })} />);
     expect(container.querySelector('[data-panel="connection:gone"]')).toBeNull();
+    // Closing a stale tab on load is not the Owner changing the layout: the name stays.
+    expect(testDock.api!.currentName()).toBe("Mine");
     expect(container.querySelector('[data-panel="connection:c1"]')).toBeTruthy();
 
     // Only the first load prunes: a later list without c1 leaves its tab to say it no longer exists.
@@ -276,6 +315,7 @@ describe("Workbench", () => {
 
   it("keeps the Needs-you strip above the dock in every view, even with the bottom panel closed", async () => {
     const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+    operator();
     await userEvent.click(view("Connections"));
     await userEvent.keyboard("{Control>}j{/Control}");
     expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
@@ -297,6 +337,7 @@ describe("Workbench", () => {
 
   it("toggles the bottom panel with Ctrl+J and Cmd+J, but not while typing", async () => {
     const { container } = render(<Workbench model={model()} />);
+    operator();
     const ledgerShown = () => container.querySelector('[data-panel="ledger"]') !== null;
 
     await userEvent.click(screen.getByLabelText("New project name"));
@@ -352,10 +393,79 @@ describe("Workbench", () => {
     const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
     render(<Workbench model={m} />);
     await userEvent.click(view("Agents"));
-    await userEvent.selectOptions(screen.getByLabelText("Card (optional)"), "Login");
-    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    await userEvent.selectOptions(agents.getByLabelText("Card (optional)"), "Login");
+    await userEvent.type(agents.getByLabelText("Prompt"), "hello");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", [], "c1");
+  });
+
+  it("opens the Needs-you tab from a strip card's More context, keeping focus on the button", async () => {
+    const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+    expect(container.querySelector('[data-panel="needs_you"]')).toBeNull();
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    const more = within(strip).getByRole("button", { name: "More context" });
+    await userEvent.click(more);
+    const tab = container.querySelector<HTMLElement>('[data-panel="needs_you"]')!;
+    expect(tab.getAttribute("data-active")).toBe("true");
+    const everything = within(tab).getByRole("region", { name: "Everything that needs you" });
+    expect(within(everything).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
+    // The tab's own cards need no More context: it is already open. The strip decides, so the tab's copy is read-only.
+    expect(within(everything).queryByRole("button", { name: "More context" })).toBeNull();
+    expect(within(everything).queryByRole("button", { name: "Allow" })).toBeNull();
+    expect(within(everything).getByText("Decide in the strip above")).toBeTruthy();
+    expect(document.activeElement).toBe(more);
+    const announcer = screen.getByText("Opened Needs you");
+    expect(announcer.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("opens Learn on a shell decision's topic from the strip", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    await userEvent.click(within(strip).getByRole("button", { name: "Learn more" }));
+    expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+    expect(testDock.shell!.learnTopic).toBe("action_kinds");
+  });
+
+  it("says in the live region which topic Learn opened, keeping focus on the button, and says it again on a repeat", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    const learn = within(strip).getByRole("button", { name: "Learn more" });
+    await userEvent.click(learn);
+    const region = document.querySelector<HTMLElement>('main [aria-live="polite"]')!;
+    expect(region.textContent).toBe("Opened Learn: Kinds of action");
+    expect(document.activeElement).toBe(learn);
+    const first = region.textContent;
+    await userEvent.click(learn);
+    // The same words again would not be read: the text changes (a trailing no-break space) while saying the same.
+    expect(region.textContent).not.toBe(first);
+    expect(region.textContent!.trim()).toBe("Opened Learn: Kinds of action");
+    expect(document.activeElement).toBe(learn);
+  });
+
+  it("says More context again on a repeat press", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const more = within(screen.getByRole("region", { name: "Needs you" })).getByRole("button", { name: "More context" });
+    await userEvent.click(more);
+    const region = document.querySelector<HTMLElement>('main [aria-live="polite"]')!;
+    const first = region.textContent;
+    expect(first).toBe("Opened Needs you");
+    await userEvent.click(more);
+    expect(region.textContent).not.toBe(first);
+    expect(region.textContent!.trim()).toBe("Opened Needs you");
+  });
+
+  it("moves focus to the opened topic when the Learn more button that opened it is gone", async () => {
+    render(<Workbench model={model({ changesRunId: "run1" })} />);
+    await userEvent.click(view("Changes"));
+    const side = screen.getByRole("complementary", { name: "Side bar" });
+    const note = within(side).getByText(/^Read-only\. Agents change code/);
+    await userEvent.click(within(note).getByRole("button", { name: "Learn more" }));
+    expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.tagName).toBe("SUMMARY");
+    expect(focused.textContent).toContain("Reading a diff");
+    expect(document.querySelector('main [aria-live="polite"]')!.textContent).toBe("Opened Learn: Reading a diff");
   });
 
   it("does not show the strip when nothing is pending", () => {
@@ -375,6 +485,125 @@ describe("Workbench", () => {
     expect(side.style.width).toBe("480px");
     for (let i = 0; i < 40; i++) await userEvent.keyboard("{ArrowLeft}");
     expect(handle.getAttribute("aria-valuenow")).toBe("200");
+  });
+
+  describe("layouts and new views", () => {
+    const panels = (container: HTMLElement) => [...container.querySelectorAll("[data-panel]")].map((p) => p.getAttribute("data-panel"));
+    const layoutSelect = () => screen.getByRole("combobox", { name: "Layout" }) as HTMLSelectElement;
+
+    it("opens on the Guided layout: the Board and the Conversation, no Ledger", () => {
+      const { container } = render(<Workbench model={model()} />);
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+      const conversation = container.querySelector<HTMLElement>('[data-panel="conversation"]')!;
+      expect(within(conversation).getByRole("region", { name: "Conversation" })).toBeTruthy();
+      expect(within(conversation).getByRole("region", { name: "Ask an agent" })).toBeTruthy();
+    });
+
+    it("keeps a decision in the strip with the Guided layout in the Connections view, and badges it", async () => {
+      const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+      await userEvent.click(view("Connections"));
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
+      expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+    });
+
+    it("switches presets from the status bar, saves a layout under a name, and resets to Guided", async () => {
+      const { container } = render(<Workbench model={model()} />);
+      await userEvent.selectOptions(layoutSelect(), "Operator");
+      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed", "ledger"]);
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Operator");
+
+      act(() => testDock.api!.close("ledger"));
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Custom");
+      await userEvent.click(screen.getByRole("button", { name: "Save layout" }));
+      await userEvent.type(screen.getByLabelText("Layout name"), "Mine");
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Mine");
+      expect([...layoutSelect().options].map((o) => o.textContent)).toEqual(["Guided", "Operator", "Mine"]);
+
+      await userEvent.click(screen.getByRole("button", { name: "Reset layout" }));
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+      await userEvent.selectOptions(layoutSelect(), "Mine");
+      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed"]);
+    });
+
+    it("keeps the selected name and says so when browser storage refuses the save", async () => {
+      render(<Workbench model={model()} />);
+      await userEvent.selectOptions(layoutSelect(), "Operator");
+      const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("full", "QuotaExceededError");
+      });
+      try {
+        await userEvent.click(screen.getByRole("button", { name: "Save layout" }));
+        await userEvent.type(screen.getByLabelText("Layout name"), "Mine{Enter}");
+        expect(screen.getByRole("alert").textContent).toBe("The layout could not be saved: browser storage is full or blocked");
+        expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Operator");
+        expect([...layoutSelect().options].map((o) => o.textContent)).toEqual(["Guided", "Operator"]);
+      } finally {
+        setItem.mockRestore();
+      }
+    });
+
+    it("lists the Changes and Learn views, with a side bar for each", async () => {
+      render(<Workbench model={model()} />);
+      await userEvent.click(view("Changes"));
+      expect(screen.getByRole("complementary", { name: "Side bar" }).querySelector(".side-bar-title")?.textContent).toBe("Changes");
+      await userEvent.click(view("Learn"));
+      expect(screen.getByRole("complementary", { name: "Side bar" }).querySelector(".side-bar-title")?.textContent).toBe("Learn");
+    });
+
+    it("openLearn selects the Learn view on the topic, and never hides the side bar", () => {
+      render(<Workbench model={model()} />);
+      expect(testDock.shell!.learnTopic).toBeNull();
+      act(() => testDock.shell!.openLearn("reading_a_diff"));
+      expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+      expect(testDock.shell!.learnTopic).toBe("reading_a_diff");
+      expect(testDock.shell!.contextView).toBe("board");
+      act(() => testDock.shell!.openLearn("estimates"));
+      expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
+      expect(testDock.shell!.learnTopic).toBe("estimates");
+    });
+
+    it("showView keeps the side bar open on the active view, and the status bar uses it", async () => {
+      render(<Workbench model={model()} />);
+      act(() => testDock.shell!.showView("changes"));
+      act(() => testDock.shell!.showView("changes"));
+      expect(view("Changes").getAttribute("aria-pressed")).toBe("true");
+      expect(testDock.shell!.contextView).toBe("changes");
+      await userEvent.click(screen.getByRole("button", { name: "Needs you: 0" }));
+      await userEvent.click(screen.getByRole("button", { name: "Needs you: 0" }));
+      expect(view("Needs you").getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
+    });
+
+    it("opens a run's diff and file tabs in the main area, named after the file", () => {
+      const { container } = render(<Workbench model={model()} />);
+      act(() => testDock.shell!.model.onOpenDiff("run1", "src/a.ts"));
+      act(() => testDock.shell!.model.onOpenFile("run1", "src/a.ts"));
+      expect(panels(container)).toEqual(["board", "conversation", "diff:run1:src%2Fa.ts", "file:run1:src%2Fa.ts"]);
+      expect(container.querySelector('[data-panel="file:run1:src%2Fa.ts"]')?.getAttribute("data-active")).toBe("true");
+    });
+
+    it("closes restored diff and file tabs whose run the server no longer knows, keeping the rest", async () => {
+      testDock.restore = [
+        { id: "board", where: "main" },
+        { id: "diff:run1:src%2Fa.ts", where: "main" },
+        { id: "file:gone:notes.txt", where: "main" },
+        { id: "diff:gone:b.ts", where: "main" },
+        // Malformed: no path. A real dock could restore one from an edited layout.
+        { id: "diff:broken" as DockPanelId, where: "main" },
+      ];
+      const runExists = vi.fn(async (id: string) => id === "run1");
+      const { container } = render(<Workbench model={model({ runExists })} />);
+      await waitFor(() => expect(panels(container)).toEqual(["board", "diff:run1:src%2Fa.ts"]));
+      // The prune is not the Owner changing the layout: it keeps its name.
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+      expect(runExists.mock.calls.map(([id]) => id).sort()).toEqual(["gone", "run1"]);
+    });
   });
 
   describe("plan intake", () => {

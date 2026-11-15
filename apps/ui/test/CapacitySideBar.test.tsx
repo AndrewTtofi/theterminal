@@ -13,7 +13,7 @@ import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacitySideBar } from "../src/views/CapacitySideBar";
 import { hardware, report } from "./capacity-fixtures";
-import { fakeDock } from "./connections-harness";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const m = vi.mocked(api);
 
@@ -22,7 +22,7 @@ function renderSideBar(capacity: Partial<WorkbenchModel["capacity"]>) {
   const dock = fakeDock();
   const model = { capacity: { report: null, error: null, refresh, ...capacity } } as unknown as WorkbenchModel;
   render(
-    <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
       <CapacitySideBar />
     </ShellContext.Provider>,
   );

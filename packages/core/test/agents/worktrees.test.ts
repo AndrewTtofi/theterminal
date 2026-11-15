@@ -1,11 +1,17 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
-import { EMPTY_GITCONFIG, SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, gitEnv } from "../../src/agents/worktrees.js";
+import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
+import {
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, GitTimeoutError, SharedGitconfigModifiedError, UnsafeGitConfigError,
+  WorktreeManager,
+  ensureEmptyGitconfig, gitEnv,
+  type GitRunner,
+} from "../../src/agents/worktrees.js";
 
 const run = promisify(execFile);
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
@@ -16,14 +22,21 @@ let dataDir: string;
 let outside: string;
 let mgr: WorktreeManager;
 
+// Every runGit call is five or six git processes (its hardening checks, then the call) and a repository or worktree
+// is set up with eight or nine of them: seconds on Windows CI, where a process start is slow and the suite shares two
+// cores; the default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 beforeEach(() => {
   dataDir = realpathSync(mkdtempSync(join(tmpdir(), "wt-data-")));
   outside = realpathSync(mkdtempSync(join(tmpdir(), "wt-out-")));
   mgr = new WorktreeManager(dataDir);
 });
 afterEach(() => {
-  rmSync(dataDir, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  // Retried: on Windows a git process that was just killed can still hold its working directory (EBUSY).
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe("WorktreeManager", () => {
@@ -310,6 +323,342 @@ describe("WorktreeManager", () => {
       expect(mgr.resolveInside(wt, "loopa")).toBeNull();
       expect(mgr.resolveInside(wt, "loopa/x")).toBeNull();
       expect(mgr.resolveInside(wt, "dlink/../x")).toBeNull();
+    });
+  });
+
+  describe("runGit and repoPath", () => {
+    it("prepends GIT_COMMON_ARGS and an empty hooks directory, with the timeout, buffer and an allowlisted env", async () => {
+      const calls: { args: string[]; cwd: string; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, cwd, opts) => {
+        calls.push({ args, cwd, opts });
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      process.env.TT_TEST_PLANTED_VAR = "planted-value";
+      try {
+        await m.runGit(outside, ["status", "--short"]);
+      } finally {
+        delete process.env.TT_TEST_PLANTED_VAR;
+      }
+      const last = calls.at(-1)!;
+      expect(last.cwd).toBe(outside);
+      expect(last.args.slice(0, GIT_COMMON_ARGS.length)).toEqual([...GIT_COMMON_ARGS]);
+      expect(last.args.slice(-2)).toEqual(["status", "--short"]);
+      expect(last.args).toContain(`core.hooksPath=${join(dataDir, ".theterminal-empty-hooks")}`);
+      expect(last.opts).toMatchObject({ timeoutMs: 30000, maxBuffer: 2 * 1024 * 1024 });
+      expect(last.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
+      expect(last.opts!.env!.GIT_CONFIG_GLOBAL).toBe(join(dataDir, EMPTY_GITCONFIG));
+      expect(last.opts!.env!.GIT_CONFIG_NOSYSTEM).toBe("1");
+      expect(last.opts!.env!.GIT_INDEX_FILE).toBeUndefined();
+    });
+
+    it("names a scratch index with GIT_INDEX_FILE only when asked, and pins the index features that hide changes off", async () => {
+      const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, _cwd, opts) => {
+        calls.push({ args, opts });
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      const indexFile = join(outside, "scratch", "index");
+      await m.runGit(outside, ["status"], { indexFile });
+      expect(calls.at(-1)!.opts!.env!.GIT_INDEX_FILE).toBe(indexFile);
+      const pairs = calls.at(-1)!.args.filter((a, i, all) => all[i - 1] === "-c");
+      expect(pairs).toEqual(
+        expect.arrayContaining([
+          "core.sparseCheckout=false", "index.sparse=false", "core.splitIndex=false", "core.untrackedCache=false", "core.ignoreStat=false",
+        ]),
+      );
+    });
+
+    it("neutralises every filter driver the repository configures", async () => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        return args.includes("--get-regexp") ? "filter.lfs.clean\0filter.lfs.smudge\0filter.a.b.process\0" : "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      await m.runGit(outside, ["diff"]);
+      const last = calls.at(-1)!;
+      for (const name of ["lfs", "a.b"]) {
+        for (const kv of [`filter.${name}.clean=`, `filter.${name}.smudge=`, `filter.${name}.process=`, `filter.${name}.required=false`]) {
+          expect(last).toContain(kv);
+        }
+      }
+    });
+
+    it("the default runner maps a maxBuffer overflow to GitOutputTooLargeError", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      await expect(mgr.runGit(repo, ["log"], { maxBuffer: 4 })).rejects.toBeInstanceOf(GitOutputTooLargeError);
+      expect((await mgr.runGit(repo, ["rev-parse", "--verify", "HEAD"])).trim()).toMatch(/^[0-9a-f]{40,64}$/);
+    });
+
+    it("repoPath is the project repository, and refuses a bad id", () => {
+      expect(mgr.repoPath("proj1")).toBe(join(dataDir, "projects", "proj1", "repo"));
+      expect(() => mgr.repoPath("../x")).toThrow();
+    });
+
+    it.skipIf(process.platform === "win32")("never runs a hook the repository plants", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const marker = join(outside, "hook-ran");
+      writeFileSync(join(repo, ".git", "hooks", "pre-commit"), `#!/bin/sh\ntouch "${marker}"\n`);
+      chmodSync(join(repo, ".git", "hooks", "pre-commit"), 0o755);
+      await mgr.runGit(repo, ["commit", "--allow-empty", "-m", "x"]);
+      expect(existsSync(marker)).toBe(false);
+    });
+  });
+
+  describe("repository setup runs through the same hardening (R2)", () => {
+    it("ensureProjectRepo and createRunWorktree call git with the common args, no hooks, no signing, an allowlisted env and bounds", async () => {
+      const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, cwd, opts) => {
+        calls.push({ args, opts });
+        const inWorktree = basename(dirname(cwd)) === "worktrees"; // the new worktree, which this fake never creates
+        if (args.includes("--absolute-git-dir")) return join(inWorktree ? cwd : realpathSync.native(cwd), ".git");
+        if (args.includes("--verify")) {
+          if (inWorktree) return `${"a".repeat(40)}\n`; // the new worktree's HEAD: the run's fork commit
+          throw new Error("no HEAD yet");
+        }
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      process.env.TT_TEST_PLANTED_VAR = "planted-value";
+      try {
+        await m.createRunWorktree("proj1", "run-a");
+      } finally {
+        delete process.env.TT_TEST_PLANTED_VAR;
+      }
+      const subcommands = calls.map((c) => c.args.find((a, i) => i > 0 && c.args[i - 1] !== "-c" && !a.startsWith("-")));
+      expect(subcommands).toEqual(expect.arrayContaining(["init", "commit", "worktree"]));
+      for (const c of calls) {
+        expect(c.args.slice(0, GIT_COMMON_ARGS.length)).toEqual([...GIT_COMMON_ARGS]);
+        expect(c.args).toContain(`core.hooksPath=${join(dataDir, ".theterminal-empty-hooks")}`);
+        expect(c.args).toContain("commit.gpgsign=false");
+        // Listing HEAD's tree for .gitattributes files has its own larger, still bounded, buffer.
+        const maxBuffer = c.args.includes("ls-tree") ? 32 * 1024 * 1024 : c.args.includes("cat-file") ? 256 * 1024 : 2 * 1024 * 1024;
+        expect(c.opts).toMatchObject({ timeoutMs: 30000, maxBuffer });
+        expect(c.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
+      }
+    });
+
+    it.skipIf(process.platform === "win32")("never runs a planted post-commit, post-checkout hook or smudge filter; plain git does", async () => {
+      const evil = (name: string) => {
+        const f = join(outside, `${name}.sh`);
+        writeFileSync(f, `#!/bin/sh\necho ran >> "${join(outside, `${name}.ran`)}"\ncat\n`);
+        chmodSync(f, 0o755);
+        return f;
+      };
+      const ran = (name: string) => existsSync(join(outside, `${name}.ran`));
+      const hook = (repo: string, name: string) => {
+        writeFileSync(join(repo, ".git", "hooks", name), `#!/bin/sh\necho ran >> "${join(outside, `${name}.ran`)}"\n`);
+        chmodSync(join(repo, ".git", "hooks", name), 0o755);
+      };
+
+      // A repository planted before the initial commit: its post-commit hook must not run on that commit.
+      const repo = join(dataDir, "projects", "proj1", "repo");
+      mkdirSync(repo, { recursive: true });
+      await git(repo, "init");
+      hook(repo, "post-commit");
+      await mgr.ensureProjectRepo("proj1");
+      expect(ran("post-commit")).toBe(false);
+
+      // A smudge filter and a post-checkout hook in the shared .git must not run when a worktree is checked out.
+      writeFileSync(join(repo, ".gitattributes"), "*.txt filter=evil\n");
+      writeFileSync(join(repo, "a.txt"), "hello\n");
+      await mgr.runGit(repo, ["add", "-A"]);
+      await mgr.runGit(repo, ["commit", "-m", "files"]);
+      await git(repo, "config", "filter.evil.smudge", evil("smudge"));
+      await git(repo, "config", "filter.evil.clean", evil("clean"));
+      hook(repo, "post-checkout");
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      expect(readFileSync(join(wt.absPath, "a.txt"), "utf8")).toBe("hello\n");
+      expect([ran("post-commit"), ran("post-checkout"), ran("smudge")]).toEqual([false, false, false]);
+
+      // Controls: plain git runs each of them.
+      await git(repo, "commit", "--allow-empty", "-m", "control");
+      expect(ran("post-commit")).toBe(true);
+      await git(repo, "worktree", "add", join(outside, "control-wt"));
+      expect(ran("post-checkout")).toBe(true);
+      expect(ran("smudge")).toBe(true);
+    });
+  });
+
+  describe("included configuration and attributes (R2, re-review)", () => {
+    const smudge = () => {
+      const f = join(outside, "smudge.sh");
+      writeFileSync(f, `#!/bin/sh\necho ran >> "${join(outside, "smudge.ran")}"\ncat\n`);
+      chmodSync(f, 0o755);
+      const cfg = join(outside, "evil.cfg");
+      writeFileSync(cfg, `[filter "hid"]\n\tsmudge = ${f}\n\tclean = cat\n`);
+      return cfg;
+    };
+    /** A project repository whose HEAD holds a nested .gitattributes that uses the `hid` filter. */
+    const withNestedAttributes = async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      mkdirSync(join(repo, "sub"));
+      writeFileSync(join(repo, "sub", ".gitattributes"), "*.txt filter=hid\n");
+      writeFileSync(join(repo, "sub", "a.txt"), "hello\n");
+      await mgr.runGit(repo, ["add", "-A"]);
+      await mgr.runGit(repo, ["commit", "-m", "nested attributes"]);
+      return repo;
+    };
+
+    for (const condition of ["gitdir:**/.git/worktrees/**", "onbranch:run/**"]) {
+      it.skipIf(process.platform === "win32")(`refuses a conditional include (${condition}) and never runs its filter; plain git does`, async () => {
+        const repo = await withNestedAttributes();
+        await git(repo, "config", `includeIf.${condition}.path`, smudge());
+        await expect(mgr.createRunWorktree("proj1", "run-a")).rejects.toThrow(
+          "This repository's git configuration includes other files, which The Terminal does not allow",
+        );
+        expect(existsSync(join(outside, "smudge.ran"))).toBe(false);
+        // Control: plain git applies the included filter on checkout.
+        await git(repo, "worktree", "add", "-b", "run/control", join(outside, "control-wt"));
+        expect(existsSync(join(outside, "smudge.ran"))).toBe(true);
+      });
+    }
+
+    it("refuses a plain include.path too, and an include in the worktree's own configuration", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      await git(repo, "config", "extensions.worktreeConfig", "true");
+      await git(wt.absPath, "config", "--worktree", "include.path", join(outside, "x.cfg"));
+      await expect(mgr.runGit(wt.absPath, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await git(wt.absPath, "config", "--worktree", "--unset", "include.path");
+      await mgr.runGit(wt.absPath, ["status"]);
+      await git(repo, "config", "include.path", join(outside, "x.cfg"));
+      await expect(mgr.runGit(repo, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it("refuses a repository with a non-empty info/attributes", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+      writeFileSync(join(repo, ".git", "info", "attributes"), "* filter=x\n");
+      await expect(mgr.runGit(repo, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    /** A fake git whose repository (under `outside`) has the given object format, and whose version is `version`. */
+    const fakeGit = (version: () => string, format = "sha1") => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        if (args.at(-1) === "version") return version();
+        if (args.includes("--show-object-format")) return `${join(outside, ".git")}\n${join(outside, ".git")}\n${format}\n`;
+        return "";
+      };
+      return { calls, m: new WorktreeManager(dataDir, fake) };
+    };
+
+    it("neutralises attribute files: core.attributesFile, and --attr-source when git supports it", async () => {
+      const argsFor = async (version: string) => {
+        const { calls, m } = fakeGit(() => version);
+        await m.runGit(outside, ["status"]);
+        await m.runGit(outside, ["status"]);
+        expect(calls.filter((a) => a.at(-1) === "version")).toHaveLength(1); // detected once
+        return calls.at(-1)!;
+      };
+      const modern = await argsFor("git version 2.45.1\n");
+      expect(modern).toContain(`core.attributesFile=${join(dataDir, ".theterminal-empty-attributes")}`);
+      expect(modern).toContain("--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+      const old = await argsFor("git version 2.39.3 (Apple Git-146)\n");
+      expect(old).toContain(`core.attributesFile=${join(dataDir, ".theterminal-empty-attributes")}`);
+      expect(old.some((a) => a.startsWith("--attr-source"))).toBe(false);
+    });
+
+    it("uses the empty tree of the repository's object format, and refuses an unknown one", async () => {
+      const sha256 = fakeGit(() => "git version 2.45.1\n", "sha256");
+      await sha256.m.runGit(outside, ["status"]);
+      expect(sha256.calls.at(-1)).toContain("--attr-source=6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321");
+      const odd = fakeGit(() => "git version 2.45.1\n", "sha512");
+      await expect(odd.m.runGit(outside, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it.skipIf(process.platform === "win32")("works in a real sha256 repository", async () => {
+      const repo = join(outside, "r256");
+      mkdirSync(repo);
+      await git(repo, "init", "--object-format=sha256");
+      writeFileSync(join(repo, "a.txt"), "x\n");
+      await mgr.runGit(repo, ["add", "a.txt"]);
+      await mgr.runGit(repo, ["-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-m", "x"]);
+      expect((await mgr.runGit(repo, ["diff", "HEAD"])).trim()).toBe("");
+    });
+
+    it("never caches a failed git version check", async () => {
+      let n = 0;
+      const { calls, m } = fakeGit(() => {
+        n++;
+        if (n === 1) throw new Error("git not ready");
+        return "git version 2.45.1\n";
+      });
+      await expect(m.runGit(outside, ["status"])).rejects.toThrow();
+      await m.runGit(outside, ["status"]);
+      expect(calls.at(-1)).toContain("--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+      expect(calls.filter((a) => a.at(-1) === "version")).toHaveLength(2);
+    });
+
+    it("treats any failure of the attribute scan as a refusal", async () => {
+      const refusedWith = async (fail: (args: string[]) => Error | string | null) => {
+        const fake: GitRunner = async (args) => {
+          const r = fail(args);
+          if (r instanceof Error) throw r;
+          if (typeof r === "string") return r;
+          if (args.at(-1) === "version") return "git version 2.45.1\n";
+          if (args.includes("--show-object-format")) return `${join(outside, ".git")}\n${join(outside, ".git")}\nsha1\n`;
+          return "";
+        };
+        return new WorktreeManager(dataDir, fake).runGit(outside, ["status"]);
+      };
+      const tree = (args: string[]) => (args.includes("ls-tree") ? "sub/.gitattributes\0" : null);
+      await expect(refusedWith((a) => (a.includes("cat-file") ? new Error("bad object") : tree(a)))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith((a) => (a.includes("cat-file") ? new GitOutputTooLargeError() : tree(a)))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith((a) => (a.includes("ls-tree") ? new GitTimeoutError() : null))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      // ls-tree failing while HEAD exists is a refusal; without a HEAD there is simply no tree to scan.
+      const lsTreeFails = (head: boolean) => (a: string[]) =>
+        a.includes("ls-tree") ? new Error("fatal") : a.includes("--verify") ? (head ? "abc\n" : new Error("no HEAD")) : null;
+      await expect(refusedWith(lsTreeFails(true))).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await expect(refusedWith(lsTreeFails(false))).resolves.toBe("");
+      const configFails = (a: string[]) => (a.includes("--get-regexp") ? Object.assign(new Error("bad config"), { code: 128 }) : null);
+      await expect(refusedWith(configFails)).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      writeFileSync(join(outside, ".gitattributes"), `${"#".repeat(300 * 1024)}\n* filter=late\n`);
+      await expect(refusedWith(() => null)).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it("neutralises filters named by any .gitattributes in HEAD's tree", async () => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        if (args.includes("ls-tree")) return "README\0sub/deep/.gitattributes\0.gitattributes\0";
+        if (args.includes("cat-file")) return args.at(-1)!.endsWith("sub/deep/.gitattributes") ? "*.bin filter=deep\n" : "* filter=top\n";
+        return "";
+      };
+      await new WorktreeManager(dataDir, fake).runGit(outside, ["status"]);
+      const last = calls.at(-1)!;
+      for (const n of ["deep", "top"]) expect(last).toContain(`filter.${n}.smudge=`);
+    });
+  });
+
+  describe("submodules, replace objects and the big-file threshold (final review)", () => {
+    it("every call disables submodule recursion and summaries, replace objects, and pins core.bigFileThreshold", () => {
+      const args = [...GIT_COMMON_ARGS];
+      const pairs = args.flatMap((a, i) => (a === "-c" ? [args[i + 1]] : []));
+      expect(pairs).toEqual(expect.arrayContaining(["submodule.recurse=false", "status.submoduleSummary=false", "core.bigFileThreshold=512m"]));
+      expect(args).toContain("--no-replace-objects");
+      // Global options only, before the subcommand: nothing here names a subcommand or takes an operand.
+      for (const a of args) expect(a === "-c" || a.startsWith("--") || a.includes("=")).toBe(true);
+    });
+
+    it.skipIf(process.platform === "win32")("never recurses into a planted submodule on reset, checkout or status, so its filter driver never runs; plain git does", async () => {
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      const trap = await plantSubmoduleTrap(wt.absPath, outside);
+      await mgr.runGit(wt.absPath, ["reset", "--hard", "HEAD"]);
+      expect(trap.ran()).toBe(false);
+      expect(existsSync(trap.inner)).toBe(false); // nothing was restored inside the submodule
+      await mgr.runGit(wt.absPath, ["checkout", "--", "."]);
+      await mgr.runGit(wt.absPath, ["status", "--porcelain=v1", "-z"]);
+      await mgr.runGit(wt.absPath, ["diff", "--numstat", "HEAD~1"]);
+      expect(trap.ran()).toBe(false);
+      // Control: plain git with the same repository recurses and runs the driver.
+      await plainGit(wt.absPath, "reset", "--hard", "HEAD");
+      expect(trap.ran()).toBe(true);
+      expect(existsSync(trap.inner)).toBe(true);
     });
   });
 });

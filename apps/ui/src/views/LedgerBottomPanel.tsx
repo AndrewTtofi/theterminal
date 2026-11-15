@@ -7,5 +7,17 @@ export function LedgerBottomPanel() {
   if (model.ledgerScope === "project" && !model.selectedId) {
     return <p className="empty">Select a project to see its ledger, or show all projects from the Ledger view.</p>;
   }
-  return <LedgerPanel entries={model.entries} topics={model.ledgerTopics} ctx={model.narration} />;
+  // Keyed by what it shows, so choosing another project or scope starts again from the newest page.
+  return (
+    <LedgerPanel
+      key={model.ledgerScope === "all" ? "all" : `project:${model.selectedId}`}
+      entries={model.entries}
+      topics={model.ledgerTopics}
+      ctx={model.narration}
+      hasOlder={model.ledgerHasOlder}
+      onLoadOlder={() => void model.onLoadOlderLedger()}
+      loadingOlder={model.ledgerOlder.loading}
+      olderError={model.ledgerOlder.error}
+    />
+  );
 }

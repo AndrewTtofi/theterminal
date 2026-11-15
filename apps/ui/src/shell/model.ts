@@ -8,6 +8,9 @@ import type {
   CapacityReport,
   CardStory,
   DecisionId,
+  DirListing,
+  FileContent,
+  FileDiff,
   GateDecisionInput,
   GateEvaluation,
   GitHubOverview,
@@ -20,6 +23,7 @@ import type {
   Project,
   Provider,
   QuestionId,
+  RunChanges,
   Stage,
 } from "@theterminal/shared";
 import type { AgentsInfo, Status } from "../api";
@@ -44,8 +48,26 @@ export type GatePrompt = {
   refreshing: boolean;
 };
 
-/** Every narration topic, in the order the ledger's filter lists them. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];
+/** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
+
+/** True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. */
+export function namesRun(e: LedgerEntry, runId: string): boolean {
+  if (!e.type.startsWith("agent.") && !e.type.startsWith("override.")) return false;
+  const p = e.payload;
+  return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
+}
+
+/**
+ * True when `runs` lists `runId` as running. The server refuses every view of a live run's working copy (409
+ * run_active), so nothing asks for one until the run is stopped or finished; an unknown run is asked about.
+ */
+export function runIsLive(runs: readonly AgentRun[], runId: string | null): boolean {
+  return runId !== null && runs.some((r) => r.id === runId && r.status === "running");
+}
+
+/** What an emergency override request came to: recorded, or refused with a message for the Owner. */
+export type OverrideOutcome<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };
 
 /** Everything the shell shows and every action it can take; App owns the data and the API calls. */
 export type WorkbenchModel = {
@@ -63,7 +85,10 @@ export type WorkbenchModel = {
    * intake.* or gate.* entry of the card's project while it is set.
    */
   gate: GatePrompt | null;
-  /** Moves with the decisions; true when moved. When the server refuses them, refreshes the evaluations and keeps the card. */
+  /**
+   * Moves with the decisions; true when moved. When the server refuses them, refreshes the evaluations and keeps the
+   * card. False at once, sending nothing, while an earlier call is still in flight.
+   */
   onResolveGate: (decisions: GateDecisionInput[]) => Promise<boolean>;
   onCancelGate: () => void;
   /** A card's story, read from the server each time. */
@@ -81,9 +106,29 @@ export type WorkbenchModel = {
   onStopRun: (runId: string) => void;
 
   pending: PendingAgentAction[];
+  /** Sends the decision; resolves false at once, sending nothing, while a decision on the same action is in flight. */
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown>;
 
+  /** The entries the ledger panel shows: the selected project's, or every project's, by `ledgerScope`. */
   entries: LedgerEntry[];
+  /** The selected project's stream, whatever the ledger scope: what the Agent feed and the Terminal are made from. */
+  projectEntries: LedgerEntry[];
+  /** The run the Agent feed and the Terminal follow; null follows every run of the project. */
+  feedRunId: string | null;
+  onFollowRun: (runId: string | null) => void;
+  /** True while the server may hold entries older than the oldest loaded for the ledger scope. */
+  ledgerHasOlder: boolean;
+  /** Fetches the 500 entries before the oldest loaded for the ledger scope and puts them in front. */
+  onLoadOlderLedger: () => Promise<void>;
+  /** The ledger scope's older-page request: in flight, and why the last one failed (null when it did not). */
+  ledgerOlder: { loading: boolean; error: string | null };
+  /**
+   * The same for the selected project's stream (`projectEntries`), whatever the ledger scope: whether older entries
+   * may exist, the older-page request in flight, and why the last one failed.
+   */
+  projectOlder: { hasOlder: boolean; loading: boolean; error: string | null };
+  /** Fetches the 500 entries before the oldest loaded of the selected project's stream and puts them in front. */
+  onLoadOlderProject: () => Promise<void>;
   ledgerScope: LedgerScope;
   onLedgerScopeChange: (scope: LedgerScope) => void;
   /** Which narration topics the ledger shows; every topic by default. */
@@ -119,9 +164,58 @@ export type WorkbenchModel = {
   onDecideIntake: (decisionId: DecisionId, chosen: string, rationale?: string) => Promise<boolean>;
   onCompleteIntake: () => Promise<boolean>;
   onReopenIntake: (reason: string) => Promise<boolean>;
+
+  /** False when the server answers 404 for the run; used to close restored diff and file tabs of deleted runs. */
+  runExists: (runId: string) => Promise<boolean>;
+
+  /** The run the Changes view shows: the one picked there, else the selected run, else the project's newest. */
+  changesRunId: string | null;
+  /** Picks the Changes view's run; null goes back to following the selected run. */
+  onSelectChangesRun: (runId: string | null) => void;
+  /** What `changesRunId` changed; reloaded on any agent.* or override.* entry naming it. Null while loading. */
+  changes: RunChanges | null;
+  /** Why the changes could not load, worded for the Owner; null otherwise. */
+  changesError: string | null;
+  /** A run's changes, remembered for 10 s per run. */
+  runChanges: (runId: string) => Promise<RunChanges>;
+  dir: (runId: string, path: string) => Promise<DirListing>;
+  file: (runId: string, path: string) => Promise<FileContent>;
+  diff: (runId: string, path: string) => Promise<FileDiff>;
+  /**
+   * Emergency override: runs a program as the Owner in the run's working copy, or drops its uncommitted changes.
+   * Each resolves `ok: true` when the server recorded it (a discard with how many uncommitted files it dropped), and
+   * `ok: false` with the refusal worded for the Owner, for the form to show.
+   */
+  onOverrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) => Promise<OverrideOutcome>;
+  onOverrideDiscard: (runId: string, reason: string) => Promise<OverrideOutcome<{ files: number }>>;
+  /** Opens (or shows) the diff tab of one file of a run. */
+  onOpenDiff: (runId: string, path: string) => void;
+  /** Opens (or shows) the read-only tab of one file of a run. */
+  onOpenFile: (runId: string, path: string) => void;
 };
 
-export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };
+/** What App provides: the shell adds the actions that open tabs, since it owns the dock. */
+export type AppModel = Omit<WorkbenchModel, "onOpenDiff" | "onOpenFile">;
+
+export type ShellContextValue = {
+  model: WorkbenchModel;
+  dock: () => DockApi | null;
+  /** The activity bar's action: selecting the active view again hides the side bar. */
+  selectView: (view: ViewId) => void;
+  /** Shows a view in the side bar and never hides it: for every navigation that is not the activity bar. */
+  showView: (view: ViewId) => void;
+  /** Shows the Learn view open on the topic. */
+  openLearn: (topicId: string) => void;
+  /** The topic the last openLearn named, or null. */
+  learnTopic: string | null;
+  /** The view the Owner is looking at: the active view, or the last one before Learn while Learn is shown. */
+  contextView: ViewId;
+  /**
+   * True while the Needs-you strip above the dock is showing (anything pending, a plan waiting or a stopped move):
+   * other copies of its cards are then read-only, so each decision is made in one place.
+   */
+  stripShown: boolean;
+};
 
 /** Dock panels render through portals, so they read the model from context rather than props. */
 export const ShellContext = createContext<ShellContextValue | null>(null);

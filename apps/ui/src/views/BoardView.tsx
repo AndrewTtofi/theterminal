@@ -1,8 +1,14 @@
 import { visibleControls } from "@theterminal/shared";
 import { Board } from "../components/Board";
+import { spendLine } from "../components/cost";
 import { useShell } from "../shell/model";
 
-/** The main area's home tab: the selected project's lifecycle board. A card's title opens its story tab. */
+export { spendLine };
+
+/**
+ * The main area's home tab: the selected project's lifecycle board, with what its agents have cost in the header.
+ * A card's title opens its story tab.
+ */
 export function BoardView() {
   const { model, dock } = useShell();
   const { board, selectedId } = model;
@@ -13,7 +19,10 @@ export function BoardView() {
   };
   return (
     <div className="board-view">
-      <h1>{board.project.name}</h1>
+      <header className="board-head">
+        <h1>{board.project.name}</h1>
+        <p className="spend">{spendLine(model.runs)}</p>
+      </header>
       <Board board={board} onAddCard={model.onAddCard} onMoveCard={model.onMoveCard} onOpenStory={openStory} />
     </div>
   );

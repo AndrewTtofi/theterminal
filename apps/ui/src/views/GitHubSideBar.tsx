@@ -25,7 +25,7 @@ const external = { target: "_blank", rel: "noopener noreferrer" } as const;
 
 /** Read-only view of the connected repository: branches, open pull requests and recent CI runs. */
 export function GitHubSideBar() {
-  const { model, selectView } = useShell();
+  const { model, showView } = useShell();
   const { overview, error, refresh } = model.github;
   const uid = useId();
   const refreshRef = useRef(refresh);
@@ -42,7 +42,7 @@ export function GitHubSideBar() {
     return (
       <div className="github-side">
         <p className="empty">Connect GitHub and set a repository in Connections.</p>
-        <button type="button" onClick={() => selectView("connections")}>
+        <button type="button" onClick={() => showView("connections")}>
           Open Connections
         </button>
       </div>
