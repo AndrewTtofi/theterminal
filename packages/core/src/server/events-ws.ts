@@ -6,6 +6,7 @@ import type { Ledger } from "../ledger/ledger.js";
 import type { SessionStore } from "../people/sessions.js";
 import { builtInClean, displayEntry } from "../link/mirrored.js";
 import { trimForRole } from "../ledger/trim.js";
+import { needs } from "./auth.js";
 import { PresenceRegistry } from "./presence.js";
 
 const PAGE = 500;
@@ -107,12 +108,13 @@ export function registerLedgerStream(
 
   app.register(websocket, { options: { maxPayload: MAX_CLIENT_FRAME } });
   app.register(async (scope) => {
-    scope.get("/api/presence", async () => presence.list());
+    // Each route carries its own role check beside the hook's table, as every route does; the hook answers first.
+    scope.get("/api/presence", needs("viewer"), async () => presence.list());
 
-    scope.get("/api/events", { websocket: true }, (socket, request) => {
+    scope.get("/api/events", { websocket: true, ...needs("viewer") }, (socket, request) => {
       const principal = request.principal;
       if (!principal) {
-        socket.close(1008, "unauthorized");
+        socket.close(1008, "unauthorized"); // unreachable behind the hook and the check above; kept as the last guard
         return;
       }
       const raw = (request.query as { afterSeq?: string }).afterSeq ?? "0";

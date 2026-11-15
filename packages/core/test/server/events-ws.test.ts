@@ -266,17 +266,19 @@ describe("presence over the ledger stream", () => {
     expect(first.ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("closes 1008 unauthorized when an upgrade arrives with no principal", async () => {
+  it("refuses an upgrade with no principal before the handshake (401), with no auth hook at all", async () => {
     await app.close();
     ledger = new Ledger(openDatabase(":memory:"));
-    app = Fastify(); // no auth hook: the stream itself must refuse
+    app = Fastify(); // no auth hook: the stream's own role check must refuse
     registerLedgerStream(app, ledger);
     await app.listen({ port: 0, host: "127.0.0.1" });
     port = (app.server.address() as { port: number }).port;
     append(1);
     const c = connect("", {});
-    expect(await c.closed).toEqual({ code: 1008, reason: "unauthorized" });
+    const refused = new Promise<string>((r) => c.ws.on("error", (e) => r(e.message)));
+    expect(await refused).toContain("401");
     expect(c.messages).toEqual([]);
+    expect(c.ws.readyState).not.toBe(WebSocket.OPEN);
   });
 
   it("rate-limits presence frames per socket", async () => {
@@ -394,6 +396,21 @@ describe("presence over the ledger stream", () => {
     ledger.append({ projectId: null, actor: { kind: "human", id: "owner" }, type: "person.removed", payload: { personId: "p-reviewer" } });
     expect(await reviewer.closed).toEqual({ code: 1008, reason: "removed" });
     expect(presence.list()).toEqual([]);
+  });
+
+  it("GET /api/presence and GET /api/events each carry their own viewer check, as every route does, beside the hook's table", async () => {
+    const own = Fastify();
+    const guards: Record<string, unknown> = {};
+    own.addHook("onRoute", (r) => {
+      const methods = Array.isArray(r.method) ? r.method : [r.method];
+      for (const m of methods) guards[`${m} ${r.url}`] = Array.isArray(r.preHandler) ? r.preHandler[0] : r.preHandler;
+    });
+    registerLedgerStream(own, ledger, undefined, { sessions, presence: new PresenceRegistry() });
+    await own.ready();
+    for (const key of ["GET /api/presence", "GET /api/events"]) {
+      expect((guards[key] as { role?: Role } | undefined)?.role, key).toBe("viewer");
+    }
+    await own.close();
   });
 
   it("GET /api/presence lists the same, for a viewer, from the events-ws plugin alone", async () => {
