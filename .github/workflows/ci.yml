@@ -40,3 +40,67 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm e2e
+  # The Linux server image: build it, start it on empty volumes, check the health check, the certificate pin in the
+  # bootstrap link, the key file and the log, then kill and restart it (the stale PID-1 data-folder lock must not stop
+  # it) and check the Host rule. Linux only; no Docker actions, the runner's own docker.
+  server-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the image
+        run: docker build -t theterminal-server .
+      - name: Start it on empty data and key volumes
+        run: |
+          mkdir -p "$RUNNER_TEMP/data" "$RUNNER_TEMP/key"
+          # The image runs as the node user (uid 1000).
+          sudo chown 1000:1000 "$RUNNER_TEMP/data" "$RUNNER_TEMP/key"
+          sudo chmod 0700 "$RUNNER_TEMP/data" "$RUNNER_TEMP/key"
+          docker run -d --name tt -p 4318:4318 -v "$RUNNER_TEMP/data:/data" -v "$RUNNER_TEMP/key:/key" theterminal-server
+      - name: Wait for the bootstrap link
+        run: |
+          for i in $(seq 1 60); do
+            if docker logs tt 2>&1 | grep -q "Open this link once"; then exit 0; fi
+            sleep 1
+          done
+          docker logs tt 2>&1 | grep -v "/join/" || true
+          exit 1
+      - name: Health, certificate pin, key file and log
+        run: |
+          test "$(curl -sk https://127.0.0.1:4318/healthz)" = '{"ok":true}'
+          logged=$(docker logs tt 2>&1 | grep "Open this link once" | sed -n 's/.*#fp=\([0-9A-F:]*\).*/\1/p')
+          served=$(openssl s_client -connect 127.0.0.1:4318 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout | sed 's/.*=//')
+          test -n "$logged"
+          test "$logged" = "$served"
+          test "$(sudo stat -c '%s %a' "$RUNNER_TEMP/key/secret.key")" = "32 600"
+          test -z "$(sudo find "$RUNNER_TEMP/data" -name secret.key)"
+          test "$(docker logs tt 2>&1 | grep -c '/join/')" = 1
+          test "$(docker logs tt 2>&1 | grep '/join/' | grep -c 'Open this link once')" = 1
+          # No 32-byte base64 value on a line of its own, and no local session token. ("! cmd" would not fail the step.)
+          if docker logs tt 2>&1 | grep -Eq '^[A-Za-z0-9+/=_-]{43,44}$'; then exit 1; fi
+          if docker logs tt 2>&1 | grep -q 'token='; then exit 1; fi
+          test "$(sudo stat -c '%a' "$RUNNER_TEMP/data/bootstrap-invite")" = 600
+          for i in $(seq 1 60); do
+            test "$(docker inspect -f '{{.State.Health.Status}}' tt)" = healthy && break
+            sleep 2
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' tt)" = healthy
+      - name: Kill and restart, then the Host rule
+        run: |
+          docker kill tt
+          docker start tt
+          for i in $(seq 1 60); do
+            if [ "$(curl -sk https://127.0.0.1:4318/healthz)" = '{"ok":true}' ]; then break; fi
+            sleep 1
+          done
+          test "$(curl -sk https://127.0.0.1:4318/healthz)" = '{"ok":true}'
+          # One new one-hour link after the restart (the old one is revoked), two in all.
+          for i in $(seq 1 30); do
+            test "$(docker logs tt 2>&1 | grep -c 'Open this link once')" = 2 && break
+            sleep 1
+          done
+          test "$(docker logs tt 2>&1 | grep -c 'Open this link once')" = 2
+          test "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Host: evil.example.org:4318' https://127.0.0.1:4318/api/status)" = 403
+          test "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Host: evil.example.org:4318' https://127.0.0.1:4318/healthz)" = 200
+      - name: Logs on failure, without the bootstrap link
+        if: failure()
+        run: docker logs tt 2>&1 | grep -v '/join/' || true
