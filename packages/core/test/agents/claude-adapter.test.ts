@@ -715,7 +715,7 @@ describe("ProviderSettings", () => {
   });
 
   it("rejects subscription mode without the exact acknowledgement and records nothing", () => {
-    const s = new ProviderSettings(db, ledger);
+    const s = new ProviderSettings(db, ledger, { restrictedSignIn: true });
     expect(() => s.setMode(owner, "claude", "subscription")).toThrow(expect.objectContaining({ name: "ZodError" }));
     expect(() => s.setMode(owner, "claude", "subscription", `${CLAUDE_SUBSCRIPTION_ACK} `)).toThrow(expect.objectContaining({ name: "ZodError" }));
     expect(() => s.setMode(owner, "claude", "subscription", "yes")).toThrow(expect.objectContaining({ name: "ZodError" }));
@@ -724,7 +724,7 @@ describe("ProviderSettings", () => {
   });
 
   it("records subscription mode with the acknowledgement, and switching back", () => {
-    const s = new ProviderSettings(db, ledger);
+    const s = new ProviderSettings(db, ledger, { restrictedSignIn: true });
     s.setMode(owner, "claude", "subscription", CLAUDE_SUBSCRIPTION_ACK);
     expect(s.getMode("claude")).toBe("subscription");
     expect(getSetting(db, "auth_mode:claude")).toBe("subscription");

@@ -3,7 +3,7 @@ import { homedir, userInfo } from "node:os";
 import { isIP } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { domainSchema, type TlsMode } from "@theterminal/shared";
+import { RESTRICTED_SIGNIN_ENV, domainSchema, type TlsMode } from "@theterminal/shared";
 import { DataDirInUseError } from "./server/data-dir-lock.js";
 import { KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-store.js";
 import { SecretStoreUnavailableError } from "./secrets/store.js";
@@ -16,7 +16,8 @@ import { pathScrubber, usernameScrubber } from "./agents/scrub-paths.js";
 export const USAGE =
   "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir PATH] [--core-dir ABSOLUTE_PATH]" +
   " [--remote] [--remote-port N] [--remote-bind ADDR] [--remote-domain NAME] [--remote-tls self_signed|acme|provided]" +
-  " [--tls-cert FILE] [--tls-key FILE] [--secret-store keychain|file] [--secret-key-file FILE] [--allow-key-in-data-dir]";
+  " [--tls-cert FILE] [--tls-key FILE] [--secret-store keychain|file] [--secret-key-file FILE] [--allow-key-in-data-dir]" +
+  " [--allow-restricted-signin]";
 export const START_FAILED = "The Terminal could not start. See the log for details.";
 export const SHUTDOWN_FAILED = "The Terminal did not shut down cleanly.";
 export const SHUTDOWN_TIMED_OUT = "The Terminal did not shut down in time.";
@@ -52,6 +53,8 @@ export type StartOptions = {
   secretStore?: "keychain" | "file";
   secretKeyFile?: string;
   allowKeyInDataDir?: true;
+  /** The restricted sign-in switch (see createServer): `--allow-restricted-signin`, or THETERMINAL_RESTRICTED_SIGNIN=1. */
+  restrictedSignIn?: true;
 };
 
 const TLS_MODES: readonly TlsMode[] = ["self_signed", "acme", "provided"];
@@ -65,6 +68,7 @@ const NEEDS_FILE_STORE = "--secret-key-file and --allow-key-in-data-dir need --s
 export function parseStartArgs(
   args: string[],
   defaults: { dataDir: () => string; uiDir: () => string | undefined },
+  env: NodeJS.ProcessEnv = process.env,
 ): { ok: true; options: StartOptions } | { ok: false; message: string } {
   const failed = (message: string) => ({ ok: false as const, message });
   let parsed;
@@ -87,6 +91,7 @@ export function parseStartArgs(
         "secret-store": { type: "string" },
         "secret-key-file": { type: "string" },
         "allow-key-in-data-dir": { type: "boolean" },
+        "allow-restricted-signin": { type: "boolean" },
       },
     });
   } catch {
@@ -158,6 +163,8 @@ export function parseStartArgs(
       throw e;
     }
   }
+  // Exactly "1": anything else, including "true", leaves the switch off.
+  if (v["allow-restricted-signin"] || env[RESTRICTED_SIGNIN_ENV] === "1") options.restrictedSignIn = true;
   return { ok: true, options };
 }
 

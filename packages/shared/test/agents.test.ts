@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, PROVIDERS, PROVIDER_ACKS, eventPayloadSchemas } from "../src/index.js";
+import {
+  ADAPTERS, CLAUDE_SUBSCRIPTION_ACK, PROVIDERS, PROVIDER_ACKS, RESTRICTED_MODES, RESTRICTED_SIGNIN_ENV, eventPayloadSchemas, isRestrictedMode,
+} from "../src/index.js";
 
 const ok = (type: keyof typeof eventPayloadSchemas, payload: unknown) =>
   expect(eventPayloadSchemas[type]!.safeParse(payload).success).toBe(true);
@@ -137,5 +139,16 @@ describe("settings.provider_auth_changed", () => {
   });
   it("exposes the codex and gemini adapters", () => {
     expect(ADAPTERS).toEqual(["claude", "codex", "gemini", "fake"]);
+  });
+});
+
+describe("RESTRICTED_MODES", () => {
+  it("lists Claude's subscription and Gemini's Google sign-in, never Codex's ChatGPT sign-in or an API key", () => {
+    expect(RESTRICTED_MODES).toEqual({ claude: "subscription", gemini: "google" });
+    expect(isRestrictedMode("claude", "subscription")).toBe(true);
+    expect(isRestrictedMode("gemini", "google")).toBe(true);
+    expect(isRestrictedMode("codex", "chatgpt")).toBe(false);
+    for (const p of ["claude", "codex", "gemini"] as const) expect(isRestrictedMode(p, "api_key")).toBe(false);
+    expect(RESTRICTED_SIGNIN_ENV).toBe("THETERMINAL_RESTRICTED_SIGNIN");
   });
 });

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defaultDataDir } from "@theterminal/core/dist/paths.js";
-import { desktopDataDir, devLayout, packagedLayout, profileDir, serverArgs, serverLogFile } from "../src/layout.js";
+import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile } from "../src/layout.js";
 
 const R = join("res", "Resources");
 const root = join("work", "repo");
@@ -60,5 +60,19 @@ describe("serverArgs", () => {
 
   it("leaves the port to core when none is given", () => {
     expect(serverArgs(L, d)).toEqual(["start", "--data-dir", d, "--ui-dir", L.uiDir, "--core-dir", L.coreDir]);
+  });
+
+  it("passes the restricted sign-in switch on only when asked", () => {
+    expect(serverArgs(L, d, undefined, { restrictedSignIn: true })).toEqual([
+      "start", "--data-dir", d, "--ui-dir", L.uiDir, "--core-dir", L.coreDir, "--allow-restricted-signin",
+    ]);
+    expect(serverArgs(L, d, 0, { restrictedSignIn: false })).toEqual(["start", "--data-dir", d, "--ui-dir", L.uiDir, "--core-dir", L.coreDir, "--port", "0"]);
+  });
+});
+
+describe("restrictedSignInRequested", () => {
+  it("is on only for THETERMINAL_RESTRICTED_SIGNIN=1", () => {
+    expect(restrictedSignInRequested({ THETERMINAL_RESTRICTED_SIGNIN: "1" })).toBe(true);
+    for (const value of [undefined, "", "0", "true", "yes"]) expect(restrictedSignInRequested({ THETERMINAL_RESTRICTED_SIGNIN: value })).toBe(false);
   });
 });

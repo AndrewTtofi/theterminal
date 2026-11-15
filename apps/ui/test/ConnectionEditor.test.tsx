@@ -203,6 +203,27 @@ describe("ConnectionEditor", () => {
     expect(onProviderAuthChange).toHaveBeenCalledWith("codex", "chatgpt", "Example codex warning.");
   });
 
+  it.each([
+    ["claude", "Claude", "Signing in with your own Claude plan is turned off until Anthropic allows it. Use an API key."],
+    ["gemini", "Gemini", "Signing in with your own Google account is turned off: Google doesn't allow other apps to use Gemini CLI's Google sign-in. Use an API key."],
+  ] as const)("%s with its own-plan sign-in turned off: no own-plan choice and no Sign in button, one plain line instead", (provider, name, line) => {
+    const providers = { ...AGENTS.providers, [provider]: { mode: "api_key", available: true, apiKey: "none", ownModeAvailable: false } };
+    renderWithConnections(<ConnectionEditor id={`connection:new:${provider}`} />, { agentsInfo: { ...AGENTS, providers } });
+    const group = within(screen.getByRole("group", { name: `${name} sign-in` }));
+    expect(group.getByText(line)).toBeTruthy();
+    expect(group.getAllByRole("radio")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(screen.queryByText(/sign in with .*'s own login/)).toBeNull();
+  });
+
+  it.each(["claude", "codex", "gemini"] as const)("%s with its own-plan sign-in allowed keeps the choice and the Sign in button", (provider) => {
+    const providers = { ...AGENTS.providers, [provider]: { mode: "api_key", available: true, apiKey: "none", ownModeAvailable: true } };
+    renderWithConnections(<ConnectionEditor id={`connection:new:${provider}`} />, { agentsInfo: { ...AGENTS, providers } });
+    expect(screen.getAllByRole("radio")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.queryByText(/turned off/)).toBeNull();
+  });
+
   it("a GitHub token field shows its help and no sign-in section", () => {
     renderWithConnections(<ConnectionEditor id="connection:new:github" />);
     const token = screen.getByLabelText("Personal access token") as HTMLInputElement;

@@ -65,7 +65,7 @@ async function start(
   script?: FakeStep[] | null,
   opts: {
     shutdownTimeoutMs?: number; which?: (cmd: string) => string | null; bundled?: Parameters<typeof createServer>[0]["bundled"];
-    secrets?: MemorySecretStore; sts?: StsCaller;
+    secrets?: MemorySecretStore; sts?: StsCaller; restrictedSignIn?: boolean;
   } = {},
 ) {
   if (script !== null) {
@@ -121,9 +121,9 @@ describe("agent API", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
     expect(await json(get(s, "/api/agents"))).toEqual({
       adapters: ["claude", "codex", "gemini", "fake"],
       providers: {
-        claude: { mode: "api_key", available: false, apiKey: "none" },
-        codex: { mode: "api_key", available: true, apiKey: "none" },
-        gemini: { mode: "api_key", available: false, apiKey: "environment" },
+        claude: { mode: "api_key", available: false, apiKey: "none", ownModeAvailable: false },
+        codex: { mode: "api_key", available: true, apiKey: "none", ownModeAvailable: true },
+        gemini: { mode: "api_key", available: false, apiKey: "environment", ownModeAvailable: false },
       },
       acks: PROVIDER_ACKS,
     });
@@ -439,7 +439,7 @@ describe("agent API", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
   });
 
   it("the claude-auth alias switches Claude auth mode; subscription needs the exact acknowledgement", async () => {
-    const { s } = await start(script);
+    const { s } = await start(script, { restrictedSignIn: true });
     const bad = await post(s, "/api/settings/claude-auth", { mode: "subscription" });
     expect(bad.status).toBe(400);
     expect(await bad.json()).toMatchObject({ error: "invalid_input" });
@@ -453,6 +453,60 @@ describe("agent API", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
     expect(listing.providers.claude!.mode).toBe("subscription");
 
     expect(await json(post(s, "/api/settings/claude-auth", { mode: "api_key" }))).toEqual({ mode: "api_key" });
+  });
+
+  describe("the restricted sign-in switch", () => {
+    const ownModes = async (s: RunningServer) =>
+      Object.fromEntries(
+        Object.entries((await json<{ providers: Record<string, { ownModeAvailable: boolean }> }>(get(s, "/api/agents"))).providers)
+          .map(([p, v]) => [p, v.ownModeAvailable]),
+      );
+
+    it("off (the default): Claude subscription and Gemini Google are refused with restricted_signin_off and nothing is recorded", async () => {
+      const { s } = await start(script);
+      const before = (await json<unknown[]>(get(s, "/api/ledger"))).length;
+      const claude = await post(s, "/api/settings/provider-auth", { provider: "claude", mode: "subscription", acknowledgement: PROVIDER_ACKS.claude });
+      expect(claude.status).toBe(409);
+      expect(await claude.json()).toEqual({ error: "restricted_signin_off", provider: "claude" });
+      const gemini = await post(s, "/api/settings/provider-auth", { provider: "gemini", mode: "google", acknowledgement: PROVIDER_ACKS.gemini });
+      expect(gemini.status).toBe(409);
+      expect(await gemini.json()).toEqual({ error: "restricted_signin_off", provider: "gemini" });
+      const alias = await post(s, "/api/settings/claude-auth", { mode: "subscription", acknowledgement: CLAUDE_SUBSCRIPTION_ACK });
+      expect(alias.status).toBe(409);
+      expect(await alias.json()).toEqual({ error: "restricted_signin_off", provider: "claude" });
+      expect(await json<unknown[]>(get(s, "/api/ledger"))).toHaveLength(before);
+      // Codex's ChatGPT sign-in and the API key modes are unaffected.
+      expect((await post(s, "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.codex })).status).toBe(200);
+      expect((await post(s, "/api/settings/claude-auth", { mode: "api_key" })).status).toBe(200);
+      expect(await ownModes(s)).toEqual({ claude: false, codex: true, gemini: false });
+    });
+
+    it("on: every own-plan mode is available and can be chosen", async () => {
+      const { s } = await start(script, { restrictedSignIn: true });
+      expect(await ownModes(s)).toEqual({ claude: true, codex: true, gemini: true });
+      expect(await json(post(s, "/api/settings/provider-auth", { provider: "gemini", mode: "google", acknowledgement: PROVIDER_ACKS.gemini })))
+        .toEqual({ provider: "gemini", mode: "google" });
+    });
+
+    it("a mode chosen while on reads as api_key once the server starts with it off, and the ledger is left as it was", async () => {
+      const dataDir = tmp();
+      const opts = { dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() };
+      const on = await createServer({ ...opts, restrictedSignIn: true });
+      expect((await post(on, "/api/settings/provider-auth", { provider: "claude", mode: "subscription", acknowledgement: PROVIDER_ACKS.claude })).status).toBe(200);
+      await on.close();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const off = await createServer(opts);
+        running.push(off);
+        const listing = await json<{ providers: Record<string, { mode: string; ownModeAvailable: boolean }> }>(get(off, "/api/agents"));
+        expect(listing.providers.claude).toMatchObject({ mode: "api_key", ownModeAvailable: false });
+        const entries = await json<{ type: string; payload: { mode?: string } }[]>(get(off, "/api/ledger"));
+        expect(entries.filter((e) => e.type === "settings.provider_auth_changed").map((e) => e.payload.mode)).toEqual(["subscription"]);
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Claude.*API key.*THETERMINAL_RESTRICTED_SIGNIN=1/));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it("a scripted throw fails the run, the action stays denied, and responses are bounded", async () => {
@@ -984,7 +1038,7 @@ describe("collaborators run agents on API keys and are named on what they do", {
     expect(JSON.stringify(theirs)).not.toContain("chatgpt");
     const owners = (await (await send("owner", "GET", "/api/agents")).json()) as { providers: Record<string, Record<string, unknown>>; acks: unknown };
     expect(owners.acks).toEqual(PROVIDER_ACKS);
-    expect(owners.providers.claude).toMatchObject({ mode: "api_key", apiKey: "none" });
+    expect(owners.providers.claude).toMatchObject({ mode: "api_key", apiKey: "none", ownModeAvailable: false });
     expect(owners.providers.codex).toMatchObject({ mode: "chatgpt" });
   });
 
