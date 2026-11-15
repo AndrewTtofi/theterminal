@@ -982,6 +982,17 @@ describe("cloud, MCP and hardware connections", () => {
     expect(svc.githubSource()).toBeNull();
   });
 
+  it("githubToken needs an enabled GitHub connection with a token, whatever its repo", async () => {
+    const svc = makeU();
+    expect(svc.githubToken()).toBeNull();
+    const g = await svc.add(owner, { kind: "github", provider: "github", name: "GitHub", secrets: { token: "ghp_TESTKEY0000000000" } });
+    expect(svc.githubToken()).toEqual({ connectionId: g.id, token: "ghp_TESTKEY0000000000" });
+    await svc.update(owner, g.id, { config: { repo: "octo/example" } });
+    expect(svc.githubToken()).toEqual({ connectionId: g.id, token: "ghp_TESTKEY0000000000" });
+    await svc.update(owner, g.id, { enabled: false });
+    expect(svc.githubToken()).toBeNull();
+  });
+
   it("budgets lists one entry per enabled model connection, the budget as a number", async () => {
     const svc = makeU();
     const c = await svc.add(owner, {

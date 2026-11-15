@@ -28,7 +28,7 @@ const MAX_BLOCK_MS = 60 * 60 * 1000;
 const TEXT_MAX = 500;
 
 /** owner/name as the catalog allows it, minus the dot segments a URL would resolve. */
-const REPO_NAME = /^(?!\.\.?\/)[A-Za-z0-9_.-]{1,100}\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
+export const REPO_NAME = /^(?!\.\.?\/)[A-Za-z0-9_.-]{1,100}\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
 
 const UNKNOWN: CiStatus = { state: "unknown", url: null, branch: null, updatedAt: null };
 
@@ -124,7 +124,7 @@ export function ciStatusOf(repo: { defaultBranch: string }, runs: GitHubOverview
 }
 
 /** Reads at most MAX_BODY_BYTES; null when the body is larger. */
-async function boundedText(res: Response): Promise<string | null> {
+export async function boundedText(res: Response): Promise<string | null> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     await res.body?.cancel().catch(() => undefined);
