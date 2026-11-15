@@ -195,12 +195,12 @@ describe("MachinesSideBar", () => {
   });
 
   it("shows a remote machine's name inert, with hidden characters made visible", () => {
-    const name = "GPU‮exe.bat\u0007<b>x</b>";
+    const name = "GPU\u202eexe.bat\u0007<b>x</b>";
     const { container } = renderSideBar({ overview: overview({ machines: [machine({ name })] }) });
     const heading = within(screen.getByRole("list", { name: "Linked machines" })).getByRole("heading");
     expect(heading.textContent).toBe("GPU\\u202eexe.bat\\u0007<b>x</b>");
     expect(heading.querySelector("b")).toBeNull();
-    expect(container.textContent).not.toMatch(/[‮\u0007]/);
+    expect(container.textContent).not.toMatch(/[\u202e\u0007]/);
     expect(screen.getByRole("button", { name: 'Unlink "GPU\\u202eexe.bat\\u0007<b>x</b>"' })).toBeTruthy();
   });
 });

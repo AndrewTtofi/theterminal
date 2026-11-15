@@ -195,7 +195,7 @@ describe("LinkMachinePanel", () => {
 
   it("shows a found machine's name inert, hidden characters made visible", async () => {
     renderPanel({
-      overview: overview({ discovered: [{ machineId: "22".repeat(16), name: "Box​‮", address: "192.168.1.20:4418", seenAt: NOW.toISOString() }] }),
+      overview: overview({ discovered: [{ machineId: "22".repeat(16), name: "Box\u200b\u202e", address: "192.168.1.20:4418", seenAt: NOW.toISOString() }] }),
     });
     await userEvent.click(tab("Enter a code"));
     expect(screen.getByRole("option").textContent).toBe("Box\\u200b\\u202e · 192.168.1.20:4418");
