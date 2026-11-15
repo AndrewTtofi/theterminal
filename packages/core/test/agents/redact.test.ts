@@ -288,8 +288,9 @@ describe("redact: leak fixes", () => {
     expect(r("password: |\r\n  FAKE1\r\n  FAKE2\r\nnext: x")).toBe(`password: ${REDACTED}\r\nnext: x`);
   });
   // Growth, not an absolute bound: a slow or loaded runner (Windows CI) slows both sizes alike, while a quadratic
-  // path takes sixteen times as long on four times the input. Each size is timed after a warm-up, best of three.
-  it("is linear on large input", { timeout: 120_000 }, () => {
+  // path takes sixteen times as long on four times the input. Each size is timed after a warm-up, best of three. A
+  // retry absorbs a burst of load on a shared machine; a quadratic path fails every attempt.
+  it("is linear on large input", { timeout: 120_000, retry: 2 }, () => {
     const time = (input: string): number => {
       let best = Infinity;
       for (let i = 0; i < 3; i++) {
