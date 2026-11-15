@@ -48,6 +48,8 @@ test("Guided by default: ask in the Conversation, decide in the strip with more 
   await expect(copy.getByRole("heading", { name: 'Agent wants to run the command "nvidia-smi"', level: 3 })).toBeVisible();
   await expect(tab.getByText("Before this, the agent said:")).toBeVisible();
   await expect(tab.locator(".agent-said").getByRole("listitem")).toHaveText(["I read README.md. Next I check the GPU."]);
+  // The run is live while it waits on the decision, so its changes are not read yet, and the tab says when they show.
+  await expect(tab.getByText("Changes show when the run is stopped or finished.")).toBeVisible();
   // The tab's copy is read-only while the strip shows the card, so the step is decided once.
   await expect(copy.getByText("Decide in the strip above")).toBeVisible();
   await expect(copy.getByRole("button", { name: "Allow" })).toHaveCount(0);
@@ -57,6 +59,13 @@ test("Guided by default: ask in the Conversation, decide in the strip with more 
   await more.click();
   await expect(tab).toBeInViewport();
   await expect(more).toBeFocused();
+
+  // Learn more on the card opens its topic and says so; focus stays on the button, as with More context.
+  // (The Needs-you tab's read-only copy has one too: this is the strip's, above the dock.)
+  const learn = page.locator("section.needs-you").getByRole("article", { name: "Decision: Run: nvidia-smi" }).getByRole("button", { name: "Learn more" });
+  await learn.click();
+  await expect(page.locator(".sr-only[aria-live=polite]")).toHaveText("Opened Learn: Kinds of action");
+  await expect(learn).toBeFocused();
 
   await card.getByRole("button", { name: "Allow" }).click();
   await expect(card).toHaveCount(0);
@@ -68,6 +77,12 @@ test("Guided by default: ask in the Conversation, decide in the strip with more 
   await expect(asked.locator("blockquote")).toHaveText("Write some notes");
   await expect(asked.getByText("I wrote notes.txt.", { exact: true })).toBeVisible();
   await expect(asked.locator(".result")).toHaveText(/^completed · 3 actions, 2 allowed, 1 denied · /);
+
+  // Learn more in the Changes view says which topic opened and, since Learn replaced the button, focuses the topic.
+  await openView(page, "Changes");
+  await page.locator(".changes p.note", { hasText: "Read-only. Agents change code" }).getByRole("button", { name: "Learn more" }).click();
+  await expect(page.locator(".sr-only[aria-live=polite]")).toHaveText("Opened Learn: Reading a diff");
+  await expect(page.locator(".learn-side summary:focus")).toHaveText("Reading a diff");
 });
 
 test("the Operator preset, a saved layout kept across a reload and restored without a stale tab, and Learn by context", async ({ page }) => {
@@ -120,6 +135,6 @@ test("the Operator preset, a saved layout kept across a reload and restored with
   // Learn ranks its topics by the view the Owner was looking at: from Changes, reading a diff comes first.
   await openView(page, "Changes");
   await openView(page, "Learn");
-  await expect(page.getByRole("heading", { name: "For what you are looking at", level: 3 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "For what you are looking at", level: 2 })).toBeVisible();
   await expect(page.locator(".learn-side details summary").first()).toHaveText("Reading a diff");
 });
