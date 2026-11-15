@@ -96,6 +96,7 @@ const pending = (s: RunningServer, projectId: string) => json<AgentAction[]>(get
 const WIN32 = process.platform === "win32";
 const GIT_TEST_TIMEOUT_MS = WIN32 ? 40_000 : 15_000;
 vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+// A describe's own timeout overrides the one above, so each suite that starts runs names it from these too.
 /** How long a route that starts a run or records a decision may take to answer: never the agent's own run time. */
 const BOUNDED_MS = WIN32 ? 10_000 : 3000;
 const WAIT_MS = WIN32 ? 20_000 : 5000;
@@ -112,7 +113,7 @@ const script: FakeStep[] = [
   { propose: { ...shell, paths: [] }, result: { ok: true, output: "ok" } },
 ];
 
-describe("agent API", { timeout: 15000 }, () => {
+describe("agent API", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
   it("GET /api/agents lists registered adapters, each provider's mode, availability and key source, and the acknowledgements", async () => {
     for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const) delete process.env[k];
     process.env.GEMINI_API_KEY = FAKE_GEMINI_KEY;
@@ -707,7 +708,7 @@ describe("agent API", { timeout: 15000 }, () => {
   });
 });
 
-describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, () => {
+describe("POST /api/projects/:id/runs with connectionIds", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
   const AWS = {
     kind: "cloud", provider: "aws", name: "AWS dev", config: { region: "eu-west-1" },
     secrets: { accessKeyId: "AKIATESTKEY000000000", secretAccessKey: "TESTKEY-static-secret-0000000000" },
@@ -858,7 +859,7 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
   });
 });
 
-describe("collaborators run agents on API keys and are named on what they do", { timeout: 20_000 }, () => {
+describe("collaborators run agents on API keys and are named on what they do", { timeout: WIN32 ? 40_000 : 20_000 }, () => {
   const AZURE = {
     kind: "cloud", provider: "azure", name: "Azure dev",
     config: {
