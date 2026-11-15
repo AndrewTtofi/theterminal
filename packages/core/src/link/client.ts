@@ -184,6 +184,8 @@ export class LinkClient {
       req.destroy();
     };
     signal?.addEventListener("abort", abort, { once: true });
+    // A signal that fired between open() resolving and the listener above is honoured too.
+    if (signal?.aborted) abort();
     try {
       if (!ok(res)) throw await refusal(res, peer.machineId);
       return await this.json(res, peer, schema);
