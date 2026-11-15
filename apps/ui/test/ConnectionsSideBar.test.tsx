@@ -185,7 +185,7 @@ describe("ConnectionsSideBar", () => {
     expect(screen.getByRole("button", { name: "AWS: Staging" })).toBeTruthy();
     expect(prod.querySelector(".status-dot")!.classList.contains("ok")).toBe(true);
     await userEvent.click(prod);
-    expect(dock.open).toHaveBeenCalledWith("connection:a2", "AWS", "main");
+    expect(dock.open).toHaveBeenCalledWith("connection:a2", "Production", "main");
     const sw = screen.getByRole("switch", { name: "Enable AWS: Production" });
     expect(sw.getAttribute("aria-checked")).toBe("false");
     await userEvent.click(sw);

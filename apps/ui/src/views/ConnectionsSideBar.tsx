@@ -146,7 +146,7 @@ export function ConnectionsSideBar() {
                             aria-label={label}
                             aria-describedby={`${uid}-${c.id}-status`}
                             disabled={!loaded}
-                            onClick={() => dock()?.open(`connection:${c.id}`, entry.label, "main")}
+                            onClick={() => dock()?.open(`connection:${c.id}`, c.name, "main")}
                           >
                             <span className={`status-dot ${c.status.state}`} aria-hidden="true" />
                             <span id={`${uid}-${c.id}-status`} className="visually-hidden">
