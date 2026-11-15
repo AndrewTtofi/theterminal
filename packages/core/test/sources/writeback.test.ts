@@ -7,7 +7,7 @@ import { OWNER_ID, type LedgerEntry } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { WorktreeManager, type GitRunner } from "../../src/agents/worktrees.js";
 import { redact } from "../../src/agents/redact.js";
 import { commitEvent } from "../../src/events/commit.js";
 import { getRun } from "../../src/events/projections.js";
@@ -157,6 +157,48 @@ describe("accept", () => {
     const projectId = await folderProject({ "a.txt": "one\n" });
     await run(projectId, "run-live1111", { "b.txt": "x\n" }, true);
     await expect(writeback().accept(owner, "run-live1111")).rejects.toBeInstanceOf(RunActiveError);
+  });
+
+  it("an accept overlapping a commit of added files waits for it in the project's queue, and both land", async () => {
+    const projectId = await folderProject({ "keep.txt": "keep\n" });
+    await run(projectId, "run-cccc3333", { "a.txt": "from the run\n" });
+    // Holds the accept just before its merge, and the commit of added files once it has staged them (its index dirty).
+    const holder = wt as unknown as { git: GitRunner };
+    const real = holder.git;
+    let atMerge!: () => void;
+    const mergeReached = new Promise<void>((r) => (atMerge = r));
+    let releaseMerge!: () => void;
+    const mergeGate = new Promise<void>((r) => (releaseMerge = r));
+    let releaseCommit!: () => void;
+    const commitGate = new Promise<void>((r) => (releaseCommit = r));
+    let staged = false;
+    holder.git = async (args, cwd, opts) => {
+      if (args.includes("merge") && args.includes("--no-ff")) {
+        atMerge();
+        await mergeGate;
+      }
+      if (args.includes("diff") && args.includes("--cached")) {
+        staged = true;
+        await commitGate;
+      }
+      return real(args, cwd, opts);
+    };
+    const accepting = writeback().accept(owner, "run-cccc3333");
+    await mergeReached;
+    const stagingDir = join(base, "staged");
+    put(stagingDir, "added.txt", "added\n");
+    const committing = wt.commitFiles(projectId, stagingDir, ["added.txt"], "Added 1 file");
+    // Without the project lock, the commit stages its file now, while the merge is about to run.
+    const until = Date.now() + 2000;
+    while (!staged && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+    releaseMerge();
+    const accepted = await accepting.then((v) => v, (e: unknown) => e);
+    releaseCommit();
+    await committing;
+    expect(accepted).not.toBeInstanceOf(Error);
+    expect(getRun(db, "run-cccc3333")!.acceptedCommit).toBe((accepted as { commit: string }).commit);
+    expect(await headTree(projectId)).toEqual(["a.txt", "added.txt", "keep.txt"]);
+    expect((await git(projectId, ["status", "--porcelain"])).trim()).toBe("");
   });
 });
 

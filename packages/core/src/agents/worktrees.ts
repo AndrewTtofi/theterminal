@@ -448,6 +448,17 @@ export class WorktreeManager {
     return next;
   }
 
+  /**
+   * Runs `fn` in the project's queue, after all earlier work on the project's repository has settled and before any
+   * later work starts: for a caller that changes the project repo itself through runGit (a merge, say). `fn` must not
+   * call this manager's queued methods for the same project (ensureProjectRepo, commitFiles, materialise,
+   * snapshotRun, createRunWorktree), which would wait on `fn` forever.
+   */
+  withProjectLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+    assertId("projectId", projectId);
+    return this.serialize(projectId, fn);
+  }
+
   /** The project's own repository: `<dataDir>/projects/<projectId>/repo`. */
   repoPath(projectId: string): string {
     assertId("projectId", projectId);

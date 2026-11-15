@@ -155,39 +155,43 @@ export class WritebackService {
       const run = this.acceptable(runId); // again inside the lock: a second accept waits, then sees the first
       const wt = this.deps.worktrees;
       const repo = await wt.ensureProjectRepo(run.projectId);
-      const scope = new GitScope();
-      const snapshot =
-        run.machineId === null
-          ? await wt.snapshotRun(run.projectId, runId)
-          : (await wt.runGit(repo, ["rev-parse", "--verify", `refs/heads/run/${runId}^{commit}`], { scope })).trim();
-      if (!COMMIT.test(snapshot)) throw new NotAcceptableError();
-      const changed = await wt.runGit(
-        repo, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", run.base!, snapshot],
-        { scope, maxBuffer: GIT_LIST_MAX_BUFFER },
-      );
-      const files = changed.split("\0").filter(Boolean).length;
-      const previous = await this.head(repo, scope);
-      try {
-        await wt.runGit(repo, ["merge", "--no-ff", "--no-edit", "-m", `Accept run ${runId.slice(0, 8)}`, snapshot], {
-          scope, timeoutMs: GIT_LONG_TIMEOUT_MS,
-        });
-      } catch (e) {
-        if (isRefusal(e)) throw e;
-        await wt.runGit(repo, ["merge", "--abort"], { scope }).catch(() => undefined);
-        await this.resetTo(repo, previous, scope);
-        throw new MergeConflictError();
-      }
-      const commit = await this.head(repo, scope);
-      try {
-        commitEvent(this.deps.db, this.deps.ledger, () => ({
-          event: { projectId: run.projectId, actor, type: "run.accepted", payload: { runId, commit, files } },
-          result: () => undefined,
-        }));
-      } catch (e) {
-        await this.resetTo(repo, previous, scope);
-        throw e;
-      }
-      return { commit };
+      // Queued work of its own, so taken before the project lock below.
+      const local = run.machineId === null ? await wt.snapshotRun(run.projectId, runId) : null;
+      // The merge changes the project repo's branch, index and files: in the project's queue, so added files being
+      // committed (commitFiles) never overlap it.
+      return wt.withProjectLock(run.projectId, async () => {
+        const scope = new GitScope();
+        const snapshot =
+          local ?? (await wt.runGit(repo, ["rev-parse", "--verify", `refs/heads/run/${runId}^{commit}`], { scope })).trim();
+        if (!COMMIT.test(snapshot)) throw new NotAcceptableError();
+        const changed = await wt.runGit(
+          repo, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", run.base!, snapshot],
+          { scope, maxBuffer: GIT_LIST_MAX_BUFFER },
+        );
+        const files = changed.split("\0").filter(Boolean).length;
+        const previous = await this.head(repo, scope);
+        try {
+          await wt.runGit(repo, ["merge", "--no-ff", "--no-edit", "-m", `Accept run ${runId.slice(0, 8)}`, snapshot], {
+            scope, timeoutMs: GIT_LONG_TIMEOUT_MS,
+          });
+        } catch (e) {
+          if (isRefusal(e)) throw e;
+          await wt.runGit(repo, ["merge", "--abort"], { scope }).catch(() => undefined);
+          await this.resetTo(repo, previous, scope);
+          throw new MergeConflictError();
+        }
+        const commit = await this.head(repo, scope);
+        try {
+          commitEvent(this.deps.db, this.deps.ledger, () => ({
+            event: { projectId: run.projectId, actor, type: "run.accepted", payload: { runId, commit, files } },
+            result: () => undefined,
+          }));
+        } catch (e) {
+          await this.resetTo(repo, previous, scope);
+          throw e;
+        }
+        return { commit };
+      });
     });
   }
 
