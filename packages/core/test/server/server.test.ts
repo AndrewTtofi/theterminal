@@ -10,6 +10,7 @@ import { createServer, selectFetch, selectSecretStore, selectSts, type RunningSe
 import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ChunkedSecretStore } from "../../src/secrets/store.js";
+import { FileSecretStore, KeyInsideDataDirError } from "../../src/secrets/file-store.js";
 import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
@@ -422,24 +423,79 @@ describe("createServer", { timeout: 30_000 }, () => {
   });
 });
 
+describe("the file secret store", () => {
+  const dirs = () => {
+    const root = mkdtempSync(join(tmpdir(), "tt-file-store-"));
+    return { dataDir: join(root, "data"), keyFile: join(root, "key", "secret.key") };
+  };
+
+  it("is chosen only by the flags, never by the environment", () => {
+    expect(selectSecretStore({ THETERMINAL_SECRET_STORE: "file" }).kind).toBe("keychain");
+    expect(selectSecretStore({ ...{ THETERMINAL_FAKE_AGENT: "1" }, THETERMINAL_SECRET_STORE: "file" }).kind).toBe("keychain");
+    const { dataDir, keyFile } = dirs();
+    const chosen = selectSecretStore({ VITEST: "true" }, undefined, { store: "file", keyFile, dataDir });
+    expect(chosen.kind).toBe("file");
+    expect(chosen.store).toBeInstanceOf(FileSecretStore);
+    expect(selectSecretStore({}, undefined, { store: "keychain", keyFile, dataDir }).kind).toBe("keychain");
+  });
+
+  it("refuses a key file inside the data folder unless allowed", () => {
+    const { dataDir } = dirs();
+    const keyFile = join(dataDir, "secret.key");
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile, dataDir })).toThrow(KeyInsideDataDirError);
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile, dataDir })).toThrow(
+      "Refusing to start: the secret key file is inside the data directory",
+    );
+    expect(selectSecretStore({}, undefined, { store: "file", keyFile, dataDir, allowKeyInDataDir: true }).kind).toBe("file");
+  });
+
+  it("needs a key file and a data folder", () => {
+    const { dataDir, keyFile } = dirs();
+    expect(() => selectSecretStore({}, undefined, { store: "file", dataDir })).toThrow();
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile })).toThrow();
+  });
+
+  it("a server on the file store creates the key at startup and keeps secrets encrypted in the data folder", async () => {
+    const { dataDir, keyFile } = dirs();
+    const s = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile });
+    running.push(s);
+    expect(existsSync(keyFile)).toBe(true);
+    expect(statSync(keyFile).size).toBe(32);
+    if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(dataDir, "secret.key"))).toBe(false);
+  });
+
+  it("a server refuses to start with the key file inside its data folder, and releases the lock", async () => {
+    const { dataDir } = dirs();
+    await expect(
+      createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: join(dataDir, "k", "secret.key") }),
+    ).rejects.toBeInstanceOf(KeyInsideDataDirError);
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+    expect(existsSync(join(dataDir, "k", "secret.key"))).toBe(false);
+  });
+});
+
 describe("test doubles for connections", () => {
   const FAKE = { THETERMINAL_FAKE_AGENT: "1" };
 
+  const storeOf = (...args: Parameters<typeof selectSecretStore>) => selectSecretStore(...args).store;
+
   it("uses the memory secret store only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_SECRET_STORE=memory", () => {
-    expect(selectSecretStore({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
-    expect(selectSecretStore({ THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
-    expect(selectSecretStore({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
-    expect(selectSecretStore(FAKE)).toBeInstanceOf(ChunkedSecretStore);
+    expect(storeOf({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    expect(selectSecretStore({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" }).kind).toBe("memory");
+    expect(storeOf({ THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(storeOf({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(selectSecretStore(FAKE)).toMatchObject({ kind: "keychain", store: expect.any(ChunkedSecretStore) });
     const injected = new MemorySecretStore();
-    expect(selectSecretStore({}, injected)).toBe(injected);
+    expect(selectSecretStore({}, injected)).toEqual({ store: injected, kind: "memory" });
   });
 
   it("refuses to fall back to the real keychain under vitest: a test server must inject its store or set the flags", () => {
     expect(() => selectSecretStore({ VITEST: "true" })).toThrow(/keychain/);
     expect(() => selectSecretStore({ VITEST: "true", THETERMINAL_SECRET_STORE: "memory" })).toThrow(/keychain/);
-    expect(selectSecretStore({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    expect(storeOf({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
     const injected = new MemorySecretStore();
-    expect(selectSecretStore({ VITEST: "true" }, injected)).toBe(injected);
+    expect(storeOf({ VITEST: "true" }, injected)).toBe(injected);
   });
 
   it("uses the fake HTTP stub only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", async () => {

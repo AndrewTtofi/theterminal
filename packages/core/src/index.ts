@@ -91,6 +91,8 @@ export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";
 export { SecretStoreUnavailableError, SECRET_SERVICE, MAX_SECRET_BYTES, ChunkedSecretStore } from "./secrets/store.js";
 export type { SecretStore } from "./secrets/store.js";
 export { MemorySecretStore } from "./secrets/memory-store.js";
+export { FileSecretStore, KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-store.js";
+export type { SecretStoreKind } from "./secrets/file-store.js";
 export { KeychainSecretStore } from "./secrets/keychain-store.js";
 export type { KeyringEntryLike, KeyringEntryFactory } from "./secrets/keychain-store.js";
 export { ConnectionService, ConflictError, SecretInConfigError, UnknownFieldError } from "./connections/service.js";

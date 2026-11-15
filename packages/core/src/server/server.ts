@@ -55,6 +55,7 @@ import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
+import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
 import { ADAPTERS, PROVIDERS, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
@@ -246,16 +247,38 @@ export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitco
 }
 
 /**
- * Where connection secrets live: the injected store, else the OS keychain. Under THETERMINAL_FAKE_AGENT=1 (tests and
- * demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ * Where connection secrets live: the injected store, else the encrypted file store when the flags ask for it (the
+ * CLI's `--secret-store file`; never from the environment), else the OS keychain. Under THETERMINAL_FAKE_AGENT=1
+ * (tests and demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ * The file store refuses a key file inside the data folder (KeyInsideDataDirError) unless `allowKeyInDataDir`: a
+ * backup of the data folder must not hold the key and the ciphertext together.
  */
-export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
-  if (injected) return injected;
-  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+export function selectSecretStore(
+  env: NodeJS.ProcessEnv = process.env,
+  injected?: SecretStore,
+  flags: { store?: "keychain" | "file"; keyFile?: string; dataDir?: string; allowKeyInDataDir?: boolean } = {},
+): { store: SecretStore; kind: SecretStoreKind } {
+  if (injected) {
+    const kind = injected instanceof FileSecretStore ? "file" : injected instanceof MemorySecretStore ? "memory" : "keychain";
+    return { store: injected, kind };
+  }
+  if (flags.store === "file") {
+    const { keyFile, dataDir } = flags;
+    if (!keyFile || !dataDir) throw new Error("the file secret store needs a key file and a data folder");
+    assertKeyOutsideDataDir(keyFile, dataDir, flags.allowKeyInDataDir ?? false);
+    return { store: new FileSecretStore({ file: join(dataDir, SECRETS_FILE), keyFile, createKey: true }), kind: "file" };
+  }
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return { store: new MemorySecretStore(), kind: "memory" };
   // Test-time guard (vitest sets VITEST): a test server that names no store never reaches the real keychain.
   if (env.VITEST) throw new Error("Refusing to use the real keychain under vitest: inject `secrets` or set the test flags");
-  return new ChunkedSecretStore(new KeychainSecretStore());
+  return { store: new ChunkedSecretStore(new KeychainSecretStore()), kind: "keychain" };
 }
+
+/** The account the startup read asks for; nothing is ever stored under it. */
+const STARTUP_PROBE = "theterminal/startup";
+
+/** The file store's ciphertext, inside the data folder (its key is not). */
+export const SECRETS_FILE = "secrets.enc.json";
 
 const FAKE_TOKEN = { access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" };
 const AZURE_TOKEN_URL = /^https:\/\/login\.microsoftonline\.com\/[^/]+\/oauth2\/v2\.0\/token$/;
@@ -434,6 +457,11 @@ export async function createServer(opts: {
   bundled?: Partial<BundledPrograms>;
   /** Where connection secrets live. Default: the OS keychain (see selectSecretStore). */
   secrets?: SecretStore;
+  /** `file`: the encrypted file store, with its key at `secretKeyFile` (the CLI's `--secret-store`). */
+  secretStore?: "keychain" | "file";
+  secretKeyFile?: string;
+  /** Lets `secretKeyFile` sit inside the data folder (refused otherwise). */
+  allowKeyInDataDir?: boolean;
   /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
   fetch?: typeof fetch;
   /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
@@ -510,7 +538,15 @@ export async function createServer(opts: {
     // whose outcomes infer the network state. Local-model detection and the link client keep the plain fetch.
     const network = new NetworkObserver();
     const fetchFn = observedFetch(selectFetch(process.env, opts.fetch), network);
-    const secrets = selectSecretStore(process.env, opts.secrets);
+    const { store: secrets, kind: secretStoreKind } = selectSecretStore(process.env, opts.secrets, {
+      store: opts.secretStore,
+      keyFile: opts.secretKeyFile,
+      dataDir: opts.dataDir,
+      allowKeyInDataDir: opts.allowKeyInDataDir,
+    });
+    // One read at startup creates the file store's key, so it exists before the first secret is saved. A key that
+    // cannot be used is reported like an unavailable keychain (connections.load below); the server still starts.
+    if (secretStoreKind === "file") await secrets.get(STARTUP_PROBE).catch(() => undefined);
     const connections = new ConnectionService({
       db,
       ledger,
