@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import type { AgentRun, DirListing, FileContent, FileDiff, LedgerEntry, RunChanges } from "@theterminal/shared";
 import { TOKEN_COOKIE } from "../../src/server/auth.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
@@ -39,7 +40,7 @@ async function start() {
   process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify([{ message: "done" }]);
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "tt-changes-")));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P" })).json()) as { id: string };
   const run = (await (await post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" })).json()) as AgentRun;
@@ -60,7 +61,7 @@ describe("changes routes", { timeout: 20000 }, () => {
     ]);
     const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "tt-changes-")));
     dirs.push(dataDir);
-    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     const project = (await (await post(s, "/api/projects", { name: "P" })).json()) as { id: string };
     const run = (await (await post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" })).json()) as AgentRun;

@@ -131,7 +131,7 @@ describe("agent API", { timeout: 15000 }, () => {
 
   it("reports every provider available from its bundled program alone, with nothing on PATH", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
-    const s = await createServer({ dataDir: tmp(), port: 0, which: noCli, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir: tmp(), port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     expect(await availability(s)).toEqual({ claude: true, codex: true, gemini: true });
   });
@@ -234,7 +234,7 @@ describe("agent API", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_LOG = log;
     process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([{ message: "Done on the local model." }]);
     const key = "TESTKEY-local-000000";
-    const { s, projectId } = await start(script, { secrets: new MemorySecretStore() });
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     const added = await post(s, "/api/connections", {
       kind: "llm", provider: "local_model", name: "Fake coder", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "fake-coder:7b" },
       secrets: { apiKey: key },
@@ -483,14 +483,14 @@ describe("agent API", { timeout: 15000 }, () => {
   it("refuses to start when THETERMINAL_FAKE_SCRIPT is not valid JSON", async () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = "{not json";
-    await expect(createServer({ dataDir: tmp(), port: 0, secrets: new MemorySecretStore() })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
+    await expect(createServer({ dataDir: tmp(), port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
   });
 
   it("repairs a modified shared git config at startup: emptied and read-only", async () => {
     const dataDir = tmp();
     const cfg = join(dataDir, EMPTY_GITCONFIG);
     writeFileSync(cfg, "[user]\n\temail = someone@example.com\n");
-    const s = await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     expect(readFileSync(cfg, "utf8")).toBe("");
     if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
@@ -501,7 +501,7 @@ describe("agent API", { timeout: 15000 }, () => {
     async function startWarned(dataDir: string): Promise<string[]> {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       try {
-        running.push(await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore() }));
+        running.push(await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() }));
         return warn.mock.calls.map((c) => c.map(String).join(" "));
       } finally {
         warn.mockRestore();
@@ -556,7 +556,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const dataDir = tmp();
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
-    const s = await createServer({ dataDir, port: 0, shutdownTimeoutMs: 500, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir, port: 0, shutdownTimeoutMs: 500, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     const project = await json<{ id: string }>(post(s, "/api/projects", { name: "P", pitch: "x" }));
     const run = await json<AgentRun>(post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" }));
     await untilPending(s, project.id);
@@ -565,7 +565,7 @@ describe("agent API", { timeout: 15000 }, () => {
     await s.close();
     expect(Date.now() - t).toBeLessThan(3000);
 
-    const b = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore() });
+    const b = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(b);
     const detail = await getRun(b, run.id);
     expect(detail.run.status).toBe("stopped");
@@ -636,7 +636,7 @@ describe("agent API", { timeout: 15000 }, () => {
     await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: WAIT_MS, interval: 25 });
     db.close();
 
-    const s = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     const detail = await getRun(s, run.id);
     expect(detail.run).toMatchObject({ status: "failed", error: "workspace restarted" });

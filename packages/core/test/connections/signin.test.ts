@@ -7,6 +7,7 @@ import type { LedgerEntry, Provider } from "@theterminal/shared";
 import { InvalidCliHomeError, SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
 import { ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const FIXTURE = fileURLToPath(new URL("../fixtures/fake-login.mjs", import.meta.url));
@@ -303,7 +304,7 @@ describe("sign-in API", { timeout: 15000 }, () => {
   async function start(script: Record<string, unknown>, bundled = { claude: () => null, codex: () => fake, gemini: () => null }) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_LOGIN = JSON.stringify(script);
-    const s = await createServer({ dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     return s;
   }

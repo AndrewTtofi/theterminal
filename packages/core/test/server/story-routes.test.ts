@@ -8,6 +8,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { registerStoryRoutes } from "../../src/server/story-routes.js";
 import type { CardStory, LedgerEntry } from "@theterminal/shared";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { TOKEN_COOKIE } from "../../src/server/auth.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
@@ -23,7 +24,7 @@ afterEach(async () => {
 async function start() {
   const dataDir = mkdtempSync(join(tmpdir(), "tt-story-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   return s;
 }

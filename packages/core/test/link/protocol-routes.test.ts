@@ -15,7 +15,7 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { LinkListener } from "../../src/link/listener.js";
-import { LinkClient, RemoteRefusedError, type Peer } from "../../src/link/client.js";
+import { LinkClient, MachineUnreachableError, RemoteRefusedError, type Peer } from "../../src/link/client.js";
 import { LinkService } from "../../src/link/service.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
@@ -446,9 +446,11 @@ describe("link protocol: runs from a paired machine", () => {
     await w.link.unpair(owner, requester.machineId);
     await until(() => expect(getRun(w.db, "run-unpaired")!.status).toBe("stopped"));
     expect(listPendingActions(w.db, "p1")).toHaveLength(0);
-    // The stream the requester already held ends with the run, as after any stop.
-    const frames = await reading;
-    expect(frames.map((f) => f.origin.type)).toEqual(["agent.started", "agent.action.requested", "agent.action.decided", "agent.finished"]);
+    // The stream the requester held is cut with the trust: nothing of it outlives the unpair, and the requester's next
+    // connection is refused at the TLS layer.
+    await expect(reading).rejects.toBeInstanceOf(MachineUnreachableError);
+    await expect(readStream(w, "run-unpaired")).rejects.toBeInstanceOf(MachineUnreachableError);
+    expect(w.ledger.list().filter((e) => e.type === "agent.finished")).toHaveLength(1);
   });
 
   it("ends the stream cleanly before an entry it cannot sign as a frame the requester would accept", { timeout: T }, async () => {

@@ -292,7 +292,7 @@ describe("a run on a linked machine in the story and the export", () => {
 
   beforeEach(async () => {
     remote = await remoteRun("run-on-gpu-box", w.planned);
-    pairAndRequest(w.db, w.ledger, remote);
+    pairAndRequest(w.db, w.ledger, remote, "GPU box", cardId);
     for (const e of [
       remote.started(cardId),
       remote.connectionUsed(),

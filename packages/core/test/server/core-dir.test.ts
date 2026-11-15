@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 
 /** Codex's Rust target triple per platform, as in bundled.ts. */
 const CODEX_TARGETS: Record<string, string> = {
@@ -44,7 +45,7 @@ describe("createServer coreDir", () => {
   it("coreDir decides where bundled programs are found (the hoisted layout the desktop app ships)", async () => {
     const coreDir = hoistedCore();
     const dataDir = mkdtempSync(join(tmpdir(), "tt-data-"));
-    const s = await createServer({ dataDir, port: 0, coreDir, which: () => null, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir, port: 0, coreDir, which: () => null, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     const res = await fetch(`http://127.0.0.1:${s.port}/api/agents`, {
       headers: { authorization: `Bearer ${s.token}`, host: `127.0.0.1:${s.port}` },

@@ -48,7 +48,7 @@ describe("a linked machine's entries leave this server through its own cleaner",
     const db = openDatabase(join(dataDir, "ledger.db"));
     const ledger = new Ledger(db);
     const remote = await remoteRun("run-on-gpu-box", projectId);
-    pairAndRequest(db, ledger, remote);
+    pairAndRequest(db, ledger, remote, "GPU box", cardId);
     // A built-in secret pattern, and this server's own session token: only this server's cleaner knows the second.
     const text = `I found ${SECRET} and ${s.token} in the config`;
     for (const e of [remote.started(cardId), remote.message(text), remote.requested("act-1", `echo ${s.token}`)]) {
