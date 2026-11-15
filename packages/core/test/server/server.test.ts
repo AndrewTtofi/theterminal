@@ -14,6 +14,7 @@ import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { LinkService } from "../../src/link/service.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { LinkListener } from "../../src/link/listener.js";
 import { LinkClient } from "../../src/link/client.js";
 import { LinkIdentity } from "../../src/link/identity.js";
@@ -25,9 +26,9 @@ afterEach(async () => {
   while (running.length) await running.pop()!.close().catch(() => undefined);
 });
 // A memory store unless the test brings its own: a server loads its link identity from the store at start, and a
-// test must never write one into the real keychain.
+// test must never write one into the real keychain. The in-process discovery, so linking never sends multicast.
 const start = async (o: Parameters<typeof createServer>[0]) => {
-  const s = await createServer({ secrets: new MemorySecretStore(), ...o });
+  const s = await createServer({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...o });
   running.push(s);
   return s;
 };
@@ -493,7 +494,7 @@ describe("createServer link listener", { timeout: 30_000 }, () => {
     const db = openDatabase(join(dataDir, "ledger.db"));
     const ledger = new Ledger(db);
     const link: LinkService = new LinkService({
-      db, ledger, secrets, bind: "127.0.0.1",
+      db, ledger, secrets, bind: "127.0.0.1", discovery: fakeDiscovery(),
       listener: (deps) => new LinkListener(deps),
       client: (identity) => new LinkClient({ identity }),
       registerProtocol: (app) => registerLinkProtocolRoutes(app, { link }),

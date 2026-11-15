@@ -87,11 +87,20 @@ export type { IdentityCreated } from "./link/identity.js";
 export { LinkListener, PAIR_PATH, LINK_BODY_LIMIT } from "./link/listener.js";
 export type { ListenerDeps, PeerCheck } from "./link/listener.js";
 export {
-  LinkClient, MachineUnreachableError, MachineKeyMismatchError, RemoteRefusedError, LinkProtocolError, MAX_JSON_BYTES,
+  LinkClient, MachineUnreachableError, MachineKeyMismatchError, RemoteRefusedError, LinkProtocolError, ClosedBeforeReplyError, MAX_JSON_BYTES,
   MAX_FRAME_BYTES, parseAddress,
 } from "./link/client.js";
 export type { Peer } from "./link/client.js";
-export { LinkService, LinkingDisabledError, IdentityUnavailableError } from "./link/service.js";
-export type { LinkServiceDeps } from "./link/service.js";
+export {
+  LinkService, LinkingDisabledError, IdentityUnavailableError, PairingCodeMismatchError, PairingRejectedError, NoPairingError,
+  SelfPairingError,
+} from "./link/service.js";
+export type { LinkServiceDeps, PairReply } from "./link/service.js";
+export { PairingWindow, pairingProof } from "./link/pairing.js";
+export type { PairingProofLabel } from "./link/pairing.js";
+export { mdnsDiscovery, fakeDiscovery, selectDiscovery, adaptBonjour } from "./link/discovery.js";
+export type { Discovered, Discovery, PublishInfo } from "./link/discovery.js";
+export { registerLinkRoutes } from "./server/link-routes.js";
+export type { LinkRouteDeps } from "./server/link-routes.js";
 export { registerLinkProtocolRoutes } from "./link/protocol-routes.js";
 export type { LinkProtocolDeps } from "./link/protocol-routes.js";

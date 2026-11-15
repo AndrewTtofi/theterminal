@@ -27,6 +27,8 @@ import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { wireLink } from "./link-wiring.js";
 import type { LinkService } from "../link/service.js";
+import type { Discovery } from "../link/discovery.js";
+import { registerLinkRoutes } from "./link-routes.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -430,6 +432,10 @@ export async function createServer(opts: {
    * tests pass `127.0.0.1`. The workspace server itself always binds loopback.
    */
   linkBind?: string;
+  /** The port the link listener asks for when the Owner enables linking. Default 4418; tests pass 0. */
+  linkPort?: number;
+  /** Finds other Terminals on the network. Default: mDNS, or the in-process fake under the test flags (selectDiscovery). */
+  discovery?: Discovery;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -496,7 +502,9 @@ export async function createServer(opts: {
     });
     await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
     // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().
-    link = wireLink({ db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0" }).link;
+    link = wireLink({
+      db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0", ...(opts.discovery !== undefined && { discovery: opts.discovery }),
+    }).link;
     const linkService = link;
 
     const signin = new SignInManager({
@@ -564,12 +572,14 @@ export async function createServer(opts: {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
+        machines: () => linkService.counts(),
       });
       registerGitHubRoutes(app, { github });
       registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
         localEngines: selectLocalEngines(process.env, opts.localEngines),
       });
+      registerLinkRoutes(app, { link: linkService, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
       // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
       await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported

@@ -12,7 +12,10 @@ import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/ch
 import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError } from "../agents/worktrees.js";
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
-import { LinkProtocolError } from "../link/client.js";
+import { LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError } from "../link/client.js";
+import {
+  IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
+} from "../link/service.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
@@ -131,6 +134,16 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
   // A linked machine's reply could not be read: fixed code, never the reply.
   if (err instanceof LinkProtocolError) return reply.code(502).send({ error: "machine_bad_reply" });
+  // Linked machines: fixed codes. An address or a machine's reply is never echoed.
+  if (err instanceof LinkingDisabledError) return reply.code(409).send({ error: "linking_disabled" });
+  if (err instanceof IdentityUnavailableError) return reply.code(503).send({ error: "identity_unavailable" });
+  if (err instanceof PairingCodeMismatchError) return reply.code(400).send({ error: "pairing_code_mismatch" });
+  if (err instanceof PairingRejectedError) return reply.code(403).send({ error: "pairing_rejected" });
+  if (err instanceof NoPairingError) return reply.code(404).send({ error: "no_pairing" });
+  if (err instanceof SelfPairingError) return reply.code(400).send({ error: "self_pairing" });
+  if (err instanceof MachineUnreachableError) return reply.code(502).send({ error: "machine_unreachable" });
+  if (err instanceof MachineKeyMismatchError) return reply.code(409).send({ error: "machine_key_mismatch" });
+  if (err instanceof RemoteRefusedError) return reply.code(502).send({ error: "machine_refused" });
   if (err instanceof LedgerReadOnlyError) {
     return reply.code(423).send({ error: "ledger_read_only" });
   }

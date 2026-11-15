@@ -5,8 +5,16 @@ import { LinkClient } from "../link/client.js";
 import { LinkListener } from "../link/listener.js";
 import { LinkService } from "../link/service.js";
 import { registerLinkProtocolRoutes } from "../link/protocol-routes.js";
+import { selectDiscovery, type Discovery } from "../link/discovery.js";
 
-export type LinkWiringDeps = { db: Db; ledger: Ledger; secrets: SecretStore; bind: string };
+export type LinkWiringDeps = {
+  db: Db;
+  ledger: Ledger;
+  secrets: SecretStore;
+  bind: string;
+  /** The injected discovery, else the fake under both test flags, else mDNS (see selectDiscovery). */
+  discovery?: Discovery;
+};
 
 /**
  * The workspace server's linked-machine parts. Nothing listens yet: `link.load()` starts the listener (when the
@@ -18,6 +26,7 @@ export function wireLink(deps: LinkWiringDeps): { link: LinkService } {
     ledger: deps.ledger,
     secrets: deps.secrets,
     bind: deps.bind,
+    discovery: selectDiscovery(process.env, deps.discovery),
     listener: (listenerDeps) => new LinkListener(listenerDeps),
     client: (identity, timeoutMs) => new LinkClient({ identity, ...(timeoutMs !== undefined && { timeoutMs }) }),
     // Evaluated when the listener starts, so the routes may reference the service itself.

@@ -1,3 +1,4 @@
+import http from "node:http";
 import https from "node:https";
 import tls, { type TLSSocket } from "node:tls";
 import type { ClientRequest, IncomingMessage, OutgoingHttpHeaders } from "node:http";
@@ -39,6 +40,17 @@ export class RemoteRefusedError extends Error {
   ) {
     super(`the machine refused: ${code}`);
     this.name = "RemoteRefusedError";
+  }
+}
+
+/**
+ * Pairing only: the connection closed before any reply arrived. A listener with no pairing window drops an unknown
+ * key just after the handshake, so on a pairing connection this means the machine is not showing a code.
+ */
+export class ClosedBeforeReplyError extends Error {
+  constructor() {
+    super("the connection closed before a reply");
+    this.name = "ClosedBeforeReplyError";
   }
 }
 
@@ -93,7 +105,7 @@ function presentedSpki(socket: TLSSocket): Buffer | null {
 }
 
 /** Reads a response body up to `max` bytes; past it the response is destroyed and LinkProtocolError thrown. */
-async function readCapped(res: IncomingMessage, max: number, machineId: string): Promise<Buffer> {
+async function readCapped(res: IncomingMessage, max: number, machineId: string | null): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   try {
@@ -287,6 +299,59 @@ export class LinkClient {
         socket.destroy();
         reject(new MachineUnreachableError(null, address));
       });
+    });
+  }
+
+  /**
+   * Pairing only: one JSON POST over a socket from `connectUnpinned`, after its key was checked against the code.
+   * Answers the status and the parsed body (undefined when empty or not JSON), read up to MAX_JSON_BYTES. A timeout
+   * is MachineUnreachableError; a connection closed before any reply is ClosedBeforeReplyError.
+   */
+  static postOnSocket(
+    socket: TLSSocket,
+    address: string,
+    path: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<{ status: number; body: unknown }> {
+    const { host, port } = parseAddress(address);
+    const payload = Buffer.from(JSON.stringify(body), "utf8");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+        req.destroy();
+      };
+      const req = http.request({
+        host,
+        port,
+        method: "POST",
+        path,
+        headers: { accept: "application/json", "content-type": "application/json", "content-length": payload.length, connection: "close" },
+        createConnection: () => socket,
+      });
+      req.setTimeout(timeoutMs, () => fail(new MachineUnreachableError(null, address)));
+      req.on("error", () => fail(new ClosedBeforeReplyError()));
+      req.once("response", (res) => {
+        void readCapped(res, MAX_JSON_BYTES, null).then(
+          (raw) => {
+            let parsed: unknown;
+            try {
+              parsed = raw.length === 0 ? undefined : JSON.parse(raw.toString("utf8"));
+            } catch {
+              parsed = undefined;
+            }
+            if (settled) return;
+            settled = true;
+            resolve({ status: res.statusCode ?? 0, body: parsed });
+          },
+          (err: Error) => fail(err instanceof LinkProtocolError ? err : new MachineUnreachableError(null, address)),
+        );
+      });
+      req.end(payload);
     });
   }
 
