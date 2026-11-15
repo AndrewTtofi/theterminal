@@ -4,7 +4,7 @@ import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacityPanel } from "../src/views/CapacityPanel";
 import { report } from "./capacity-fixtures";
-import { fakeDock } from "./connections-harness";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
 
@@ -12,7 +12,7 @@ function renderPanel(capacity: Partial<WorkbenchModel["capacity"]>) {
   const refresh = vi.fn();
   const model = { capacity: { report: null, error: null, refresh, ...capacity } } as unknown as WorkbenchModel;
   render(
-    <ShellContext.Provider value={{ model, dock: () => fakeDock(), selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...shellNav() }}>
       <CapacityPanel id="capacity" />
     </ShellContext.Provider>,
   );

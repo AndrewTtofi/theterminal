@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { SECRET_LIKE, SECRET_REFUSED, ledgerItems, line, projectEntries } from "./support.js";
+import { SECRET_LIKE, SECRET_REFUSED, ledgerItems, line, projectEntries, operatorLayout } from "./support.js";
 
 const PERMANENCE =
   "What you write here is recorded permanently in this project's ledger. Do not paste passwords, keys or other people's personal details.";
@@ -42,6 +42,7 @@ test("guided intake: describe, answer, decide, approve; then reopen, take paymen
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+  await operatorLayout(page);
 
   await page.getByRole("button", { name: "Plan intake" }).click();
   const panel = intakePanel(page);

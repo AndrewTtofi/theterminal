@@ -5,7 +5,7 @@ import type { Connection } from "@theterminal/shared";
 import type { AgentsInfo } from "../src/api";
 import type { DockApi } from "../src/shell/Dock";
 import { ShellContext } from "../src/shell/model";
-import type { WorkbenchModel } from "../src/shell/model";
+import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { useConnections } from "../src/use-connections";
 
 export const AGENTS: AgentsInfo = {
@@ -43,7 +43,18 @@ export function fakeDock(): DockApi & { [K in keyof DockApi]: ReturnType<typeof 
     reset: vi.fn(),
     toggleBottom: vi.fn(),
     panelIds: vi.fn(() => []),
+    applyPreset: vi.fn(),
+    applySaved: vi.fn(),
+    saveAs: vi.fn(),
+    savedNames: vi.fn(() => []),
+    currentName: vi.fn(() => "Guided"),
+    onNameChange: vi.fn(() => () => {}),
   } as never;
+}
+
+/** The ShellContext's navigation members, as spies, for tests that render one panel or side bar. */
+export function shellNav(): Omit<ShellContextValue, "model" | "dock"> {
+  return { selectView: vi.fn(), showView: vi.fn(), openLearn: vi.fn(), learnTopic: null, contextView: "board" as const };
 }
 
 /** Renders `children` inside the shell context, with the live connections model (backed by the mocked api). */
@@ -59,7 +70,7 @@ export function renderWithConnections(
       onProviderAuthChange: opts.onProviderAuthChange ?? vi.fn().mockResolvedValue(true),
       connections,
     } as unknown as WorkbenchModel;
-    return <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>{children}</ShellContext.Provider>;
+    return <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>{children}</ShellContext.Provider>;
   }
   const { container } = render(<Harness />);
   return { container, dock };

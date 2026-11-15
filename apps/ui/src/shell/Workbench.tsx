@@ -10,20 +10,23 @@ import { IntakePanel } from "../views/IntakePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { StoryPanel } from "../views/StoryPanel";
 import { ActivityBar } from "./ActivityBar";
-import { staleConnectionPanels } from "./dock-layout";
+import { runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
 import type { DockApi, DockPanelId } from "./Dock";
 import { LAYOUT_KEY } from "./layout-store";
 import { ShellContext } from "./model";
-import type { WorkbenchModel } from "./model";
+import type { ShellContextValue, WorkbenchModel } from "./model";
+import { PlaceholderPanel } from "./placeholders";
 import { SIDE_BAR_DEFAULT, SideBar } from "./SideBar";
 import { StatusBar } from "./StatusBar";
+import type { LayoutControls } from "./StatusBar";
 import type { ViewId } from "./views";
 
 // Stable registry: dockview keys components by name, so this object must not change between renders.
 const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
+  conversation: PlaceholderPanel, needs_you: PlaceholderPanel, terminal: PlaceholderPanel, diff: PlaceholderPanel, file: PlaceholderPanel,
 };
 
 type Props = { model: WorkbenchModel };
@@ -45,6 +48,9 @@ function isTyping(target: EventTarget | null): boolean {
  */
 export function Workbench({ model }: Props) {
   const [view, setView] = useState<ViewId>("board");
+  /** The last view other than Learn, which Learn ranks its topics for. */
+  const [lastView, setLastView] = useState<ViewId>("board");
+  const [learnTopic, setLearnTopic] = useState<string | null>(null);
   const [sideOpen, setSideOpen] = useState(true);
   const [width, setWidth] = useState(SIDE_BAR_DEFAULT);
   const dockRef = useRef<DockApi | null>(null);
@@ -56,22 +62,65 @@ export function Workbench({ model }: Props) {
   /** Everything waiting on the Owner: agent actions, open plan decisions and the gates of a stopped move. */
   const waiting = pending + notices.reduce((a, n) => a + n.decisions, 0) + gates;
 
-  const selectView = (v: ViewId) => {
+  const showView = (v: ViewId) => {
     // The Board view's home is the Board tab: bring it back if it was closed.
     if (v === "board") dockRef.current?.focus("board");
-    if (v === view) {
-      setSideOpen((open) => !open);
+    setView(v);
+    if (v !== "learn") setLastView(v);
+    setSideOpen(true);
+  };
+  /** The activity bar's action: the active view's button hides the side bar, or shows it again. */
+  const selectView = (v: ViewId) => {
+    if (v === view && sideOpen) {
+      if (v === "board") dockRef.current?.focus("board");
+      setSideOpen(false);
       return;
     }
-    setView(v);
-    setSideOpen(true);
+    showView(v);
+  };
+  const openLearn = (topicId: string) => {
+    setLearnTopic(topicId);
+    showView("learn");
   };
 
   const [dockReady, setDockReady] = useState(false);
+  const [layoutName, setLayoutName] = useState("Guided");
+  const [savedLayouts, setSavedLayouts] = useState<string[]>([]);
   const onDockReady = useCallback((api: DockApi) => {
     dockRef.current = api;
+    setLayoutName(api.currentName());
+    setSavedLayouts(api.savedNames());
+    api.onNameChange(setLayoutName);
     setDockReady(true);
   }, []);
+
+  const layout: LayoutControls = {
+    current: layoutName,
+    saved: savedLayouts,
+    applyPreset: (p) => dockRef.current?.applyPreset(p),
+    applySaved: (n) => dockRef.current?.applySaved(n),
+    saveAs: (n) => {
+      const dock = dockRef.current;
+      if (!dock) return;
+      dock.saveAs(n);
+      setSavedLayouts(dock.savedNames());
+    },
+  };
+
+  // A restored layout can hold diff and file tabs of runs deleted since: once the dock is ready, ask the server
+  // about each run they name and close the tabs of runs it answers 404 for (and malformed ones). A failed check
+  // keeps the tab.
+  const { runExists } = model;
+  const runsPruned = useRef(false);
+  useEffect(() => {
+    const dock = dockRef.current;
+    if (runsPruned.current || !dockReady || !dock) return;
+    runsPruned.current = true;
+    const runIds = runsOfPanels(dock.panelIds());
+    void Promise.all(runIds.map(async (id) => ((await runExists(id).catch(() => true)) ? [id] : []))).then((found) => {
+      for (const id of staleRunPanels(dock.panelIds(), found.flat())) dock.close(id as DockPanelId);
+    });
+  }, [dockReady, runExists]);
 
   // A restored layout can hold tabs for connections removed since: close them once, on the first successful
   // load. Later removals leave the tab saying the connection no longer exists.
@@ -97,7 +146,15 @@ export function Workbench({ model }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const ctx = { model, dock: () => dockRef.current, selectView };
+  const ctx: ShellContextValue = {
+    model,
+    dock: () => dockRef.current,
+    selectView,
+    showView,
+    openLearn,
+    learnTopic,
+    contextView: view === "learn" ? lastView : view,
+  };
 
   return (
     <ShellContext.Provider value={ctx}>
@@ -128,7 +185,14 @@ export function Workbench({ model }: Props) {
             </div>
           </main>
         </div>
-        <StatusBar status={model.status} running={running} pending={waiting} onSelectView={selectView} onResetLayout={() => dockRef.current?.reset()} />
+        <StatusBar
+          status={model.status}
+          running={running}
+          pending={waiting}
+          onSelectView={showView}
+          onResetLayout={() => dockRef.current?.reset()}
+          layout={layout}
+        />
       </div>
     </ShellContext.Provider>
   );

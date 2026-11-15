@@ -495,6 +495,7 @@ export function App() {
     onDecideIntake: (decisionId, chosen, rationale) => intakeAction((id) => api.decideIntake(id, decisionId, chosen, rationale)),
     onCompleteIntake: () => intakeAction((id) => api.completeIntake(id)),
     onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason), "reopen"),
+    runExists: api.runExists,
   };
 
   return (

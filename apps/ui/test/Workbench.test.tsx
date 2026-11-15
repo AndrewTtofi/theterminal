@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
 import type { AgentAction, AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
@@ -7,6 +7,7 @@ import type { AgentAction, AgentRun, Board, Connection, LedgerEntry, PendingAgen
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { Workbench } from "../src/shell/Workbench";
+import type { DockPanelId } from "../src/shell/Dock";
 import type { WorkbenchModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
 import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
@@ -101,6 +102,7 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onCancelGate: vi.fn(),
     story: vi.fn().mockReturnValue(new Promise(() => {})),
     subscribeEntries: () => () => {},
+    runExists: vi.fn().mockResolvedValue(true),
     ...over,
   };
 }
@@ -108,7 +110,13 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
 const views = () => screen.getByRole("navigation", { name: "Views" });
 const view = (name: string) => within(views()).getByRole("button", { name });
 
-beforeEach(() => localStorage.clear());
+/** Switches the TestDock to the Operator preset, which shows the Agent feed and the Ledger in the bottom panel. */
+const operator = () => act(() => testDock.api!.applyPreset("operator"));
+
+beforeEach(() => {
+  localStorage.clear();
+  testDock.restore = null;
+});
 
 describe("Workbench", () => {
   it("lays out the activity bar, side bar, dock and status bar, with the Board view first", () => {
@@ -163,6 +171,7 @@ describe("Workbench", () => {
 
   it("shows the selected run's actions in the Agent feed panel", () => {
     const { container } = render(<Workbench model={model({ selectedRunId: "run1", runActions: [action] })} />);
+    operator();
     const feed = container.querySelector<HTMLElement>('[data-panel="agent_feed"]')!;
     expect(within(feed).getByText(/Detect GPU/)).toBeTruthy();
     expect(within(feed).getByRole("listitem").textContent).toMatch(/Allowed to read read README\.md.*allowed · decided by policy/);
@@ -170,6 +179,7 @@ describe("Workbench", () => {
 
   it("keeps the ledger in an aside labelled Ledger in the bottom panel", () => {
     const { container } = render(<Workbench model={model()} />);
+    operator();
     const panel = container.querySelector<HTMLElement>('[data-panel="ledger"]')!;
     const aside = within(panel).getByRole("complementary", { name: "Ledger" });
     expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created the project "Local Model Hub"');
@@ -276,6 +286,7 @@ describe("Workbench", () => {
 
   it("keeps the Needs-you strip above the dock in every view, even with the bottom panel closed", async () => {
     const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+    operator();
     await userEvent.click(view("Connections"));
     await userEvent.keyboard("{Control>}j{/Control}");
     expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
@@ -297,6 +308,7 @@ describe("Workbench", () => {
 
   it("toggles the bottom panel with Ctrl+J and Cmd+J, but not while typing", async () => {
     const { container } = render(<Workbench model={model()} />);
+    operator();
     const ledgerShown = () => container.querySelector('[data-panel="ledger"]') !== null;
 
     await userEvent.click(screen.getByLabelText("New project name"));
@@ -375,6 +387,95 @@ describe("Workbench", () => {
     expect(side.style.width).toBe("480px");
     for (let i = 0; i < 40; i++) await userEvent.keyboard("{ArrowLeft}");
     expect(handle.getAttribute("aria-valuenow")).toBe("200");
+  });
+
+  describe("layouts and new views", () => {
+    const panels = (container: HTMLElement) => [...container.querySelectorAll("[data-panel]")].map((p) => p.getAttribute("data-panel"));
+    const layoutSelect = () => screen.getByRole("combobox", { name: "Layout" }) as HTMLSelectElement;
+
+    it("opens on the Guided layout: the Board and the Conversation, no Ledger", () => {
+      const { container } = render(<Workbench model={model()} />);
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+    });
+
+    it("keeps a decision in the strip with the Guided layout in the Connections view, and badges it", async () => {
+      const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
+      await userEvent.click(view("Connections"));
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
+      expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+    });
+
+    it("switches presets from the status bar, saves a layout under a name, and resets to Guided", async () => {
+      const { container } = render(<Workbench model={model()} />);
+      await userEvent.selectOptions(layoutSelect(), "Operator");
+      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed", "ledger"]);
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Operator");
+
+      act(() => testDock.api!.close("ledger"));
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Custom");
+      await userEvent.click(screen.getByRole("button", { name: "Save layout" }));
+      await userEvent.type(screen.getByLabelText("Layout name"), "Mine");
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Mine");
+      expect([...layoutSelect().options].map((o) => o.textContent)).toEqual(["Guided", "Operator", "Mine"]);
+
+      await userEvent.click(screen.getByRole("button", { name: "Reset layout" }));
+      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+      await userEvent.selectOptions(layoutSelect(), "Mine");
+      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed"]);
+    });
+
+    it("lists the Changes and Learn views, with a side bar for each", async () => {
+      render(<Workbench model={model()} />);
+      await userEvent.click(view("Changes"));
+      expect(screen.getByRole("complementary", { name: "Side bar" }).querySelector(".side-bar-title")?.textContent).toBe("Changes");
+      await userEvent.click(view("Learn"));
+      expect(screen.getByRole("complementary", { name: "Side bar" }).querySelector(".side-bar-title")?.textContent).toBe("Learn");
+    });
+
+    it("openLearn selects the Learn view on the topic, and never hides the side bar", () => {
+      render(<Workbench model={model()} />);
+      expect(testDock.shell!.learnTopic).toBeNull();
+      act(() => testDock.shell!.openLearn("reading_a_diff"));
+      expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+      expect(testDock.shell!.learnTopic).toBe("reading_a_diff");
+      expect(testDock.shell!.contextView).toBe("board");
+      act(() => testDock.shell!.openLearn("estimates"));
+      expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
+      expect(testDock.shell!.learnTopic).toBe("estimates");
+    });
+
+    it("showView keeps the side bar open on the active view, and the status bar uses it", async () => {
+      render(<Workbench model={model()} />);
+      act(() => testDock.shell!.showView("changes"));
+      act(() => testDock.shell!.showView("changes"));
+      expect(view("Changes").getAttribute("aria-pressed")).toBe("true");
+      expect(testDock.shell!.contextView).toBe("changes");
+      await userEvent.click(screen.getByRole("button", { name: "Needs you: 0" }));
+      await userEvent.click(screen.getByRole("button", { name: "Needs you: 0" }));
+      expect(view("Needs you").getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
+    });
+
+    it("closes restored diff and file tabs whose run the server no longer knows, keeping the rest", async () => {
+      testDock.restore = [
+        { id: "board", where: "main" },
+        { id: "diff:run1:src%2Fa.ts", where: "main" },
+        { id: "file:gone:notes.txt", where: "main" },
+        { id: "diff:gone:b.ts", where: "main" },
+        // Malformed: no path. A real dock could restore one from an edited layout.
+        { id: "diff:broken" as DockPanelId, where: "main" },
+      ];
+      const runExists = vi.fn(async (id: string) => id === "run1");
+      const { container } = render(<Workbench model={model({ runExists })} />);
+      await waitFor(() => expect(panels(container)).toEqual(["board", "diff:run1:src%2Fa.ts"]));
+      expect(runExists.mock.calls.map(([id]) => id).sort()).toEqual(["gone", "run1"]);
+    });
   });
 
   describe("plan intake", () => {

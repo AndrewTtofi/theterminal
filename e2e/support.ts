@@ -31,12 +31,22 @@ export async function showAllProjects(page: Page) {
   await page.getByRole("radio", { name: "All projects" }).check();
 }
 
-/** Opens the agent server and creates (and selects) a project. */
+/**
+ * Chooses the Operator layout, whose bottom panel holds the Terminal, the Agent feed and the Ledger. The default
+ * layout (Guided) has no bottom panel, so every spec that reads the Ledger or the Agent feed tab chooses this first.
+ */
+export async function operatorLayout(page: Page) {
+  await statusBar(page).getByRole("combobox", { name: "Layout" }).selectOption({ label: "Operator" });
+  await expect(page.getByRole("tab", { name: "Ledger" })).toBeVisible();
+}
+
+/** Opens the agent server, creates (and selects) a project, and chooses the Operator layout. */
 export async function openProject(page: Page, name: string) {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+  await operatorLayout(page);
 }
 
 /** Opens a catalog entry's editor from the Connections view (a new connection, or the existing one). */

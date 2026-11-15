@@ -7,6 +7,7 @@ import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import type { DockApi } from "../src/shell/Dock";
 import { ALL_ANSWERS, APPROVED_AT, intakeView } from "./intake-fixtures";
+import { shellNav } from "./connections-harness";
 
 function setup(intake: IntakeView | null | undefined, selectedId: string | null = "p1") {
   const model = {
@@ -18,7 +19,7 @@ function setup(intake: IntakeView | null | undefined, selectedId: string | null 
   } as unknown as WorkbenchModel;
   const dock = { focus: vi.fn() } as unknown as DockApi;
   const { unmount } = render(
-    <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
       <ProjectsSideBar />
     </ShellContext.Provider>,
   );

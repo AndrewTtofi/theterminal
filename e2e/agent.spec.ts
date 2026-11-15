@@ -1,10 +1,11 @@
 import { test, expect } from "@playwright/test";
-import { headlines, line, lineMatching, RUN_FINISHED } from "./support.js";
+import { headlines, line, lineMatching, RUN_FINISHED, operatorLayout } from "./support.js";
 
 test("fake agent run: policy auto-allow/deny, human allow and deny", async ({ page }) => {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill("Local Model Hub");
   await page.getByLabel("New project name").press("Enter");
+  await operatorLayout(page);
 
   const ledger = page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
   const needsYou = page.getByRole("region", { name: "Needs you" });

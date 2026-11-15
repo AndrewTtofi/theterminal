@@ -73,6 +73,13 @@ legend { color: var(--muted); padding: 0 4px; }
 .status-item.attention { background: var(--attention); }
 .status-bar button.status-item { background: none; color: inherit; border-radius: 0; padding: 0 8px; }
 .status-bar button.status-item:hover { background: rgba(255, 255, 255, 0.12); }
+.layout-item { gap: 6px; }
+.layout-item select, .layout-item input { height: 18px; padding: 0 4px; font-size: 12px; background: var(--input); color: var(--fg); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 2px; }
+.layout-item input { width: 120px; }
+.layout-item button { height: 18px; padding: 0 6px; font-size: 12px; background: none; color: inherit; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 2px; }
+.layout-item button:disabled { opacity: 0.5; }
+.layout-save { display: flex; align-items: center; gap: 6px; }
+.layout-item .layout-save [role="alert"] { background: var(--attention); color: var(--status-fg); padding: 0 6px; }
 
 /* Needs-you strip: outside the dock so decisions show in every layout. */
 .needs-you { flex: none; max-height: 40vh; overflow: auto; border-bottom: 2px solid var(--attention); background: var(--panel); padding: 8px 16px; }

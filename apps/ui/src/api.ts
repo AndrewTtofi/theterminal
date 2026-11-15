@@ -148,6 +148,15 @@ export const api = {
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
+  /** False only when the server answers 404 for the run; true when it exists or the check failed for another reason. */
+  runExists: async (runId: string): Promise<boolean> => {
+    try {
+      await request<unknown>(`/api/runs/${enc(runId)}`);
+      return true;
+    } catch (e) {
+      return !(e instanceof ApiError && e.status === 404);
+    }
+  },
   stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
   listPendingActions: (projectId: string) =>
     request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),

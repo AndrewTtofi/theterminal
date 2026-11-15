@@ -241,3 +241,17 @@ describe("gates and stories api", () => {
     expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
   });
 });
+
+describe("runExists", () => {
+  it("is false only when the server answers 404 for the run", async () => {
+    let f = respond(200, { run: { id: "r/1" }, actions: [] });
+    expect(await api.runExists("r/1")).toBe(true);
+    expect(call(f, 0)[0]).toBe("/api/runs/r%2F1");
+    f = respond(404, { error: "not_found" });
+    expect(await api.runExists("r1")).toBe(false);
+    respond(500, { error: "internal" });
+    expect(await api.runExists("r1")).toBe(true);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    expect(await api.runExists("r1")).toBe(true);
+  });
+});

@@ -120,9 +120,25 @@ export type WorkbenchModel = {
   onDecideIntake: (decisionId: DecisionId, chosen: string, rationale?: string) => Promise<boolean>;
   onCompleteIntake: () => Promise<boolean>;
   onReopenIntake: (reason: string) => Promise<boolean>;
+
+  /** False when the server answers 404 for the run; used to close restored diff and file tabs of deleted runs. */
+  runExists: (runId: string) => Promise<boolean>;
 };
 
-export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };
+export type ShellContextValue = {
+  model: WorkbenchModel;
+  dock: () => DockApi | null;
+  /** The activity bar's action: selecting the active view again hides the side bar. */
+  selectView: (view: ViewId) => void;
+  /** Shows a view in the side bar and never hides it: for every navigation that is not the activity bar. */
+  showView: (view: ViewId) => void;
+  /** Shows the Learn view open on the topic. */
+  openLearn: (topicId: string) => void;
+  /** The topic the last openLearn named, or null. */
+  learnTopic: string | null;
+  /** The view the Owner is looking at: the active view, or the last one before Learn while Learn is shown. */
+  contextView: ViewId;
+};
 
 /** Dock panels render through portals, so they read the model from context rather than props. */
 export const ShellContext = createContext<ShellContextValue | null>(null);

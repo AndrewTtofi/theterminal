@@ -26,6 +26,7 @@ vi.mock("../src/api", () => ({
     getAgents: vi.fn(),
     listRuns: vi.fn(),
     getRun: vi.fn(),
+    runExists: vi.fn(),
     listPendingActions: vi.fn(),
     listAllPendingActions: vi.fn(),
     decideAction: vi.fn(),
@@ -72,6 +73,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { ApiError, api, errorMessage } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
+import { testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 
@@ -90,8 +92,15 @@ const AGENTS: AgentsInfo = {
   acks: { claude: "claude ack", codex: "codex ack", gemini: "gemini ack" },
 };
 
+/** Switches to the Operator layout, whose bottom panel holds the Ledger (Guided, the default, has none). */
+async function operatorLayout() {
+  await waitFor(() => expect(testDock.api).not.toBeNull());
+  act(() => testDock.api!.applyPreset("operator"));
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
+  testDock.api = null;
   h.onEntry = undefined;
   h.subs.clear();
   m.getStatus.mockResolvedValue({
@@ -397,6 +406,7 @@ describe("App ledger scope", () => {
       Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
     );
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
@@ -422,6 +432,7 @@ describe("App ledger scope", () => {
       { ...entry(2, "A", "x"), type: "agent.message", actor: { kind: "agent", id: "r1" }, payload: { runId: "r1", text: "hi" } },
     ]);
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(ledger().textContent).toContain('Owner moved "Login" from Build to Ship'));
@@ -434,6 +445,7 @@ describe("App ledger scope", () => {
       Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
     );
     render(<App />);
+    await operatorLayout();
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));

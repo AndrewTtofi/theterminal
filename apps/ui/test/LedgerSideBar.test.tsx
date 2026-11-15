@@ -5,7 +5,7 @@ import type { NarrationTopic } from "@theterminal/shared";
 import { ShellContext } from "../src/shell/model";
 import type { LedgerScope, WorkbenchModel } from "../src/shell/model";
 import { LedgerSideBar } from "../src/views/LedgerSideBar";
-import { fakeDock } from "./connections-harness";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const ALL: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
 
@@ -21,7 +21,7 @@ function renderSideBar(over: { ledgerScope?: LedgerScope; selectedId?: string | 
   } as unknown as WorkbenchModel;
   const dock = fakeDock();
   render(
-    <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
       <LedgerSideBar />
     </ShellContext.Provider>,
   );

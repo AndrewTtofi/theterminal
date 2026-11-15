@@ -4,7 +4,7 @@ import type { AgentAction, AgentRun, LedgerEntry } from "@theterminal/shared";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { AgentFeedPanel } from "../src/views/AgentFeedPanel";
-import { fakeDock } from "./connections-harness";
+import { fakeDock, shellNav } from "./connections-harness";
 
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
@@ -23,7 +23,7 @@ function renderFeed(over: Partial<WorkbenchModel> = {}) {
   const model = { runs: [run], selectedRunId: "run1", runActions: [shell], entries: [], ...over } as unknown as WorkbenchModel;
   const dock = fakeDock();
   return render(
-    <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
       <AgentFeedPanel />
     </ShellContext.Provider>,
   );

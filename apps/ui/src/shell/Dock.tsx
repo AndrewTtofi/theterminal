@@ -3,22 +3,40 @@ import type { ComponentType, FunctionComponent } from "react";
 import { DockviewReact, themeDark } from "dockview-react";
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanel, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
-import { BOTTOM_SHARE, buildDefault, componentOf, restoreOrDefault } from "./dock-layout";
-import { loadLayout, resetLayout, saveLayout } from "./layout-store";
+import { BOTTOM_SHARE, PRESET_LABELS, buildDefault, buildPreset, componentOf, restoreOrDefault } from "./dock-layout";
+import type { PresetId } from "./dock-layout";
+import {
+  currentLayoutName, listSavedLayouts, loadLayout, loadNamedLayout, resetLayout, saveLayout, saveNamedLayout, setCurrentLayoutName,
+} from "./layout-store";
 
+export { diffPanelId, filePanelId, parsePanelPath } from "./dock-layout";
+
+/** `diff:` and `file:` ids are `<runId>:<encodeURIComponent(path)>`. */
 export type DockPanelId =
-  | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | `connection:${string}` | `story:${string}`;
+  | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | "conversation" | "needs_you" | "terminal"
+  | `connection:${string}` | `story:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
 export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
   focus(id: DockPanelId): void;
   close(id: DockPanelId): void;
+  /** Applies Guided and forgets the saved working layout. */
   reset(): void;
   toggleBottom(): void;
   /** Ids of every open panel. */
   panelIds(): string[];
+  applyPreset(preset: PresetId): void;
+  /** Applies the layout saved under `name`, if it is still fit to restore. */
+  applySaved(name: string): void;
+  /** Saves the layout on screen under `name`; throws the store's RangeError when it refuses. */
+  saveAs(name: string): void;
+  /** Names of the saved layouts, in the order they were first saved. */
+  savedNames(): string[];
+  /** "Guided", "Operator", a saved name, or "Custom" once a panel was added, removed or moved since. */
+  currentName(): string;
+  onNameChange(fn: (name: string) => void): () => void;
 };
 
-const BOTTOM_IDS: DockPanelId[] = ["agent_feed", "ledger"];
+const BOTTOM_IDS: DockPanelId[] = ["terminal", "agent_feed", "ledger"];
 /** Where focus() reopens a built-in panel the Owner closed. */
 const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bottom" }>> = {
   board: { title: "Board", where: "main" },
@@ -26,12 +44,55 @@ const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bo
   ledger: { title: "Ledger", where: "bottom" },
   capacity: { title: "Capacity", where: "main" },
   intake: { title: "Plan intake", where: "main" },
+  conversation: { title: "Conversation", where: "main" },
+  needs_you: { title: "Needs you", where: "main" },
+  terminal: { title: "Terminal", where: "bottom" },
 };
 function bottomPanel(api: DockviewApi): IDockviewPanel | undefined {
   return BOTTOM_IDS.map((id) => api.getPanel(id)).find((p) => p !== undefined);
 }
 
-function makeDockApi(api: DockviewApi, layoutKey: string): DockApi {
+/**
+ * Tracks the layout's name. Adding, removing or moving a panel makes it "Custom"; resizing, activating a tab or
+ * restoring does not. Applying a layout runs inside `applying`, so the panels it adds and removes do not count.
+ */
+function nameTracker(api: DockviewApi) {
+  let name = currentLayoutName();
+  let applying = false;
+  const listeners = new Set<(name: string) => void>();
+  const set = (next: string) => {
+    if (next === name) return;
+    name = next;
+    setCurrentLayoutName(next);
+    for (const fn of listeners) fn(next);
+  };
+  const custom = () => {
+    if (!applying) set("Custom");
+  };
+  api.onDidAddPanel(custom);
+  api.onDidRemovePanel(custom);
+  api.onDidMovePanel(custom);
+  return {
+    get: () => name,
+    set,
+    apply(next: string, build: () => string | void) {
+      applying = true;
+      try {
+        set(build() ?? next);
+      } finally {
+        applying = false;
+      }
+    },
+    subscribe(fn: (name: string) => void) {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+  };
+}
+
+function makeDockApi(api: DockviewApi, layoutKey: string, components: readonly string[], names: ReturnType<typeof nameTracker>): DockApi {
   const open: DockApi["open"] = (id, title, where) => {
     const existing = api.getPanel(id);
     if (existing) {
@@ -79,9 +140,11 @@ function makeDockApi(api: DockviewApi, layoutKey: string): DockApi {
       if (panel) api.removePanel(panel);
     },
     reset() {
-      resetLayout(layoutKey);
-      api.clear();
-      buildDefault(api);
+      names.apply(PRESET_LABELS.guided, () => {
+        resetLayout(layoutKey);
+        api.clear();
+        buildDefault(api);
+      });
     },
     toggleBottom() {
       const ref = bottomPanel(api);
@@ -93,6 +156,25 @@ function makeDockApi(api: DockviewApi, layoutKey: string): DockApi {
       ref.group.api.setVisible(!ref.group.api.isVisible);
     },
     panelIds: () => api.panels.map((p) => p.id),
+    applyPreset(preset) {
+      names.apply(PRESET_LABELS[preset], () => {
+        api.clear();
+        buildPreset(api, preset);
+      });
+    },
+    applySaved(name) {
+      const saved = loadNamedLayout(name);
+      if (saved === null) return;
+      // restoreOrDefault passes the layout through sanitizeLayout and falls back to Guided when it is not fit.
+      names.apply(name, () => (restoreOrDefault(api, saved, components) === "restored" ? name : PRESET_LABELS.guided));
+    },
+    saveAs(name) {
+      saveNamedLayout(name, api.toJSON());
+      names.set(name.trim());
+    },
+    savedNames: listSavedLayouts,
+    currentName: names.get,
+    onNameChange: names.subscribe,
   };
 }
 
@@ -123,10 +205,13 @@ export function Dock({ panels, onReady, layoutKey }: Props) {
 
   const handleReady = (event: DockviewReadyEvent) => {
     const api = event.api;
-    restoreOrDefault(api, loadLayout(layoutKey), Object.keys(panels));
+    const components = Object.keys(panels);
+    const restored = restoreOrDefault(api, loadLayout(layoutKey), components);
+    const names = nameTracker(api);
+    if (restored === "default") names.set(PRESET_LABELS.guided);
     api.onDidLayoutChange(() => saveLayout(api.toJSON(), layoutKey));
     saveLayout(api.toJSON(), layoutKey);
-    onReadyRef.current(makeDockApi(api, layoutKey));
+    onReadyRef.current(makeDockApi(api, layoutKey, components, names));
   };
 
   // Floating groups are off: one could sit over the Needs-you strip, which must stay visible.

@@ -4,6 +4,7 @@ import type { AgentRun, CardStory, LedgerEntry } from "@theterminal/shared";
 import { StoryPanel } from "../src/views/StoryPanel";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
+import { shellNav } from "./connections-harness";
 
 const card = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "active", createdAt: "", updatedAt: "" } as const;
 const run: AgentRun = {
@@ -54,7 +55,7 @@ function setup(load: () => Promise<CardStory>) {
     },
   } as unknown as WorkbenchModel;
   const r = render(
-    <ShellContext.Provider value={{ model, dock: () => null, selectView: vi.fn() }}>
+    <ShellContext.Provider value={{ model, dock: () => null, ...shellNav() }}>
       <StoryPanel id="story:c1" />
     </ShellContext.Provider>,
   );
