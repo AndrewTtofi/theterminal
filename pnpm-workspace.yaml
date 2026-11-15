@@ -15,3 +15,9 @@ allowBuilds:
 overrides:
   dockview: 8.8.3
   dockview-core: 8.8.3
+  # Vite 8's bundler and its plugin helpers would resolve to releases younger than the 14 days this repository waits
+  # before adopting one (see .github/dependabot.yml). Hold the newest mature releases instead. The selectors are
+  # scoped to these lines, so a future Vite that needs a newer line is not pinned down; drop them once the current
+  # picks are old enough.
+  "rolldown@~1.2": 1.2.16
+  "@rolldown/pluginutils@^1": 1.0.1

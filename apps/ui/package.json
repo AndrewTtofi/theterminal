@@ -14,9 +14,9 @@
     "@testing-library/user-event": "^14.6.10",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^4.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "jsdom": "^31.0.1",
-    "vite": "^6.0.0"
+    "vite": "8.3.5"
   },
   "dependencies": {
     "@theterminal/shared": "workspace:*",
