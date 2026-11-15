@@ -198,3 +198,10 @@ describe("usernameScrubber", () => {
     expect(usernameScrubber("data", { caseless: true })("<data>")).toBe("<<user>>");
   });
 });
+
+describe("usernameScrubber with no placeholders to keep", () => {
+  it("still scrubs: an empty keep list never turns the scrubber off", () => {
+    expect(usernameScrubber("alice", { keep: [] })("by alice")).toBe("by <user>");
+    expect(usernameScrubber("alice", { keep: [""] })("by alice")).toBe("by <user>");
+  });
+});

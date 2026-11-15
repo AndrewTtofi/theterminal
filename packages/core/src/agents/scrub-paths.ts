@@ -102,10 +102,12 @@ const MIN_USERNAME = 3;
 export function usernameScrubber(username: string, opts: { caseless?: boolean; keep?: readonly string[] } = {}): Scrub {
   if (username.length < MIN_USERNAME) return (s) => s;
   const caseless = opts.caseless ?? (process.platform === "darwin" || process.platform === "win32");
-  const kept = (opts.keep ?? ["<user>"]).map(escapeRegExp).join("|");
+  // An empty placeholder would match everywhere and silently turn the scrubber off: keep only non-empty ones.
+  const kept = (opts.keep ?? ["<user>"]).filter((k) => k.length > 0).map(escapeRegExp).join("|");
   const re = new RegExp(
-    `(${kept})|(?<![${WORD}])${escapeRegExp(username)}(?![${RIGHT_WORD}]|\\.[${RIGHT_WORD}])`,
+    `${kept === "" ? "" : `(${kept})|`}(?<![${WORD}])${escapeRegExp(username)}(?![${RIGHT_WORD}]|\\.[${RIGHT_WORD}])`,
     caseless ? "giu" : "gu",
   );
+  if (kept === "") return (s) => s.replace(re, "<user>");
   return (s) => s.replace(re, (match: string, placeholder: string | undefined) => (placeholder === undefined ? "<user>" : match));
 }
