@@ -1,5 +1,6 @@
 import { Readable, Transform, pipeline } from "node:stream";
 import { createGunzip } from "node:zlib";
+import { IMPORT_LIMITS } from "@theterminal/shared";
 
 /**
  * A streaming reader for gzip tar archives (a GitHub tarball), on node:zlib only.
@@ -16,8 +17,10 @@ export type TarEntry = { path: string; kind: "file" | "dir" | "link" | "other"; 
 
 export type TarReadOptions = {
   maxCompressedBytes: number;
-  /** Every entry counts: files, directories, links and the rest (not pax or GNU metadata headers). */
+  /** Files, links and the rest count; directories do not (see maxDirectories), nor do pax or GNU metadata headers. */
   maxEntries: number;
+  /** The most directory entries. Defaults to five times IMPORT_LIMITS.files. */
+  maxDirectories?: number;
   /** The largest declared size of one entry whose body is read. Defaults to 50 MiB (IMPORT_LIMITS.fileBytes). */
   maxEntryBytes?: number;
   /** The largest sum of declared entry sizes. Defaults to 200 MiB (IMPORT_LIMITS.bytes). */
@@ -45,8 +48,10 @@ export class TarLimitError extends Error {
 }
 
 const BLOCK = 512;
-const DEFAULT_ENTRY_BYTES = 52_428_800;
-const DEFAULT_TOTAL_BYTES = 209_715_200;
+const DEFAULT_ENTRY_BYTES = IMPORT_LIMITS.fileBytes;
+const DEFAULT_TOTAL_BYTES = IMPORT_LIMITS.bytes;
+/** A repository with 2000 files can hold many more directories; they cost no body, only a header each. */
+const DEFAULT_DIRECTORIES = IMPORT_LIMITS.files * 5;
 const DEFAULT_PATH_BYTES = 4096;
 /** The largest pax or GNU metadata body held in memory. */
 const MAX_META_BYTES = 64 * 1024;
@@ -247,6 +252,7 @@ export async function readTarGz(
   const maxEntryBytes = opts.maxEntryBytes ?? DEFAULT_ENTRY_BYTES;
   const maxTotalBytes = opts.maxTotalBytes ?? DEFAULT_TOTAL_BYTES;
   const maxPathBytes = opts.maxPathBytes ?? DEFAULT_PATH_BYTES;
+  const maxDirectories = opts.maxDirectories ?? DEFAULT_DIRECTORIES;
 
   let compressed = 0;
   let streamFailure: unknown = null;
@@ -306,6 +312,7 @@ export async function readTarGz(
 
   const parse = async (): Promise<void> => {
     let entries = 0;
+    let directories = 0;
     let total = 0;
     let metaRun = 0;
     let pending: Pending = {};
@@ -343,8 +350,13 @@ export async function readTarGz(
       }
       metaRun = 0;
 
-      entries += 1;
-      if (entries > opts.maxEntries) throw new TarLimitError("entries");
+      if (type === "5") {
+        directories += 1;
+        if (directories > maxDirectories) throw new TarLimitError("entries");
+      } else {
+        entries += 1;
+        if (entries > opts.maxEntries) throw new TarLimitError("entries");
+      }
 
       let raw = pending.path;
       if (raw === undefined) {

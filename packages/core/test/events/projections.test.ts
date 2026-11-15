@@ -14,7 +14,7 @@ import {
   countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting,
   getShareSnapshot, listActions, listAllPendingActions, listGateDecisions, listLinkRuns, listMachines, listOpenIntakes,
   listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
-  rebuildAllProjections, workspaceCounts, getPerson, listPeople, getRemoteState, getGateRequirement, getInviteByHash, listInvites,
+  rebuildAllProjections, workspaceCounts, getProjectSource, getPerson, listPeople, getRemoteState, getGateRequirement, getInviteByHash, listInvites,
 } from "../../src/events/projections.js";
 import { canonicalJson } from "../../src/ledger/canonical.js";
 import { MirroredEntryRefusedError } from "../../src/events/projections.js";
@@ -206,6 +206,41 @@ describe("agent projections", () => {
   it("migrates agent_runs with progress, last_message and accepted_commit", () => {
     const columns = (db.prepare("PRAGMA table_info(agent_runs)").all() as { name: string }[]).map((c) => c.name);
     expect(columns).toEqual(expect.arrayContaining(["progress", "last_message", "accepted_commit"]));
+  });
+
+  it("migrates to user_version 13 with project_sources and project_imports", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(13);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("project_sources")).toEqual(["project_id", "kind", "repo", "branch", "remote_commit", "path", "synced_commit"]);
+    expect(columns("project_imports")).toEqual(["project_id", "files"]);
+  });
+
+  it("projects project sources, imports, accepted runs and folder applies, and rebuilds the same rows", () => {
+    const A = "a".repeat(40);
+    const B = "b".repeat(40);
+    const C = "c".repeat(40);
+    expect(getProjectSource(db, "p1")).toBeNull();
+    emit("project.source_set", { projectId: "p1", kind: "folder", path: "/tmp/mine", syncedCommit: A }, human);
+    emit("project.files_imported", { projectId: "p1", from: "folder", commit: A, files: 3, bytes: 10, skipped: 0, secretsIncluded: false }, human);
+    emit("project.source_set", { projectId: "p2", kind: "github", repo: "octo/site", branch: "main", remoteCommit: B, syncedCommit: B }, human, "p2");
+    emit("project.files_imported", { projectId: "p1", from: "files", commit: B, files: 2, bytes: 4, skipped: 1, secretsIncluded: false }, human);
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r1" });
+    emit("run.accepted", { runId: "r1", commit: C, files: 1 }, human);
+    emit("project.folder_applied", { projectId: "p1", from: A, to: C, written: 1, deleted: 0, skipped: 0 }, human);
+    emit("project.published", { projectId: "p2", branch: "the-terminal/ab12cd34", pullUrl: "https://github.com/octo/site/pull/1", from: B, to: C, files: 1 }, human, "p2");
+    expect(getProjectSource(db, "p1")).toEqual({
+      projectId: "p1", kind: "folder", repo: null, branch: null, remoteCommit: null, path: "/tmp/mine", syncedCommit: C,
+    });
+    // Publishing leaves the GitHub source where it was: the pull request is not merged.
+    expect(getProjectSource(db, "p2")).toEqual({
+      projectId: "p2", kind: "github", repo: "octo/site", branch: "main", remoteCommit: B, path: null, syncedCommit: B,
+    });
+    expect(db.prepare("SELECT * FROM project_imports").all()).toEqual([{ project_id: "p1", files: 5 }]);
+    expect(getRun(db, "r1")!.acceptedCommit).toBe(C);
+    const dump = () => ["project_sources", "project_imports", "agent_runs"].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1`).all());
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
   });
 
   it("projects the latest agent.progress and the last agent.message, null without them, and rebuilds the same rows", () => {

@@ -181,6 +181,10 @@ const MIGRATIONS = [
   `ALTER TABLE agent_runs ADD COLUMN progress TEXT;
   ALTER TABLE agent_runs ADD COLUMN last_message TEXT;
   ALTER TABLE agent_runs ADD COLUMN accepted_commit TEXT;`,
+  // Project sources: where a project's files came from (GitHub or a folder, whose path only the Owner sees) and the
+  // last commit written back to it; and how many files were added to each project.
+  `CREATE TABLE project_sources (project_id TEXT PRIMARY KEY, kind TEXT NOT NULL, repo TEXT, branch TEXT, remote_commit TEXT, path TEXT, synced_commit TEXT NOT NULL);
+  CREATE TABLE project_imports (project_id TEXT PRIMARY KEY, files INTEGER NOT NULL);`,
 ];
 
 export type Db = Database.Database;

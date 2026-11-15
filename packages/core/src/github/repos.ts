@@ -1,6 +1,7 @@
 import { Readable, Transform, pipeline } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { z } from "zod";
+import type { GitHubRepoChoice } from "@theterminal/shared";
 import {
   GitHubNotConnectedError,
   GitHubRejectedError,
@@ -10,8 +11,8 @@ import {
   boundedText,
 } from "./client.js";
 
-/** A repository the person can pick to start a project from. */
-export type GitHubRepoChoice = { fullName: string; defaultBranch: string; private: boolean };
+/** A repository the person can pick to start a project from (the shared type of the API contract). */
+export type { GitHubRepoChoice };
 
 export type GitHubToken = { connectionId: string; token: string } | null;
 

@@ -1,7 +1,7 @@
 import { DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
-  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
+  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, ProjectSourceKind, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
   ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -294,7 +294,26 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         ).run(e.projectId, p.gateId, canonicalJson(p.requirement));
       }
       break;
-    default: // gate.blocked, person.locked, conversation entries, link.project_received and link.decision_received project nothing
+    case "project.source_set":
+      db.prepare(
+        `INSERT INTO project_sources (project_id, kind, repo, branch, remote_commit, path, synced_commit) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET kind = excluded.kind, repo = excluded.repo, branch = excluded.branch,
+           remote_commit = excluded.remote_commit, path = excluded.path, synced_commit = excluded.synced_commit`,
+      ).run(p.projectId, p.kind, p.repo ?? null, p.branch ?? null, p.remoteCommit ?? null, p.path ?? null, p.syncedCommit);
+      break;
+    case "project.files_imported":
+      db.prepare(
+        `INSERT INTO project_imports (project_id, files) VALUES (?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET files = files + excluded.files`,
+      ).run(p.projectId, p.files);
+      break;
+    case "run.accepted":
+      db.prepare("UPDATE agent_runs SET accepted_commit = ? WHERE id = ?").run(p.commit, p.runId);
+      break;
+    case "project.folder_applied":
+      db.prepare("UPDATE project_sources SET synced_commit = ? WHERE project_id = ?").run(p.to, p.projectId);
+      break;
+    default: // project.published (the pull request is not merged, so the source stays where it was), gate.blocked, person.locked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
 }
@@ -448,7 +467,7 @@ const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
   "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
   // Not sessions or credential_state: neither is in the ledger.
-  "people", "credentials", "invites", "remote_state", "gate_requirements",
+  "people", "credentials", "invites", "remote_state", "gate_requirements", "project_sources", "project_imports",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -464,6 +483,33 @@ export function rebuildAllProjections(db: Db, ledger: Ledger, opts: { beforeSeq?
       afterSeq = batch[batch.length - 1]!.seq;
     }
   }).immediate();
+}
+
+/** Where a project's files came from; `path` is the Owner's folder path, never shown to anyone else. */
+export type ProjectSource = {
+  projectId: string;
+  kind: ProjectSourceKind;
+  repo: string | null;
+  branch: string | null;
+  remoteCommit: string | null;
+  path: string | null;
+  syncedCommit: string;
+};
+
+export function getProjectSource(db: Db, projectId: string): ProjectSource | null {
+  const r = db.prepare("SELECT * FROM project_sources WHERE project_id = ?").get(projectId) as
+    | { project_id: string; kind: ProjectSourceKind; repo: string | null; branch: string | null; remote_commit: string | null; path: string | null; synced_commit: string }
+    | undefined;
+  if (!r) return null;
+  return {
+    projectId: r.project_id, kind: r.kind, repo: r.repo, branch: r.branch, remoteCommit: r.remote_commit, path: r.path, syncedCommit: r.synced_commit,
+  };
+}
+
+/** How many files were added to the project (uploads and imports together); 0 when none. */
+export function countImportedFiles(db: Db, projectId: string): number {
+  const r = db.prepare("SELECT files FROM project_imports WHERE project_id = ?").get(projectId) as { files: number } | undefined;
+  return r?.files ?? 0;
 }
 
 export function getSetting(db: Db, key: string): string | null {

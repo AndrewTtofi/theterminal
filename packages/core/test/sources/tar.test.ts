@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { IMPORT_LIMITS } from "@theterminal/shared";
 import { readTarGz, TarInvalidError, TarLimitError, type TarEntry } from "../../src/sources/tar.js";
 import { paxRecord, setChecksum, tar, tgz, type FixtureEntry } from "./tar-fixture.js";
 
@@ -159,6 +160,24 @@ describe("readTarGz", () => {
     const err = await collect(tgz(entries), { ...OPTS, maxEntries: 5 }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TarLimitError);
     expect((err as TarLimitError).limit).toBe("entries");
+  });
+
+  it("does not count directories against maxEntries, but bounds them with maxDirectories", async () => {
+    const entries = [
+      ...Array.from({ length: 8 }, (_, i) => dir(`${ROOT}d${i}/`)),
+      ...Array.from({ length: 5 }, (_, i) => ({ name: `${ROOT}d${i}/f`, body: "x" })),
+    ];
+    const seen = await collect(tgz(entries), { ...OPTS, maxEntries: 5 });
+    expect(seen.filter((s) => s.entry.kind === "file")).toHaveLength(5);
+    const err = await collect(tgz(entries), { ...OPTS, maxEntries: 5, maxDirectories: 7 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TarLimitError);
+    expect((err as TarLimitError).limit).toBe("entries");
+  });
+
+  it("takes its default size limits from IMPORT_LIMITS", async () => {
+    const big = { name: `${ROOT}big`, body: Buffer.alloc(16), size: IMPORT_LIMITS.fileBytes + 1 };
+    const err = await collect(tgz([big]), OPTS).catch((e: unknown) => e);
+    expect((err as TarLimitError).limit).toBe("file_bytes");
   });
 
   it("reads a 5 MB file as a stream of bounded chunks", async () => {
