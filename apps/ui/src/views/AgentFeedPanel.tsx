@@ -1,9 +1,9 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { narrate, visibleControls } from "@theterminal/shared";
-import type { LedgerEntry } from "@theterminal/shared";
+import type { LedgerEntry, Narration, NarrationContext } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../components/AgentPanel";
 import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
-import { clip } from "../components/text";
+import { clip, stripAnsiDeep } from "../components/text";
 import { namesRun, useShell } from "../shell/model";
 import { useFollowBottom } from "./use-follow-bottom";
 
@@ -17,6 +17,26 @@ const inFeed = (e: LedgerEntry) => e.type.startsWith("agent.") || isOverride(e);
 /** The project's agent.* and override.* entries, oldest first, of one run or of every run. */
 export function feedEntries(entries: LedgerEntry[], runId: string | null): LedgerEntry[] {
   return entries.filter((e) => inFeed(e) && (runId === null || namesRun(e, runId))).sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * Narrates entries, remembering each one's narration by seq while the context stays the same, so a new entry costs
+ * one narration rather than the whole list again. Terminal codes are stripped from the payload first, so headlines
+ * read as plain text before narration makes hidden characters visible.
+ */
+function useNarrations(list: LedgerEntry[], ctx: NarrationContext): { e: LedgerEntry; n: Narration }[] {
+  const memo = useRef<{ ctx: NarrationContext; bySeq: Map<number, Narration> }>({ ctx, bySeq: new Map() });
+  return useMemo(() => {
+    const known = memo.current.ctx === ctx ? memo.current.bySeq : new Map<number, Narration>();
+    const bySeq = new Map<number, Narration>();
+    const out = list.map((e) => {
+      const n = known.get(e.seq) ?? narrate({ ...e, payload: stripAnsiDeep(e.payload) }, ctx);
+      bySeq.set(e.seq, n);
+      return { e, n };
+    });
+    memo.current = { ctx, bySeq };
+    return out;
+  }, [list, ctx]);
 }
 
 /** The run the Agent feed and the Terminal follow, shared by both: every run of the project, or one. */
@@ -43,7 +63,8 @@ export function AgentFeedPanel() {
   const { model } = useShell();
   const { projectEntries, feedRunId, narration, runs } = model;
   const all = useMemo(() => feedEntries(projectEntries, feedRunId), [projectEntries, feedRunId]);
-  const items = useMemo(() => all.slice(-FEED_LIMIT).map((e) => ({ e, n: narrate(e, narration) })), [all, narration]);
+  const shown = useMemo(() => all.slice(-FEED_LIMIT), [all]);
+  const items = useNarrations(shown, narration);
   const follow = useFollowBottom<HTMLUListElement>(items.map(({ e }) => String(e.seq)));
   const working = runs.some((r) => r.status === "running" && (feedRunId === null || r.id === feedRunId));
 
@@ -56,9 +77,9 @@ export function AgentFeedPanel() {
       {items.length === 0 ? (
         <p className="empty">Nothing to show yet. Start an agent in the Agents view or the Conversation tab.</p>
       ) : (
-        <ul className="feed-items" ref={follow.ref} onScroll={follow.onScroll}>
+        <ul className="feed-items" aria-label="Agent feed entries" tabIndex={0} ref={follow.ref} onScroll={follow.onScroll}>
           {items.map(({ e, n }) => (
-            <li key={e.seq} className={entryClass(e, n.attention)}>
+            <li key={e.seq} data-key={e.seq} className={entryClass(e, n.attention)}>
               <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <OverrideTag entry={e} headline={n.headline} />
               <span className="headline">{n.headline}</span>
               <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} override={isOverride(e)} />
@@ -66,10 +87,14 @@ export function AgentFeedPanel() {
           ))}
         </ul>
       )}
-      {working && <p className="live">Working…</p>}
+      {working && (
+        <p className="live" role="status">
+          Working…
+        </p>
+      )}
       {follow.away && (
         <button type="button" className="jump" onClick={follow.jump}>
-          Jump to latest ({follow.fresh} new)
+          Jump to latest <span role="status">({follow.fresh} new)</span>
         </button>
       )}
     </section>

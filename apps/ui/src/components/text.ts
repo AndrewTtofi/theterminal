@@ -20,3 +20,11 @@ export function clip(s: string, max: number): string {
   const chars = Array.from(s);
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : s;
 }
+
+/** `v` with `stripAnsi` applied to every string inside it, at any depth; other values are kept. */
+export function stripAnsiDeep(v: unknown): unknown {
+  if (typeof v === "string") return stripAnsi(v);
+  if (Array.isArray(v)) return v.map(stripAnsiDeep);
+  if (typeof v !== "object" || v === null) return v;
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, stripAnsiDeep(x)]));
+}

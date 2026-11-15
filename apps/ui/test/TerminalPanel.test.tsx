@@ -56,8 +56,16 @@ describe("terminalItems", () => {
       requested(1, "run1", "a1", "echo key=[REDACTED]"),
       completed(2, "run1", "a1", "\u001b[32mOK\u001b[0m"),
       requested(3, "run1", "a2", "echo ok\u202Eko"),
+      overrideCommand(4, "run1", "node", ["-e", "\u001b[1mx\u001b[0m\u2066"]),
+      overrideCompleted(5, "run1", "\u001b[31m<b>bad</b>\u202Eok\u001b[0m key=[REDACTED]", false),
     ];
-    expect(view(entries).map(([, t]) => t)).toEqual(["$ echo key=[REDACTED]", "OK", "$ echo ok\\u202eko"]);
+    expect(view(entries).map(([, t]) => t)).toEqual([
+      "$ echo key=[REDACTED]",
+      "OK",
+      "$ echo ok\\u202eko",
+      "# OVERRIDE node -e x\\u2066",
+      "<b>bad</b>\\u202eok key=[REDACTED]",
+    ]);
   });
 
   it("follows one run, or every run", () => {
@@ -96,6 +104,21 @@ function renderTerminal(over: Partial<WorkbenchModel> = {}) {
 
 describe("TerminalPanel", () => {
   const panel = () => screen.getByRole("region", { name: "Terminal" });
+
+  it("labels an override's output as an override too, and paints it red", () => {
+    renderTerminal({ projectEntries: [overrideCommand(1, "run1", "git", ["status"]), overrideCompleted(2, "run1", "M notes.txt")] });
+    const out = within(panel()).getAllByRole("listitem")[1]!;
+    expect(out.textContent).toBe("OVERRIDE M notes.txt");
+    expect(out.querySelector(".override-tag")?.textContent).toBe("OVERRIDE");
+    expect(out.classList.contains("override")).toBe(true);
+  });
+
+  it("is a log the keyboard can reach and scroll, that does not read every line aloud", () => {
+    renderTerminal({ projectEntries: [requested(1, "run1", "a1", "ls")] });
+    const log = within(panel()).getByRole("log", { name: "Terminal output" });
+    expect(log.tabIndex).toBe(0);
+    expect(log.getAttribute("aria-live")).toBe("off");
+  });
 
   it("shows the commands, paints overrides red and says it is read-only", () => {
     renderTerminal({ projectEntries: [requested(1, "run1", "a1", "nvidia-smi"), overrideCommand(2, "run1", "git", ["status"])] });

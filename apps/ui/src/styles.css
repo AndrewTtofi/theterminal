@@ -186,7 +186,9 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .agent-feed, .terminal { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 6px; }
 .feed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .feed-head .note { margin: 0; font-size: 12px; color: var(--muted); }
-.feed-items, .terminal-lines { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 0; list-style: none; }
+/* The follow hook keeps the reading position itself when old items are dropped, so the browser's anchoring is off. */
+.feed-items, .terminal-lines { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; margin: 0; padding: 0; list-style: none; }
+.feed-items:focus-visible, .terminal-lines:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .feed-items li { padding: 3px 0; border-bottom: 1px solid var(--line); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .feed-items time { color: var(--muted); }
 .feed-items li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }

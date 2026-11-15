@@ -91,16 +91,30 @@ export function TerminalPanel() {
       <div className="feed-head">
         <FollowSelect />
       </div>
-      <ol className="terminal-lines" ref={follow.ref} onScroll={follow.onScroll}>
+      {/* A log the keyboard can scroll; not read aloud line by line, since commands can pour out quickly. */}
+      <ol
+        className="terminal-lines"
+        role="log"
+        aria-live="off"
+        aria-label="Terminal output"
+        tabIndex={0}
+        ref={follow.ref}
+        onScroll={follow.onScroll}
+      >
         {items.map((i) => (
-          <li key={i.key} className={lineClass(i)}>
+          <li key={i.key} data-key={i.key} className={lineClass(i)}>
+            {i.kind === "override_output" && (
+              <>
+                <span className="override-tag">OVERRIDE</span>{" "}
+              </>
+            )}
             {i.text}
           </li>
         ))}
       </ol>
       {follow.away && (
         <button type="button" className="jump" onClick={follow.jump}>
-          Jump to latest ({follow.fresh} new)
+          Jump to latest <span role="status">({follow.fresh} new)</span>
         </button>
       )}
       <p className="note">

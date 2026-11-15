@@ -83,6 +83,7 @@ function model(over: Partial<AppModel> = {}): AppModel {
     onFollowRun: vi.fn(),
     ledgerHasOlder: false,
     onLoadOlderLedger: vi.fn(async () => {}),
+    ledgerOlder: { loading: false, error: null },
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
     ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],

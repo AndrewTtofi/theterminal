@@ -16,6 +16,8 @@ export function LedgerBottomPanel() {
       ctx={model.narration}
       hasOlder={model.ledgerHasOlder}
       onLoadOlder={() => void model.onLoadOlderLedger()}
+      loadingOlder={model.ledgerOlder.loading}
+      olderError={model.ledgerOlder.error}
     />
   );
 }

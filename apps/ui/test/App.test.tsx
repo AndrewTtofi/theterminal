@@ -449,6 +449,77 @@ describe("App ledger scope", () => {
     expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull();
   });
 
+  const page = (from: number, n: number, projectId = "A") => Array.from({ length: n }, (_, i) => entry(from + i, projectId, `P${from + i}`));
+  const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+  const older = () => within(ledger()).getByRole("button", { name: "Show older entries" }) as HTMLButtonElement;
+  async function openLedger(health = 1100) {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: health });
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+  }
+
+  it("applies streamed entries together, a moment after they arrive", async () => {
+    m.listLedger.mockResolvedValue([entry(1, "A", "P1")]);
+    await openLedger(1);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+    act(() => {
+      for (const seq of [2, 3, 4]) h.onEntry!(entry(seq, "A", `P${seq}`));
+    });
+    expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1);
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(4));
+  });
+
+  it("keeps the entries that streamed in when an older page is put in front", async () => {
+    m.listLedger.mockImplementation(async (_p, q) => (q.beforeSeq === 1101 ? page(601, 500) : page(101, 500)));
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    act(() => h.onEntry!(entry(1101, "A", "P1101")));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")[0]!.textContent).toContain("P1101"));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 }));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    const lines = within(ledger()).getAllByRole("listitem");
+    expect(lines).toHaveLength(1001);
+    expect(lines[0]!.textContent).toContain("P1101");
+    expect(lines[1000]!.textContent).toContain("P101");
+  });
+
+  it("disables Show older entries while a page loads, and a stale load does not end a newer one", async () => {
+    const pending: Array<(v: LedgerEntry[]) => void> = [];
+    m.listLedger.mockImplementation((projectId, q) =>
+      q.beforeSeq === 1101 ? Promise.resolve(page(601, 500, projectId ?? "A")) : new Promise((resolve) => pending.push(resolve)),
+    );
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(older().disabled).toBe(true));
+    // Another scope, and its own older page, while the first is still out.
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    expect(older().disabled).toBe(false);
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => pending[0]!(page(101, 500)));
+    expect(older().disabled).toBe(true);
+    await act(async () => pending[1]!(page(101, 10)));
+    await waitFor(() => expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull());
+  });
+
+  it("says inline when an older page could not be loaded, and lets the Owner try again", async () => {
+    m.listLedger.mockImplementation(async (_p, q) => {
+      if (q.beforeSeq === 1101) return page(601, 500);
+      throw new ApiError(500, "internal");
+    });
+    await openLedger();
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    for (let i = 0; i < 3; i++) await userEvent.click(older());
+    expect((await within(ledger()).findByRole("alert")).textContent).toBe("Older entries could not be loaded: err");
+    expect(older().disabled).toBe(false);
+  });
+
   it("feeds the Agent feed from the project's stream whatever the ledger scope, following the chosen run", async () => {
     m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
     m.listRuns.mockResolvedValue([

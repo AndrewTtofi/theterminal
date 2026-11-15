@@ -322,6 +322,30 @@ describe("LedgerPanel paging", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps an override however far back it is, whatever topics are chosen", () => {
+    const override = entry(1, "override.discard", { overrideId: "o1", runId: "run1", reason: "The agent broke the build", files: 2 });
+    const cards = Array.from({ length: 450 }, (_, i) => entry(i + 2, "card.created", { cardId: `c${i}`, title: `T${i}`, stage: "plan" }));
+    const agents = Array.from({ length: 50 }, (_, i) => entry(i + 452, "agent.message", { runId: "run1", text: "hi" }, { kind: "agent", id: "run1" }));
+    render(<LedgerPanel entries={[override, ...cards, ...agents]} topics={["board"]} hasOlder={false} onLoadOlder={vi.fn()} />);
+    expect(items()).toHaveLength(200);
+    fireEvent.click(older());
+    fireEvent.click(older());
+    expect(items()).toHaveLength(451);
+    const last = items()[450]!;
+    expect(last.classList.contains("override")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Show older entries" })).toBeNull();
+  });
+
+  it("disables the button while older entries load, and says inline when they could not", () => {
+    const { rerender } = render(<LedgerPanel entries={many(10)} hasOlder onLoadOlder={vi.fn()} loadingOlder />);
+    expect((older() as HTMLButtonElement).disabled).toBe(true);
+    rerender(<LedgerPanel entries={many(10)} hasOlder onLoadOlder={vi.fn()} olderError="Something went wrong" />);
+    expect((older() as HTMLButtonElement).disabled).toBe(false);
+    expect(within(screen.getByRole("complementary", { name: "Ledger" })).getByRole("alert").textContent).toBe(
+      "Older entries could not be loaded: Something went wrong",
+    );
+  });
+
   it("offers no older entries once everything is shown and the server has no more", () => {
     render(<LedgerPanel entries={many(150)} hasOlder={false} onLoadOlder={vi.fn()} />);
     expect(items()).toHaveLength(150);

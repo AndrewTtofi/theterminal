@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { AgentRun } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../src/components/AgentPanel";
@@ -6,6 +6,15 @@ import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { AgentFeedPanel, FEED_LIMIT } from "../src/views/AgentFeedPanel";
 import { fakeDock, shellNav } from "./connections-harness";
+
+const shared = vi.hoisted(() => ({ narrate: undefined as unknown as ReturnType<typeof vi.fn> }));
+vi.mock("@theterminal/shared", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@theterminal/shared")>();
+  shared.narrate = vi.fn(real.narrate);
+  return { ...real, narrate: shared.narrate };
+});
+
+afterEach(() => vi.useRealTimers());
 import { completed, ev, feedRun, message, overrideCommand, requested } from "./feed-fixtures";
 
 const runs: AgentRun[] = [
@@ -98,9 +107,29 @@ describe("AgentFeedPanel", () => {
     expect(said!.className).toBe("");
   });
 
+  it("narrates only the entries that arrived, not the whole list again", () => {
+    const first = [message(1, "run1", "a"), message(2, "run1", "b")];
+    const { rerender } = renderFeed({ projectEntries: first });
+    shared.narrate.mockClear();
+    rerender({ projectEntries: [...first, message(3, "run1", "c")] });
+    expect(shared.narrate).toHaveBeenCalledTimes(1);
+    expect(items()).toHaveLength(3);
+  });
+
+  it("strips terminal codes from headlines before showing hidden characters", () => {
+    renderFeed({ projectEntries: [message(1, "run1", "\u001b[31mred\u001b[0m done")] });
+    expect(items()[0]!.querySelector(".headline")?.textContent).toBe('The Fake agent said: "red done"');
+  });
+
+  it("can be reached and scrolled with the keyboard, and names its list", () => {
+    renderFeed({ projectEntries: [message(1, "run1", "a")] });
+    const list = within(feed()).getByRole("list", { name: "Agent feed entries" });
+    expect(list.tabIndex).toBe(0);
+  });
+
   it("ends a running run's items with a live marker", () => {
     const { rerender } = renderFeed({ projectEntries: [message(1, "run1", "hi")], feedRunId: "run1" });
-    expect(within(feed()).getByText("Working…")).toBeTruthy();
+    expect(within(feed()).getByRole("status").textContent).toBe("Working…");
     rerender({ feedRunId: "run2" });
     expect(within(feed()).queryByText("Working…")).toBeNull();
   });
@@ -145,6 +174,55 @@ describe("AgentFeedPanel", () => {
       fireEvent.click(jump);
       expect(list().scrollTop).toBe(1100);
       expect(within(feed()).queryByRole("button", { name: /Jump to latest/ })).toBeNull();
+    });
+
+    it("updates the count of new items at most once a second, as a status", () => {
+      vi.useFakeTimers();
+      const first = [message(1, "run1", "a")];
+      const { rerender } = renderFeed({ projectEntries: first });
+      geometry(list(), { scrollHeight: 1000, clientHeight: 200 });
+      act(() => {
+        list().scrollTop = 0;
+        fireEvent.scroll(list());
+      });
+      const more = (n: number) => Array.from({ length: n }, (_, i) => message(i + 2, "run1", `m${i + 2}`));
+      rerender({ projectEntries: [...first, ...more(1)] });
+      const count = () => within(feed()).getByRole("button", { name: /Jump to latest/ }).textContent;
+      expect(count()).toBe("Jump to latest (1 new)");
+      expect(within(feed()).getByRole("button", { name: /Jump to latest/ }).querySelector('[role="status"]')).not.toBeNull();
+      rerender({ projectEntries: [...first, ...more(3)] });
+      expect(count()).toBe("Jump to latest (1 new)");
+      act(() => vi.advanceTimersByTime(1000));
+      expect(count()).toBe("Jump to latest (3 new)");
+    });
+
+    it("keeps the item the Owner is reading in place when old items are dropped from the top", () => {
+      const offsetTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop")!;
+      const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight")!;
+      // Every item is 100 px tall, stacked in order.
+      Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+        configurable: true,
+        get(this: HTMLElement) {
+          return this.tagName === "LI" && this.parentElement ? Array.prototype.indexOf.call(this.parentElement.children, this) * 100 : 0;
+        },
+      });
+      Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 100 });
+      try {
+        const all = Array.from({ length: 510 }, (_, i) => message(i + 1, "run2", `m${i + 1}`));
+        const { rerender } = renderFeed({ projectEntries: all.slice(0, 500) });
+        geometry(list(), { scrollHeight: 50_000, clientHeight: 200 });
+        // Reading item 301, at the top of the view.
+        act(() => {
+          list().scrollTop = 30_000;
+          fireEvent.scroll(list());
+        });
+        rerender({ projectEntries: all });
+        // Ten items were dropped above it: it now starts 1,000 px higher, and the view follows it.
+        expect(list().scrollTop).toBe(29_000);
+      } finally {
+        Object.defineProperty(HTMLElement.prototype, "offsetTop", offsetTop);
+        Object.defineProperty(HTMLElement.prototype, "offsetHeight", offsetHeight);
+      }
     });
 
     it("keeps following when the Owner is within 40 px of the bottom", () => {

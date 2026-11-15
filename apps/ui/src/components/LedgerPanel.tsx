@@ -94,12 +94,18 @@ export function LedgerPanel({
   ctx,
   hasOlder = false,
   onLoadOlder,
+  loadingOlder = false,
+  olderError = null,
 }: {
   entries: LedgerEntry[];
   topics?: NarrationTopic[];
   ctx?: NarrationContext;
   hasOlder?: boolean;
   onLoadOlder?: () => void;
+  /** True while older entries are being fetched: the button waits. */
+  loadingOlder?: boolean;
+  /** Why the last fetch of older entries failed, shown under the list; null when it did not. */
+  olderError?: string | null;
 }) {
   const [shown, setShown] = useState(LEDGER_PAGE);
   // Narrating every entry is the costly part: redone only when the entries or the context change, not per filter.
@@ -133,9 +139,14 @@ export function LedgerPanel({
         ))}
       </ul>
       {(more || (hasOlder && onLoadOlder)) && (
-        <button type="button" className="link older" onClick={older}>
+        <button type="button" className="link older" onClick={older} disabled={!more && loadingOlder}>
           Show older entries
         </button>
+      )}
+      {olderError !== null && (
+        <p className="note" role="alert">
+          Older entries could not be loaded: {olderError}
+        </p>
       )}
     </aside>
   );

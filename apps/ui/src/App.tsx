@@ -10,6 +10,7 @@ import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
 import type { AppModel, GatePrompt, LedgerScope } from "./shell/model";
+import { LIVE_CAP, appendEntries, batcher, prependEntries } from "./ledger-buffer";
 import { useConnections } from "./use-connections";
 
 /** Shown in the strip when the server refused the gate decisions because the conditions changed. */
@@ -28,10 +29,18 @@ async function newestLedgerPage(projectId: string | null): Promise<{ page: Ledge
   return { page, headSeq };
 }
 
-/** `older` in front of `current`, without the entries `current` already has. */
-function prependEntries(older: LedgerEntry[], current: LedgerEntry[]): LedgerEntry[] {
-  const have = new Set(current.map((e) => e.seq));
-  return [...older.filter((e) => !have.has(e.seq)), ...current];
+/**
+ * One ledger scope's loaded entries (ascending seq). `hasOlder`: the server may hold older ones. `paged`: the Owner
+ * has paged older entries in, so the stream no longer trims to `LIVE_CAP`. `loading` and `error` describe the
+ * older-page request.
+ */
+type ScopeLedger = { entries: LedgerEntry[]; hasOlder: boolean; paged: boolean; loading: boolean; error: string | null };
+const EMPTY_SCOPE: ScopeLedger = { entries: [], hasOlder: false, paged: false, loading: false, error: null };
+
+/** Streamed entries added to a scope: trimmed to the newest `LIVE_CAP` unless the Owner paged older ones in. */
+function withStreamed(prev: ScopeLedger, incoming: LedgerEntry[]): ScopeLedger {
+  const { entries, trimmed } = appendEntries(prev.entries, incoming, prev.paged ? null : LIVE_CAP);
+  return entries === prev.entries ? prev : { ...prev, entries, hasOlder: prev.hasOlder || trimmed };
 }
 
 /** How long a run's changes are reused before they are read again. */
@@ -74,17 +83,17 @@ export function App() {
   /** The selected project as of the latest render, so a late intake answer for another project is dropped. */
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
-  const [entries, setEntries] = useState<LedgerEntry[]>([]);
+  const [projectLedger, setProjectLedger] = useState<ScopeLedger>(EMPTY_SCOPE);
+  const entries = projectLedger.entries;
   const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
   const [ledgerTopics, setLedgerTopics] = useState<NarrationTopic[]>(LEDGER_TOPICS);
-  const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
-  /** Whether the server may hold entries older than those loaded: for the selected project, and for every project. */
-  const [projectHasOlder, setProjectHasOlder] = useState(false);
-  const [allHasOlder, setAllHasOlder] = useState(false);
+  const [allLedger, setAllLedger] = useState<ScopeLedger>(EMPTY_SCOPE);
   /** Bumped each time a scope's entries are loaded afresh, so an older page asked for before is dropped. */
   const projectLoad = useRef(0);
   const allLoad = useRef(0);
-  const loadingOlder = useRef(false);
+  /** Bumped on each older-page request of a scope, so only the newest request ends its loading state. */
+  const projectOlderReq = useRef(0);
+  const allOlderReq = useRef(0);
   /** The run the Agent feed and the Terminal follow; null follows every run of the project. */
   const [feedRunId, setFeedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -259,10 +268,12 @@ export function App() {
     }, () => cancelled);
     refreshRef.current = refresh;
     setBoard(null);
-    setEntries([]);
-    setProjectHasOlder(false);
+    setProjectLedger(EMPTY_SCOPE);
     setFeedRunId(null);
     const load = ++projectLoad.current;
+    projectOlderReq.current++;
+    // Streamed entries are applied together, at most every 50 ms, so a burst renders once.
+    const stream = batcher<LedgerEntry>((batch) => setProjectLedger((prev) => withStreamed(prev, batch)));
     // Board and ledger load independently, so one failing does not hide the other.
     void run(async () => {
       const initialBoard = await api.getBoard(selectedId);
@@ -271,11 +282,10 @@ export function App() {
     void run(async () => {
       const { page, headSeq } = await newestLedgerPage(selectedId);
       if (cancelled || load !== projectLoad.current) return;
-      setEntries(page);
-      setProjectHasOlder(page.length === LEDGER_FETCH);
+      setProjectLedger({ ...EMPTY_SCOPE, entries: page, hasOlder: page.length === LEDGER_FETCH });
       unsubscribe = subscribeLedger(headSeq, (e) => {
         if (e.projectId !== selectedId) return;
-        setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+        stream.push(e);
         refresh();
         if (e.type.startsWith("agent.")) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
@@ -285,6 +295,7 @@ export function App() {
       cancelled = true;
       refreshRef.current = () => {};
       unsubscribe();
+      stream.cancel();
     };
   }, [selectedId, run]);
 
@@ -351,43 +362,49 @@ export function App() {
     if (ledgerScope !== "all") return;
     let cancelled = false;
     let unsubscribe = () => {};
-    setAllEntries([]);
-    setAllHasOlder(false);
+    setAllLedger(EMPTY_SCOPE);
     const load = ++allLoad.current;
+    allOlderReq.current++;
+    const stream = batcher<LedgerEntry>((batch) => setAllLedger((prev) => withStreamed(prev, batch)));
     void run(async () => {
       const { page, headSeq } = await newestLedgerPage(null);
       if (cancelled || load !== allLoad.current) return;
-      setAllEntries(page);
-      setAllHasOlder(page.length === LEDGER_FETCH);
-      unsubscribe = subscribeLedger(headSeq, (e) => {
-        setAllEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
-      });
+      setAllLedger({ ...EMPTY_SCOPE, entries: page, hasOlder: page.length === LEDGER_FETCH });
+      unsubscribe = subscribeLedger(headSeq, (e) => stream.push(e));
     });
     return () => {
       cancelled = true;
       unsubscribe();
+      stream.cancel();
     };
   }, [ledgerScope, run]);
 
-  /** Puts the page before the oldest loaded entry of the ledger scope in front; one request at a time. */
+  /**
+   * Puts the page before the oldest loaded entry of the ledger scope in front, one request per scope at a time. A
+   * failure is kept on the scope for the panel to show; a request overtaken by a reload or a newer request changes
+   * nothing when it ends.
+   */
   const loadOlderLedger = async (): Promise<void> => {
     const all = ledgerScope === "all";
     const projectId = all ? null : selectedId;
-    const current = all ? allEntries : entries;
-    if ((!all && projectId === null) || current.length === 0 || loadingOlder.current) return;
+    const scope = all ? allLedger : projectLedger;
+    const set = all ? setAllLedger : setProjectLedger;
+    if ((!all && projectId === null) || scope.entries.length === 0 || scope.loading) return;
     const load = all ? allLoad : projectLoad;
+    const req = all ? allOlderReq : projectOlderReq;
     const at = load.current;
-    const oldest = current.reduce((min, e) => Math.min(min, e.seq), Infinity);
-    loadingOlder.current = true;
+    const token = ++req.current;
+    const current = () => load.current === at && req.current === token;
+    const oldest = scope.entries.reduce((min, e) => Math.min(min, e.seq), Infinity);
+    set((prev) => ({ ...prev, loading: true, error: null }));
     try {
       const page = await api.listLedger(projectId, { beforeSeq: oldest, limit: LEDGER_FETCH });
-      if (load.current !== at) return;
-      (all ? setAllEntries : setEntries)((prev) => prependEntries(page, prev));
-      (all ? setAllHasOlder : setProjectHasOlder)(page.length === LEDGER_FETCH);
+      if (!current()) return;
+      set((prev) => ({
+        ...prev, entries: prependEntries(page, prev.entries), hasOlder: page.length === LEDGER_FETCH, paged: true, loading: false,
+      }));
     } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      loadingOlder.current = false;
+      if (current()) set((prev) => ({ ...prev, loading: false, error: errorMessage(e) }));
     }
   };
 
@@ -588,11 +605,15 @@ export function App() {
         refreshAgents.current();
       }
     },
-    entries: ledgerScope === "all" ? allEntries : entries,
+    entries: ledgerScope === "all" ? allLedger.entries : entries,
     projectEntries: entries,
     feedRunId,
     onFollowRun: setFeedRunId,
-    ledgerHasOlder: ledgerScope === "all" ? allHasOlder : projectHasOlder,
+    ledgerHasOlder: (ledgerScope === "all" ? allLedger : projectLedger).hasOlder,
+    ledgerOlder: {
+      loading: (ledgerScope === "all" ? allLedger : projectLedger).loading,
+      error: (ledgerScope === "all" ? allLedger : projectLedger).error,
+    },
     onLoadOlderLedger: loadOlderLedger,
     ledgerScope,
     onLedgerScopeChange: setLedgerScope,

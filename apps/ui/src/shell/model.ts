@@ -108,6 +108,8 @@ export type WorkbenchModel = {
   ledgerHasOlder: boolean;
   /** Fetches the 500 entries before the oldest loaded for the ledger scope and puts them in front. */
   onLoadOlderLedger: () => Promise<void>;
+  /** The ledger scope's older-page request: in flight, and why the last one failed (null when it did not). */
+  ledgerOlder: { loading: boolean; error: string | null };
   ledgerScope: LedgerScope;
   onLedgerScopeChange: (scope: LedgerScope) => void;
   /** Which narration topics the ledger shows; every topic by default. */
