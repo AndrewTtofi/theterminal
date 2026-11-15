@@ -98,6 +98,26 @@ describe("PairingWindow", () => {
     expect(t.window.isOpen()).toBe(true);
   });
 
+  it("zeroes the random bytes it was given once the code is made, keeping its own copy", () => {
+    const self = keyOf();
+    const handed: Uint8Array[] = [];
+    const window = new PairingWindow({
+      fingerprint: self.fingerprint,
+      random: (n) => {
+        const b = Uint8Array.from([9, 8, 7, 6].slice(0, n));
+        handed.push(b);
+        return b;
+      },
+    });
+    const { code } = window.open();
+    expect([...handed[0]!]).toEqual([0, 0, 0, 0]);
+    expect([...parsePairingCode(code)!.secret]).toEqual([9, 8, 7, 6]);
+    const peer = keyOf();
+    const ekm = Buffer.alloc(32, 3);
+    const proof = pairingProof(Uint8Array.from([9, 8, 7, 6]), "theterminal-pair-v1", ekm, peer.spki);
+    expect(window.verify(proof, ekm, peer.spki)).toBe("ok");
+  });
+
   it("uses node:crypto randomness by default: two windows get different secrets", () => {
     const t = setup();
     const a = parsePairingCode(t.window.open().code)!.secret;

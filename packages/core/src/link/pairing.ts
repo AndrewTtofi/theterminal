@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomFillSync, timingSafeEqual } from "node:crypto";
 import { FINGERPRINT, PAIRING_CODE_TTL_MS, PAIRING_MAX_ATTEMPTS, encodePairingCode } from "@theterminal/shared";
 
 /**
@@ -35,13 +35,15 @@ export class PairingWindow {
     if (!FINGERPRINT.test(deps.fingerprint)) throw new TypeError("fingerprint must be 64 lower-case hex characters");
     this.fingerprint = deps.fingerprint;
     this.now = deps.now ?? (() => new Date());
-    this.random = deps.random ?? ((n) => new Uint8Array(randomBytes(n)));
+    this.random = deps.random ?? ((n) => randomFillSync(new Uint8Array(n)));
   }
 
   /** Opens a fresh window with a new secret, replacing any earlier one (and its attempt count). */
   open(): { code: string; expiresAt: string } {
     this.clear();
-    const secret = Uint8Array.from(this.random(SECRET_BYTES));
+    const drawn = this.random(SECRET_BYTES);
+    const secret = Uint8Array.from(drawn);
+    drawn.fill(0);
     if (secret.length !== SECRET_BYTES) throw new TypeError(`random must return ${SECRET_BYTES} bytes`);
     const code = encodePairingCode(this.fingerprint, secret);
     const expiresAt = this.now().getTime() + PAIRING_CODE_TTL_MS;
@@ -84,7 +86,11 @@ export class PairingWindow {
     return "rejected";
   }
 
-  /** The consumed window's secret for the ack proof: once, after "ok"; null otherwise. */
+  /**
+   * The consumed window's secret for the ack proof: once, after "ok"; null otherwise. The window zeroes its own
+   * copy as it hands this one over; the caller must zero the returned array (`fill(0)`) as soon as the ack proof
+   * is made.
+   */
   secret(): Uint8Array | null {
     const s = this.consumed;
     if (!s) return null;

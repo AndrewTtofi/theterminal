@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  adaptBonjour,
   fakeDiscovery,
   mdnsDiscovery,
   selectDiscovery,
@@ -137,11 +138,14 @@ function fakeBonjour() {
     published: [] as FakeService[],
     browsers: [] as FakeBrowser[],
     destroyed: 0,
+    /** The multicast socket's emitter, with no listener of its own, as multicast-dns has it. */
+    errors: new EventEmitter(),
   };
   const create = (onError: (err: Error) => void): BonjourLike => {
     state.constructed++;
     state.onError = onError;
     return {
+      errors: state.errors,
       publish(config) {
         const s = new FakeService(config as unknown as Record<string, unknown>);
         state.published.push(s);
@@ -262,7 +266,6 @@ describe("mdnsDiscovery", () => {
       remote({ txt: { id: GPU, name: "GPU box" } }),
       remote({ txt: { id: GPU, name: "", v: "1" } }),
       remote({ txt: { id: GPU, name: "x".repeat(41), v: "1" } }),
-      remote({ txt: { id: GPU, name: "GPU\u0000box", v: "1" } }),
       remote({ txt: { id: GPU, name: Buffer.from("GPU box"), v: "1" } }),
       remote({ txt: null }),
       remote({ txt: "id=x" }),
@@ -277,6 +280,25 @@ describe("mdnsDiscovery", () => {
       good,
     ]);
     expect(seen.at(-1)).toEqual([{ machineId: GPU, name: "GPU box", address: "192.168.1.20:4418", seenAt: NOW.toISOString() }]);
+  });
+
+  it("shows a heard name with its hidden characters escaped and capped at 40 characters", () => {
+    const b = fakeBonjour();
+    const d = track(mdnsDiscovery({ createBonjour: b.create, now: () => NOW }));
+    const seen: Discovered[][] = [];
+    d.browse((list) => seen.push(list));
+    const id2 = "1".repeat(32);
+    const id3 = "2".repeat(32);
+    b.state.browsers[0]!.show([
+      remote({ txt: { id: GPU, name: "GPU\u0000box", v: "1" } }),
+      remote({ txt: { id: id2, name: "Mac\u202etxt.exe", v: "1" } }),
+      remote({ txt: { id: id3, name: "\u202e".repeat(40), v: "1" } }),
+    ]);
+    const byId = new Map(seen.at(-1)!.map((r) => [r.machineId, r.name]));
+    expect(byId.get(GPU)).toBe("GPU\\u0000box");
+    expect(byId.get(id2)).toBe("Mac\\u202etxt.exe");
+    expect(byId.get(id3)).toBe("\\u202e".repeat(40).slice(0, 40));
+    for (const name of byId.values()) expect(name.length).toBeLessThanOrEqual(40);
   });
 
   it("lists one row per machine (the latest heard) and caps the list", () => {
@@ -297,10 +319,64 @@ describe("mdnsDiscovery", () => {
     expect(list.length).toBe(32);
   });
 
-  it("reports a socket error to no one and keeps working (multicast may be blocked)", () => {
+  it("ignores a respond error passed to the error callback", () => {
     const b = fakeBonjour();
     const d = track(mdnsDiscovery({ createBonjour: b.create }));
     d.browse(() => {});
-    expect(() => (b.state.onError as (e: Error) => void)(new Error("EADDRINUSE"))).not.toThrow();
+    expect(() => (b.state.onError as (e: Error) => void)(new Error("send failed"))).not.toThrow();
+    expect(d.available()).toBe(true);
+  });
+
+  it("a multicast socket error (EADDRINUSE, EACCES) never throws: discovery stops and reports itself unavailable", () => {
+    const b = fakeBonjour();
+    const d = track(mdnsDiscovery({ createBonjour: b.create, now: () => NOW }));
+    d.publish({ machineId: MAC, name: "Mac", port: 4418 });
+    const seen: Discovered[][] = [];
+    d.browse((list) => seen.push(list));
+    b.state.browsers[0]!.show([remote()]);
+    expect(seen.at(-1)).toHaveLength(1);
+    expect(d.available()).toBe(true);
+
+    const err = Object.assign(new Error("bind EADDRINUSE 0.0.0.0:5353"), { code: "EADDRINUSE" });
+    expect(() => b.state.errors.emit("error", err)).not.toThrow();
+    expect(d.available()).toBe(false);
+    expect(seen.at(-1)).toEqual([]);
+    expect(b.state.published[0]!.stopped).toBe(true);
+    expect(b.state.browsers[0]!.stopped).toBe(true);
+    expect(b.state.destroyed).toBe(1);
+    // A second error from the dying socket is absorbed too.
+    expect(() => b.state.errors.emit("error", Object.assign(new Error("EACCES"), { code: "EACCES" }))).not.toThrow();
+
+    // While unavailable it opens nothing new; browsing reports an empty list.
+    d.publish({ machineId: MAC, name: "Mac", port: 4418 });
+    const later: Discovered[][] = [];
+    d.browse((list) => later.push(list));
+    expect(later).toEqual([[]]);
+    expect(b.state.constructed).toBe(1);
+    expect(b.state.published).toHaveLength(1);
+
+    // destroy resets it, so a later start tries the network again.
+    d.destroy();
+    expect(d.available()).toBe(true);
+    d.browse(() => {});
+    expect(b.state.constructed).toBe(2);
+  });
+});
+
+describe("adaptBonjour", () => {
+  it("exposes bonjour-service's inner multicast emitter, so a socket error has a listener", () => {
+    const mdns = new EventEmitter();
+    const raw = { server: { mdns }, publish: () => ({}), find: () => ({}), destroy: () => {} };
+    const adapted = adaptBonjour(raw);
+    expect(adapted.errors).toBe(mdns);
+    const d = track(mdnsDiscovery({ createBonjour: () => adapted }));
+    expect(() => d.publish({ machineId: MAC, name: "Mac", port: 4418 })).not.toThrow();
+    expect(() => mdns.emit("error", new Error("EACCES"))).not.toThrow();
+    expect(d.available()).toBe(false);
+  });
+
+  it("tolerates a Bonjour without the inner emitter", () => {
+    const adapted = adaptBonjour({ publish: () => ({}), find: () => ({}), destroy: () => {} });
+    expect(adapted.errors).toBeUndefined();
   });
 });
