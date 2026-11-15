@@ -386,7 +386,7 @@ Runs after Task 1 (both edit `narration.ts` and `index.ts`).
     - a step before any plan → `null`;
     - a 9-step plan → 7 steps, then `8/9 started` → `null`, and `7/9 done` → `done:[7]`;
     - a marker split as `"[[step 1/3 do"` + `"ne]]\n"` across two feeds counts once;
-    - a step text with `‮` and an `sk-ant-TESTKEY…` secret is recorded escaped and redacted, at most 80 characters.
+    - a step text with `\u202e` and an `sk-ant-TESTKEY…` secret is recorded escaped and redacted, at most 80 characters.
   - Runner, with a FakeAdapter script `[{message:"[[plan: Read | Fix | Test]]"},{message:"[[step 1/3 started]]"},{message:"[[step 1/3 done]]"}]`:
     - the ledger holds three `agent.progress` entries;
     - `getRun(...).progress` equals `{steps:["Read","Fix","Test"], done:[1], current:null}`;
