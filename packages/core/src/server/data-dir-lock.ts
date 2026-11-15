@@ -1,4 +1,5 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Thrown when another live server holds the data folder's lock. The message is fixed: it holds no path or pid. */
@@ -10,6 +11,8 @@ export class DataDirInUseError extends Error {
 }
 
 const LOCK_FILE = "server.lock";
+/** An empty or unparsable lock younger than this may belong to a writer that has not finished: it counts as live. */
+const YOUNG_LOCK_MS = 2000;
 
 /** Whether a process with this pid exists: EPERM means it exists but belongs to someone else. */
 function processAlive(pid: number): boolean {
@@ -21,24 +24,40 @@ function processAlive(pid: number): boolean {
   }
 }
 
-/** The pid a lock file names, or null when it cannot be read or holds no positive integer. */
-function readPid(file: string): number | null {
-  let text: string;
+/** The file's text, or null when it cannot be read. */
+function readText(file: string): string | null {
   try {
-    text = readFileSync(file, "utf8");
+    return readFileSync(file, "utf8");
   } catch {
     return null;
   }
-  const m = /^\s*(\d+)\s*$/.exec(text);
+}
+
+/** The pid a lock's text names, or null when it holds no positive integer. */
+function parsePid(text: string | null): number | null {
+  const m = text === null ? null : /^\s*(\d+)\s*$/.exec(text);
   if (!m) return null;
   const pid = Number(m[1]);
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
+/** Whether the file was modified within the young-lock grace period (false when it cannot be read). */
+function isYoung(file: string): boolean {
+  try {
+    return Date.now() - statSync(file).mtimeMs < YOUNG_LOCK_MS;
+  } catch {
+    return false;
+  }
+}
+
+const uniqueName = (dataDir: string, kind: string) => join(dataDir, `${LOCK_FILE}.${kind}-${randomBytes(8).toString("hex")}`);
+
 /**
  * Takes `<dataDir>/server.lock` for `pid`, so that only one server (the CLI or the desktop app) opens a data folder
- * at a time. A lock whose process is gone, or that cannot be read, is taken over; a live one throws
- * DataDirInUseError. release() removes the file only while it still names our pid.
+ * at a time. The pid is written to a unique temp file and published with a hard link, so the lock never exists
+ * half-written. A held lock throws DataDirInUseError: one whose pid is alive, or one that is empty or unparsable and
+ * still young. Any other lock is stale and taken over: it is renamed away, confirmed unchanged, removed, and the
+ * publish is tried once more. release() removes the file only while it still names our pid.
  */
 export function acquireDataDirLock(
   dataDir: string,
@@ -46,21 +65,52 @@ export function acquireDataDirLock(
   isAlive: (pid: number) => boolean = processAlive,
 ): { release(): void } {
   const file = join(dataDir, LOCK_FILE);
-  const content = `${pid}\n`;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      writeFileSync(file, content, { flag: "wx", mode: 0o600 });
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) throw e;
+  const temp = uniqueName(dataDir, "tmp");
+  writeFileSync(temp, `${pid}\n`, { flag: "wx", mode: 0o600 });
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        linkSync(temp, file);
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        if (attempt > 0) throw new DataDirInUseError();
+      }
+      takeOverIfStale(dataDir, file, isAlive);
     }
-    const holder = readPid(file);
-    if (holder !== null && isAlive(holder)) throw new DataDirInUseError();
-    rmSync(file, { force: true });
+  } finally {
+    rmSync(temp, { force: true });
   }
   return {
     release() {
-      if (readPid(file) === pid) rmSync(file, { force: true });
+      if (parsePid(readText(file)) === pid) rmSync(file, { force: true });
     },
   };
+}
+
+/** Removes a stale lock, or throws DataDirInUseError when it is held (or changes while it is being judged). */
+function takeOverIfStale(dataDir: string, file: string, isAlive: (pid: number) => boolean): void {
+  const text = readText(file);
+  if (text === null) return; // gone already: publish again
+  const holder = parsePid(text);
+  if (holder === null ? isYoung(file) : isAlive(holder)) throw new DataDirInUseError();
+  const stale = uniqueName(dataDir, "stale");
+  try {
+    renameSync(file, stale);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // another process removed it: publish again
+    throw e;
+  }
+  if (readText(stale) === text) {
+    rmSync(stale, { force: true });
+    return;
+  }
+  // Another process published its own lock between our read and our rename: put it back, never delete it.
+  try {
+    linkSync(stale, file);
+  } catch {
+    // A newer lock is already in place; either way the folder is in use.
+  }
+  rmSync(stale, { force: true });
+  throw new DataDirInUseError();
 }
