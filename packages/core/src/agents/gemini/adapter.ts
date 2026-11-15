@@ -500,7 +500,10 @@ class GeminiRun {
 
   private async describe(e: unknown): Promise<string> {
     const msg = errorMessage(e);
-    if (msg === "rpc closed: eof") {
+    // A process that exits closes both pipes, and the OS gives no order between them: Node destroys stdin on exit,
+    // which can be seen before stdout's end. Once it has exited, a closed stdin is the exit, not a refusal to read.
+    const exited = this.child.exitCode !== null || this.child.signalCode !== null;
+    if (msg === "rpc closed: eof" || (msg === "rpc closed: output error" && exited)) {
       await this.stderrSettled();
       // Cleaned before the tail is cut, so the cut never leaves part of a secret behind; no tail if that fails.
       let tail = "";
