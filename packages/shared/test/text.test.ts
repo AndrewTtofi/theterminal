@@ -33,10 +33,20 @@ describe("formatUsd", () => {
 
 describe("visibleControls", () => {
   it("shows controls, bidi and zero-width characters as escapes and keeps line breaks and tabs", () => {
-    expect(visibleControls("a‮b")).toBe("a\\u202eb");
+    expect(visibleControls("a\u202eb")).toBe("a\\u202eb");
     expect(visibleControls("x\u001b[31m")).toBe("x\\u001b[31m");
     expect(visibleControls("y\r\b\f")).toBe("y\\r\\b\\f");
-    expect(visibleControls("z​⁦")).toBe("z\\u200b\\u2066");
+    expect(visibleControls("z\u200b\u2066")).toBe("z\\u200b\\u2066");
     expect(visibleControls("line\nnext\tcol")).toBe("line\nnext\tcol");
+  });
+
+  it("shows the Arabic letter mark, invisible operators, the byte-order mark, line and paragraph separators and the soft hyphen", () => {
+    expect(visibleControls("a\u061cb")).toBe("a\\u061cb");
+    for (const c of ["\u2060", "\u2061", "\u2062", "\u2063", "\u2064"]) {
+      expect(visibleControls(c)).toBe(`\\u${c.charCodeAt(0).toString(16)}`);
+    }
+    expect(visibleControls("\ufeffx")).toBe("\\ufeffx");
+    expect(visibleControls("a\u2028b\u2029c")).toBe("a\\u2028b\\u2029c");
+    expect(visibleControls("co\u00adop")).toBe("co\\u00adop");
   });
 });

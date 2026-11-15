@@ -23,11 +23,16 @@ export function lowerFirst(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1);
 }
 
-/** C0 and C1 controls other than a line break and a tab, and bidi and zero-width characters. */
-const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+/**
+ * C0 and C1 controls other than a line break and a tab; the soft hyphen; bidi marks, embeddings, overrides and
+ * isolates (including the Arabic letter mark); zero-width and invisible-operator characters; the byte-order mark;
+ * and the line and paragraph separators, which break a line without looking like one.
+ */
+const HIDDEN_CHARS =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 const SHORT_ESCAPES: Record<string, string> = { "\b": "\\b", "\f": "\\f", "\r": "\\r" };
 
-/** Characters that could hide, reorder or restyle what is shown, as JSON escapes (`\r`, `\u001b`, `‮`). */
+/** Characters that could hide, reorder or restyle what is shown, as JSON escapes (`\r`, `\u001b`, `\u202e`). */
 export function visibleControls(s: string): string {
   return s.replace(HIDDEN_CHARS, (c) => SHORT_ESCAPES[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }

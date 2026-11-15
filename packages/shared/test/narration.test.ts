@@ -172,6 +172,9 @@ describe("narrate: agent", () => {
     expect(failed.attention).toBe(true);
     expect(fin("stopped", null).headline).toBe("The Claude agent was stopped");
     expect(fin("stopped", null).attention).toBe(false);
+    expect(fin("failed", 0.2856, "exit code 1").headline).toBe("The Claude agent failed: exit code 1 · cost $0.29 (estimate)");
+    expect(fin("failed", 0.1, null).headline).toBe("The Claude agent failed · cost $0.10 (estimate)");
+    expect(fin("stopped", 0.1).headline).toBe("The Claude agent was stopped · cost $0.10 (estimate)");
   });
 });
 
@@ -220,7 +223,7 @@ describe("narrate: 5A/5B lines kept word for word", () => {
       '"Work key" failed to connect: Key rejected',
     );
     expect(h(entry("connection.tested", { ...c, ok: false, message: "x".repeat(300) }))).toBe(
-      `"Work key" failed to connect: ${"x".repeat(200)}…`.slice(0, 199) + "…",
+      `"Work key" failed to connect: ${"x".repeat(168)}…`,
     );
     expect(h(entry("connection.signin", { provider: "codex", ok: true }))).toBe("Owner signed in to Codex");
     expect(h(entry("connection.signin", { provider: "claude", ok: false }))).toBe("Sign-in to Claude failed");
@@ -408,14 +411,90 @@ describe("narrate: robustness", () => {
     expect(() => narrate(entry("card.moved", { cardId: "c1", from: "plan", to: "build" }), bad)).not.toThrow();
   });
 
-  it("caps the headline at 200 characters", () => {
+  it("caps the headline at 200 characters by clipping the free text, not the end of the line", () => {
     const out = h(entry("intake.reopened", { intakeId: "i1", reason: "r".repeat(500) }));
-    expect(out.length).toBe(200);
-    expect(out.endsWith("…")).toBe(true);
+    expect(out).toBe(`Owner reopened the plan: ${"r".repeat(173)}…`);
+    const waived = h(
+      entry("gate.waived", { gateId: "go_live", cardId: "c1", from: "ship", to: "operate", unmet: ["x"], reason: "\u202e".repeat(300) }),
+      ctx,
+    );
+    expect(waived.length).toBeLessThanOrEqual(200);
+    expect(waived.startsWith('Owner waived "Going live" for "Detect GPU": \\u202e')).toBe(true);
+    expect(waived.endsWith("\\u202e…")).toBe(true);
+  });
+
+  it("keeps the hidden-line count and the closing quote when escapes make a command longer", () => {
+    const command = `${"\u202e".repeat(100)}\nrm -rf build`;
+    const input = { command };
+    const req = h(
+      entry("agent.action.requested", { runId: "r1", actionId: "a1", kind: "shell", tool: "Bash", summary: "Run", input }, agentActor),
+      { adapterName: () => "a-long-adapter-name-that-goes-on-and-on" },
+    );
+    expect(req.length).toBeLessThanOrEqual(200);
+    expect(req.endsWith('…" (and 1 more line)')).toBe(true);
+    const many = narrateAction(action({ status: "failed", input: { command: `${"\u202e".repeat(100)}${"\nx".repeat(999999)}` } }));
+    expect(many.headline.length).toBeLessThanOrEqual(200);
+    expect(many.headline.endsWith('…" (and 999999 more lines)')).toBe(true);
+    for (const status of ["pending", "allowed", "denied", "completed", "failed"] as const) {
+      const out = narrateAction(action({ status, input })).headline;
+      expect(out.length).toBeLessThanOrEqual(200);
+      expect(out.endsWith('…" (and 1 more line)')).toBe(true);
+    }
+  });
+
+  it("fits every template's worst case under the cap without cutting its fixed words", () => {
+    const long = "\u202e".repeat(400);
+    const longCtx: NarrationContext = { cardTitle: () => long, adapterName: () => long };
+    const variants: Record<string, unknown>[] = [
+      { status: "completed", ok: true, decision: "allow", by: "human", purpose: "api_key", mode: "api_key" },
+      { status: "failed", ok: false, decision: "deny", by: "human", purpose: "mcp_server", mode: "subscription" },
+      { status: "stopped", ok: "?", decision: "allow", by: "policy", purpose: "cloud_credentials", mode: "chatgpt" },
+      { status: "?", decision: "deny", by: "policy", mode: "google" },
+      { decision: "maybe", by: "x", mode: "other" },
+    ];
+    const fields = {
+      name: long, title: long, stage: long, from: long, to: long, prompt: long, adapter: long, text: long, kind: "shell",
+      tool: "Bash", summary: long, input: { command: `${long}\n${"x\n".repeat(999)}` }, reason: long, output: long,
+      error: long, costUsd: 1e15, message: long, changes: { secretsSet: Array(50).fill(long) }, provider: long,
+      credential: "aws_static_keys", runId: long, idea: long, questionId: "existing", answer: long, decisionId: "payments_scope",
+      chosen: long, rationale: long, summaryText: long, cards: [], gates: Array(10).fill({ gateId: long }), gateId: long,
+      retryAfterS: 1e15,
+    };
+    const actors: Actor[] = [owner, { kind: "human", id: long }, agentActor, policy, runner];
+    for (const type of [...Object.keys(eventPayloadSchemas), "future.event." + long]) {
+      for (const actor of actors) {
+        for (const v of variants) {
+          const out = narrate(entry(type, { ...fields, ...v }, actor), longCtx).headline;
+          // The blind cap produces exactly 200 characters; staying under it means every fixed word survived.
+          expect(out.length, `${type} ${JSON.stringify(v)}`).toBeLessThan(200);
+        }
+      }
+    }
+  });
+
+  it("uses neutral words for values it does not recognise", () => {
+    const dec = (decision: unknown, by: unknown, actor: Actor) =>
+      h(entry("agent.action.decided", { runId: "r1", actionId: "a1", decision, by, reason: "" }, actor));
+    expect(dec("maybe", "human", owner)).toBe("Owner decided something");
+    expect(dec(undefined, "policy", policy)).toBe("Policy decided something");
+    expect(h(entry("agent.action.completed", { runId: "r1", actionId: "a1", output: "x" }, agentActor))).toBe(
+      "Finished with an unknown result",
+    );
+    expect(h(entry("agent.finished", { runId: "r1", status: "paused", costUsd: null, error: null }, runner), ctx)).toBe(
+      "The Claude agent finished with an unknown result",
+    );
+    expect(h(entry("connection.tested", { connectionId: "c1", name: "Ops", message: "" }))).toBe(
+      'Testing "Ops" finished with an unknown result',
+    );
+    expect(h(entry("connection.signin", { provider: "codex" }))).toBe("Sign-in to Codex finished with an unknown result");
+    expect(h(entry("settings.claude_auth_changed", { mode: "other" }))).toBe("Owner changed how Claude signs in");
+    expect(h(entry("settings.provider_auth_changed", { provider: "codex", mode: "other" }))).toBe(
+      "Owner changed how Codex signs in",
+    );
   });
 
   it("shows hidden and bidi characters instead of letting them reorder the line", () => {
-    expect(h(entry("agent.message", { runId: "r9", text: "ok‮gnp.exe" }, agentActor))).toBe(
+    expect(h(entry("agent.message", { runId: "r9", text: "ok\u202egnp.exe" }, agentActor))).toBe(
       'The agent said: "ok\\u202egnp.exe"',
     );
     expect(h(entry("card.created", { cardId: "c1", title: "a\u001b[31mred", stage: "plan" }))).toBe(
@@ -501,6 +580,17 @@ describe("actionPhrase", () => {
     expect(actionPhrase(action({ input: truncated }))).toBe("run a command too long to show in full (12345 characters)");
     expect(actionPhrase(action({ kind: "file_write", tool: "write", input: truncated }))).toBe(
       "create or replace something too long to show in full (12345 characters)",
+    );
+  });
+
+  it("prefers the command over a path for shell actions", () => {
+    expect(actionPhrase(action({ input: { path: "src", command: "ls -la" } }))).toBe('run the command "ls -la"');
+  });
+
+  it("escapes quotes and backslashes inside a narrated command so it cannot close its own quotes", () => {
+    expect(actionPhrase(action({ input: { command: 'echo "hi" \\ ok' } }))).toBe('run the command "echo \\"hi\\" \\\\ ok"');
+    expect(actionPhrase(action({ tool: "codex.stdin", input: { reason: 'say "y"' } }))).toBe(
+      'type "say \\"y\\"" into the running command',
     );
   });
 

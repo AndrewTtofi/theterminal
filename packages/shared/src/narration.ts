@@ -1,3 +1,17 @@
+/**
+ * Plain-language narration of ledger entries and agent actions, built from fixed templates.
+ *
+ * Pure: it reads only its arguments and adds nothing that is not in the entry or the context.
+ *
+ * Headlines are safe to show as they are: payload text in them is clipped, with hidden, bidi and control
+ * characters shown as escapes, and quotes and backslashes in commands escaped. Each piece of free text gets the
+ * room left after the fixed words, so the end of a line (a closing quote, "(and n more lines)", a cost) always
+ * survives the 200-character cap.
+ *
+ * Details are NOT made safe: `detail` carries the raw recorded text (a message, a prompt, an output, an answer,
+ * a rationale, an error or the input JSON). A UI must render it through `visibleControls` (or an equivalent)
+ * before showing it.
+ */
 import type { ActionKind, AgentAction } from "./agents.js";
 import { KIND_LABELS } from "./connections.js";
 import type { Actor, LedgerEntry } from "./domain.js";
@@ -23,6 +37,11 @@ export type NarrationContext = {
 export type ActionLike = Pick<AgentAction, "kind" | "tool" | "summary" | "input">;
 
 const HEADLINE_MAX = 200;
+/**
+ * The longest headline the templates build. The blind cap in `capHeadline` gives exactly HEADLINE_MAX
+ * characters, so a headline that stays under it never had its fixed words cut.
+ */
+const FIT = HEADLINE_MAX - 1;
 
 const ADAPTER_LABELS: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
 
@@ -62,17 +81,38 @@ function own<T>(rec: Record<string, T>, key: unknown): T | undefined {
   return typeof key === "string" && Object.hasOwn(rec, key) ? rec[key] : undefined;
 }
 
-const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max)}…` : s);
+/**
+ * Text for a headline, with hidden characters shown as escapes (and, when `quoted`, `"` and `\` escaped), clipped to
+ * at most `max` characters AFTER escaping, plus `…` when cut. An escape is never cut in half.
+ */
+function clipVisible(s: string, max: number, quoted = false): string {
+  let out = "";
+  for (const c of s) {
+    const unit = quoted && (c === '"' || c === "\\") ? `\\${c}` : visibleControls(c);
+    if (out.length + unit.length > max) return `${out}…`;
+    out += unit;
+  }
+  return out;
+}
 
-/** Payload text for a headline: clipped, then with hidden and bidi characters shown as escapes. */
-const show = (v: unknown, max = HEADLINE_MAX): string => visibleControls(clip(str(v), max));
+/** A payload value as headline text (see `clipVisible`). */
+const show = (v: unknown, max: number, quoted = false): string => clipVisible(str(v), max, quoted);
+
+/**
+ * `before` + the free text + `after`, the free text clipped to `max` and to the room the fixed words leave under the
+ * cap, so `after` always survives.
+ */
+function fit(before: string, v: unknown, after = "", max = HEADLINE_MAX): string {
+  const room = Math.max(0, Math.min(max, FIT - before.length - after.length - 1));
+  return `${before}${show(v, room)}${after}`;
+}
 
 const cap = (v: unknown): string => {
   const t = str(v);
   return t.charAt(0).toUpperCase() + t.slice(1);
 };
 
-const adapterLabel = (v: unknown): string => own(ADAPTER_LABELS, v) ?? show(cap(v), 40);
+const adapterLabel = (v: unknown): string => own(ADAPTER_LABELS, v) ?? show(cap(v), 20);
 
 function lookup<T>(fn: ((key: string) => T | undefined) | undefined, key: string | undefined): T | undefined {
   return fn && key !== undefined ? fn(key) : undefined;
@@ -81,18 +121,18 @@ function lookup<T>(fn: ((key: string) => T | undefined) | undefined, key: string
 function actorName(a: Actor, agent: string): string {
   if (a.kind === "system") return a.id === "policy" ? "Policy" : "The workspace";
   if (a.kind === "agent") return agent;
-  return a.id === "owner" ? "Owner" : show(a.id, 60);
+  return a.id === "owner" ? "Owner" : show(a.id, 30);
 }
 
 function agentName(runId: string | undefined, ctx: NarrationContext): string {
   const name = lookup(ctx.adapterName, runId);
-  return name ? `The ${own(ADAPTER_LABELS, name) ?? show(name, 40)} agent` : "The agent";
+  return name ? `The ${own(ADAPTER_LABELS, name) ?? show(name, 20)} agent` : "The agent";
 }
 
 /** `"<title>"` when the context knows the card, else `a card`. */
 function cardRef(cardId: string | undefined, ctx: NarrationContext): string {
   const title = lookup(ctx.cardTitle, cardId);
-  return title ? `"${show(title, 120)}"` : "a card";
+  return title ? `"${show(title, 80)}"` : "a card";
 }
 
 function lineCount(output: string): number {
@@ -102,7 +142,7 @@ function lineCount(output: string): number {
 
 const firstLine = (s: string): string => s.split(/\r?\n/)[0] ?? "";
 
-const gateTitle = (id: unknown): string => GATES.find((g) => g.id === id)?.title ?? show(id, 60);
+const gateTitle = (id: unknown): string => GATES.find((g) => g.id === id)?.title ?? show(id, 30);
 
 function topicOf(type: string): NarrationTopic {
   if (type === "agent.action.decided") return "decision";
@@ -145,6 +185,8 @@ function refsOf(p: Payload): NarrationRefs {
 }
 
 const TARGET_KEYS = ["path", "file_path", "filePath", "command", "url"] as const;
+/** A shell action names its command first, even when its input also carries a path. */
+const SHELL_TARGET_KEYS = ["command", "path", "file_path", "filePath", "url"] as const;
 
 const VERBS: Record<ActionKind, string> = {
   file_read: "read",
@@ -164,7 +206,7 @@ export function actionPhrase(a: ActionLike): string {
   if (a.kind === "other") return summary;
 
   if (input.truncated === true) {
-    const size = typeof input.totalChars === "number" ? ` (${input.totalChars} characters)` : "";
+    const size = typeof input.totalChars === "number" ? ` (${show(input.totalChars, 20)} characters)` : "";
     if (a.kind === "shell" && a.tool === "codex.stdin") {
       return `type something too long to show in full${size} into the running command`;
     }
@@ -173,15 +215,16 @@ export function actionPhrase(a: ActionLike): string {
   }
 
   if (a.kind === "shell" && a.tool === "codex.stdin") {
-    return `type "${show(input.reason, 80)}" into the running command`;
+    return `type "${show(input.reason, 80, true)}" into the running command`;
   }
 
-  const raw = TARGET_KEYS.map((k) => input[k]).find((v): v is string => typeof v === "string");
+  const keys = a.kind === "shell" ? SHELL_TARGET_KEYS : TARGET_KEYS;
+  const raw = keys.map((k) => input[k]).find((v): v is string => typeof v === "string");
   if (a.kind === "shell") {
-    if (raw === undefined) return `run the command "${summary}"`;
+    if (raw === undefined) return `run the command "${show(a.summary, 100, true)}"`;
     const lines = raw.split(/\r?\n/);
     const more = lines.length > 1 ? ` (and ${plural(lines.length - 1, "more line")})` : "";
-    return `run the command "${show(lines[0], 100)}"${more}`;
+    return `run the command "${show(lines[0], 100, true)}"${more}`;
   }
   const target = raw === undefined ? summary : show(raw, 120);
   return `${own(VERBS, a.kind) ?? "use"} ${target}`;
@@ -218,14 +261,17 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
   const agent = agentName(runId, ctx);
   const who = actorName(e.actor, agent);
   const cardId = idOf(p.cardId);
+  const stage = (v: unknown) => show(cap(v), 20);
+  /** The first eight characters of a run id, as 5B wrote them. */
+  const run8 = () => `Agent ${show(str(p.runId).slice(0, 8), 16)}`;
 
   switch (e.type) {
     case "project.created":
-      return { headline: `${who} created the project "${show(p.name, 120)}"` };
+      return { headline: fit(`${who} created the project "`, p.name, `"`, 120) };
     case "card.created":
-      return { headline: `${who} added "${show(p.title, 120)}" to ${show(cap(p.stage), 20)}` };
+      return { headline: `${who} added "${show(p.title, 120)}" to ${stage(p.stage)}` };
     case "card.moved":
-      return { headline: `${who} moved ${cardRef(cardId, ctx)} from ${show(cap(p.from), 20)} to ${show(cap(p.to), 20)}` };
+      return { headline: `${who} moved ${cardRef(cardId, ctx)} from ${stage(p.from)} to ${stage(p.to)}` };
     case "card.status_changed":
       return { headline: `${who} marked ${cardRef(cardId, ctx)} ${show(p.to, 20)}` };
 
@@ -234,13 +280,13 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       const title = lookup(ctx.cardTitle, cardId);
       const prompt = str(p.prompt);
       const headline = title
-        ? `${who} started a ${adapter} agent on "${show(title, 120)}"`
-        : `${who} started a ${adapter} agent: "${show(prompt, 80)}"`;
+        ? `${who} started a ${adapter} agent on "${show(title, 80)}"`
+        : fit(`${who} started a ${adapter} agent: "`, prompt, `"`, 80);
       return { headline, detail: prompt || null };
     }
     case "agent.message": {
       const text = str(p.text);
-      return { headline: `${agent} said: "${show(text, 120)}"`, detail: text || null };
+      return { headline: fit(`${agent} said: "`, text, `"`, 120), detail: text || null };
     }
     case "agent.action.requested": {
       const phrase = actionPhrase({
@@ -252,86 +298,100 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `${agent} wants to ${phrase}`, detail: json(p.input), attention: true };
     }
     case "agent.action.decided": {
+      const reason = str(p.reason);
+      if (p.decision !== "allow" && p.decision !== "deny") {
+        return { headline: reason ? fit(`${who} decided something: `, reason, "", 150) : `${who} decided something` };
+      }
       const allowed = p.decision === "allow";
-      const reason = show(p.reason, 160);
       const byPolicy = p.by === "policy" || (p.by !== "human" && e.actor.kind !== "human");
       if (byPolicy) {
         const lead = allowed ? "Allowed automatically" : "Stopped automatically";
-        return { headline: reason ? `${lead}: ${reason}` : lead };
+        return { headline: reason ? fit(`${lead}: `, reason, "", 150) : lead };
       }
-      return { headline: allowed ? `${who} allowed it` : `${who} denied it: ${reason || "no reason given"}` };
+      if (allowed) return { headline: `${who} allowed it` };
+      return { headline: reason ? fit(`${who} denied it: `, reason, "", 150) : `${who} denied it: no reason given` };
     }
     case "agent.action.completed": {
       const output = str(p.output);
-      if (p.ok === true) return { headline: `Done (${plural(lineCount(output), "line")} of output)`, detail: output || null };
-      const first = show(firstLine(output), 80);
-      return { headline: first ? `It failed: ${first}` : "It failed", detail: output || null };
+      const detail = output || null;
+      if (p.ok === true) return { headline: `Done (${plural(lineCount(output), "line")} of output)`, detail };
+      if (p.ok !== false) return { headline: "Finished with an unknown result", detail };
+      const first = firstLine(output);
+      return { headline: first ? fit("It failed: ", first, "", 80) : "It failed", detail };
     }
     case "agent.finished": {
+      const cost =
+        typeof p.costUsd === "number" && Number.isFinite(p.costUsd) ? ` · cost ${show(formatUsd(p.costUsd), 30)} (estimate)` : "";
       if (p.status === "failed") {
         const error = str(p.error);
-        return { headline: error ? `${agent} failed: ${show(error, 120)}` : `${agent} failed`, detail: error || null, attention: true };
+        return {
+          headline: error ? fit(`${agent} failed: `, error, cost, 120) : `${agent} failed${cost}`,
+          detail: error || null,
+          attention: true,
+        };
       }
-      if (p.status === "stopped") return { headline: `${agent} was stopped` };
-      const cost = typeof p.costUsd === "number" && Number.isFinite(p.costUsd) ? ` · cost ${formatUsd(p.costUsd)} (estimate)` : "";
-      return { headline: `${agent} finished${cost}` };
+      if (p.status === "stopped") return { headline: `${agent} was stopped${cost}` };
+      if (p.status === "completed") return { headline: `${agent} finished${cost}` };
+      return { headline: `${agent} finished with an unknown result${cost}` };
     }
     case "agent.rate_limited": {
-      const retry = typeof p.retryAfterS === "number" ? `; retry after ${p.retryAfterS} s` : "";
-      return { headline: `Agent ${show(str(p.runId).slice(0, 8))} was rate-limited by the provider${retry}` };
+      const retry = typeof p.retryAfterS === "number" ? `; retry after ${show(p.retryAfterS, 20)} s` : "";
+      return { headline: `${run8()} was rate-limited by the provider${retry}` };
     }
 
     case "settings.claude_auth_changed":
-      return { headline: `${who} set Claude to use ${p.mode === "subscription" ? "own subscription" : "API key"}` };
+      if (p.mode === "api_key") return { headline: `${who} set Claude to use API key` };
+      if (p.mode === "subscription") return { headline: `${who} set Claude to use own subscription` };
+      return { headline: `${who} changed how Claude signs in` };
     case "settings.provider_auth_changed": {
-      const how =
-        p.mode === "api_key"
-          ? "API key"
-          : p.mode === "chatgpt"
-            ? "own ChatGPT plan"
-            : p.mode === "google"
-              ? "own Google account"
-              : "own subscription";
-      return { headline: `${who} set ${show(cap(p.provider), 20)} to use ${how}` };
+      const provider = stage(p.provider);
+      const how = own<string>(
+        { api_key: "API key", subscription: "own subscription", chatgpt: "own ChatGPT plan", google: "own Google account" },
+        p.mode,
+      );
+      return { headline: how ? `${who} set ${provider} to use ${how}` : `${who} changed how ${provider} signs in` };
     }
 
     case "connection.added": {
       const kind = own<string>(KIND_LABELS, p.kind) ?? show(p.kind, 40);
-      return { headline: `${who} connected "${show(p.name, 120)}" (${kind})` };
+      return { headline: `${who} connected "${show(p.name, 100)}" (${kind})` };
     }
     case "connection.updated": {
       const c = isRecord(p.changes) ? p.changes : {};
-      const name = show(p.name, 120);
+      const name = show(p.name, 100);
       if (c.enabled === true) return { headline: `${who} enabled "${name}"` };
       if (c.enabled === false) return { headline: `${who} disabled "${name}"` };
-      const set = Array.isArray(c.secretsSet) ? c.secretsSet.map((s) => show(s, 40)) : [];
-      if (set.length > 0) return { headline: `${who} replaced the ${set.join(", ")} of "${name}"` };
+      const set = Array.isArray(c.secretsSet) ? c.secretsSet.map(str).filter((s) => s.length > 0) : [];
+      if (set.length > 0) return { headline: `${who} replaced the ${show(set.join(", "), 40)} of "${name}"` };
       return { headline: `${who} updated "${name}"` };
     }
     case "connection.removed":
-      return { headline: `${who} removed "${show(p.name, 120)}"` };
-    case "connection.tested":
-      return {
-        headline: p.ok === true ? `"${show(p.name, 120)}" connected` : `"${show(p.name, 120)}" failed to connect: ${show(p.message, 200)}`,
-      };
-    case "connection.signin":
-      return {
-        headline: p.ok === true ? `${who} signed in to ${show(cap(p.provider), 20)}` : `Sign-in to ${show(cap(p.provider), 20)} failed`,
-      };
+      return { headline: `${who} removed "${show(p.name, 100)}"` };
+    case "connection.tested": {
+      const name = show(p.name, 100);
+      if (p.ok === true) return { headline: `"${name}" connected` };
+      if (p.ok === false) return { headline: fit(`"${name}" failed to connect: `, p.message, "", 200) };
+      return { headline: `Testing "${name}" finished with an unknown result` };
+    }
+    case "connection.signin": {
+      const provider = stage(p.provider);
+      if (p.ok === true) return { headline: `${who} signed in to ${provider}` };
+      if (p.ok === false) return { headline: `Sign-in to ${provider} failed` };
+      return { headline: `Sign-in to ${provider} finished with an unknown result` };
+    }
     case "connection.used": {
-      const used = `Agent ${show(str(p.runId).slice(0, 8))}`;
-      const name = show(p.name, 120);
-      if (p.purpose === "mcp_server") return { headline: `${used} was given the MCP server "${name}"` };
+      const name = show(p.name, 100);
+      if (p.purpose === "mcp_server") return { headline: `${run8()} was given the MCP server "${name}"` };
       if (p.purpose === "cloud_credentials") {
         const label = own(CREDENTIAL_LABELS, p.credential) ?? "cloud credentials";
-        return { headline: `${used} was given ${label} from "${name}"` };
+        return { headline: `${run8()} was given ${label} from "${name}"` };
       }
-      return { headline: `${used} was given access to "${name}"` };
+      return { headline: `${run8()} was given access to "${name}"` };
     }
 
     case "intake.started": {
       const idea = str(p.idea);
-      return { headline: `${who} described the idea: "${show(idea, 80)}"`, detail: idea || null };
+      return { headline: fit(`${who} described the idea: "`, idea, `"`, 80), detail: idea || null };
     }
     case "intake.answered": {
       const q = INTAKE_QUESTIONS.find((x) => x.id === p.questionId);
@@ -339,7 +399,7 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       const a = p.answer;
       const valid = typeof a === "string" || typeof a === "number" || (Array.isArray(a) && a.every((x) => typeof x === "string"));
       const rendered = !valid ? "" : q ? renderAnswer(q, a as IntakeAnswer) : Array.isArray(a) ? a.join(", ") : str(a);
-      return { headline: `${who} answered "${label}": ${show(rendered, 120)}`, detail: rendered || null };
+      return { headline: fit(`${who} answered "${label}": `, rendered, "", 120), detail: rendered || null };
     }
     case "intake.decided": {
       const d = INTAKE_DECISIONS.find((x) => x.id === p.decisionId);
@@ -355,23 +415,20 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `${who} approved the plan (${plural(created, "card")} added)`, detail: summary || null };
     }
     case "intake.reopened":
-      return { headline: `${who} reopened the plan: ${show(p.reason)}` };
+      return { headline: fit(`${who} reopened the plan: `, p.reason) };
 
     case "gate.blocked": {
       const gates = Array.isArray(p.gates) ? p.gates : [];
-      const titles = gates.map((g) => gateTitle(isRecord(g) ? g.gateId : undefined));
+      const titles = gates.map((g) => gateTitle(isRecord(g) ? g.gateId : undefined)).join(", ") || "a readiness gate";
       const card = lookup(ctx.cardTitle, cardId);
-      const subject = card ? `"${show(card, 120)}"` : "a card";
-      return {
-        headline: `Moving ${subject} to ${show(cap(p.to), 20)} is blocked by ${titles.join(", ") || "a readiness gate"}`,
-        attention: true,
-      };
+      const subject = card ? `"${show(card, 50)}"` : "a card";
+      return { headline: fit(`Moving ${subject} to ${stage(p.to)} is blocked by `, titles), attention: true };
     }
     case "gate.signed_off":
       return { headline: `${who} signed off "${gateTitle(p.gateId)}" for ${cardRef(cardId, ctx)}` };
     case "gate.waived":
       return {
-        headline: `${who} waived "${gateTitle(p.gateId)}" for ${cardRef(cardId, ctx)}: ${show(p.reason)}`,
+        headline: fit(`${who} waived "${gateTitle(p.gateId)}" for ${cardRef(cardId, ctx)}: `, p.reason),
         attention: true,
       };
 
