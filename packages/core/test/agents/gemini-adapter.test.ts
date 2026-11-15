@@ -139,22 +139,32 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
   const events: AdapterEvent[] = [];
   let n = 0;
   const abort = new AbortController();
+  // Settled by the first gate call and the first event: a test awaits these instead of polling with a deadline,
+  // which a slow process start (Windows CI) can overrun.
+  let onGated!: () => void;
+  let onEmitted!: () => void;
+  const gated = new Promise<void>((r) => (onGated = r));
+  const emitted = new Promise<void>((r) => (onEmitted = r));
   const opts: AdapterStartOptions = {
     cwd: worktree, projectId: "p1", prompt: "do it", authMode, signal: abort.signal,
     gate: async (a) => {
       proposed.push(a);
+      onGated();
       const d = { ...(await decide(a)), actionId: `act-${++n}` };
       decisions.push(d);
       return d;
     },
-    emit: (e) => events.push(e),
+    emit: (e) => {
+      events.push(e);
+      onEmitted();
+    },
     recordDenied: async (a, reason) => {
       denied.push([a, reason]);
     },
     clean: (t) => t,
     credentials: {},
   };
-  return { opts, proposed, decisions, denied, events, abort };
+  return { opts, proposed, decisions, denied, events, abort, gated, emitted };
 }
 
 /** Spawns the fake through node and remembers the child, so a test can check it was killed. */
@@ -1424,26 +1434,31 @@ describe("GeminiAdapter", () => {
     const { spawn, children } = fakeSpawn();
     const h = harness();
     const done = adapter({ spawn }).start(h.opts);
-    await vi.waitFor(() => expect(h.events).toHaveLength(1));
+    await h.emitted;
+    expect(h.events).toHaveLength(1);
     h.abort.abort();
     expect(await done).toEqual({ status: "failed", error: "run stopped" });
     await waitExit(children[0]!);
   });
 
-  it("a gate that waits is cut off by abort: the pending write is denied and nothing is written", async () => {
-    const path = join(worktree, "notes.md");
-    script([{ type: "write", path, content: "x" }]);
-    const { spawn, children } = fakeSpawn();
-    let release: (() => void) | undefined;
-    const h = harness(() => new Promise<GateResult>((resolve) => (release = () => resolve({ decision: "deny", reason: "run stopped" }))));
-    const done = adapter({ spawn }).start(h.opts);
-    await vi.waitFor(() => expect(h.proposed).toHaveLength(1));
-    h.abort.abort();
-    release!();
-    expect(await done).toEqual({ status: "failed", error: "run stopped" });
-    await waitExit(children[0]!);
-    expect(existsSync(path)).toBe(false);
-  });
+  // The slow variant starts later than vi.waitFor's default 1 s deadline, as gemini can on a loaded Windows runner.
+  for (const [label, startDelayMs] of [["", 0], [" (gemini slow to start)", 1500]] as const) {
+    it(`a gate that waits is cut off by abort: the pending write is denied and nothing is written${label}`, async () => {
+      const path = join(worktree, "notes.md");
+      script({ config: { startDelayMs }, steps: [{ type: "write", path, content: "x" }] });
+      const { spawn, children } = fakeSpawn();
+      let release: (() => void) | undefined;
+      const h = harness(() => new Promise<GateResult>((resolve) => (release = () => resolve({ decision: "deny", reason: "run stopped" }))));
+      const done = adapter({ spawn }).start(h.opts);
+      await h.gated;
+      expect(h.proposed).toHaveLength(1);
+      h.abort.abort();
+      release!();
+      expect(await done).toEqual({ status: "failed", error: "run stopped" });
+      await waitExit(children[0]!);
+      expect(existsSync(path)).toBe(false);
+    });
+  }
 
   it("messages are flushed before tool results so the ledger keeps their order; a trailing word is held until after", async () => {
     script([

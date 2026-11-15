@@ -10,7 +10,8 @@
 // - The real CLI never calls terminal/*; the terminal steps here exercise the adapter's implementation.
 //
 // THETERMINAL_FAKE_GEMINI_SCRIPT: JSON, either an array of steps or { config, steps }.
-//   config: { protocolVersion?, modes?: SessionModeState | null, exitAt?: <method>, failAt?: <method> }
+//   config: { protocolVersion?, modes?: SessionModeState | null, exitAt?: <method>, failAt?: <method>, startDelayMs? }
+//           startDelayMs: read nothing for this long after starting, as a slow start (Windows CI) would
 //   steps (run in order when the prompt arrives):
 //     { type: "message", text }
 //     { type: "read", path, line?, limit?, toolCall?: boolean }        // toolCall: wrap in tool_call in_progress/completed
@@ -264,8 +265,12 @@ function onMessage(msg) {
   }
 }
 
-createInterface({ input: process.stdin }).on("line", (line) => {
-  if (line.trim() === "") return;
-  onMessage(JSON.parse(line));
-});
-process.stdin.on("end", () => process.exit(0));
+function listen() {
+  createInterface({ input: process.stdin }).on("line", (line) => {
+    if (line.trim() === "") return;
+    onMessage(JSON.parse(line));
+  });
+  process.stdin.on("end", () => process.exit(0));
+}
+if (config.startDelayMs) setTimeout(listen, config.startDelayMs);
+else listen();
