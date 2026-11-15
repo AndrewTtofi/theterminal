@@ -11,7 +11,7 @@ import { commitEvent } from "../events/commit.js";
 import { getShareSnapshot, listShareLinks } from "../events/projections.js";
 import { HumanRequiredError } from "../intake/service.js";
 import { NotFoundError } from "../board/board-service.js";
-import { SHARE_CSP } from "./render.js";
+import { SHARE_HEADER_CSP } from "./render.js";
 import { AddressNotAllowedError, LinkNotActiveError, ShareLinkActiveError } from "./errors.js";
 
 export const SHARE_PORT_DEFAULT = 4400;
@@ -31,7 +31,7 @@ const ttlSchema = z.union(TTL_MINUTES.map((m) => z.literal(m)) as [z.ZodLiteral<
 
 export type ShareAddress = { address: string; scope: ShareScope; label: string };
 
-/** What the manager needs from the share service: the confirmed bytes, checked against the ledger's hash. */
+/** What the manager needs from the share service: the confirmed bytes, checked against the ledger's hash and the cleaner. */
 export type ShareHtmlReader = { readHtml(shareId: string): string };
 
 /**
@@ -83,6 +83,7 @@ export type LinkManagerDeps = {
 };
 
 const END_NOT_RECORDED = "The Terminal: a share link was closed but its end could not be recorded";
+const PAGE_NOT_SERVED = "The Terminal: a share link refused its page, which no longer passes its checks; revoke the link";
 
 type EndKind = "revoked" | "expired" | "stopped";
 type EndReason = "owner" | "too_many_failures" | "shutdown" | "restart";
@@ -100,13 +101,10 @@ type LiveLink = {
 
 const digestOf = (token: string): Buffer => createHash("sha256").update(token, "utf8").digest();
 
-/** The page's CSP, plus the one directive a meta tag cannot carry: no one may frame the page. */
-const HEADER_CSP = `${SHARE_CSP}; frame-ancestors 'none'`;
-
 /** Every response, page or refusal, carries these. */
 function secure(reply: FastifyReply): FastifyReply {
   return reply
-    .header("Content-Security-Policy", HEADER_CSP)
+    .header("Content-Security-Policy", SHARE_HEADER_CSP)
     .header("X-Content-Type-Options", "nosniff")
     .header("Referrer-Policy", "no-referrer")
     .header("Cache-Control", "no-store");
@@ -173,7 +171,8 @@ export class ShareLinkManager {
     const ttl = ttlSchema.parse(ttlMinutes);
     const record = getShareSnapshot(this.db, shareId);
     if (!record) throw new NotFoundError("share snapshot", shareId);
-    const bytes = Buffer.from(this.service.readHtml(shareId), "utf8");
+    // A page that does not pass now is never put behind a link; it is read and checked again on every request.
+    this.service.readHtml(shareId);
     const projectId = record.projectId;
     // A link that cannot be recorded is never opened: refuse before anything listens.
     if (this.ledger.readOnly) throw new LedgerReadOnlyError();
@@ -196,6 +195,7 @@ export class ShareLinkManager {
       const link: LiveLink = { id: linkId, projectId, app, serving: true, ended: null, timer: null };
       let boundPort = 0;
       let failures = 0;
+      let refused = false;
 
       app.addHook("onRequest", async (request, reply) => {
         if (request.headers.host !== `${address}:${boundPort}`) return secure(reply).code(403).send({});
@@ -217,7 +217,20 @@ export class ShareLinkManager {
             return secure(reply).code(404).send({});
           }
           if (timingSafeEqual(digestOf(supplied), expected)) {
-            return secure(reply).code(200).type("text/html; charset=utf-8").send(bytes);
+            // Read and checked on every request: the hash the ledger recorded, and the cleaner with the secrets
+            // known now. A page that fails is not served (the same empty 404 as a wrong token), and the link stays
+            // live for the Owner to see and revoke; nothing is ever served that cannot be proven clean.
+            let page: string;
+            try {
+              page = this.service.readHtml(shareId);
+            } catch {
+              if (!refused) {
+                refused = true;
+                this.log(PAGE_NOT_SERVED);
+              }
+              return secure(reply).code(404).send({});
+            }
+            return secure(reply).code(200).type("text/html; charset=utf-8").send(Buffer.from(page, "utf8"));
           }
           // Only something shaped like a token is a guess; a browser's /favicon.ico is not.
           if (TOKEN_SHAPE.test(supplied) && ++failures >= MAX_TOKEN_FAILURES) {

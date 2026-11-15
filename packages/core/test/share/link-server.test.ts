@@ -282,6 +282,28 @@ describe("ShareLinkManager", () => {
     expect(m.activeCount()).toBe(0);
   });
 
+  it("reads and checks the page again on every request: a page that fails is not served, the link stays live", async () => {
+    let fail = false;
+    const log = vi.fn();
+    const { w, m, shareId } = setup({ log, service: { readHtml: () => { if (fail) throw new SnapshotTamperedError(); return HTML; } } });
+    const { url } = await m.create(human, shareId, "127.0.0.1", 60);
+    const entries = w.ledger.headSeq();
+    expect((await fetch(url)).status).toBe(200);
+    fail = true;
+    const refused = await raw(portOf(url), `/${tokenOf(url)}`);
+    expect([refused.status, refused.body]).toEqual([404, "{}"]);
+    expect(refused.headers["content-security-policy"]).toBe(HEADER_CSP);
+    expect((await raw(portOf(url), `/${tokenOf(url)}`)).status).toBe(404);
+    expect(m.activeCount()).toBe(1);
+    expect(w.ledger.headSeq()).toBe(entries);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]![0]).not.toContain("Tampered");
+    fail = false;
+    const again = await fetch(url);
+    expect(again.status).toBe(200);
+    expect(await again.text()).toBe(HTML);
+  });
+
   it("refuses a tampered snapshot before listening", async () => {
     const { w, m, shareId } = setup({ service: { readHtml: () => { throw new SnapshotTamperedError(); } } });
     const before = w.ledger.headSeq();
