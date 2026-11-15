@@ -72,6 +72,9 @@ vi.mock("../src/api", () => ({
     listPeople: vi.fn(),
     listInvites: vi.fn(),
     getRemote: vi.fn(),
+    getHome: vi.fn(),
+    projectFiles: vi.fn(),
+    acceptRun: vi.fn(),
   },
   setUnauthorizedHandler: (fn: (() => void) | null) => {
     h.unauthorized = fn;
@@ -162,6 +165,8 @@ beforeEach(() => {
   m.listPeople.mockResolvedValue([]);
   m.listInvites.mockResolvedValue([]);
   m.getRemote.mockResolvedValue({ enabled: false, listening: false });
+  m.getHome.mockResolvedValue({ working: [], finishedToday: [] });
+  m.projectFiles.mockResolvedValue({ source: null, added: false, head: "h", entries: [], truncated: false });
 });
 
 describe("App status polling", () => {
@@ -1369,5 +1374,36 @@ describe("App: who is signed in, and who is here", () => {
       });
     });
     await waitFor(() => expect(m.listPeople.mock.calls.length).toBeGreaterThan(before));
+  });
+});
+
+describe("App Home data", () => {
+  const entry = (type: string, projectId = "A"): LedgerEntry => ({
+    seq: 50, id: "50", ts: "2026-11-16T00:00:00Z", projectId, actor: { kind: "agent", id: "r1" },
+    type: type as LedgerEntry["type"], payload: { runId: "r1" }, prevHash: "", hash: "",
+  });
+
+  it("reloads Home once, debounced, after an agent.progress entry", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const before = m.getHome.mock.calls.length;
+      await act(async () => {
+        h.onEntry!(entry("agent.progress"));
+        h.onEntry!(entry("agent.progress"));
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(m.getHome.mock.calls.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks for the selected project's Home", async () => {
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await waitFor(() => expect(m.getHome).toHaveBeenLastCalledWith("A"));
+    await waitFor(() => expect(m.projectFiles).toHaveBeenLastCalledWith("A"));
   });
 });

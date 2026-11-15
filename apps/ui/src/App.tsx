@@ -7,6 +7,7 @@ import type {
   ShareSnapshotRecord, Stage,
 } from "@theterminal/shared";
 import { innerEntry } from "@theterminal/shared";
+import type { HomeRuns, ProjectFiles } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import {
   ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, setUnauthorizedHandler, subscribeLedger,
@@ -646,6 +647,89 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
     };
   }, []);
 
+  // Home: the selected project's runs (every project's in the "all" scope), read again 500 ms after the last
+  // agent.*, run.* or link.mirrored entry.
+  const [homeScope, setHomeScope] = useState<"project" | "all">("project");
+  const [homeData, setHomeData] = useState<HomeRuns | null>(null);
+  const [homeError, setHomeError] = useState<string | null>(null);
+  const refreshHomeRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const projectId = homeScope === "all" ? null : selectedId;
+    let cancelled = false;
+    let gen = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    setHomeData(null);
+    setHomeError(null);
+    const load = async () => {
+      const mine = ++gen;
+      try {
+        const data = await api.getHome(projectId);
+        if (cancelled || mine !== gen) return;
+        setHomeData(data ?? null);
+        setHomeError(null);
+      } catch (e) {
+        if (cancelled || mine !== gen) return;
+        setHomeError(errorMessage(e));
+      }
+    };
+    refreshHomeRef.current = () => void load();
+    void load();
+    const off = subscribeEntries((e) => {
+      const type = innerEntry(e).type;
+      if (!(type.startsWith("agent.") || type.startsWith("run.") || e.type === "link.mirrored")) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        void load();
+      }, 500);
+    });
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      off();
+      refreshHomeRef.current = () => {};
+    };
+  }, [selectedId, homeScope, subscribeEntries]);
+
+  // The selected project's top-level files, read again on any project.* entry of it and on run.accepted.
+  const [filesData, setFilesData] = useState<ProjectFiles | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const refreshFilesRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    setFilesData(null);
+    setFilesError(null);
+    if (!selectedId) {
+      refreshFilesRef.current = () => {};
+      return;
+    }
+    let cancelled = false;
+    let gen = 0;
+    const load = async () => {
+      const mine = ++gen;
+      try {
+        const data = await api.projectFiles(selectedId);
+        if (cancelled || mine !== gen) return;
+        setFilesData(data ?? null);
+        setFilesError(null);
+      } catch (e) {
+        if (cancelled || mine !== gen) return;
+        setFilesError(errorMessage(e));
+      }
+    };
+    refreshFilesRef.current = () => void load();
+    void load();
+    const off = subscribeEntries((e) => {
+      if (e.projectId !== selectedId) return;
+      const type = innerEntry(e).type;
+      if (type.startsWith("project.") || type === "run.accepted") void load();
+    });
+    return () => {
+      cancelled = true;
+      off();
+      refreshFilesRef.current = () => {};
+    };
+  }, [selectedId, subscribeEntries]);
+
   // The Changes view's run: the one picked there, else the selected run, else the project's newest.
   const newestRunId = useMemo(
     () => runs.reduce<AgentRun | null>((n, r) => (n === null || r.startedAt > n.startedAt ? r : n), null)?.id ?? null,
@@ -755,6 +839,24 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
         setProjects((prev) => [...prev, p]);
         setSelectedId(p.id);
       }),
+    onProjectCreated: (p) => {
+      setProjects((prev) => (prev.some((x) => x.id === p.id) ? prev : [...prev, p]));
+      setSelectedId(p.id);
+    },
+    home: { data: homeData, error: homeError, scope: homeScope, setScope: setHomeScope, refresh: () => refreshHomeRef.current() },
+    projectFiles: { data: filesData, error: filesError, refresh: () => refreshFilesRef.current() },
+    onAcceptRun: async (runId) => {
+      try {
+        setError(null);
+        await api.acceptRun(runId);
+        refreshHomeRef.current();
+        refreshFilesRef.current();
+        return true;
+      } catch (e) {
+        setError(errorMessage(e, "sources"));
+        return false;
+      }
+    },
     board: selectedId ? board : null,
     onAddCard: (stage, title) =>
       void run(async () => {

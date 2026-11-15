@@ -16,6 +16,8 @@ import type {
   GateDecisionInput,
   GateEvaluation,
   GitHubOverview,
+  HomeRuns,
+  ProjectFiles,
   IntakeAnswer,
   IntakeView,
   LedgerEntry,
@@ -89,6 +91,14 @@ export type WorkbenchModel = {
   selectedId: string | null;
   onSelectProject: (id: string) => void;
   onCreateProject: (name: string) => void;
+  /** A project made from a source (files, GitHub, a folder): added to the list and selected. */
+  onProjectCreated: (p: Project) => void;
+  /** Home's runs: the selected project's, or every project's in the "all" scope; reloaded on agent.*, run.* and link.mirrored entries. */
+  home: { data: HomeRuns | null; error: string | null; scope: "project" | "all"; setScope(s: "project" | "all"): void; refresh(): void };
+  /** The selected project's top-level files; reloaded on project.* entries and run.accepted. */
+  projectFiles: { data: ProjectFiles | null; error: string | null; refresh(): void };
+  /** Accepts a finished run's changes into the project; true when the server did it, else the error is shown. */
+  onAcceptRun: (runId: string) => Promise<boolean>;
 
   board: Board | null;
   onAddCard: (stage: Stage, title: string) => void;
