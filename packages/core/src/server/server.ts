@@ -489,6 +489,10 @@ export async function createServer(opts: {
       secrets,
       testers: { ...CONNECTION_TESTERS, ...cloudTesters(sts) },
       fetch: fetchFn,
+      // Names other machines are told (publicConnections) are scrubbed like recorded text, and redacted of the token
+      // and minted values too (the runner is declared below; read lazily).
+      scrub: (t: string): string => recorded.scrub(t),
+      extraSecrets: (): string[] => [token, ...secretEnvValues(process.env), ...runner.mintedSecrets()],
     });
     await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
     // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().

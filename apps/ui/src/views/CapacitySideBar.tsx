@@ -5,6 +5,7 @@ import { useShell } from "../shell/model";
 import {
   CheckedAt, Estimate, cpuText, engineText, gpuText, hardwareSummary, memoryText, modelCount, planText, providerName, usd, useCapacityRefresh,
 } from "./CapacityPanel";
+import { shownName } from "./MachinesSideBar";
 
 /** The month's spend: against the budget when both exist, else alone, else `not reported` (never $0). */
 function Spend({ s }: { s: CapacitySource }) {
@@ -55,7 +56,7 @@ function MachineSection({ machine, id }: { machine: MachineCapacity; id: string 
   const n = modelCount(machine);
   return (
     <section aria-labelledby={id} className={machine.online ? undefined : "offline"}>
-      <h3 id={id}>{`${machine.name} · ${machine.online ? "online" : "offline"}`}</h3>
+      <h3 id={id}>{`${shownName(machine.name)} · ${machine.online ? "online" : "offline"}`}</h3>
       <ul>
         <li>{machine.hardware === null ? "Hardware not reported" : hardwareSummary(machine.hardware)}</li>
         <li>{`${n} ${n === 1 ? "local model" : "local models"}`}</li>

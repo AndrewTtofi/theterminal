@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { CapacitySource, Figure, HardwareInfo, LocalEngine, MachineCapacity } from "@theterminal/shared";
 import { OWN_LABEL, PROVIDER_NAMES } from "../components/ProviderAuthSettings";
 import { useShell } from "../shell/model";
+import { shownName } from "./MachinesSideBar";
 
 const REFRESH_MS = 60_000;
 const ESTIMATE_TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -63,7 +64,7 @@ function MachinesTable({ machines }: { machines: MachineCapacity[] }) {
       <tbody>
         {machines.map((m) => (
           <tr key={m.machineId} className={m.online ? undefined : "offline"}>
-            <td>{m.name}</td>
+            <td>{shownName(m.name)}</td>
             <td>{m.online ? "online" : "offline"}</td>
             <td>{m.hardware === null ? "not reported" : cpuText(m.hardware)}</td>
             <td>{m.hardware === null ? "not reported" : memoryText(m.hardware)}</td>

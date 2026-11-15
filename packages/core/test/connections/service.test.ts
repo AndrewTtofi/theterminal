@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
@@ -15,8 +15,10 @@ import {
   UnsupportedConnectionError,
   SecretInConfigError,
   UnknownFieldError,
+  PUBLIC_NAME_MAX,
   type ConnectionTester,
 } from "../../src/connections/service.js";
+import { pathScrubber, usernameScrubber } from "../../src/agents/scrub-paths.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const KEY = "sk-ant-TESTKEY-0000000000";
@@ -1194,5 +1196,49 @@ describe("publicConnections", () => {
     const svc = make();
     await addClaude(svc);
     expect(svc.publicConnections()).toEqual([]);
+  });
+
+  describe("names", () => {
+    const HOME = join(tmpdir(), "home-of-alice");
+    const USER = "alicetester";
+    const MINTED = "TESTKEY-minted-name-0000000000";
+    const LATER = "TESTKEY-later-name-0000000000";
+    const scrub = (t: string) => usernameScrubber(USER)(pathScrubber([[HOME, "~"]])(t));
+    const makeClean = () =>
+      new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId, scrub, extraSecrets: () => [MINTED] });
+    const aws = (svc: ConnectionService, name: string) =>
+      svc.add(owner, { kind: "cloud", provider: "aws", name, config: { region: "us-east-1" }, secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret } });
+    const nameOf = (svc: ConnectionService, id: string) => svc.publicConnections().find((c) => c.id === id)!.name;
+
+    it("redacts stored and minted secrets in a name, also one stored after the name was given", async () => {
+      const svc = makeClean();
+      const minted = await aws(svc, `Prod ${MINTED}`);
+      const later = await aws(svc, `Old ${LATER}`);
+      await svc.add(owner, { kind: "llm", provider: "local_model", name: "Local", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "m" }, secrets: { apiKey: LATER } });
+      const text = JSON.stringify(svc.publicConnections());
+      expect(text).not.toContain("TESTKEY");
+      expect(nameOf(svc, minted.id).startsWith("Prod ")).toBe(true);
+      expect(nameOf(svc, later.id).startsWith("Old ")).toBe(true);
+    });
+
+    it("scrubs paths and the username, strips email addresses and caps the length", async () => {
+      const svc = makeClean();
+      const path = await aws(svc, `Keys in ${join(HOME, "aws")}`);
+      const user = await aws(svc, `${USER} work account`);
+      const email = await aws(svc, "AWS for alice.tester+aws@example.co.uk billing");
+      const long = await aws(svc, "A".repeat(120));
+      expect(nameOf(svc, path.id)).toBe(`Keys in ${join("~", "aws")}`);
+      expect(nameOf(svc, user.id)).toBe("<user> work account");
+      expect(nameOf(svc, email.id)).toBe("AWS for <email> billing");
+      expect(nameOf(svc, long.id).length).toBeLessThanOrEqual(PUBLIC_NAME_MAX);
+      const text = JSON.stringify(svc.publicConnections());
+      for (const leak of [HOME, USER, "example.co.uk", "alice.tester"]) expect(text).not.toContain(leak);
+    });
+
+    it("scrubs this computer's home folder and username by default", async () => {
+      const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+      const c = await aws(svc, `Keys in ${join(homedir(), "aws")}`);
+      expect(nameOf(svc, c.id)).toBe(`Keys in ${join("~", "aws")}`);
+    });
   });
 });

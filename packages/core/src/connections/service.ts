@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
@@ -24,6 +25,7 @@ import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
+import { pathScrubber, usernameScrubber, type Scrub } from "../agents/scrub-paths.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { pairValueSecrets, pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 import { privateKeySecrets } from "./cloud/gcp.js";
@@ -113,7 +115,34 @@ export type ConnectionServiceDeps = {
   fetch?: typeof fetch;
   newId?: () => string;
   testTimeoutMs?: number;
+  /**
+   * Scrubs local paths and the username from a connection name before it leaves the computer (publicConnections).
+   * Default: this computer's home folder to `~` and the OS username to `<user>`.
+   */
+  scrub?: Scrub;
+  /** Secrets this service does not store (the session token, values minted for runs), redacted from public names. */
+  extraSecrets?: () => string[];
 };
+
+/** The longest connection name another machine is told. */
+export const PUBLIC_NAME_MAX = 60;
+// An address as people write it; replaced whole, so neither the mailbox nor the domain leaves the computer.
+const EMAIL = /[\p{L}\p{N}._%+'-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu;
+
+function osUsername(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return ""; // no passwd entry: nothing to scrub
+  }
+}
+
+function defaultScrub(): Scrub {
+  const paths = pathScrubber([[homedir(), "~"]]);
+  const user = usernameScrubber(osUsername());
+  // Paths first, so the home folder becomes `~` rather than a path ending in `<user>`.
+  return (s) => user(paths(s));
+}
 
 export type AddConnectionInput = {
   kind: ConnectionKind;
@@ -265,6 +294,8 @@ export class ConnectionService {
   private readonly fetchImpl: typeof fetch;
   private readonly newId: () => string;
   private readonly testTimeoutMs: number;
+  private readonly scrub: Scrub;
+  private readonly extraSecrets: () => string[];
   /** connectionId → field → value, for secret and private fields. */
   private cache = new Map<string, Record<string, string>>();
   /** Every secret value loaded or set in this process, removed ones included, for redaction. */
@@ -294,6 +325,8 @@ export class ConnectionService {
     this.fetchImpl = deps.fetch ?? fetch;
     this.newId = deps.newId ?? (() => randomUUID());
     this.testTimeoutMs = deps.testTimeoutMs ?? 10_000;
+    this.scrub = deps.scrub ?? defaultScrub();
+    this.extraSecrets = deps.extraSecrets ?? (() => []);
   }
 
   /**
@@ -657,7 +690,18 @@ export class ConnectionService {
   publicConnections(): PublicConnection[] {
     return this.rows()
       .filter((r) => r.enabled === 1 && (r.kind === "cloud" || r.kind === "mcp" || (r.kind === "llm" && r.provider === "local_model")))
-      .map((r) => ({ id: r.id, kind: r.kind, provider: r.provider, name: r.name }));
+      .map((r) => ({ id: r.id, kind: r.kind, provider: r.provider, name: this.publicName(r.name) }));
+  }
+
+  /**
+   * A name fit to leave the computer. Names were checked for secrets when given, but a secret stored or minted later
+   * may sit in one, and a path, the username or an email address never belongs on another machine: redacted (before
+   * and after scrubbing, as the runner does), scrubbed, emails replaced, and capped.
+   */
+  private publicName(name: string): string {
+    const secrets = [...this.secretValues(), ...this.extraSecrets()];
+    const cleaned = redact(this.scrub(redact(name, secrets)), secrets).replace(EMAIL, "<email>").trim();
+    return truncate(cleaned === "" ? "Connection" : cleaned, PUBLIC_NAME_MAX);
   }
 
   /** The plan and monthly budget of each enabled model connection. */

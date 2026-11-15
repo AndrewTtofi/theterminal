@@ -153,4 +153,11 @@ describe("CapacitySideBar", () => {
     renderSideBar({ report: report() });
     expect(screen.queryByRole("region", { name: / · (online|offline)$/ })).toBeNull();
   });
+
+  it("shows a remote machine's name with hidden characters made visible", () => {
+    const name = "GPU\u202Eexe.bat\u200Bbox";
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, name }] }) });
+    expect(screen.getByRole("region", { name: "GPU\\u202eexe.bat\\u200bbox · online" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
 });

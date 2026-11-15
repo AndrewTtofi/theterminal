@@ -115,4 +115,12 @@ describe("CapacityPanel", () => {
     renderPanel({ report: report() });
     expect(screen.queryByRole("table", { name: "Machines" })).toBeNull();
   });
+
+  it("shows a remote machine's name with hidden characters made visible", () => {
+    const name = "GPU\u202Eexe.bat\u200Bbox";
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, name }] }) });
+    const first = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    expect(within(first).getAllByRole("cell")[0]!.textContent).toBe("GPU\\u202eexe.bat\\u200bbox");
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
 });
