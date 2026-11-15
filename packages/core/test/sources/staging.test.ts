@@ -146,7 +146,7 @@ describe("ImportStaging", () => {
     const redact = (s: string) => s.replace(/ghp_TESTKEY\w*/g, "[redacted]");
     const s = new ImportStaging(dir, { includeSecrets: false, redact });
     await s.add("ghp_TESTKEY0123456789.txt", body("x"));
-    await s.add("a‮b.pem", body("x"));
+    await s.add("a\u202eb.pem", body("x"));
     for (let i = 0; i < 25; i++) await s.add(`k${i}.key`, body("x"));
     try {
       s.finish();
