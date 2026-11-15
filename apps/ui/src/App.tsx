@@ -8,6 +8,7 @@ import { ApiError, api, blockedGates, errorMessage, subscribeLedger } from "./ap
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun } from "./shell/model";
+import type { OverrideOutcome } from "./shell/model";
 import type { AppModel, GatePrompt, LedgerScope } from "./shell/model";
 import { useConnections } from "./use-connections";
 
@@ -308,15 +309,12 @@ export function App() {
     }
   };
 
-  /** Sends an emergency override; false when the server refused it, with the refusal shown. */
-  const overrideAction = async (send: () => Promise<unknown>): Promise<boolean> => {
+  /** Sends an emergency override; a refusal comes back worded, for the form to show where the Owner is looking. */
+  const overrideAction = async <T extends object>(send: () => Promise<T>): Promise<OverrideOutcome<T>> => {
     try {
-      setError(null);
-      await send();
-      return true;
+      return { ok: true, ...(await send()) };
     } catch (e) {
-      setError(errorMessage(e));
-      return false;
+      return { ok: false, error: errorMessage(e) };
     }
   };
 

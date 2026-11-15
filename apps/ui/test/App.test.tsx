@@ -711,24 +711,28 @@ describe("App Changes view", () => {
     expect(await screen.findByText("0 files changed · +0 −0")).toBeTruthy();
   });
 
-  it("discards through the override route and shows a refusal's message, keeping the reason", async () => {
+  it("discards through the override route, shows a refusal inside the form and the server's count after", async () => {
     vi.mocked(errorMessage).mockImplementation(() => "Stop the agent first: it is still working in this run");
     const refusal = new ApiError(409, "run_active");
-    m.overrideDiscard.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ overrideId: "o1", files: 1 });
+    m.overrideDiscard.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ overrideId: "o1", files: 2 });
     await openChanges();
     await screen.findByText("1 file changed · +1 −0");
     await userEvent.click(screen.getByText("Emergency override"));
     const form = screen.getByRole("group", { name: "Discard this run's changes" });
     await userEvent.click(within(form).getByRole("button", { name: "Discard…" }));
     await userEvent.type(within(form).getByLabelText("Why? (required, at least 10 characters)"), "The agent broke the build");
-    await userEvent.click(within(form).getByRole("button", { name: /^Discard / }));
-    expect(await screen.findByText("Stop the agent first: it is still working in this run")).toBeTruthy();
+    await userEvent.click(within(form).getByRole("button", { name: /^Discard (\d|uncommitted)/ }));
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm discard" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe("Stop the agent first: it is still working in this run");
     expect(m.overrideDiscard).toHaveBeenCalledWith("run2", "The agent broke the build");
     expect(errorMessage).toHaveBeenCalledWith(refusal);
-    expect((within(form).getByLabelText("Why? (required, at least 10 characters)") as HTMLInputElement).value).toBe("The agent broke the build");
-    await userEvent.click(within(form).getByRole("button", { name: /^Discard / }));
-    expect(await screen.findByText("Recorded. Watch the Ledger or the Terminal for the result.")).toBeTruthy();
-    expect(screen.queryByText("Stop the agent first: it is still working in this run")).toBeNull();
+    await userEvent.click(within(form).getByRole("button", { name: "Confirm discard" }));
+    await waitFor(() =>
+      expect(within(form).getByRole("status").textContent).toBe(
+        "Recorded: 2 uncommitted files discarded. Watch the Ledger or the Terminal for the result.",
+      ),
+    );
+    expect(within(form).queryByRole("alert")).toBeNull();
   });
 
   it("runs a command through the override route", async () => {

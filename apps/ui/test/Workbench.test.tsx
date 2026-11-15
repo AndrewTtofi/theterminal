@@ -111,8 +111,8 @@ function model(over: Partial<AppModel> = {}): AppModel {
     dir: vi.fn().mockReturnValue(new Promise(() => {})),
     file: vi.fn().mockReturnValue(new Promise(() => {})),
     diff: vi.fn().mockReturnValue(new Promise(() => {})),
-    onOverrideCommand: vi.fn(async () => true),
-    onOverrideDiscard: vi.fn(async () => true),
+    onOverrideCommand: vi.fn(async () => ({ ok: true as const })),
+    onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 0 })),
     ...over,
   };
 }

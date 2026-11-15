@@ -341,3 +341,6 @@ details.override input, details.override textarea { width: 100%; }
 .override-confirm { border: 1px solid var(--override); padding: 6px; margin-top: 6px; }
 .override-confirm ol { margin: 0; padding-left: 20px; }
 .override-confirm code { white-space: pre-wrap; word-break: break-all; }
+.override-confirm:focus { outline: 1px solid var(--focus); outline-offset: 1px; }
+.override-error { color: var(--override); font-weight: 600; }
+details.override [role="status"]:empty { margin: 0; }

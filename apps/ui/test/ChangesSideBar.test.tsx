@@ -202,7 +202,7 @@ describe("ChangesSideBar", () => {
   });
 
   it("offers the emergency override for the run it shows", () => {
-    const { model } = setup({ onOverrideDiscard: vi.fn(async () => true), onOverrideCommand: vi.fn(async () => true) });
+    const { model } = setup({ onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 0 })), onOverrideCommand: vi.fn(async () => ({ ok: true as const })) });
     expect(screen.getByText("Emergency override").tagName).toBe("SUMMARY");
     expect(screen.queryByText("Stop the agent first.")).toBeNull();
     expect(model.onOverrideDiscard).not.toHaveBeenCalled();

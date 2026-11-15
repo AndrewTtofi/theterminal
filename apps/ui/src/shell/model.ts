@@ -58,6 +58,9 @@ export function namesRun(e: LedgerEntry, runId: string): boolean {
   return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
 }
 
+/** What an emergency override request came to: recorded, or refused with a message for the Owner. */
+export type OverrideOutcome<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };
+
 /** Everything the shell shows and every action it can take; App owns the data and the API calls. */
 export type WorkbenchModel = {
   projects: Project[];
@@ -149,10 +152,11 @@ export type WorkbenchModel = {
   diff: (runId: string, path: string) => Promise<FileDiff>;
   /**
    * Emergency override: runs a program as the Owner in the run's working copy, or drops its uncommitted changes.
-   * Each resolves true when the server recorded it, and false when it was refused, with the refusal shown.
+   * Each resolves `ok: true` when the server recorded it (a discard with how many uncommitted files it dropped), and
+   * `ok: false` with the refusal worded for the Owner, for the form to show.
    */
-  onOverrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) => Promise<boolean>;
-  onOverrideDiscard: (runId: string, reason: string) => Promise<boolean>;
+  onOverrideCommand: (runId: string, i: { program: string; args: string[]; cwd?: string; reason: string }) => Promise<OverrideOutcome>;
+  onOverrideDiscard: (runId: string, reason: string) => Promise<OverrideOutcome<{ files: number }>>;
   /** Opens (or shows) the diff tab of one file of a run. */
   onOpenDiff: (runId: string, path: string) => void;
   /** Opens (or shows) the read-only tab of one file of a run. */
