@@ -9,6 +9,8 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { Workbench } from "../src/shell/Workbench";
 import type { WorkbenchModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
+import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
+import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
@@ -87,6 +89,12 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     connections: connectionsModel(),
     github: { overview: null, error: null, refresh: vi.fn() },
     capacity: { report: null, error: null, refresh: vi.fn() },
+    intake: null,
+    onStartIntake: vi.fn().mockResolvedValue(true),
+    onAnswerIntake: vi.fn().mockResolvedValue(true),
+    onDecideIntake: vi.fn().mockResolvedValue(true),
+    onCompleteIntake: vi.fn().mockResolvedValue(true),
+    onReopenIntake: vi.fn().mockResolvedValue(true),
     ...over,
   };
 }
@@ -327,5 +335,62 @@ describe("Workbench", () => {
     expect(side.style.width).toBe("480px");
     for (let i = 0; i < 40; i++) await userEvent.keyboard("{ArrowLeft}");
     expect(handle.getAttribute("aria-valuenow")).toBe("200");
+  });
+
+  describe("plan intake", () => {
+    const statusWith = (intakeProjects: Status["intakeProjects"]): Status => ({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects,
+    });
+
+    it("opens the Plan intake tab from the Projects side bar", async () => {
+      const { container } = render(<Workbench model={model()} />);
+      expect(screen.getByText("Plan: not started")).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: "Plan intake" }));
+      const tab = container.querySelector('[data-panel="intake"]');
+      expect(tab?.getAttribute("data-active")).toBe("true");
+      expect(within(tab as HTMLElement).getByRole("region", { name: "Plan intake" })).toBeTruthy();
+    });
+
+    it("keeps the plan notice in the strip in the Connections view with the bottom panel closed, and opens the tab", async () => {
+      const { container } = render(
+        <Workbench model={model({ intake: intakeView(ALL_ANSWERS), status: statusWith([{ projectId: "p1", name: "Local Model Hub", decisions: 2 }]) })} />,
+      );
+      await userEvent.click(view("Connections"));
+      await userEvent.keyboard("{Control>}j{/Control}");
+      expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      const item = strip.querySelector<HTMLElement>("div.needs-you-item")!;
+      expect(item.textContent).toContain("Your plan needs 2 decisions");
+      expect(strip.querySelectorAll("div.needs-you-item")).toHaveLength(1);
+      await userEvent.click(within(item).getByRole("button", { name: "Open intake" }));
+      expect(container.querySelector('[data-panel="intake"]')?.getAttribute("data-active")).toBe("true");
+    });
+
+    it("shows other projects' open plan decisions in the strip and the Needs you side bar, selecting the project", async () => {
+      const onSelectProject = vi.fn();
+      const { container } = render(
+        <Workbench
+          model={model({ onSelectProject, status: statusWith([{ projectId: "p2", name: "Book Club", decisions: 1 }]) })}
+        />,
+      );
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.textContent).toContain("The plan for Book Club needs 1 decision");
+      expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+      await userEvent.click(within(strip).getByRole("button", { name: "Open intake" }));
+      expect(onSelectProject).toHaveBeenCalledWith("p2");
+      expect(container.querySelector('[data-panel="intake"]')?.getAttribute("data-active")).toBe("true");
+
+      await userEvent.click(view("Needs you"));
+      const side = screen.getByRole("complementary", { name: "Side bar" });
+      expect(side.textContent).toContain("The plan for Book Club needs 1 decision");
+      expect(within(side).getByRole("button", { name: "Open intake" })).toBeTruthy();
+    });
+
+    it("does not show the strip once the plan's decisions are made", () => {
+      render(<Workbench model={model({ intake: intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }) })} />);
+      expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    });
   });
 });

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DecisionCard } from "../components/DecisionCard";
+import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
 import { BoardView } from "../views/BoardView";
 import { CapacityPanel } from "../views/CapacityPanel";
 import { ConnectionEditor } from "../views/ConnectionEditor";
+import { IntakePanel } from "../views/IntakePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { ActivityBar } from "./ActivityBar";
 import { staleConnectionPanels } from "./dock-layout";
@@ -19,6 +21,7 @@ import type { ViewId } from "./views";
 // Stable registry: dockview keys components by name, so this object must not change between renders.
 const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
+  intake: IntakePanel,
 };
 
 type Props = { model: WorkbenchModel };
@@ -46,6 +49,9 @@ export function Workbench({ model }: Props) {
 
   const running = model.runs.filter((r) => r.status === "running").length;
   const pending = model.pending.length;
+  const notices = intakeNotices(model);
+  /** Everything waiting on the Owner: agent actions and open plan decisions. */
+  const waiting = pending + notices.reduce((a, n) => a + n.decisions, 0);
 
   const selectView = (v: ViewId) => {
     // The Board view's home is the Board tab: bring it back if it was closed.
@@ -94,12 +100,13 @@ export function Workbench({ model }: Props) {
     <ShellContext.Provider value={ctx}>
       <div className="workbench">
         <div className="workbench-body">
-          <ActivityBar active={sideOpen ? view : null} running={running} pending={pending} onSelect={selectView} />
+          <ActivityBar active={sideOpen ? view : null} running={running} pending={waiting} onSelect={selectView} />
           {sideOpen && <SideBar view={view} width={width} onResize={setWidth} />}
           <main className="main-column">
-            {pending > 0 && (
+            {(pending > 0 || notices.length > 0) && (
               <section className="needs-you" aria-label="Needs you">
                 <h2>Needs you</h2>
+                <IntakeNotices notices={notices} />
                 {model.pending.map((a) => (
                   <DecisionCard key={a.id} action={a} projectName={a.projectName} onDecide={model.onDecide} />
                 ))}
@@ -110,7 +117,7 @@ export function Workbench({ model }: Props) {
             </div>
           </main>
         </div>
-        <StatusBar status={model.status} running={running} pending={pending} onSelectView={selectView} onResetLayout={() => dockRef.current?.reset()} />
+        <StatusBar status={model.status} running={running} pending={waiting} onSelectView={selectView} onResetLayout={() => dockRef.current?.reset()} />
       </div>
     </ShellContext.Provider>
   );

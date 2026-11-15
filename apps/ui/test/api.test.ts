@@ -161,3 +161,47 @@ describe("sign-in api", () => {
     expect(call(f, 3)[0]).toBe("/api/connections/signin-status");
   });
 });
+
+describe("intake api", () => {
+  it("reads a project's intake, and null when it has none", async () => {
+    let f = respond(200, { step: "answer" });
+    expect(await api.getIntake("p/1")).toEqual({ step: "answer" });
+    expect(call(f, 0)[0]).toBe("/api/projects/p%2F1/intake");
+    f = respond(404, { error: "no_intake" });
+    expect(await api.getIntake("p1")).toBeNull();
+    respond(404, { error: "not_found" });
+    expect(await api.getIntake("p1").catch((e: unknown) => e)).toMatchObject({ status: 404, code: "not_found" });
+  });
+
+  it("starts, answers, decides, completes and reopens on the intake routes", async () => {
+    const f = respond(200, {});
+    await api.startIntake("p1", "a reading list");
+    await api.answerIntake("p1", "payments", "yes");
+    await api.decideIntake("p1", "first_version", "full", "");
+    await api.decideIntake("p1", "hosting", "local");
+    await api.completeIntake("p1");
+    await api.reopenIntake("p1", "We will take payments");
+    const sent = (f.mock.calls as [string, RequestInit][]).map(([url, init]) => [
+      url, init.method, init.body === undefined ? undefined : JSON.parse(String(init.body)),
+    ]);
+    expect(sent).toEqual([
+      ["/api/projects/p1/intake", "POST", { idea: "a reading list" }],
+      ["/api/projects/p1/intake/answers", "POST", { questionId: "payments", answer: "yes" }],
+      ["/api/projects/p1/intake/decisions", "POST", { decisionId: "first_version", chosen: "full", rationale: "" }],
+      ["/api/projects/p1/intake/decisions", "POST", { decisionId: "hosting", chosen: "local" }],
+      ["/api/projects/p1/intake/complete", "POST", undefined],
+      ["/api/projects/p1/intake/reopen", "POST", { reason: "We will take payments" }],
+    ]);
+    expect(call(f, 4)[1].headers).toBeUndefined();
+  });
+
+  it("words the intake refusals", () => {
+    expect(errorMessage(new ApiError(409, "intake_incomplete", { missing: { questions: [], decisions: ["hosting"] } }))).toBe(
+      "Answer every question and make every decision first",
+    );
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
+    expect(errorMessage(new ApiError(409, "intake_completed"))).toBe("This plan is approved. Reopen it to change answers.");
+    expect(errorMessage(new ApiError(409, "conflict"), "intake")).toBe("This project already has a plan intake");
+    expect(errorMessage(new ApiError(409, "decision_not_applicable"))).toBe("That decision no longer applies to your answers");
+  });
+});

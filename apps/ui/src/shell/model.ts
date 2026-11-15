@@ -6,13 +6,17 @@ import type {
   AuthMode,
   Board,
   CapacityReport,
+  DecisionId,
   GitHubOverview,
+  IntakeAnswer,
+  IntakeView,
   LedgerEntry,
   NarrationContext,
   NarrationTopic,
   PendingAgentAction,
   Project,
   Provider,
+  QuestionId,
   Stage,
 } from "@theterminal/shared";
 import type { AgentsInfo, Status } from "../api";
@@ -70,6 +74,18 @@ export type WorkbenchModel = {
 
   /** The Capacity view's data: the last report, or the error code of the last failed load. */
   capacity: { report: CapacityReport | null; error: string | null; refresh: () => void };
+
+  /**
+   * The selected project's guided intake: null when it has none, undefined while loading. Reloaded on any
+   * intake.* or card.* entry of the selected project.
+   */
+  intake: IntakeView | null | undefined;
+  /** Each resolves true when the server accepted the change; a refusal is shown as the error message. */
+  onStartIntake: (idea: string) => Promise<boolean>;
+  onAnswerIntake: (questionId: QuestionId, answer: IntakeAnswer) => Promise<boolean>;
+  onDecideIntake: (decisionId: DecisionId, chosen: string, rationale?: string) => Promise<boolean>;
+  onCompleteIntake: () => Promise<boolean>;
+  onReopenIntake: (reason: string) => Promise<boolean>;
 };
 
 export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };

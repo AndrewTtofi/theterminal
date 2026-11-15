@@ -12,11 +12,15 @@ import type {
   ConnectionKind,
   ConnectionProvider,
   GitHubOverview,
+  DecisionId,
   HardwareInfo,
+  IntakeAnswer,
+  IntakeView,
   LedgerEntry,
   PendingAgentAction,
   Project,
   Provider,
+  QuestionId,
   Stage,
 } from "@theterminal/shared";
 
@@ -108,6 +112,10 @@ export type Status = {
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
   /** null when GitHub is not connected. */
   ci: CiStatus | null;
+  /** Undecided plan decisions over every open intake. */
+  intakeDecisions: number;
+  /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
+  intakeProjects: { projectId: string; name: string; decisions: number }[];
 };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
@@ -164,6 +172,28 @@ export const api = {
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
   cancelSignIn: (id: string) => request<void>(`/api/connections/signin/${enc(id)}`, { method: "DELETE" }),
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
+  /** The project's guided intake, or null when it has none yet. */
+  getIntake: async (projectId: string): Promise<IntakeView | null> => {
+    try {
+      return await request<IntakeView>(`/api/projects/${enc(projectId)}/intake`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404 && e.code === "no_intake") return null;
+      throw e;
+    }
+  },
+  startIntake: (projectId: string, idea: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake`, { method: "POST", body: { idea } }),
+  answerIntake: (projectId: string, questionId: QuestionId, answer: IntakeAnswer) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/answers`, { method: "POST", body: { questionId, answer } }),
+  decideIntake: (projectId: string, decisionId: DecisionId, chosen: string, rationale?: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/decisions`, {
+      method: "POST",
+      body: rationale === undefined ? { decisionId, chosen } : { decisionId, chosen, rationale },
+    }),
+  /** Sent with no body: the route takes none. */
+  completeIntake: (projectId: string) => request<IntakeView>(`/api/projects/${enc(projectId)}/intake/complete`, { method: "POST" }),
+  reopenIntake: (projectId: string, reason: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/reopen`, { method: "POST", body: { reason } }),
 };
 
 /** Why a Codex run cannot be given an MCP server; the picker and the MCP editors show it too. */
@@ -186,10 +216,18 @@ export function exportLedgerUrl(projectId: string | null): string {
   return projectId === null ? "/api/ledger/export" : `/api/ledger/export?projectId=${encodeURIComponent(projectId)}`;
 }
 
-/** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
-export function errorMessage(e: unknown, context?: "run"): string {
+/**
+ * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
+ * `context: "intake"` words a conflict as the project already having an intake.
+ */
+export function errorMessage(e: unknown, context?: "run" | "intake"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
+    if (e.code === "secret_in_text") return "That text looks like it contains a key or password. It was not saved.";
+    if (e.code === "intake_completed") return "This plan is approved. Reopen it to change answers.";
+    if (e.code === "decision_not_applicable") return "That decision no longer applies to your answers";
+    if (context === "intake" && e.status === 409 && e.code === "conflict") return "This project already has a plan intake";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
     if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;

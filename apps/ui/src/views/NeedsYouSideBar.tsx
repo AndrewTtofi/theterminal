@@ -1,16 +1,21 @@
 import { DecisionCard } from "../components/DecisionCard";
+import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
 import { useShell } from "../shell/model";
 
 export function NeedsYouSideBar() {
   const { model } = useShell();
-  if (model.pending.length === 0) return <p className="empty">Nothing needs you right now.</p>;
+  const notices = intakeNotices(model);
+  if (model.pending.length === 0 && notices.length === 0) return <p className="empty">Nothing needs you right now.</p>;
   return (
-    <ul className="needs-you-list">
-      {model.pending.map((a) => (
-        <li key={a.id}>
-          <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} />
-        </li>
-      ))}
-    </ul>
+    <>
+      <IntakeNotices notices={notices} />
+      <ul className="needs-you-list">
+        {model.pending.map((a) => (
+          <li key={a.id}>
+            <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} />
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }

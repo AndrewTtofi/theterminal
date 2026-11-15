@@ -224,3 +224,30 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .capacity-footer { color: var(--muted); margin: 8px 0 0; }
 .status-item .attention { color: var(--attention); }
 abbr[title] { text-decoration: underline dotted; cursor: help; }
+
+/* Plan intake: the side bar's state line, the strip's notices, the tab and its decision cards. */
+.plan-state { padding: 8px 0; border-top: 1px solid var(--line); }
+.plan-state p { margin: 0 0 6px; color: var(--muted); }
+.needs-you-item { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 6px 8px; margin-bottom: 6px; background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; }
+.intake-panel { padding: 12px 16px; max-width: 860px; overflow: auto; height: 100%; }
+.intake-panel .notice { margin: 0 0 12px; padding: 6px 8px; border-left: 3px solid var(--attention); background: var(--panel); }
+.intake-panel .idea, .intake-panel .progress, .intake-panel .note, .intake-panel .approved { color: var(--muted); }
+.intake-panel textarea { display: block; width: 100%; min-height: 64px; margin: 4px 0; }
+.intake-panel label { display: block; }
+.intake-question { border: 0; padding: 0; margin: 0 0 14px; }
+.intake-question legend, .intake-question > label { color: var(--fg-strong); padding: 0; }
+.intake-question .help { margin: 2px 0 4px; font-size: 12px; color: var(--muted); }
+.intake-options { list-style: none; padding: 0; margin: 4px 0 8px; }
+.intake-options li { margin-bottom: 4px; }
+.intake-options label { display: inline; }
+.intake-options .recommended { margin-left: 8px; padding: 0 6px; border-radius: 8px; background: var(--ok); color: #fff; font-size: 11px; }
+.intake-options .tradeoffs { margin: 2px 0 0 22px; font-size: 12px; color: var(--muted); }
+.intake-decision h4 { margin: 8px 0 2px; font-size: 12px; }
+.intake-decision .because ul { margin: 2px 0 6px; padding-left: 18px; }
+.intake-decision .decided { color: var(--ok); margin: 6px 0; }
+.intake-change { margin-top: 16px; }
+.intake-change > summary { cursor: pointer; margin-bottom: 8px; }
+.intake-plan .summary { color: var(--fg-strong); }
+.intake-plan .problem { color: var(--attention); }
+.plan-cards { padding-left: 18px; }
+.plan-cards .stage { color: var(--fg-strong); }

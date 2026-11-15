@@ -12,6 +12,8 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   pendingDecisions: 1,
   connections: { enabled: 3, failed: 1, keychain: "ok", ...over },
   ci: null,
+  intakeDecisions: 0,
+  intakeProjects: [],
 });
 const noop = { onSelectView: vi.fn(), onResetLayout: vi.fn() };
 
@@ -43,6 +45,18 @@ describe("StatusBar", () => {
     for (const text of ["Agents running: 2", "Today: $0.40", "Needs you: 1", "Connections: 3 connected, 1 failed", "CI: not connected"]) {
       expect(bar.textContent).toContain(text);
     }
+  });
+
+  it("counts open plan decisions in Needs you", () => {
+    render(
+      <StatusBar
+        status={{ ...status(), pendingDecisions: 1, intakeDecisions: 2, intakeProjects: [{ projectId: "p1", name: "Book Club", decisions: 2 }] }}
+        running={0}
+        pending={0}
+        {...noop}
+      />,
+    );
+    expect(screen.getByText("Needs you: 3")).toBeTruthy();
   });
 
   it("leaves out the failed count when nothing failed", () => {

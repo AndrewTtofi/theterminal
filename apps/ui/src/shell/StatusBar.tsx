@@ -16,7 +16,7 @@ type Props = {
 
 export function StatusBar({ status, running, pending, onSelectView, onResetLayout }: Props) {
   const runningCount = status?.runningAgents ?? running;
-  const needsYou = status?.pendingDecisions ?? pending;
+  const needsYou = status ? status.pendingDecisions + status.intakeDecisions : pending;
   const cost = (status?.todayCostUsd ?? 0).toFixed(2);
   const month = status?.monthCostUsd ?? 0;
   const budget = status?.monthlyBudgetUsd ?? null;

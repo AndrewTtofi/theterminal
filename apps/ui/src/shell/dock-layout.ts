@@ -4,7 +4,7 @@ import type { CatalogEntry } from "@theterminal/shared";
 /** Share of the dock's height the bottom panel takes in the default layout. */
 export const BOTTOM_SHARE = 0.3;
 
-/** The registry key for a panel id: `connection:<x>` panels share the `connection` component. */
+/** The registry key for a panel id: `connection:<x>` panels share the `connection` component, `story:<card>` the `story` one. */
 export const componentOf = (id: string) => id.split(":")[0]!;
 
 /** Main group with the Board; bottom group (30 %) with the Agent feed and the Ledger, Ledger active. */

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, LedgerEntry, NarrationContext, NarrationTopic,
-  PendingAgentAction, Project,
+  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, IntakeView, LedgerEntry, NarrationContext,
+  NarrationTopic, PendingAgentAction, Project,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, api, errorMessage, subscribeLedger } from "./api";
@@ -42,6 +42,11 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [board, setBoard] = useState<BoardData | null>(null);
+  const [intake, setIntake] = useState<IntakeView | null | undefined>(undefined);
+  const refreshIntake = useRef<() => void>(() => {});
+  /** The selected project as of the latest render, so a late intake answer for another project is dropped. */
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selectedId;
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
   const [ledgerTopics, setLedgerTopics] = useState<NarrationTopic[]>(LEDGER_TOPICS);
@@ -208,6 +213,7 @@ export function App() {
         setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
         refresh();
         if (e.type.startsWith("agent.")) refreshAgents.current();
+        if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
       });
     });
     return () => {
@@ -216,6 +222,41 @@ export function App() {
       unsubscribe();
     };
   }, [selectedId, run]);
+
+  // The selected project's guided intake: undefined while it loads, null when the project has none.
+  useEffect(() => {
+    setIntake(undefined);
+    if (!selectedId) return;
+    let cancelled = false;
+    const refresh = coalesced(async () => {
+      const view = await api.getIntake(selectedId);
+      if (!cancelled) setIntake(view);
+    }, () => cancelled);
+    refreshIntake.current = refresh;
+    refresh();
+    return () => {
+      cancelled = true;
+      refreshIntake.current = () => {};
+    };
+  }, [selectedId]);
+
+  /** Runs an intake change for the selected project and shows the view the server returns; false when refused. */
+  const intakeAction = async (
+    change: (projectId: string) => Promise<IntakeView>,
+    context?: "intake",
+  ): Promise<boolean> => {
+    const projectId = selectedId;
+    if (!projectId) return false;
+    try {
+      setError(null);
+      const view = await change(projectId);
+      if (selectedRef.current === projectId) setIntake(view);
+      return true;
+    } catch (e) {
+      setError(errorMessage(e, context));
+      return false;
+    }
+  };
 
   // The "All projects" ledger scope loads and streams every project's entries while it is chosen.
   useEffect(() => {
@@ -323,6 +364,12 @@ export function App() {
     status,
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
+    intake: selectedId ? intake : undefined,
+    onStartIntake: (idea) => intakeAction((id) => api.startIntake(id, idea), "intake"),
+    onAnswerIntake: (questionId, answer) => intakeAction((id) => api.answerIntake(id, questionId, answer)),
+    onDecideIntake: (decisionId, chosen, rationale) => intakeAction((id) => api.decideIntake(id, decisionId, chosen, rationale)),
+    onCompleteIntake: () => intakeAction((id) => api.completeIntake(id)),
+    onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason)),
   };
 
   return (

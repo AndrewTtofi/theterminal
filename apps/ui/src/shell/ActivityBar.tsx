@@ -6,7 +6,7 @@ type Props = {
   active: ViewId | null;
   /** Running agent runs, badged on Agents. */
   running: number;
-  /** Pending decisions, badged on Needs you. */
+  /** Pending decisions and open plan decisions, badged on Needs you. */
   pending: number;
   onSelect: (view: ViewId) => void;
 };

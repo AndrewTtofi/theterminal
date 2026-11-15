@@ -39,6 +39,12 @@ vi.mock("../src/api", () => ({
     removeConnection: vi.fn(),
     testConnection: vi.fn(),
     getGitHubOverview: vi.fn(),
+    getIntake: vi.fn(),
+    startIntake: vi.fn(),
+    answerIntake: vi.fn(),
+    decideIntake: vi.fn(),
+    completeIntake: vi.fn(),
+    reopenIntake: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     constructor(readonly status: number, readonly code: string) {
@@ -62,6 +68,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { ApiError, api } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
+import { intakeView } from "./intake-fixtures";
 
 const mk = (id: string): Board => ({
   project: { id, name: `Project ${id}`, pitch: "", createdAt: "" },
@@ -84,8 +91,9 @@ beforeEach(() => {
   h.subs.clear();
   m.getStatus.mockResolvedValue({
     runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
   });
+  m.getIntake.mockResolvedValue(null);
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
   m.listProjects.mockResolvedValue([mk("A").project, mk("B").project]);
   m.listLedger.mockResolvedValue([]);
@@ -166,6 +174,53 @@ describe("App board refresh", () => {
     });
     await waitFor(() => expect(m.getBoard).toHaveBeenCalled());
     expect(m.getBoard.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("App plan intake", () => {
+  const entry = (seq: number, type: LedgerEntry["type"], projectId = "A"): LedgerEntry => ({
+    seq, id: String(seq), ts: "2026-01-01T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type, payload: {}, prevHash: "", hash: "",
+  });
+
+  it("loads the selected project's intake, reloads it on its intake and card entries, and shows a saved answer", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    expect(await screen.findByText("Plan: not started")).toBeTruthy();
+    expect(m.getIntake).toHaveBeenCalledWith("A");
+    await waitFor(() => expect(h.subs.size).toBe(2));
+
+    m.getIntake.mockResolvedValue(intakeView({ audience: "book club members" }));
+    await act(async () => h.onEntry!(entry(8, "intake.answered")));
+    expect(await screen.findByText("Plan: 1 of 9 questions answered")).toBeTruthy();
+    const calls = m.getIntake.mock.calls.length;
+    await act(async () => h.onEntry!(entry(9, "card.created")));
+    await waitFor(() => expect(m.getIntake.mock.calls.length).toBe(calls + 1));
+    await act(async () => h.onEntry!(entry(10, "intake.answered", "B")));
+    await act(async () => h.onEntry!(entry(11, "agent.started")));
+    expect(m.getIntake.mock.calls.length).toBe(calls + 1);
+
+    m.answerIntake.mockResolvedValue(intakeView({ audience: "book club members", payments: "yes" }));
+    await userEvent.click(screen.getByRole("button", { name: "Plan intake" }));
+    const payments = await screen.findByRole("group", { name: "Will it take payments?" });
+    await userEvent.click(within(payments).getByRole("radio", { name: "Yes" }));
+    expect(m.answerIntake).toHaveBeenCalledWith("A", "payments", "yes");
+    expect(await screen.findByText("Plan: 2 of 9 questions answered")).toBeTruthy();
+  });
+
+  it("shows the refusal and keeps the view when a change is refused", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.startIntake.mockRejectedValue(new ApiError(400, "secret_in_text"));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Plan intake" }));
+    const panel = await screen.findByRole("region", { name: "Plan intake" });
+    await userEvent.type(within(panel).getByLabelText("Describe your idea"), "key sk-123");
+    await userEvent.click(within(panel).getByRole("button", { name: "Begin" }));
+    expect(m.startIntake).toHaveBeenCalledWith("A", "key sk-123");
+    expect(await screen.findByText("err")).toBeTruthy();
+    expect((within(panel).getByLabelText("Describe your idea") as HTMLTextAreaElement).value).toBe("key sk-123");
   });
 });
 
