@@ -15,6 +15,7 @@ const samples = JSON.parse(readFileSync(new URL("./fixtures/ledger-payloads-lega
 
 /** Event types added after the zod 4 upgrade: no zod 3 ledger ever held them, so they have no legacy sample. */
 const ADDED_AFTER_ZOD_3: readonly EventType[] = [
+  "agent.progress",
   "agent.rate_limited",
   "intake.started",
   "intake.answered",

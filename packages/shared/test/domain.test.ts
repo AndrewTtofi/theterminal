@@ -91,6 +91,7 @@ describe("eventPayloadSchemas", () => {
       "agent.action.requested",
       "agent.finished",
       "agent.message",
+      "agent.progress",
       "agent.rate_limited",
       "agent.started",
       "card.created",

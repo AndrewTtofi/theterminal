@@ -110,6 +110,16 @@ describe("narrate: agent", () => {
     ).toBe('Owner started a Fake agent: "go"');
   });
 
+  it("narrates agent.progress", () => {
+    const steps = ["Read the code", "Write the fix", "Run the tests"];
+    const fin = n(entry("agent.progress", { runId: "r1", steps, done: [1, 2], current: null }, agentActor), ctx);
+    expect(fin.headline).toBe('Claude finished step 2 of 3: "Write the fix"');
+    expect(fin.topic).toBe("agent");
+    expect(h(entry("agent.progress", { runId: "r1", steps, done: [1, 2], current: 3 }, agentActor), ctx)).toBe(
+      'Claude started step 3 of 3: "Run the tests"',
+    );
+  });
+
   it("names the agent by its adapter when the context knows the run", () => {
     expect(h(entry("agent.message", { runId: "r1", text: "hi" }, agentActor), ctx)).toBe('The Claude agent said: "hi"');
     const out = n(entry("agent.message", { runId: "r2", text: "y".repeat(130) }, agentActor), ctx);

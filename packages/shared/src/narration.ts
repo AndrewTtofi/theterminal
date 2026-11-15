@@ -365,6 +365,19 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       const text = str(p.text);
       return { headline: fit(`${agent} said: "`, text, `"`, 120), detail: text || null };
     }
+    case "agent.progress": {
+      const steps = Array.isArray(p.steps) ? p.steps : [];
+      const done = Array.isArray(p.done) ? p.done.filter((d): d is number => typeof d === "number") : [];
+      const current = typeof p.current === "number" ? p.current : null;
+      const name = lookup(ctx.adapterName, runId);
+      const label = name ? adapterLabel(name) : "The agent";
+      const finished = current === null;
+      const n = finished ? Math.max(0, ...done) : current;
+      if (n < 1) return { headline: `${label} made a plan of ${plural(steps.length, "step")}` };
+      return {
+        headline: fit(`${label} ${finished ? "finished" : "started"} step ${n} of ${steps.length}: "`, steps[n - 1], `"`, 120),
+      };
+    }
     case "agent.action.requested": {
       const phrase = actionPhrase({
         kind: (str(p.kind) || "other") as ActionKind,
