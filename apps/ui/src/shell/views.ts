@@ -1,4 +1,4 @@
-export const VIEWS = ["board", "agents", "changes", "needs_you", "ledger", "connections", "github", "capacity", "learn"] as const;
+export const VIEWS = ["board", "agents", "changes", "needs_you", "ledger", "connections", "github", "capacity", "share", "learn"] as const;
 export type ViewId = (typeof VIEWS)[number];
 export const VIEW_LABELS: Record<ViewId, string> = {
   board: "Board",
@@ -9,5 +9,6 @@ export const VIEW_LABELS: Record<ViewId, string> = {
   connections: "Connections",
   github: "GitHub",
   capacity: "Capacity",
+  share: "Share",
   learn: "Learn",
 };

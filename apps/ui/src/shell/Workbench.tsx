@@ -16,6 +16,8 @@ import { IntakePanel } from "../views/IntakePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { NeedsYouPanel } from "../views/NeedsYouPanel";
 import { StoryPanel } from "../views/StoryPanel";
+import { DigestPanel } from "../views/DigestPanel";
+import { SharePanel } from "../views/SharePanel";
 import { ActivityBar } from "./ActivityBar";
 import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
@@ -33,6 +35,7 @@ const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
+  share: SharePanel, digest: DigestPanel,
 };
 
 type Props = { model: AppModel };

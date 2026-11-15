@@ -54,7 +54,17 @@ vi.mock("../src/api", () => ({
     getRunFile: vi.fn(),
     overrideCommand: vi.fn(),
     overrideDiscard: vi.fn(),
+    previewShare: vi.fn(),
+    confirmShare: vi.fn(),
+    listShareSnapshots: vi.fn(),
+    listShareAddresses: vi.fn(),
+    createShareLink: vi.fn(),
+    listShareLinks: vi.fn(),
+    revokeShareLink: vi.fn(),
+    getDigests: vi.fn(),
   },
+  shareSnapshotUrl: (id: string) => `/api/share/snapshots/${id}`,
+  shareDownloadUrl: (id: string) => `/api/share/snapshots/${id}/download`,
   ApiError: class ApiError extends Error {
     constructor(readonly status: number, readonly code: string, readonly detail?: unknown) {
       super(code);
@@ -84,6 +94,7 @@ import { testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 import { changes, fileDiff, listing, run1, runEntry } from "./changes-fixtures";
+import { ADDRESSES, SHARE_ID, digest, link, preview, snapshotRecord } from "./share-fixtures";
 
 const mk = (id: string): Board => ({
   project: { id, name: `Project ${id}`, pitch: "", createdAt: "" },
@@ -113,7 +124,7 @@ beforeEach(() => {
   h.subs.clear();
   m.getStatus.mockResolvedValue({
     runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], shareLinks: 0,
   });
   m.getIntake.mockResolvedValue(null);
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
@@ -125,6 +136,10 @@ beforeEach(() => {
   m.listAllPendingActions.mockResolvedValue([]);
   m.listConnections.mockResolvedValue([]);
   m.getConnectionCatalog.mockResolvedValue([...CONNECTION_CATALOG]);
+  m.listShareSnapshots.mockResolvedValue([]);
+  m.listShareLinks.mockResolvedValue([]);
+  m.listShareAddresses.mockResolvedValue([]);
+  m.getDigests.mockResolvedValue([]);
 });
 
 describe("App status polling", () => {
@@ -990,5 +1005,114 @@ describe("App Changes view", () => {
     await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
     expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
     expect(errorMessage).toHaveBeenCalledWith(expect.any(ApiError), "changes");
+  });
+});
+
+describe("App Share view", () => {
+  const views = () => screen.getByRole("navigation", { name: "Views" });
+  const shareEntry = (seq: number, type: LedgerEntry["type"], projectId = "A"): LedgerEntry => ({
+    seq, id: String(seq), ts: "2026-11-15T12:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type, payload: {}, prevHash: "", hash: "",
+  });
+  const ACK = "I have read this page and I am happy to share everything on it.";
+
+  async function openShare() {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await waitFor(() => expect(h.subs.size).toBe(2));
+    await userEvent.click(within(views()).getByRole("button", { name: "Share" }));
+  }
+
+  it("loads the project's snapshots and links, and again on a share entry of the project only", async () => {
+    m.listShareSnapshots.mockResolvedValue([snapshotRecord()]);
+    m.listShareLinks.mockResolvedValue([link()]);
+    await openShare();
+    expect(m.listShareSnapshots).toHaveBeenCalledWith("A");
+    expect(m.listShareLinks).toHaveBeenCalledWith("A");
+    expect(await screen.findByText(new RegExp(`#${SHARE_ID.slice(0, 8)}`))).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Live links" })).getAllByRole("listitem")).toHaveLength(1);
+    m.listShareSnapshots.mockClear();
+    m.listShareLinks.mockClear();
+    await act(async () => h.onEntry!(shareEntry(20, "card.created")));
+    await act(async () => h.onEntry!(shareEntry(21, "share.confirmed", "B")));
+    expect(m.listShareSnapshots).not.toHaveBeenCalled();
+    await act(async () => h.onEntry!(shareEntry(22, "share.revoked")));
+    await waitFor(() => expect(m.listShareLinks).toHaveBeenCalledWith("A"));
+    expect(m.listShareSnapshots).toHaveBeenCalledWith("A");
+  });
+
+  it("loads the addresses when the Share view opens", async () => {
+    m.listShareAddresses.mockResolvedValue(ADDRESSES);
+    await openShare();
+    await waitFor(() => expect(m.listShareAddresses).toHaveBeenCalled());
+  });
+
+  it("previews with the chosen options, shows the page, and clears a stale preview on confirm", async () => {
+    m.previewShare.mockResolvedValue(preview());
+    m.confirmShare.mockRejectedValue(new ApiError(409, "preview_stale"));
+    await openShare();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Include my prompts to agents" }));
+    await userEvent.click(screen.getByRole("button", { name: "Preview share page" }));
+    expect(m.previewShare).toHaveBeenCalledWith("A", { includePrompts: true, includeHardware: false, digestDays: 7 });
+    const frame = (await screen.findByTitle("Share page preview")) as HTMLIFrameElement;
+    expect(frame.getAttribute("srcdoc")).toContain("Book Club");
+    await userEvent.click(screen.getByRole("checkbox", { name: ACK }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and save snapshot" }));
+    expect(m.confirmShare).toHaveBeenCalledWith("A", "pv1", preview().contentHash);
+    await waitFor(() => expect(screen.queryByTitle("Share page preview")).toBeNull());
+  });
+
+  it("drops the preview when the options change, so what is confirmed matches what is chosen", async () => {
+    m.previewShare.mockResolvedValue(preview());
+    await openShare();
+    await userEvent.click(screen.getByRole("button", { name: "Preview share page" }));
+    expect(await screen.findByTitle("Share page preview")).toBeTruthy();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Include this computer's hardware" }));
+    expect(screen.queryByTitle("Share page preview")).toBeNull();
+  });
+
+  it("confirms a preview and reloads the snapshots", async () => {
+    m.previewShare.mockResolvedValue(preview());
+    m.confirmShare.mockResolvedValue(snapshotRecord());
+    await openShare();
+    await userEvent.click(screen.getByRole("button", { name: "Preview share page" }));
+    await screen.findByTitle("Share page preview");
+    m.listShareSnapshots.mockClear();
+    await userEvent.click(screen.getByRole("checkbox", { name: ACK }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm and save snapshot" }));
+    expect(await screen.findByText("Saved. Open, download or share it from the Share view.")).toBeTruthy();
+    await waitFor(() => expect(m.listShareSnapshots).toHaveBeenCalledWith("A"));
+  });
+
+  it("creates a link for a snapshot and revokes it", async () => {
+    m.listShareSnapshots.mockResolvedValue([snapshotRecord()]);
+    m.listShareAddresses.mockResolvedValue(ADDRESSES);
+    m.createShareLink.mockResolvedValue({ link: link(), url: "http://127.0.0.1:47400/tok" });
+    m.revokeShareLink.mockResolvedValue(undefined);
+    await openShare();
+    await userEvent.click(await screen.findByRole("button", { name: "Share on your network…" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Address" }).querySelectorAll("option")).toHaveLength(2));
+    await userEvent.click(screen.getByRole("button", { name: "Create link" }));
+    expect(m.createShareLink).toHaveBeenCalledWith(SHARE_ID, "127.0.0.1", 1440);
+    expect(((await screen.findByRole("textbox", { name: "Share link" })) as HTMLInputElement).value).toBe("http://127.0.0.1:47400/tok");
+    m.listShareLinks.mockResolvedValue([link()]);
+    await act(async () => h.onEntry!(shareEntry(30, "share.link_created")));
+    await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    expect(m.revokeShareLink).toHaveBeenCalledWith("l1");
+  });
+
+  it("loads the digests for the selected project, again on its entries, and for the chosen window", async () => {
+    m.getDigests.mockResolvedValue([digest()]);
+    await openShare();
+    expect(m.getDigests).toHaveBeenCalledWith("A", 7);
+    await userEvent.click(screen.getByRole("button", { name: "Open daily digest" }));
+    expect(await screen.findByRole("article", { name: "2026-11-15 (UTC)" })).toBeTruthy();
+    m.getDigests.mockClear();
+    await act(async () => h.onEntry!(shareEntry(40, "card.created")));
+    await waitFor(() => expect(m.getDigests).toHaveBeenCalledWith("A", 7));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Days" }), "30");
+    await waitFor(() => expect(m.getDigests).toHaveBeenCalledWith("A", 30));
   });
 });
