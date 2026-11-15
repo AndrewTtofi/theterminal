@@ -22,9 +22,10 @@ function osUsername(): string {
 }
 
 /**
- * The share page's cleaner: secrets redacted, the data folder and the home directory scrubbed to `<data>` and `~`,
- * the username to `<user>`, redacted again (a scrub can reveal a secret pattern), email addresses replaced with
- * `[email]`, then cut at `max`. Redaction always runs before the cut, so a secret is never left half-present.
+ * The share page's cleaner: secrets redacted, email addresses replaced with `[email]` (before the username scrub,
+ * so an address whose local part is the username goes whole, domain included), the data folder and the home
+ * directory scrubbed to `<data>` and `~`, the username to `<user>`, redacted again (a scrub can reveal a secret
+ * pattern), then cut at `max`. Redaction always runs before the cut, so a secret is never left half-present.
  * The secrets are read on every call, so a connection added after the cleaner was built is still covered.
  */
 export function shareCleaner(deps: CleanerDeps): ShareClean {
@@ -38,7 +39,7 @@ export function shareCleaner(deps: CleanerDeps): ShareClean {
   const emails = (s: string) => s.replace(EMAIL, "[email]");
   return (s, max) => {
     const secrets = deps.secrets();
-    return truncate(emails(redact(scrub(redact(s, secrets)), secrets)), max);
+    return truncate(redact(scrub(emails(redact(s, secrets))), secrets), max);
   };
 }
 

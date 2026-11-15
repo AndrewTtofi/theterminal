@@ -1,5 +1,5 @@
 import {
-  ADAPTERS, GATES, GATE_IDS, HIDDEN_BY_DEFAULT, STAGES, adapterLabel, applicableDecisions, dailyDigests, narrate, utcDay,
+  ADAPTERS, GATES, GATE_IDS, HIDDEN_BY_DEFAULT, HIDDEN_HARDWARE_LINE, HIDDEN_PROMPTS_LINE, STAGES, adapterLabel, applicableDecisions, dailyDigests, narrate, utcDay,
   type AdapterId, type AgentRun, type Answers, type Ask, type Basis, type CiStatus, type Connection, type DecisionItem,
   type Evidence, type Figure, type GateId, type HardwareInfo, type HistoryDay, type LedgerEntry, type NarrationContext,
   type ReadinessRow, type ShareNumbers, type ShareOptions, type ShareSnapshot, type Stage, type WaitingItem,
@@ -53,6 +53,32 @@ function projectEntries(ledger: Ledger, projectId: string, integrity: VerifyResu
     afterSeq = page[page.length - 1]!.seq;
   }
   return integrity.ok ? out : out.filter((e) => e.seq < integrity.brokenAtSeq);
+}
+
+/** The most connection.added entries read for the tech stack (`listRows` takes at most 500 seqs). */
+const MAX_CONNECTION_ENTRIES = 500;
+
+/**
+ * The `connection.added` entries of the enabled connections. They carry no project (a connection belongs to the
+ * workspace), so the project's own entries never hold them. Only the entries the integrity check vouches for are
+ * kept, and only their seq, hash and time reach the page, as evidence.
+ */
+function connectionEntries(db: Db, ledger: Ledger, connections: Connection[], integrity: VerifyResult): LedgerEntry[] {
+  const ids = connections.filter((c) => c.enabled).map((c) => c.id);
+  if (ids.length === 0) return [];
+  // CASE guarantees json_valid runs first: json_extract throws on a tampered, unparseable payload.
+  const seqs = (db
+    .prepare(
+      `SELECT seq FROM ledger WHERE type = 'connection.added' AND project_id IS NULL
+       AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.connectionId') IN (${ids.map(() => "?").join(", ")}) ELSE 0 END
+       ORDER BY seq LIMIT ?`,
+    )
+    .all(...ids, MAX_CONNECTION_ENTRIES) as { seq: number }[]).map((r) => r.seq);
+  if (seqs.length === 0) return [];
+  return ledger
+    .listRows({ seqs })
+    .filter((r): r is LedgerEntry => !("unreadable" in r))
+    .filter((e) => integrity.ok || e.seq < integrity.brokenAtSeq);
 }
 
 /** A human decision: an intake decision, a gate sign-off or waiver, or a human's decision on an agent action. */
@@ -169,8 +195,6 @@ function hardwareOf(h: (HardwareInfo & { enabled?: boolean }) | null): HardwareI
   return { cpu, cores, memoryGb, gpu, gpuMemoryGb, platform, wsl, detectedAt };
 }
 
-const PROMPTS_LINE = HIDDEN_BY_DEFAULT.find((l) => l.startsWith("Your prompts"));
-const HARDWARE_LINE = HIDDEN_BY_DEFAULT.find((l) => l.startsWith("This computer's hardware"));
 
 /**
  * The share page's content for one project, read from the ledger and its projections, then cleaned: every text
@@ -195,6 +219,7 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
   const runs = listRuns(db, projectId);
   const intake = getIntake(db, projectId);
   const entriesById = new Map(entries.map((e) => [e.id, e] as const));
+  const connections = deps.connections();
 
   // Progress.
   const progress = Object.fromEntries(STAGES.map((s) => [s, { total: 0, done: 0 }])) as ShareSnapshot["progress"];
@@ -293,7 +318,7 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
   audit.headHash12 = head && "hash" in head ? head.hash.slice(0, 12) : null;
 
   const hidden = HIDDEN_BY_DEFAULT.filter(
-    (l) => !(options.includePrompts && l === PROMPTS_LINE) && !(options.includeHardware && l === HARDWARE_LINE),
+    (l) => !(options.includePrompts && l === HIDDEN_PROMPTS_LINE) && !(options.includeHardware && l === HIDDEN_HARDWARE_LINE),
   );
 
   const raw: ShareSnapshot = {
@@ -308,7 +333,10 @@ export async function buildSnapshot(deps: SnapshotDeps, projectId: string, optio
     numbers,
     summary: intake?.intake.summary ?? null,
     idea: intake?.intake.idea ?? null,
-    stack: techStack({ intake, connections: deps.connections(), runs, entries }),
+    stack: techStack({
+      intake, connections, runs,
+      entries: [...entries, ...connectionEntries(db, ledger, connections, integrity)].sort((a, b) => a.seq - b.seq),
+    }),
     workforce: workforce(runs),
     waiting,
     decisions,

@@ -53,6 +53,10 @@ describe("shareCleaner", () => {
     );
   });
 
+  it("replaces an address whose local part is the username, domain included", () => {
+    expect(clean("mail alice@example.test", 4000)).toBe("mail [email]");
+  });
+
   it("scrubs the data folder as <data>", () => {
     expect(clean(`log at ${join(dataDir, "logs", "a.log")}`, 4000)).toBe(`log at ${join("<data>", "logs", "a.log")}`);
   });

@@ -14,13 +14,24 @@ beforeEach(() => {
 
 const AWS = { accessKeyId: "AKIATESTKEY00000000", secretAccessKey: "aws-TESTKEY-secret-0000000000" };
 
-const stack = (): StackRow[] =>
-  techStack({
+/**
+ * As buildSnapshot calls it: the project's own entries plus the `connection.added` entries of the connections, which
+ * carry no project.
+ */
+const stack = (): StackRow[] => {
+  const connections = w.connections.list();
+  const ids = new Set(connections.map((c) => c.id));
+  const added = w.ledger
+    .list({ limit: 500 })
+    .filter((e) => e.type === "connection.added" && ids.has((e.payload as { connectionId: string }).connectionId));
+  const own = w.ledger.list({ projectId, limit: 500 });
+  return techStack({
     intake: getIntake(w.db, projectId),
-    connections: w.connections.list(),
+    connections,
     runs: listRuns(w.db, projectId),
-    entries: w.ledger.list({ limit: 500 }),
+    entries: [...own, ...added].sort((a, b) => a.seq - b.seq),
   });
+};
 
 describe("techStack", () => {
   it("derives the rows from the decisions, the platform answer, the connections and the programs that ran", async () => {
@@ -54,6 +65,7 @@ describe("techStack", () => {
     await w.connections.add(human, { kind: "cloud", provider: "aws", name: "A", config: { region: "us-east-1" }, secrets: AWS });
     startRun(w, projectId, "r1", "fake", null);
     const entries = w.ledger.list({ limit: 500 });
+    expect(entries.find((e) => e.type === "connection.added")!.projectId).toBeNull();
     const rows = stack();
     const typeOf = (seq: number | undefined) => entries.find((e) => e.seq === seq)?.type;
     expect(rows.map((r) => typeOf(r.evidence?.seq))).toEqual([
@@ -74,6 +86,12 @@ describe("techStack", () => {
 
   it("is empty for a project with no intake, connections or runs", () => {
     expect(stack()).toEqual([]);
+  });
+
+  it("gives a connection row no evidence when its connection.added entry is not among the entries", async () => {
+    await w.connections.add(human, { kind: "cloud", provider: "aws", name: "A", config: { region: "us-east-1" }, secrets: AWS });
+    const rows = techStack({ intake: null, connections: w.connections.list(), runs: [], entries: w.ledger.list({ projectId }) });
+    expect(rows).toEqual([{ layer: "Cloud", choice: "AWS", why: "Connected by the Owner", licence: "AWS customer agreement", evidence: null }]);
   });
 
   it("one row per adapter that ran, in adapter order", () => {

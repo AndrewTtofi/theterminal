@@ -61,14 +61,19 @@ export const SHARE_SECTION_TITLES: Record<ShareSection, string> = {
   audit: "Audit status",
 };
 
+/** The hidden line that `includePrompts` removes. */
+export const HIDDEN_PROMPTS_LINE = "Your prompts to agents (shown only when you tick Include my prompts)";
+/** The hidden line that `includeHardware` removes. */
+export const HIDDEN_HARDWARE_LINE = "This computer's hardware (shown only when you tick Include this computer)";
+
 /** What a share page never carries by default, shown to the Owner before confirming and on the page itself. */
 export const HIDDEN_BY_DEFAULT: readonly string[] = [
   "Credentials, API keys and tokens (they live only in your keychain and are never in the ledger)",
   "File contents and diffs",
   "Raw agent output and the raw input of every action",
   "What agents said (their messages)",
-  "Your prompts to agents (shown only when you tick Include my prompts)",
-  "This computer's hardware (shown only when you tick Include this computer)",
+  HIDDEN_PROMPTS_LINE,
+  HIDDEN_HARDWARE_LINE,
   "Connection names and account details: regions, project ids, repository names",
   "File paths outside the project, your username and email addresses",
   "Anything from other projects",

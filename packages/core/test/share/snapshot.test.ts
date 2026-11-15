@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_SHARE_OPTIONS, GATES, HIDDEN_BY_DEFAULT, type CapacityHardware, type CiStatus, type GateId, type ShareOptions,
+  DEFAULT_SHARE_OPTIONS, GATES, HIDDEN_BY_DEFAULT, HIDDEN_HARDWARE_LINE, HIDDEN_PROMPTS_LINE, type CapacityHardware, type CiStatus, type GateId, type ShareOptions,
   type ShareSnapshot,
 } from "@theterminal/shared";
 import { NotFoundError } from "../../src/board/board-service.js";
@@ -147,7 +147,8 @@ describe("buildSnapshot", () => {
     expect(s.asks[0]!.time).toMatch(/^\d\d:\d\d$/);
     expect(s.asks).toHaveLength(2);
     expect(s.hidden).toHaveLength(HIDDEN_BY_DEFAULT.length - 1);
-    expect(s.hidden.some((l) => l.startsWith("Your prompts"))).toBe(false);
+    expect(s.hidden).not.toContain(HIDDEN_PROMPTS_LINE);
+    expect(s.hidden).toContain(HIDDEN_HARDWARE_LINE);
     expect(JSON.stringify(s)).not.toContain("Water the garden");
   });
 
@@ -160,8 +161,25 @@ describe("buildSnapshot", () => {
     const s = await build({ includeHardware: true }, { hardware: () => hw });
     const { enabled: _enabled, ...info } = hw;
     expect(s.hardware).toEqual(info);
-    expect(s.hidden.some((l) => l.startsWith("This computer's hardware"))).toBe(false);
+    expect(s.hidden).not.toContain(HIDDEN_HARDWARE_LINE);
+    expect(s.hidden).toContain(HIDDEN_PROMPTS_LINE);
     expect((await build({ includeHardware: true }, { hardware: () => ({ ...hw, enabled: false }) })).hardware).toBeNull();
+  });
+
+  it("names the connection.added entry of each connection row, though connections belong to no project", async () => {
+    await w.connections.add(human, {
+      kind: "cloud", provider: "aws", name: "My prod account", config: { region: "us-east-1" },
+      secrets: { accessKeyId: "AKIATESTKEY00000000", secretAccessKey: "aws-TESTKEY-secret-0000000000" },
+    });
+    const added = w.ledger.list({ limit: 500 }).find((e) => e.type === "connection.added")!;
+    expect(added.projectId).toBeNull();
+    const s = await build();
+    const cloud = s.stack.find((r) => r.layer === "Cloud")!;
+    expect(cloud.evidence).toEqual({ seq: added.seq, hash12: added.hash.slice(0, 12), at: added.ts });
+    expect(cloud.evidence!.hash12).toMatch(/^[0-9a-f]{12}$/);
+    const json = JSON.stringify(s);
+    expect(json).not.toContain("My prod account");
+    expect(json).not.toContain("us-east-1");
   });
 
   it("takes the CI state from the client", async () => {
