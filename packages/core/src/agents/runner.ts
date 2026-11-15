@@ -89,6 +89,20 @@ export class RemoteRunError extends Error {
   }
 }
 
+/**
+ * A collaborator's run must use an API key, and none is configured for the provider: neither a key connection nor
+ * the server's own variable. Agents never run on the Owner's logins for anyone but the Owner.
+ */
+export class ApiKeyRequiredError extends Error {
+  constructor(readonly provider: Provider) {
+    super(`collaborators run agents on API keys; no API key is configured for ${provider}`);
+    this.name = "ApiKeyRequiredError";
+  }
+}
+
+/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
+export const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
+
 /** A run id: what a path, a branch name (`run/<id>`) and a linked machine's request may carry. */
 export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 const runIdSchema = z.string().regex(RUN_ID_PATTERN);
@@ -279,12 +293,14 @@ export class AgentRunner {
    * Starts a run. `runId` is given by a linked machine that asked for the run (it names the run on both machines):
    * it must be an id (RUN_ID_PATTERN, else ZodError) that no run has (ConflictError); by default a new id is made.
    * `foreignCard` says `cardId` names a card on that machine, so it is recorded without a local card to check.
+   * `forceApiKey` is set for anyone but the Owner: the run is `api_key` whatever the provider's mode, and without a
+   * key (a connection's, else the server's variable) it is refused with ApiKeyRequiredError before anything is recorded.
    */
   async start(
     actor: Actor,
     input: {
       projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; runId?: string;
-      foreignCard?: boolean;
+      foreignCard?: boolean; forceApiKey?: boolean;
     },
   ): Promise<AgentRun> {
     if (input.runId === undefined) return this.startRun(actor, input, this.newId());
@@ -302,7 +318,10 @@ export class AgentRunner {
 
   private async startRun(
     actor: Actor,
-    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean },
+    input: {
+      projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean;
+      forceApiKey?: boolean;
+    },
     runId: string,
   ): Promise<AgentRun> {
     const { db, ledger, worktrees } = this.deps;
@@ -334,10 +353,12 @@ export class AgentRunner {
       ...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp), ...(localModel?.apiKey ? [localModel.apiKey] : []),
     ];
 
-    // A local model needs no login: the provider's own mode and connection are not used.
-    const authMode: AuthMode =
-      input.adapter === "fake" || localModel !== null ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
-    const creds = input.adapter === "fake" || localModel !== null ? null : (this.deps.credentials?.(input.adapter) ?? null);
+    // A local model needs no login: the provider's own mode and connection are not used. A collaborator's run is on
+    // an API key whatever the mode says, and never starts without one.
+    const provider: Provider | null = input.adapter === "fake" || localModel !== null ? null : input.adapter;
+    const authMode: AuthMode = provider === null ? "none" : input.forceApiKey ? "api_key" : new ProviderSettings(db, ledger).getMode(provider);
+    const creds = provider === null ? null : (this.deps.credentials?.(provider) ?? null);
+    if (provider !== null && input.forceApiKey && !creds?.apiKey && !process.env[API_KEY_ENV[provider]]) throw new ApiKeyRequiredError(provider);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
     const env: Record<string, string> = Object.assign({}, ...grants.map((g) => g.env));
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };

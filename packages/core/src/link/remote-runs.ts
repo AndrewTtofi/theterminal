@@ -198,7 +198,11 @@ export class RemoteRunService {
    */
   async start(
     actor: Actor,
-    input: { projectId: string; machineId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[] },
+    input: {
+      projectId: string; machineId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[];
+      /** The run is a collaborator's: the worker runs it on an API key, never on its Owner's login. */
+      forceApiKey?: boolean;
+    },
   ): Promise<AgentRun> {
     if (actor.kind !== "human") throw new HumanRequiredError();
     const { db, ledger, link } = this.deps;
@@ -238,6 +242,7 @@ export class RemoteRunService {
       const projectName = [...this.clean(project.name).trim()].slice(0, 120).join("") || "Project";
       await slow.request(peer, "POST", `/link/v1/runs/${runId}/start`, {
         v: LINK_PROTOCOL_VERSION, projectId: input.projectId, projectName, adapter: input.adapter, prompt, cardId, connectionIds,
+        ...(input.forceApiKey === true && { forceApiKey: true }),
       });
     } catch (err) {
       const error = err instanceof RemoteRunRefusedError ? err.code

@@ -339,6 +339,8 @@ export class LinkWorker {
         runId: id,
         // The card is the requester's: this computer has none of its cards.
         foreignCard: true,
+        // A collaborator's run over there is on an API key here too, never on this Owner's login.
+        ...(input.forceApiKey === true && { forceApiKey: true }),
       });
     } catch (err) {
       // The accepted run did not start: recorded with the code the requester is answered, then answered as it is.

@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute } from "node:path";
-import { PROVIDERS, type AuthMode, type Provider } from "@theterminal/shared";
+import { PROVIDERS, type Actor, type AuthMode, type Provider } from "@theterminal/shared";
 import { buildChildEnv } from "../agents/child-env.js";
 import { redact } from "../agents/redact.js";
 import { pathScrubber, usernameScrubber, type Scrub } from "../agents/scrub-paths.js";
@@ -169,8 +169,11 @@ export type SignInManagerDeps = {
   extraEnv?: NodeJS.ProcessEnv;
   /** Extra values to redact (the server token, stored secrets). Read on every clean. */
   secrets?: () => string[];
-  /** Records the outcome (`connection.signin`). Not called for a sign-in the Owner cancelled or shutdown stopped. */
-  record: (provider: Provider, ok: boolean) => void;
+  /**
+   * Records the outcome (`connection.signin`) as the person who started the login. Not called for a sign-in the Owner
+   * cancelled or shutdown stopped.
+   */
+  record: (provider: Provider, ok: boolean, actor: Actor) => void;
   /** How long a sign-in may run before it is killed. Default 10 minutes. */
   timeoutMs?: number;
   newId?: () => string;
@@ -186,6 +189,8 @@ type Session = {
   exited: Promise<void>;
   /** Stopped by the Owner or by shutdown: nothing is recorded. */
   cancelled: boolean;
+  /** Who started it: the outcome is recorded as theirs. */
+  actor: Actor;
 };
 
 /** Runs at most one login per provider, keeps the last one of each for its result, and kills them on demand. */
@@ -219,8 +224,8 @@ export class SignInManager {
     };
   }
 
-  /** Starts `p`'s login command. Throws when one is running, the CLI is missing, or it needs a terminal. */
-  start(p: Provider): { id: string } {
+  /** Starts `p`'s login command for `actor`. Throws when one is running, the CLI is missing, or it needs a terminal. */
+  start(p: Provider, actor: Actor): { id: string } {
     if (this.shuttingDown) throw new Error("shutting down");
     const spec = SPECS[p];
     if (spec.login === null) throw new TerminalRequiredError();
@@ -236,7 +241,7 @@ export class SignInManager {
     const id = (this.deps.newId ?? randomUUID)();
     let resolveExited!: () => void;
     const session: Session = {
-      id, provider: p, state: "running", lines: [], child: null, timer: null, cancelled: false,
+      id, provider: p, state: "running", lines: [], child: null, timer: null, cancelled: false, actor,
       exited: new Promise((r) => (resolveExited = r)),
     };
     this.sessions.set(id, session);
@@ -266,7 +271,7 @@ export class SignInManager {
       resolveExited();
       if (this.shuttingDown || session.cancelled) return;
       try {
-        this.deps.record(p, session.state === "succeeded");
+        this.deps.record(p, session.state === "succeeded", session.actor);
       } catch {
         // A read-only ledger: the outcome is still shown.
       }
