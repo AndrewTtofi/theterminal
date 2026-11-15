@@ -473,7 +473,7 @@ export async function createServer(opts: {
     });
 
     const clean = (runId: string, s: string, max: number) => runner.cleanFor(runId)(s, max);
-    const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which });
+    const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which, settling: (id) => runner.settling(id) });
 
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });

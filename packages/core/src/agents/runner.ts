@@ -221,6 +221,8 @@ function scrubJson(v: unknown, scrub: Scrub): unknown {
  */
 export class AgentRunner {
   private readonly sessions = new Map<string, Session>();
+  /** Runs whose adapter has not returned yet, even after a stop has closed their session. */
+  private readonly unsettled = new Set<string>();
   private readonly newId: () => string;
   /** Scrubs dataDir, the home directory and the username, for strings recorded outside a live run. */
   private readonly scrub: Scrub;
@@ -390,6 +392,14 @@ export class AgentRunner {
     return listActions(db, runId).find((a) => a.id === actionId)!;
   }
 
+  /**
+   * True from a run's start until its adapter has returned. A stopped run is no longer `running` at once, but its
+   * agent process may still be writing into the working copy until then.
+   */
+  settling(runId: string): boolean {
+    return this.unsettled.has(runId);
+  }
+
   stop(_actor: Actor, runId: string): void {
     if (!getRun(this.deps.db, runId)) throw new NotFoundError("run", runId);
     this.close(runId, "stopped", null, "run stopped");
@@ -468,6 +478,7 @@ export class AgentRunner {
       secrets,
     };
     this.sessions.set(run.id, session);
+    this.unsettled.add(run.id);
     session.done = (async () => {
       let status: FinishStatus;
       let error: string | null = null;
@@ -497,7 +508,7 @@ export class AgentRunner {
       } finally {
         this.sessions.delete(run.id);
       }
-    })();
+    })().finally(() => this.unsettled.delete(run.id));
   }
 
   /** Records a proposal through the same snapshot, redaction and scrub as every action; returns what was recorded. */

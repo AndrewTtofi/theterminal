@@ -951,3 +951,29 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
     noRun();
   });
 });
+
+describe("AgentRunner.settling", () => {
+  it("stays true after a stop until the adapter has returned", async () => {
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Ignores the abort until released, as a CLI slow to exit does.
+    const slow: AgentAdapter = {
+      id: "fake",
+      start: async () => {
+        await returned;
+        return { status: "completed" };
+      },
+    };
+    const runner = makeRunner({ fake: slow });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "go" });
+    expect(runner.settling(run.id)).toBe(true);
+    runner.stop(owner, run.id);
+    expect(getRun(db, run.id)!.status).toBe("stopped");
+    expect(runner.settling(run.id)).toBe(true);
+    release();
+    await vi.waitFor(() => expect(runner.settling(run.id)).toBe(false));
+    expect(runner.settling("no-such-run")).toBe(false);
+  });
+});

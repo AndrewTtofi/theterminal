@@ -21,6 +21,12 @@ import type { Ledger } from "../ledger/ledger.js";
  * allowlisted environment (no connection keys); a `discard` drops the working copy's uncommitted changes and keeps
  * the agent's commits. Each is refused while the run is live or another override runs for it, records its request
  * before it starts and `override.completed` after it ends, and records nothing when it is refused.
+ *
+ * What this does not confine: the program itself runs as the Owner, with the Owner's files and network, and may
+ * change anything. Refusing programs inside the worktree does not stop code an agent planted from running through a
+ * legitimate program: git runs the hooks of the shared project repository when the Owner runs git, Python imports
+ * modules from the working directory, npm runs the scripts in package.json, a Makefile runs its recipes. The Owner
+ * is trusting whatever the named program loads from the working copy.
  */
 
 export { RunActiveError };
@@ -62,6 +68,12 @@ export const OVERRIDE_OUTPUT_CHARS = 16_000;
 export const OVERRIDE_BUFFER = 1_048_576;
 /** How long shutdown waits for killed overrides to end before recording them itself. */
 const SHUTDOWN_WAIT_MS = 5_000;
+/**
+ * How long after the program exits its output may still arrive. A child it left behind (in its own session, so the
+ * process group kill misses it) can hold the output pipes open for ever; after this the pipes are closed and the
+ * override completes.
+ */
+const EXIT_GRACE_MS = 2_000;
 const SIGNAL = /^SIG[A-Z0-9]+$/;
 const RESTARTED = "workspace restarted";
 const RECOVERY: Actor = { kind: "system", id: "override" };
@@ -77,6 +89,8 @@ const commandInput = z
 
 export type OverrideDeps = ChangesDeps & {
   ledger: Ledger;
+  /** Whether a run's agent may still be writing (runner.settling): true until its adapter has returned. */
+  settling: (runId: string) => boolean;
   /** How the Owner's text is checked for secrets and scrubbed of local paths before it is recorded. */
   recorded: RecordedText;
   /** PATH lookup for a bare program name. Default: this process's PATH. */
@@ -95,6 +109,7 @@ export type OverrideDeps = ChangesDeps & {
 type Completion = { ok: boolean; exitCode: number | null; signal: string | null; timedOut: boolean; output: string };
 
 type Active = {
+  kind: "command" | "discard";
   overrideId: string;
   runId: string;
   projectId: string;
@@ -180,8 +195,7 @@ export class OverrideService {
       if (!recorded.passes(text)) throw new SecretInTextError();
     }
     const { run, abs } = this.stoppedRun(runId);
-    const cwdRel = (body.cwd ?? ".").split(/[\\/]/).filter((s) => s !== "" && s !== ".").join("/");
-    const cwd = this.resolveCwd(abs, body.cwd ?? ".");
+    const { resolved: cwd, rel: cwdRel } = this.resolveCwd(abs, body.cwd ?? ".");
     const program = this.resolveProgram(body.program, abs);
     const env = { ...baseChildEnv(this.deps.dataDir), GIT_CEILING_DIRECTORIES: dirname(abs) };
 
@@ -190,7 +204,7 @@ export class OverrideService {
       runId,
       program: truncate(recorded.scrub(body.program), 260),
       args: body.args.map((a) => truncate(recorded.scrub(a), 1000)),
-      cwd: truncate(recorded.scrub(cwdRel === "" ? "." : cwdRel), 500),
+      cwd: truncate(recorded.scrub(cwdRel), 500),
       reason,
     }));
 
@@ -198,11 +212,13 @@ export class OverrideService {
     let overflow = false;
     let startError: string | null = null;
     let timer: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     const sizes = { out: 0, err: 0 };
     const complete = (code: number | null, sig: NodeJS.Signals | null) => {
       clearTimeout(timer);
+      clearTimeout(grace);
       if (entry.recorded) return;
       const killed = timedOut || overflow || entry.killedAtShutdown;
       const exitCode = killed || startError !== null ? null : code;
@@ -245,10 +261,20 @@ export class OverrideService {
       startError = notStarted(e);
       if (child.pid === undefined) complete(null, null); // never started: no close follows for sure
     });
+    /** Closes the output pipes (whoever still holds them) and completes with what was read. */
+    const drain = (code: number | null, sig: NodeJS.Signals | null) => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      complete(code, sig);
+    };
     child.on("close", (code, sig) => complete(code, sig));
+    child.on("exit", (code, sig) => {
+      if (!entry.recorded) grace = setTimeout(() => drain(code, sig), EXIT_GRACE_MS);
+    });
     timer = setTimeout(() => {
       timedOut = true;
       this.killTree(child);
+      drain(null, "SIGKILL");
     }, this.deps.timeoutMs ?? OVERRIDE_TIMEOUT_MS);
     return { overrideId: entry.overrideId };
   }
@@ -262,7 +288,7 @@ export class OverrideService {
     const why = this.deps.recorded.text("reason", reason, { min: 10, max: 500 });
     const { run, abs } = this.stoppedRun(runId);
     // Held from here (synchronously after the checks), so nothing else starts while git counts the files.
-    const hold = this.hold(actor, run);
+    const hold = this.hold(actor, run, "discard");
     let files: number;
     let git: Awaited<ReturnType<typeof verifiedGit>>;
     try {
@@ -324,29 +350,28 @@ export class OverrideService {
   }
 
   /**
-   * Kills every running override's process tree, waits up to 5 s for them to end, and records any that has not
-   * ended itself as completed { ok: false, signal: "SIGKILL" }. No override starts afterwards.
+   * Kills every running command's process tree, waits up to 5 s for them to end, and records any that has not ended
+   * itself as completed { ok: false, signal: "SIGKILL" }. A discard is waited for until it ends by itself (each git
+   * call is bounded by its own timeout), so nothing is recorded while git may still be writing. No override starts
+   * afterwards.
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const all = [...this.active_.values()];
-    for (const a of all) {
-      if (a.child === undefined) continue;
+    const commands = all.filter((a) => a.kind === "command");
+    const discards = all.filter((a) => !commands.includes(a));
+    for (const a of commands) {
       a.killedAtShutdown = true;
-      this.killTree(a.child);
+      if (a.child !== undefined) this.killTree(a.child);
     }
     let timer: NodeJS.Timeout | undefined;
     const waited = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, SHUTDOWN_WAIT_MS);
     });
-    await Promise.race([Promise.all(all.map((a) => a.done)), waited]);
+    await Promise.all([Promise.race([Promise.all(commands.map((a) => a.done)), waited]), ...discards.map((a) => a.done)]);
     clearTimeout(timer);
-    for (const a of all) {
-      if (!a.recorded) {
-        this.finish(a, {
-          ok: false, exitCode: null, signal: a.child === undefined ? null : "SIGKILL", timedOut: false, output: RESTARTED,
-        });
-      }
+    for (const a of commands) {
+      if (!a.recorded) this.finish(a, { ok: false, exitCode: null, signal: "SIGKILL", timedOut: false, output: RESTARTED });
     }
   }
 
@@ -354,13 +379,18 @@ export class OverrideService {
   private stoppedRun(runId: string): { run: AgentRun; abs: string } {
     if (this.shuttingDown) throw new OverridesShuttingDownError();
     const found = runWorktree(this.deps, runId);
-    if (found.run.status === "running") throw new RunActiveError(OVERRIDE_RUN_ACTIVE);
+    // A stopped run's agent may still be writing until its adapter returns.
+    if (found.run.status === "running" || this.deps.settling(runId)) throw new RunActiveError(OVERRIDE_RUN_ACTIVE);
     if (this.active(runId)) throw new OverrideBusyError();
     return found;
   }
 
-  /** The working directory inside the worktree: a directory resolveInside accepts, never `.git`; else NotFoundError. */
-  private resolveCwd(abs: string, cwd: string): string {
+  /**
+   * The working directory inside the worktree: a directory resolveInside accepts with no `.git` segment, as given or
+   * once resolved (a symlink to a `.git` folder is refused); else NotFoundError. `rel` is the resolved path relative
+   * to the worktree's real path, `/`-separated, or `.`.
+   */
+  private resolveCwd(abs: string, cwd: string): { resolved: string; rel: string } {
     const notFound = new NotFoundError("path", "(given)");
     if (isAbsolute(cwd) || isWindowsAbsolute(cwd) || cwd.startsWith("\\")) throw notFound;
     if (cwd.split(/[\\/]/).some((s) => isGitSegment(s))) throw notFound;
@@ -371,7 +401,9 @@ export class OverrideService {
     } catch {
       throw notFound;
     }
-    return resolved;
+    const segments = relative(real(abs) ?? abs, resolved).split(/[\\/]/).filter((x) => x !== "" && x !== ".");
+    if (segments.some((x) => x === ".." || isGitSegment(x))) throw notFound;
+    return { resolved, rel: segments.length === 0 ? "." : segments.join("/") };
   }
 
   /**
@@ -403,13 +435,13 @@ export class OverrideService {
   }
 
   /** Holds the run for a new override (not yet recorded). */
-  private hold(actor: Actor, run: AgentRun): Active {
+  private hold(actor: Actor, run: AgentRun, kind: Active["kind"]): Active {
     let settle!: () => void;
     const done = new Promise<void>((resolve) => {
       settle = resolve;
     });
     const a: Active = {
-      overrideId: this.newId(), runId: run.id, projectId: run.projectId, actor, started: this.now().getTime(),
+      kind, overrideId: this.newId(), runId: run.id, projectId: run.projectId, actor, started: this.now().getTime(),
       recorded: false, killedAtShutdown: false, done, settle,
     };
     this.active_.set(run.id, a);
@@ -425,7 +457,7 @@ export class OverrideService {
   private record(a: Active, type: Exclude<OverrideEventType, "override.completed">, payload: Record<string, unknown>): void {
     const { db, ledger } = this.deps;
     commitEvent(db, ledger, () => {
-      if (getRun(db, a.runId)?.status === "running") throw new RunActiveError(OVERRIDE_RUN_ACTIVE);
+      if (getRun(db, a.runId)?.status === "running" || this.deps.settling(a.runId)) throw new RunActiveError(OVERRIDE_RUN_ACTIVE);
       return { event: { projectId: a.projectId, actor: a.actor, type, payload }, result: () => undefined };
     });
   }
@@ -437,7 +469,7 @@ export class OverrideService {
     type: Exclude<OverrideEventType, "override.completed">,
     payload: (overrideId: string) => Record<string, unknown>,
   ): Active {
-    const a = this.hold(actor, run);
+    const a = this.hold(actor, run, "command");
     try {
       this.record(a, type, payload(a.overrideId));
     } catch (e) {

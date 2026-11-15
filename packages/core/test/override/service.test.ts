@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +9,8 @@ import { ZodError } from "zod";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { WorktreeManager, type GitRunner } from "../../src/agents/worktrees.js";
+import type { AgentAdapter } from "../../src/agents/adapter.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { RunActiveError, listChanges } from "../../src/changes/changes.js";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -41,6 +43,7 @@ const depsWith = (extra: Partial<OverrideDeps> = {}): OverrideDeps => ({
   db, ledger, dataDir, worktrees, which,
   recorded: new RecordedText({ dataDir, username: "someuser", secrets: () => [KEY] }),
   clean: (id, s, max) => runner.cleanFor(id)(s, max),
+  settling: (id) => runner.settling(id),
   ...extra,
 });
 
@@ -245,6 +248,93 @@ describe("command", () => {
     await refused(() => s.command(owner, run.id, { program: "tool", args: [], reason: REASON }), ProgramNotAllowedError);
   });
 
+  it.runIf(posix)("refuses a PATH entry outside that is a symlink into the working copy", async () => {
+    const inside = join(wt, "tool");
+    writeFileSync(inside, "#!/bin/sh\n");
+    chmodSync(inside, 0o755);
+    const link = join(outside, "tool");
+    symlinkSync(inside, link);
+    const s = new OverrideService(depsWith({ which: () => link }));
+    await refused(() => s.command(owner, run.id, { program: "tool", args: [], reason: REASON }), ProgramNotAllowedError);
+    await refused(() => s.command(owner, run.id, { program: link, args: [], reason: REASON }), ProgramNotAllowedError);
+  });
+
+  it.runIf(posix)("refuses a folder that is a symlink to a .git folder, and records a symlinked folder by its real path", async () => {
+    mkdirSync(join(wt, "inner", ".git"), { recursive: true });
+    symlinkSync(join(wt, "inner", ".git"), join(wt, "link"));
+    await refused(() => service.command(owner, run.id, node("1", { cwd: "link" })), NotFoundError);
+    mkdirSync(join(wt, "sub"));
+    symlinkSync(join(wt, "sub"), join(wt, "alias"));
+    const { overrideId } = await service.command(owner, run.id, node("1", { cwd: "alias" }));
+    await completion(overrideId);
+    expect(entries("override.command")[0]!.payload).toMatchObject({ cwd: "sub" });
+  });
+
+  it("refuses a stopped run whose agent has not returned yet", async () => {
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: AgentAdapter = {
+      id: "fake",
+      start: async () => {
+        await returned; // ignores the abort until released
+        return { status: "completed" };
+      },
+    };
+    const live = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), dataDir, extraSecrets: () => [KEY], username: "someuser", adapters: { fake: slow },
+    });
+    try {
+      const r = await live.start(owner, { projectId: run.projectId, adapter: "fake", prompt: "slow" });
+      live.stop(owner, r.id);
+      expect(getRun(db, r.id)!.status).toBe("stopped");
+      const s = new OverrideService(depsWith({ settling: (id) => live.settling(id) }));
+      const head = ledger.headSeq();
+      await expect(s.command(owner, r.id, node("1"))).rejects.toThrow(new RunActiveError("an agent is still working in this run"));
+      await expect(s.discard(owner, r.id, REASON)).rejects.toBeInstanceOf(RunActiveError);
+      expect(ledger.headSeq()).toBe(head);
+      release();
+      await vi.waitFor(() => expect(live.settling(r.id)).toBe(false));
+      const { overrideId } = await s.command(owner, r.id, node("1"));
+      expect(await completion(overrideId)).toMatchObject({ ok: true });
+    } finally {
+      release();
+      await live.shutdown();
+    }
+  });
+
+  it.runIf(posix)("completes soon after the program exits even when an escaped child keeps its output open", async () => {
+    const code =
+      "const c=require('child_process').spawn('sleep',['30'],{detached:true,stdio:'inherit'});console.log(c.pid);c.unref()";
+    const started = Date.now();
+    const { overrideId } = await service.command(owner, run.id, node(code));
+    const done = await completion(overrideId, 8000);
+    const pid = Number(done.output.trim());
+    try {
+      expect(Date.now() - started).toBeLessThan(8000);
+      expect(done).toMatchObject({ ok: true, exitCode: 0 });
+      expect(service.active(run.id)).toBe(false);
+    } finally {
+      if (pid > 0) process.kill(pid, "SIGKILL");
+    }
+  }, 15_000);
+
+  it.runIf(posix)("completes at the timeout even when an escaped child keeps its output open", async () => {
+    service = new OverrideService(depsWith({ timeoutMs: 500 }));
+    const code =
+      "const c=require('child_process').spawn('sleep',['30'],{detached:true,stdio:'inherit'});console.log(c.pid);setInterval(()=>{},1000)";
+    const { overrideId } = await service.command(owner, run.id, node(code));
+    const done = await completion(overrideId, 5000);
+    const pid = Number(done.output.trim());
+    try {
+      expect(done).toMatchObject({ ok: false, timedOut: true, signal: "SIGKILL" });
+      expect(service.active(run.id)).toBe(false);
+    } finally {
+      if (pid > 0) process.kill(pid, "SIGKILL");
+    }
+  }, 15_000);
+
   it("refuses a program that is not on PATH or does not exist", async () => {
     await refused(() => service.command(owner, run.id, { program: "nope-not-here", args: [], reason: REASON }), ProgramNotFoundError);
     await refused(() => service.command(owner, run.id, { program: "bad name", args: [], reason: REASON }), ProgramNotFoundError);
@@ -279,6 +369,22 @@ describe("command", () => {
 });
 
 describe("shutdown", () => {
+  it("waits for a discard's git call to finish and records its real outcome", async () => {
+    const exec = promisify(execFile);
+    const slowGit: GitRunner = async (args, cwd, opts) => {
+      if (args.includes("reset")) await new Promise((r) => setTimeout(r, 5500)); // longer than the 5 s wait for commands
+      return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+    };
+    service = new OverrideService(depsWith({ worktrees: new WorktreeManager(dataDir, slowGit) }));
+    writeFileSync(join(wt, "u.txt"), "x");
+    const discarding = service.discard(owner, run.id, REASON);
+    await vi.waitFor(() => expect(entries("override.discard")).toHaveLength(1), { timeout: 5000 });
+    await service.shutdown();
+    const { overrideId } = await discarding;
+    expect(completedFor(overrideId)!.payload).toMatchObject({ ok: true, exitCode: 0 });
+    expect(existsSync(join(wt, "u.txt"))).toBe(false);
+  }, 20_000);
+
   it("kills a long command and records it completed with SIGKILL", async () => {
     const { overrideId } = await service.command(owner, run.id, node("setInterval(()=>{},1000)"));
     await service.shutdown();
