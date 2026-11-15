@@ -298,5 +298,7 @@ export function fakeDiscovery(deps: { now?: () => Date } = {}): Discovery & { re
 export function selectDiscovery(env: NodeJS.ProcessEnv = process.env, injected?: Discovery): Discovery {
   if (injected) return injected;
   if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_DISCOVERY === "1") return fakeDiscovery();
+  // Test-time guard (vitest sets VITEST): a test server that names no discovery never opens a multicast socket.
+  if (env.VITEST) throw new Error("Refusing to browse multicast under vitest: inject `discovery` or set the test flags");
   return mdnsDiscovery();
 }

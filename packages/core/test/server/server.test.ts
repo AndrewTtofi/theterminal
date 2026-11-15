@@ -385,6 +385,14 @@ describe("test doubles for connections", () => {
     expect(selectSecretStore({}, injected)).toBe(injected);
   });
 
+  it("refuses to fall back to the real keychain under vitest: a test server must inject its store or set the flags", () => {
+    expect(() => selectSecretStore({ VITEST: "true" })).toThrow(/keychain/);
+    expect(() => selectSecretStore({ VITEST: "true", THETERMINAL_SECRET_STORE: "memory" })).toThrow(/keychain/);
+    expect(selectSecretStore({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    const injected = new MemorySecretStore();
+    expect(selectSecretStore({ VITEST: "true" }, injected)).toBe(injected);
+  });
+
   it("uses the fake HTTP stub only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", async () => {
     expect(selectFetch({ THETERMINAL_FAKE_HTTP: "1" })).toBe(globalThis.fetch);
     expect(selectFetch(FAKE)).toBe(globalThis.fetch);

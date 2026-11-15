@@ -1,3 +1,4 @@
+import tls from "node:tls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { LINKING_ACK, PAIRING_LABEL, encodePairingCode, parsePairingCode } from "@theterminal/shared";
@@ -19,7 +20,7 @@ import { fakeDiscovery, type Discovered, type Discovery } from "../../src/link/d
 import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
 import { dribblingServer, holdPort, rawTlsGet, tcpAccepts, tlsServer } from "./helpers.js";
 import { pairingProof } from "../../src/link/pairing.js";
-import { IDENTITY_ACCOUNT, LinkIdentity } from "../../src/link/identity.js";
+import { IDENTITY_ACCOUNT, LinkIdentity, machineIdOf } from "../../src/link/identity.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 
@@ -29,7 +30,10 @@ afterEach(async () => {
 });
 
 function makeService(
-  o: { db?: Db; secrets?: SecretStore; platform?: NodeJS.Platform; discovery?: Discovery; interfaces?: LinkServiceDeps["interfaces"] } = {},
+  o: {
+    db?: Db; secrets?: SecretStore; platform?: NodeJS.Platform; discovery?: Discovery; interfaces?: LinkServiceDeps["interfaces"];
+    cleanText?: (s: string) => string;
+  } = {},
 ) {
   const db = o.db ?? openDatabase(":memory:");
   const ledger = new Ledger(db);
@@ -45,6 +49,7 @@ function makeService(
     bind: "127.0.0.1",
     ...(o.platform && { platform: o.platform }),
     ...(o.interfaces && { interfaces: o.interfaces }),
+    ...(o.cleanText && { cleanText: o.cleanText }),
   });
   services.push(link);
   return { db, ledger, secrets, link };
@@ -451,6 +456,37 @@ describe("LinkService pairing", () => {
     expect(await s.link.hello(eSelf.machineId)).toBe(true);
   });
 
+  it("records the other machine's name through the cleaner on both sides, hidden characters made visible", async () => {
+    // S cleans with an injected cleaner (the server's publicText); E with the built-in redaction.
+    const s = makeService({ platform: "darwin", cleanText: (t) => t.replace("GPU", "[gpu]") });
+    const e = makeService({ platform: "linux" });
+    await s.link.load();
+    await e.link.load();
+    await s.link.setName(owner, "Studio\u200bMac");
+    await e.link.setName(owner, "GPU\u200bbox");
+    const sPort = await s.link.enableLinking(owner, LINKING_ACK, 0);
+    await e.link.enableLinking(owner, LINKING_ACK, 0);
+    const machine = await e.link.pair(owner, `127.0.0.1:${sPort}`, s.link.showCode().code);
+    expect(machine.name).toBe("Studio\\u200bMac");
+    expect(paired(e.ledger)[0]!.payload).toMatchObject({ name: "Studio\\u200bMac" });
+    expect(paired(s.ledger)[0]!.payload).toMatchObject({ name: "[gpu]\\u200bbox" });
+    expect(s.link.machines()[0]!.name).toBe("[gpu]\\u200bbox");
+  });
+
+  it("the showing side refuses a client key that is not Ed25519 before it costs an attempt", async () => {
+    const s = makeService();
+    await s.link.load();
+    await s.link.enableLinking(owner, LINKING_ACK, 0);
+    s.link.showCode();
+    // A 91-byte SPKI (a P-256 key's size), with the machine id it would hash to, so only the key's shape is refused.
+    const peerSpki = Buffer.alloc(91, 7);
+    const socket = { remoteAddress: "127.0.0.1", exportKeyingMaterial: () => Buffer.alloc(32) } as unknown as tls.TLSSocket;
+    const body = { v: 1, machineId: machineIdOf(peerSpki), name: "Odd key", port: 4418, proof: "a".repeat(64) };
+    expect(s.link.acceptPair({ body, socket, peerSpki })).toEqual({ status: 400, body: { error: "invalid_input" } });
+    expect(s.link.pairingState()).toEqual({ open: true, attempts: 0 });
+    expect(s.link.machines()).toEqual([]);
+  });
+
   it("checks the code's fingerprint against the certificate before sending anything", async () => {
     const { s, e, sPort } = await pairOfServices();
     s.link.showCode();
@@ -610,7 +646,13 @@ describe("LinkService pairing", () => {
     const sId = s.link.self()!.machineId;
     await expect(s.link.unpair({ kind: "agent", id: "a" }, eId)).rejects.toBeInstanceOf(HumanRequiredError);
     await expect(s.link.unpair(owner, "0".repeat(32))).rejects.toBeInstanceOf(NotFoundError);
+    // A connection E holds open to S is cut by the unpair: nothing in flight on it outlives the trust.
+    const eIdentity = await LinkIdentity.load({ secrets: e.secrets, onCreated: () => undefined });
+    const held = tls.connect({ host: "127.0.0.1", port: sPort, ...eIdentity.tls(), rejectUnauthorized: false });
+    held.on("error", () => undefined);
+    await new Promise<void>((r) => held.once("secureConnect", () => r()));
     await s.link.unpair(owner, eId);
+    await vi.waitFor(() => expect(held.destroyed).toBe(true), { timeout: 2000 });
     expect(s.link.machines()).toEqual([]);
     expect(s.ledger.list().at(-1)).toMatchObject({ type: "machine.unpaired", payload: { machineId: eId, name: "GPU box" } });
     const client = new LinkClient({ identity: await LinkIdentity.load({ secrets: e.secrets, onCreated: () => undefined }) });

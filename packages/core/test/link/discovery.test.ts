@@ -103,6 +103,14 @@ describe("selectDiscovery", () => {
     expect(fakeOf({ THETERMINAL_FAKE_AGENT: "true", THETERMINAL_FAKE_DISCOVERY: "1" })).toBe("mdns");
     expect(fakeOf({})).toBe("mdns");
   });
+
+  it("refuses to fall back to multicast under vitest: a test server must inject its discovery or set the flags", () => {
+    expect(() => selectDiscovery({ VITEST: "true" })).toThrow(/multicast/);
+    expect(() => selectDiscovery({ VITEST: "true", THETERMINAL_FAKE_DISCOVERY: "1" })).toThrow(/multicast/);
+    expect((track(selectDiscovery({ VITEST: "true", THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_DISCOVERY: "1" })) as { kind?: string }).kind).toBe("fake");
+    const injected = track(fakeDiscovery());
+    expect(selectDiscovery({ VITEST: "true" }, injected)).toBe(injected);
+  });
 });
 
 /** A Bonjour double: records what is published and lets the test play browser events. No socket is opened. */

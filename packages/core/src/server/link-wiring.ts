@@ -17,6 +17,8 @@ export type LinkWiringDeps = {
   bind: string;
   /** The injected discovery, else the fake under both test flags, else mDNS (see selectDiscovery). */
   discovery?: Discovery;
+  /** Cleans text another machine sent before it is recorded (its name at pairing). Default: the built-in redaction. */
+  cleanText?: (s: string) => string;
   /** What this computer tells paired machines about itself (`/link/v1/capacity`). */
   capacity?: CapacityProtocolDeps;
   /**
@@ -39,6 +41,7 @@ export function wireLink(deps: LinkWiringDeps): { link: LinkService; capacity: L
     ledger: deps.ledger,
     secrets: deps.secrets,
     bind: deps.bind,
+    ...(deps.cleanText !== undefined && { cleanText: deps.cleanText }),
     discovery: selectDiscovery(process.env, deps.discovery),
     listener: (listenerDeps) => new LinkListener(listenerDeps),
     client: (identity, timeoutMs) => new LinkClient({ identity, ...(timeoutMs !== undefined && { timeoutMs }) }),

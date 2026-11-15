@@ -244,6 +244,8 @@ export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitco
 export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
   if (injected) return injected;
   if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+  // Test-time guard (vitest sets VITEST): a test server that names no store never reaches the real keychain.
+  if (env.VITEST) throw new Error("Refusing to use the real keychain under vitest: inject `secrets` or set the test flags");
   return new ChunkedSecretStore(new KeychainSecretStore());
 }
 
@@ -523,6 +525,8 @@ export async function createServer(opts: {
     // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().
     const wired = wireLink({
       db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0", ...(opts.discovery !== undefined && { discovery: opts.discovery }),
+      // A paired machine's name is cleaned like any text that crosses the link.
+      cleanText: (t: string) => connections.publicText(t),
       capacity: {
         report: () => (localCapacity ? localCapacity() : Promise.reject(new Error("capacity is not ready"))),
         adapters: () => ADAPTERS.filter((id) => adapters[id] !== undefined && (id === "fake" || programAvailable(id))),

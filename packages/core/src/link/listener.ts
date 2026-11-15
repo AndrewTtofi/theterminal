@@ -59,6 +59,8 @@ export class LinkListener {
   private app: FastifyInstance | null = null;
   private bound: number | null = null;
   private readonly sockets = new Set<Socket>();
+  /** The open TLS connections and the client key each presented, for `disconnect`. */
+  private readonly secure = new Map<TLSSocket, Buffer>();
 
   constructor(private readonly deps: ListenerDeps) {}
 
@@ -91,6 +93,16 @@ export class LinkListener {
     throw lastError ?? new Error("no free port for the link listener");
   }
 
+  /**
+   * Destroys every open connection whose client key is `spkiDer`: called as a machine is unpaired, so nothing it has in
+   * flight (an upload, a held stream) outlives the trust. The next connection from that key is refused at the TLS layer.
+   */
+  disconnect(spkiDer: Buffer): void {
+    for (const [s, key] of this.secure) {
+      if (key.equals(spkiDer)) s.destroy();
+    }
+  }
+
   /** Closes every socket, then the server. */
   async stop(): Promise<void> {
     const app = this.app;
@@ -98,6 +110,7 @@ export class LinkListener {
     this.bound = null;
     for (const s of this.sockets) s.destroy();
     this.sockets.clear();
+    this.secure.clear();
     if (app) await app.close().catch(() => undefined);
   }
 
@@ -136,6 +149,8 @@ export class LinkListener {
         return;
       }
       keys.set(s, spki);
+      this.secure.set(s, spki);
+      s.once("close", () => this.secure.delete(s));
     });
     // A failed handshake (plain HTTP, TLS 1.2, a bad certificate) only closes that socket.
     server.on("tlsClientError", (_err, s) => s.destroy());

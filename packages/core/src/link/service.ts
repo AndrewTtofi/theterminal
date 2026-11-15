@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   LINK_DEFAULT_PORT, LINK_PROTOCOL_VERSION, LINKING_ACK, PAIRING_LABEL, helloResponseSchema, machineAddressSchema,
-  machineNameSchema, pairRequestSchema, pairResponseSchema, parsePairingCode,
+  machineNameSchema, pairRequestSchema, pairResponseSchema, parsePairingCode, visibleControls,
   type Actor, type Machine, type MachinePresence, type MachineProblem,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -82,6 +82,11 @@ export type LinkServiceDeps = {
   discovery: Discovery;
   /** This computer's network interfaces, for the addresses shown beside a code. Default os.networkInterfaces. */
   interfaces?: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
+  /**
+   * Cleans text another machine sent before it is recorded (its name at pairing): the server's publicText (redaction
+   * with every known secret, paths, the username, email addresses). Default: the built-in redaction.
+   */
+  cleanText?: (s: string) => string;
   bind?: string;
   now?: () => Date;
   platform?: NodeJS.Platform;
@@ -105,6 +110,11 @@ const IDENTITY_FAILED = "The Terminal: this computer's link identity could not b
 
 const ackSchema = z.object({ acknowledgement: z.literal(LINKING_ACK) });
 const portSchema = z.number().int().min(0).max(65535);
+/** An Ed25519 SPKI DER is exactly this long; any other key is refused before it is looked at. */
+const ED25519_SPKI_BYTES = 44;
+const MAX_NAME = 40;
+/** When a machine's name cleans to nothing. */
+const UNNAMED = "Linked machine";
 
 /** `host:port` split at the last colon (already checked with machineAddressSchema). */
 function parseHostPort(address: string): { host: string; port: number } {
@@ -153,6 +163,7 @@ export class LinkService {
   private readonly deps: LinkServiceDeps;
   private readonly now: () => Date;
   private readonly platform: NodeJS.Platform;
+  private readonly cleanText: (s: string) => string;
   private identity: LinkIdentity | null = null;
   private state: "ok" | "unavailable" = "unavailable";
   private listener: LinkListener | null = null;
@@ -171,6 +182,15 @@ export class LinkService {
     this.deps = deps;
     this.now = deps.now ?? (() => new Date());
     this.platform = deps.platform ?? process.platform;
+    this.cleanText = deps.cleanText ?? ((s) => redact(s));
+  }
+
+  /**
+   * A name another machine sent, as it is recorded: through the cleaner (a name is text another machine chose), hidden
+   * characters made visible, trimmed to the name length; a name that cleans to nothing is `Linked machine`.
+   */
+  private cleanName(raw: string): string {
+    return [...visibleControls(this.cleanText(raw)).trim()].slice(0, MAX_NAME).join("") || UNNAMED;
   }
 
   /**
@@ -350,6 +370,8 @@ export class LinkService {
       const { host } = parseHostPort(address);
       const { socket, peerSpki } = await LinkClient.connectUnpinned(identity, address, PAIR_TIMEOUT_MS);
       try {
+        // Not an Ed25519 key: not a Terminal; nothing is sent to it.
+        if (peerSpki.length !== ED25519_SPKI_BYTES) throw new LinkProtocolError();
         if (peerSpki.equals(identity.publicKeyDer)) throw new SelfPairingError();
         if (!fingerprintOf(peerSpki).startsWith(parsed.fingerprintPrefix)) throw new PairingCodeMismatchError();
         const ekm = exportEkm(socket);
@@ -381,7 +403,7 @@ export class LinkService {
         if (!timingSafeEqual(Buffer.from(body.data.proof, "hex"), expected)) throw new PairingRejectedError();
         return this.recordPaired(actor, {
           machineId: body.data.machineId,
-          name: body.data.name,
+          name: this.cleanName(body.data.name),
           publicKey: peerSpki.toString("base64"),
           fingerprint: fingerprintOf(peerSpki),
           address: `${host}:${body.data.port}`,
@@ -409,8 +431,10 @@ export class LinkService {
     if (input.peerSpki.equals(identity.publicKeyDer) || body.machineId === identity.machineId) {
       return { status: 400, body: { error: "self_pairing" } };
     }
-    // The id it claims must be the key it presented; checked before the proof, so it never costs an attempt.
+    // The id it claims must be the key it presented, and the key must be an Ed25519 one (the only kind the ledger
+    // records); both checked before the proof, so neither costs an attempt.
     if (body.machineId !== machineIdOf(input.peerSpki)) return { status: 400, body: { error: "invalid_input" } };
+    if (input.peerSpki.length !== ED25519_SPKI_BYTES) return { status: 400, body: { error: "invalid_input" } };
     const remote = ipv4Of(input.socket.remoteAddress);
     const address = remote === null ? null : `${remote}:${body.port}`;
     if (address === null || !machineAddressSchema.safeParse(address).success) return { status: 400, body: { error: "invalid_input" } };
@@ -428,7 +452,7 @@ export class LinkService {
     }
     this.recordPaired(OWNER, {
       machineId: body.machineId,
-      name: body.name,
+      name: this.cleanName(body.name),
       publicKey: input.peerSpki.toString("base64"),
       fingerprint: fingerprintOf(input.peerSpki),
       address,
@@ -484,6 +508,8 @@ export class LinkService {
       result: () => undefined,
     }));
     this.checked.delete(m.id);
+    // Whatever the machine still has in flight here ends with the trust; its next connection is refused at the TLS layer.
+    this.listener?.disconnect(Buffer.from(m.publicKey, "base64"));
   }
 
   /**

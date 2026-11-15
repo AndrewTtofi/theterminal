@@ -121,6 +121,29 @@ describe("LinkListener", () => {
     }
   });
 
+  it("disconnect(spki) closes that machine's open connections and no other's", async () => {
+    const l = listener({
+      peer: (spki) =>
+        spki.equals(paired.publicKeyDer) ? { machineId: paired.machineId } : spki.equals(stranger.publicKeyDer) ? { machineId: stranger.machineId } : null,
+    });
+    const port = await l.start(0);
+    const connect = async (who: LinkIdentity) => {
+      const socket = tls.connect({ host: "127.0.0.1", port, ...who.tls(), rejectUnauthorized: false });
+      socket.on("error", () => undefined);
+      await new Promise<void>((r) => socket.once("secureConnect", () => r()));
+      return socket;
+    };
+    const [one, two, other] = await Promise.all([connect(paired), connect(paired), connect(stranger)]);
+    // TLS 1.3: the client is connected one flight before the server's secureConnection records the key.
+    await new Promise((r) => setTimeout(r, 100));
+    const closed = Promise.all([one, two].map((s) => new Promise<void>((r) => s.once("close", () => r()))));
+    l.disconnect(paired.publicKeyDer);
+    await closed;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(other.destroyed).toBe(false);
+    other.destroy();
+  });
+
   it("closes open connections on stop()", async () => {
     const l = listener();
     const port = await l.start(0);
