@@ -54,9 +54,15 @@ export class ClosedBeforeReplyError extends Error {
   }
 }
 
-/** The machine's reply could not be read: too large, not JSON, or not the expected shape. Never carries the reply. */
+/** What the NDJSON splitter refused on a stream: a line over the frame cap, or bytes that are not UTF-8. */
+export type StreamRefusal = "too_large" | "invalid_frame";
+
+/**
+ * The machine's reply could not be read: too large, not JSON, or not the expected shape. Never carries the reply.
+ * On a stream, `refusal` names what the splitter refused (a correct worker never sends it); null for a bad reply.
+ */
 export class LinkProtocolError extends Error {
-  constructor() {
+  constructor(readonly refusal: StreamRefusal | null = null) {
     super("the machine sent a reply that could not be read");
     this.name = "LinkProtocolError";
   }
@@ -187,13 +193,14 @@ export class LinkClient {
     res.socket.setTimeout(opts.idleMs ?? this.streamIdleMs);
     const abort = () => req.destroy();
     signal.addEventListener("abort", abort, { once: true });
-    // Lines past the cap or not UTF-8 are refused as they arrive; blank lines (the worker's heartbeat) are skipped.
+    // Lines past the cap or not UTF-8 are refused as they arrive, named for the caller (a correct worker never sends
+    // them); blank lines (the worker's heartbeat) are skipped.
     const splitter = new NdjsonLines();
     const split = (fn: () => string[] | void): string[] => {
       try {
         return fn() ?? [];
       } catch (err) {
-        if (err instanceof MirrorFrameError) throw new LinkProtocolError();
+        if (err instanceof MirrorFrameError) throw new LinkProtocolError(err.reason === "too_large" ? "too_large" : "invalid_frame");
         throw err;
       }
     };

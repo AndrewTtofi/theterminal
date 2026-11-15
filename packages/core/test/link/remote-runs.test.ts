@@ -182,6 +182,32 @@ describe("RemoteRunService: following a worker's stream", () => {
     });
   }
 
+  const UNREADABLE: [string, Buffer][] = [
+    // A line past the frame cap, refused before its newline arrives.
+    ["too_large", Buffer.from("x".repeat(300_000))],
+    // Bytes that are not UTF-8.
+    ["invalid_frame", Buffer.from([0xff, 0xfe, 0x0a])],
+  ];
+  for (const [reason, bytes] of UNREADABLE) {
+    it(`a stream the splitter refuses (${reason}) ends the run with link.run_failed and is never retried`, async () => {
+      const started = remote.started();
+      const good = remote.message("never reached");
+      const fixture = await follow((_req, res) => {
+        ndjson(res);
+        res.write(`${remote.line(started)}\n`);
+        res.write(bytes);
+        res.write(`${remote.line(good)}\n`);
+      });
+      await vi.waitFor(() => expect(getLinkRun(db, remote.runId)!.state).toBe("failed"), { timeout: 5000 });
+      expect(getLinkRun(db, remote.runId)!.error).toBe(reason);
+      expect(originIds()).toEqual([started.id]);
+      expect(getRun(db, remote.runId)!.status).toBe("failed");
+      await sleep(300); // several backoffs: no reconnect
+      expect(eventsRequests(fixture)).toHaveLength(1);
+      expect(ledger.list().filter((e) => e.type === "link.run_failed")).toHaveLength(1);
+    });
+  }
+
   it("a duplicate frame commits nothing; the stream is closed and the next good frame after a reconnect is committed", async () => {
     const started = remote.started();
     const message = remote.message("after the reconnect");

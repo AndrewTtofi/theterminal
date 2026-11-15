@@ -413,7 +413,13 @@ export class RemoteRunService {
           this.recordFailed(current.projectId, runId, current.machineId, `remote_${err.code}`.slice(0, 100));
           return;
         }
-        // Unreachable, a cut, a key that does not match, an unreadable line, a transient refusal: wait and reconnect.
+        if (err instanceof LinkProtocolError && err.refusal !== null) {
+          // A line over the frame cap or bytes that are not UTF-8: a correct worker never sends them, and the same
+          // stream would be refused again, so the run ends here as a checked frame with that refusal would end it.
+          this.recordFailed(current.projectId, runId, current.machineId, err.refusal);
+          return;
+        }
+        // Unreachable, a cut, a transient refusal: wait and reconnect.
       }
       if (!progressed) attempt++;
       await sleep(this.backoff(Math.max(0, attempt - 1)), signal);
