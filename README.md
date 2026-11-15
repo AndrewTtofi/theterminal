@@ -12,6 +12,7 @@ Every agent action goes through a gate. Anything that could change your machine,
 - **Agents behind a gate.** Claude (Agent SDK), Codex (`codex app-server`) and Gemini CLI (ACP) run in a per-run git worktree. Reads inside the worktree are allowed. Everything else asks you first. Secrets are redacted from everything the agent reports.
 - **Your own subscriptions or API keys,** chosen per provider.
 - **Connections.** Cloud accounts (AWS, Google Cloud, Azure) and MCP servers are given to a run only when you tick them, with secrets kept in your OS keychain. A read-only GitHub view and a Capacity view sit alongside. See [`docs/connections-and-credentials.md`](docs/connections-and-credentials.md).
+- **Plan, gates and story.** Describe an idea, answer a few questions and approve a plan, and your first cards appear. Risky moves to Ship or Operate stop at readiness gates that you sign off or waive with a reason. Each card has a story, and the whole ledger exports as NDJSON for audit. See [`docs/glass-box.md`](docs/glass-box.md).
 - **Local only.** The server listens on your machine at its own local address, protected by a session token and Host and Origin checks.
 
 The full design is in [`docs/specs/2026-11-13-agent-workspace-design.md`](docs/specs/2026-11-13-agent-workspace-design.md), and the implementation plans are in [`docs/plans/`](docs/plans/).
