@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z, ZodError } from "zod";
-import { cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
+import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
@@ -15,7 +15,7 @@ import {
   DecisionNotApplicableError, HumanRequiredError, IntakeCompletedError, IntakeIncompleteError, NoIntakeError,
   SecretInTextError,
 } from "../intake/service.js";
-import { GateBlockedError, GateNotMetError, type GateService } from "../gates/service.js";
+import { GateBlockedError, GateNotMetError, stageHasEntryGates, type GateService } from "../gates/service.js";
 import {
   GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
 } from "../github/client.js";
@@ -30,6 +30,7 @@ export type RouteDeps = {
 const actor = { kind: "human", id: "owner" } as const;
 
 const moveBody = z.object({ to: stageSchema, gates: z.array(gateDecisionInputSchema).max(10).optional() }).strict();
+const STAGE_GATED = "Add the card to an earlier stage, then move it, so its readiness checks run.";
 const gatesQuery = z.object({ to: stageSchema });
 const statusBody = z.object({ to: cardStatusSchema });
 const ledgerQuery = z.object({
@@ -139,6 +140,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   );
 
   app.post<{ Params: { id: string } }>("/api/projects/:id/cards", async (req, reply) => {
+    const { stage } = cardInputSchema.parse(req.body);
+    // A card created in Ship or Operate would skip the gates a move there runs. The intake's approved plan still
+    // creates cards in those stages (IntakeService.complete), because approving the plan is itself a recorded
+    // human decision; only this direct path is refused.
+    if (stageHasEntryGates(stage)) {
+      return reply.code(409).send({ error: "stage_gated", message: STAGE_GATED });
+    }
     const card = board.addCard(actor, req.params.id, req.body as never);
     return reply.code(201).send(card);
   });

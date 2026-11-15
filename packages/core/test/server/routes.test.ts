@@ -32,6 +32,10 @@ async function mkProject(name = "Acme") {
   return res.json() as { id: string };
 }
 
+async function mkCardRes(projectId: string, stage: string) {
+  return app.inject({ method: "POST", url: `/api/projects/${projectId}/cards`, payload: { title: "T", stage } });
+}
+
 async function mkCard(projectId: string, stage = "plan") {
   const res = await app.inject({
     method: "POST",
@@ -180,10 +184,32 @@ describe("routes", () => {
       expect(many.statusCode).toBe(400);
       const extra = await app.inject({ method: "POST", url, payload: { to: "ship", other: 1 } });
       expect(extra.statusCode).toBe(400);
-      const waiver = { gateId: "ready_to_ship", decision: "waive", reason: "demo sk-ant-TESTKEY-0000000000", acknowledgement: GATES[1]!.acknowledgement };
+      const waiver = { gateId: "ready_to_ship", decision: "waive", reason: "demo sk-ant-TESTKEY-0000000000", acknowledgement: GATES.find((g) => g.id === "ready_to_ship")!.acknowledgement };
       const secret = await app.inject({ method: "POST", url, payload: { to: "ship", gates: [waiver] } });
       expect(secret.statusCode).toBe(400);
       expect(secret.json()).toEqual({ error: "secret_in_text" });
+    });
+
+    it("refuses a new card straight into a stage with entry gates, so it cannot skip them", async () => {
+      const p = await mkProject();
+      const head = ledger.headSeq();
+      for (const stage of ["ship", "operate"]) {
+        const res = await app.inject({ method: "POST", url: `/api/projects/${p.id}/cards`, payload: { title: "T", stage } });
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: "stage_gated", message: "Add the card to an earlier stage, then move it, so its readiness checks run.",
+        });
+      }
+      expect(ledger.headSeq()).toBe(head);
+      for (const stage of ["plan", "design", "build"]) expect((await mkCardRes(p.id, stage)).statusCode).toBe(201);
+    });
+
+    it("an approved plan still creates its Ship and Operate cards: the approval is a recorded human decision", async () => {
+      const c = await plannedCard();
+      const projectId = (ledger.list().find((e) => e.type === "card.created" && (e.payload as { cardId: string }).cardId === c.id)!).projectId!;
+      const board = (await app.inject({ url: `/api/projects/${projectId}/board` })).json() as { columns: Record<string, { title: string }[]> };
+      expect(board.columns.ship!.map((x) => x.title)).toContain("Payments readiness review");
+      expect(board.columns.operate!.map((x) => x.title)).toEqual(["Monitoring and health checks"]);
     });
 
     it("GET /api/cards/:id/gates?to= returns the evaluations without recording anything", async () => {

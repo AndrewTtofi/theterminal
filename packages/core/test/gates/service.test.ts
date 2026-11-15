@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ZodError } from "zod";
-import { GATES, type GateDecisionInput, type GateId, type LedgerEntry } from "@theterminal/shared";
+import { GATES, STAGES, type GateDecisionInput, type GateId, type LedgerEntry } from "@theterminal/shared";
 import { NotFoundError } from "../../src/board/board-service.js";
 import { rebuildAllProjections } from "../../src/events/projections.js";
 import { HumanRequiredError, SecretInTextError } from "../../src/intake/service.js";
-import { GateBlockedError, GateNotMetError, GateService } from "../../src/gates/service.js";
+import { GateBlockedError, GateNotMetError, GateService, stageHasEntryGates } from "../../src/gates/service.js";
 import { completeIntake, emit, finishedRun, human, world, type World } from "./setup.js";
 
 const SECRET = "sk-ant-TESTKEY-0000000000";
@@ -39,6 +39,12 @@ function snapshot() {
   const tables = ["cards", "projects", "agent_runs", "agent_actions", "intakes", "intake_answers", "intake_decisions", "gate_decisions"];
   return Object.fromEntries(tables.map((t) => [t, w.db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()]));
 }
+
+describe("stageHasEntryGates", () => {
+  it("is true for Ship and Operate only: the stages a gate stands in front of whatever the card comes from", () => {
+    expect(STAGES.filter(stageHasEntryGates)).toEqual(["ship", "operate"]);
+  });
+});
 
 describe("GateService.evaluate", () => {
   it("a move to Ship for the planned project raises four gates; the payments gate among them", () => {
@@ -169,8 +175,11 @@ describe("GateService.move", () => {
     const id = card(w.planned);
     const head = w.ledger.headSeq();
     const decisions = [...SHIP_GATES.slice(1).map((g) => signOff(g as GateId)), waive("ready_to_ship", "a reason long enough")];
-    caught(() => gates.move(human, id, "ship", decisions), GateBlockedError);
-    expect(after(head).map((e) => e.type)).toEqual(["gate.blocked"]);
+    const err = caught(() => gates.move(human, id, "ship", decisions), GateBlockedError);
+    expect(err.gates.map((g) => g.id)).toEqual(SHIP_GATES);
+    const added = after(head);
+    expect(added.map((e) => e.type)).toEqual(["gate.blocked"]);
+    expect((added[0]!.payload as { gates: unknown }).gates).toEqual([{ gateId: "ready_to_ship", outcome: "needs_sign_off", unmet: [] }]);
   });
 
   it("a decision for a gate that does not apply is ignored and not recorded", () => {
@@ -186,6 +195,8 @@ describe("GateService.move", () => {
     const system = { kind: "system", id: "runner" } as const;
     expect(() => gates.move(system, id, "ship", SHIP_GATES.map((g) => signOff(g as GateId)))).toThrow(HumanRequiredError);
     expect(() => gates.move(system, id, "ship")).toThrow(HumanRequiredError);
+    // The actor is checked first: a reason that would be refused as a secret still answers HumanRequiredError.
+    expect(() => gates.move(system, id, "ship", [waive("ready_to_ship", `demo ${SECRET}`)])).toThrow(HumanRequiredError);
     expect(w.ledger.headSeq()).toBe(head);
     // A move no gate stops is not a decision.
     gates.move(system, id, "design");

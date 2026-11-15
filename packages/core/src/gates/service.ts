@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  applicableGates, gateDecisionInputSchema, outcomeOf, stageSchema,
+  STAGES, applicableGates, gateDecisionInputSchema, outcomeOf, stageSchema,
   type Actor, type Card, type ConditionId, type GateDecisionInput, type GateEvaluation, type GateId, type NewLedgerEntry,
   type Stage,
 } from "@theterminal/shared";
@@ -43,6 +43,16 @@ const decisionsSchema = z
     });
   });
 
+const NO_FACTS = { intakeCompleted: false, budgetUsd: null, spendUsd: 0 };
+
+/**
+ * True when a gate stands in front of the stage whatever stage the card comes from (Ship, Operate), so a card must
+ * not be created there directly: it would skip the readiness checks a move runs.
+ */
+export function stageHasEntryGates(stage: Stage): boolean {
+  return STAGES.some((from) => from !== "plan" && from !== stage && applicableGates({ from, to: stage }, {}, NO_FACTS).length > 0);
+}
+
 type MoveResult = { card: Card } | { blocked: GateEvaluation[] };
 
 const unmetOf = (g: GateEvaluation): ConditionId[] => g.conditions.filter((c) => !c.met).map((c) => c.id);
@@ -75,6 +85,8 @@ export class GateService {
    */
   move(actor: Actor, cardId: string, to: Stage, decisions: GateDecisionInput[] = []): Card {
     const stage = stageSchema.parse(to);
+    // A gate decision is a human's: refused for anyone else before the decisions or their text are even looked at.
+    if (actor.kind !== "human" && decisions.length > 0) throw new HumanRequiredError();
     const byGate = new Map(decisionsSchema.parse(decisions).map((d) => [d.gateId, d] as const));
     // Checked before the transaction: the error never carries the text, and a refusal records nothing.
     const reasons = new Map<GateId, string>();
