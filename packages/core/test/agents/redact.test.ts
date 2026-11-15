@@ -287,9 +287,9 @@ describe("redact: leak fixes", () => {
     expect(r("a: 1\r  password: |\r    FAKE1\r  keep: y")).toBe(`a: 1\r  password: ${REDACTED}\r  keep: y`);
     expect(r("password: |\r\n  FAKE1\r\n  FAKE2\r\nnext: x")).toBe(`password: ${REDACTED}\r\nnext: x`);
   });
-  // Retried up to twice: a timing check can lose to a burst of load from parallel test files; a real quadratic
-  // path fails every attempt. Growth, not an absolute bound: a slow or loaded runner (Windows CI) slows both sizes alike, while a quadratic
-  // path takes sixteen times as long on four times the input. Each size is timed after a warm-up, best of three.
+  // Growth, not an absolute bound: a slow or loaded runner (Windows CI) slows both sizes alike, while a quadratic
+  // path takes sixteen times as long on four times the input. Each size is timed after a warm-up, best of three. A
+  // retry absorbs a burst of load on a shared machine; a quadratic path fails every attempt.
   it("is linear on large input", { timeout: 120_000, retry: 2 }, () => {
     const time = (input: string): number => {
       let best = Infinity;
