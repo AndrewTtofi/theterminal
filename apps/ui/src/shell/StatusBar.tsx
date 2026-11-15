@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { visibleControls } from "@theterminal/shared";
 import type { CiStatus } from "@theterminal/shared";
 import type { Status } from "../api";
 import { PRESET_LABELS } from "./dock-layout";
@@ -104,6 +105,18 @@ function LayoutItem({ layout }: { layout: LayoutControls }) {
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** Set when the name form closes, so focus goes back to Save layout instead of falling to the page. */
+  const [closed, setClosed] = useState(false);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!closed) return;
+    setClosed(false);
+    saveButton.current?.focus();
+  }, [closed]);
+  const close = () => {
+    setNaming(false);
+    setClosed(true);
+  };
 
   const preset = PRESETS.find((p) => PRESET_LABELS[p] === layout.current);
   const value = preset ? presetValue(preset) : layout.saved.includes(layout.current) ? savedValue(layout.current) : "custom";
@@ -126,7 +139,7 @@ function LayoutItem({ layout }: { layout: LayoutControls }) {
       }
       throw err;
     }
-    setNaming(false);
+    close();
     setName("");
     setError(null);
   };
@@ -146,7 +159,7 @@ function LayoutItem({ layout }: { layout: LayoutControls }) {
         ))}
         {layout.saved.map((n) => (
           <option key={n} value={savedValue(n)}>
-            {n}
+            {visibleControls(n)}
           </option>
         ))}
       </select>
@@ -159,7 +172,7 @@ function LayoutItem({ layout }: { layout: LayoutControls }) {
             autoFocus
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setNaming(false);
+              if (e.key === "Escape") close();
             }}
           />
           <button type="submit" disabled={name.trim() === ""}>
@@ -172,7 +185,7 @@ function LayoutItem({ layout }: { layout: LayoutControls }) {
           )}
         </form>
       ) : (
-        <button type="button" onClick={() => setNaming(true)}>
+        <button type="button" ref={saveButton} onClick={() => setNaming(true)}>
           Save layout
         </button>
       )}

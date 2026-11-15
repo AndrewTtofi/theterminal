@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, errorMessage } from "../api";
+import { ApiError, LIVE_RUN_CHANGES, errorMessage } from "../api";
 import type { DockPanelId } from "../shell/Dock";
-import { namesRun, useShell } from "../shell/model";
+import { namesRun, runIsLive, useShell } from "../shell/model";
 
 /**
  * Loads one file's data for a `diff:` or `file:` tab on mount, and again on every agent.* or override.* entry
  * naming its run (one load in flight, one more queued). A 404 `not_found` asks whether the run still exists: when
  * the server no longer knows it, the tab closes quietly, as stale tabs are pruned on load; otherwise the failure
- * is worded for the Owner and the last data loaded stays. A live run (409 `run_active`) never closes the tab: it
- * says the changes show once the run stops, and the run's finish entry loads them.
+ * is worded for the Owner and the last data loaded stays. While the runs list says the run is live nothing is asked
+ * (the server would refuse with 409 `run_active`): the tab says the changes show once the run stops, and loads when
+ * the list says it ended. A 409 `run_active` all the same never closes the tab either.
  */
 export function useRunData<T>(
   panelId: string,
@@ -27,9 +28,14 @@ export function useRunData<T>(
   const runId = target?.runId ?? null;
   const path = target?.path ?? null;
   const subscribe = model.subscribeEntries;
+  const live = runIsLive(model.runs, runId);
 
   useEffect(() => {
     if (runId === null || path === null) return;
+    if (live) {
+      setError(LIVE_RUN_CHANGES);
+      return;
+    }
     let cancelled = false;
     let inFlight = false;
     let again = false;
@@ -67,7 +73,7 @@ export function useRunData<T>(
       cancelled = true;
       unsubscribe();
     };
-  }, [panelId, runId, path, subscribe]);
+  }, [panelId, runId, path, subscribe, live]);
 
   return { data, error };
 }

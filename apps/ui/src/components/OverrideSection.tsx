@@ -294,7 +294,8 @@ function CommandForm({ run, disabled }: { run: AgentRun; disabled: boolean }) {
 export function OverrideSection({ run }: { run: AgentRun }) {
   const { model, openLearn } = useShell();
   const running = run.status === "running";
-  const busy = overrideActive(model.entries, run.id);
+  // The project stream, not the Ledger panel's page: that one may hold every project's entries, or none while it loads.
+  const busy = overrideActive(model.projectEntries, run.id);
   const disabled = running || busy;
   return (
     <details className="override">

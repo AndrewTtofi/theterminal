@@ -20,6 +20,7 @@ function Topic({ topic, read, open, onRead }: { topic: LearnTopic; read: boolean
   return (
     <details
       ref={ref}
+      data-topic={topic.id}
       className={read ? "learn-topic read" : "learn-topic"}
       onToggle={(e) => {
         if (programmatic.current) {
@@ -72,19 +73,19 @@ export function LearnSideBar() {
       {pinned && <ul>{item(pinned)}</ul>}
       {matchedShown.length > 0 && (
         <>
-          <h3>For what you are looking at</h3>
+          <h2>For what you are looking at</h2>
           <ul>{matchedShown.map(item)}</ul>
         </>
       )}
       {restShown.length > 0 && (
         <>
-          <h3>Everything else</h3>
+          <h2>Everything else</h2>
           {LEARN_SECTIONS.map((s) => {
             const inSection = restShown.filter((t) => t.section === s);
             return (
               inSection.length > 0 && (
                 <section key={s}>
-                  <h4>{LEARN_SECTION_LABELS[s]}</h4>
+                  <h3>{LEARN_SECTION_LABELS[s]}</h3>
                   <ul>{inSection.map(item)}</ul>
                 </section>
               )

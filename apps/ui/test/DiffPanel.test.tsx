@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { FileDiff, LedgerEntry } from "@theterminal/shared";
+import type { AgentRun, FileDiff, LedgerEntry } from "@theterminal/shared";
 import { ApiError } from "../src/api";
 import type { DockApi } from "../src/shell/Dock";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { DiffPanel } from "../src/views/DiffPanel";
-import { changes, fileDiff, runEntry } from "./changes-fixtures";
+import { changes, fileDiff, run1, runEntry } from "./changes-fixtures";
 import { shellNav } from "./connections-harness";
 
 const ID = "diff:run1:notes.txt";
@@ -18,6 +18,7 @@ function setup(load: () => Promise<FileDiff>, over: Partial<WorkbenchModel> = {}
     runChanges: vi.fn(async () => changes()),
     onOpenFile: vi.fn(),
     runExists: vi.fn(async () => true),
+    runs: [],
     subscribeEntries: (cb: (e: LedgerEntry) => void) => {
       listeners.add(cb);
       return () => listeners.delete(cb);
@@ -25,13 +26,17 @@ function setup(load: () => Promise<FileDiff>, over: Partial<WorkbenchModel> = {}
     ...over,
   } as unknown as WorkbenchModel;
   const dock = { closeQuietly: vi.fn() } as unknown as DockApi;
-  render(
-    <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
+  const nav = shellNav();
+  const tree = (m: WorkbenchModel) => (
+    <ShellContext.Provider value={{ model: m, dock: () => dock, ...nav }}>
       <DiffPanel id={ID} />
-    </ShellContext.Provider>,
+    </ShellContext.Provider>
   );
+  const { rerender } = render(tree(model));
   const emit = (e: LedgerEntry) => act(() => listeners.forEach((l) => l(e)));
-  return { model, dock, emit };
+  /** Renders again with the model's runs replaced, as App does when the runs list refreshes. */
+  const withRuns = (runs: AgentRun[]) => rerender(tree({ ...model, runs }));
+  return { model, dock, emit, withRuns };
 }
 
 const panel = () => screen.findByRole("region", { name: "Diff: notes.txt" });
@@ -122,6 +127,19 @@ describe("DiffPanel", () => {
     live = false;
     emit(runEntry("agent.finished", "run1"));
     expect(await panel()).toBeTruthy();
+  });
+
+  it("asks nothing while the runs list says the run is live, and loads once it says the run ended", async () => {
+    const { model, emit, withRuns } = setup(async () => fileDiff(), { runs: [{ ...run1, status: "running" }] });
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    emit(runEntry("agent.message", "run1"));
+    emit(runEntry("agent.message", "run1"));
+    await act(async () => {});
+    expect(model.diff).not.toHaveBeenCalled();
+    withRuns([{ ...run1, status: "completed" }]);
+    expect(await panel()).toBeTruthy();
+    expect(model.diff).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("Changes show when the run is stopped or finished.")).toBeNull());
   });
 
   it("says why an unsafe repository's diff cannot be shown", async () => {

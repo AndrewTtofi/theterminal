@@ -63,7 +63,7 @@ function lastMessages(entries: LedgerEntry[], runId: string, n: number): string[
   const out: string[] = [];
   for (let i = entries.length - 1; i >= 0 && out.length < n; i--) {
     const e = entries[i]!;
-    if (e.type !== "agent.message") continue;
+    if (e.type !== "agent.message" || typeof e.payload !== "object" || e.payload === null) continue;
     const p = e.payload as { runId?: unknown; text?: unknown };
     if (p.runId === runId && typeof p.text === "string") out.unshift(p.text);
   }

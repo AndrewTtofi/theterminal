@@ -6,7 +6,7 @@ import type { DockApi } from "../src/shell/Dock";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { FilePanel } from "../src/views/FilePanel";
-import { fileContent, runEntry } from "./changes-fixtures";
+import { fileContent, run1, runEntry } from "./changes-fixtures";
 import { shellNav } from "./connections-harness";
 
 const ID = "file:run1:src%2Fa.ts";
@@ -16,6 +16,7 @@ function setup(load: () => Promise<FileContent>, over: Partial<WorkbenchModel> =
   const model = {
     file: vi.fn(load),
     runExists: vi.fn(async () => true),
+    runs: [],
     subscribeEntries: (cb: (e: LedgerEntry) => void) => {
       listeners.add(cb);
       return () => listeners.delete(cb);
@@ -100,5 +101,13 @@ describe("FilePanel", () => {
     const { dock } = setup(() => Promise.reject(new ApiError(409, "run_active", { message: "x" })));
     expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
     expect(dock.closeQuietly).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing while the runs list says the run is live", async () => {
+    const { model, emit } = setup(async () => fileContent(), { runs: [{ ...run1, status: "running" }] });
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    emit(runEntry("agent.message", "run1"));
+    await act(async () => {});
+    expect(model.file).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { LEARN_TOPICS } from "@theterminal/shared";
 import { DecisionCard } from "../components/DecisionCard";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
@@ -89,6 +90,15 @@ export function Workbench({ model }: Props) {
   const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(announceTimer.current), []);
   /**
+   * Says `text` in the live region. The same words again would leave the region unchanged and unread, so a repeat
+   * toggles a trailing no-break space. Cleared after a while.
+   */
+  const announce = (text: string) => {
+    setAnnouncement((prev) => (prev === text ? `${text}\u00a0` : text));
+    clearTimeout(announceTimer.current);
+    announceTimer.current = setTimeout(() => setAnnouncement(""), 3000);
+  };
+  /**
    * A strip card's "More context": shows the Needs-you tab, leaving focus on the button the Owner pressed, and says
    * so in the live region, since nothing near the button changes.
    */
@@ -96,15 +106,30 @@ export function Workbench({ model }: Props) {
     const from = document.activeElement;
     dockRef.current?.focus("needs_you");
     if (from instanceof HTMLElement && from.isConnected && document.activeElement !== from) from.focus();
-    setAnnouncement("Opened Needs you");
-    // Cleared after a while, so pressing it again later is announced again.
-    clearTimeout(announceTimer.current);
-    announceTimer.current = setTimeout(() => setAnnouncement(""), 3000);
+    announce("Opened Needs you");
   };
+  /** Set by openLearn: the topic to move focus to if the button that opened it is gone once the side bar shows Learn. */
+  const learnFocus = useRef<string | null>(null);
+  /**
+   * A "Learn more" link: shows the Learn view on the topic and says so in the live region. As with More context,
+   * focus stays on the button pressed; when that button was in the side bar Learn replaced, the topic takes focus.
+   */
   const openLearn = (topicId: string) => {
+    learnFocus.current = topicId;
     setLearnTopic(topicId);
     showView("learn");
+    const title = LEARN_TOPICS.find((t) => t.id === topicId)?.title;
+    announce(title === undefined ? "Opened Learn" : `Opened Learn: ${title}`);
   };
+  useEffect(() => {
+    const topicId = learnFocus.current;
+    if (topicId === null) return;
+    learnFocus.current = null;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && active.isConnected) return;
+    const topic = [...document.querySelectorAll<HTMLElement>(".learn-side details[data-topic]")].find((d) => d.dataset.topic === topicId);
+    (topic?.querySelector<HTMLElement>("summary") ?? document.querySelector<HTMLElement>(".learn-side input[type='search']"))?.focus();
+  });
 
   const [dockReady, setDockReady] = useState(false);
   const [layoutName, setLayoutName] = useState("Guided");

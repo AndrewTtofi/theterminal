@@ -94,6 +94,18 @@ describe("named layouts", () => {
     expect(loadNamedLayout("Big")).toBeNull();
   });
 
+  it("skips one stored layout that cannot be measured, keeping the others and keeping them on the next save", () => {
+    localStorage.setItem(LAYOUTS_KEY, JSON.stringify([{ name: "A", layout: { a: 1 } }, { name: "Bad", layout: { boom: true } }, { name: "C", layout: {} }]));
+    const stringify = JSON.stringify.bind(JSON);
+    vi.spyOn(JSON, "stringify").mockImplementation((value: unknown, ...rest: unknown[]) => {
+      if (typeof value === "object" && value !== null && "boom" in value) throw new RangeError("Maximum call stack size exceeded");
+      return stringify(value, ...(rest as [undefined, undefined]));
+    });
+    expect(listSavedLayouts()).toEqual(["A", "C"]);
+    saveNamedLayout("D", { d: 1 });
+    expect(listSavedLayouts()).toEqual(["A", "C", "D"]);
+  });
+
   it("skips stored names that a save would refuse", () => {
     const entries = ["", "   ", "x".repeat(41), "Guided", "custom", " padded ", "ok"].map((name) => ({ name, layout: {} }));
     localStorage.setItem(LAYOUTS_KEY, JSON.stringify(entries));

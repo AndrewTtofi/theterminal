@@ -4,10 +4,10 @@ import type {
   NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, api, blockedGates, errorMessage, subscribeLedger } from "./api";
+import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
-import { LEDGER_TOPICS, namesRun } from "./shell/model";
+import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
 import type { AppModel, GatePrompt, LedgerScope } from "./shell/model";
 import { LIVE_CAP, appendEntries, batcher, prependEntries } from "./ledger-buffer";
@@ -121,6 +121,8 @@ export function App() {
    */
   const resolvingGate = useRef(false);
   const deciding = useRef(new Set<string>());
+  /** The runs whose override is being sent; see overrideAction. */
+  const overriding = useRef(new Set<string>());
   gateRef.current = gate;
   const refreshGateRef = useRef<() => void>(() => {});
   /** Listeners for every new ledger entry (the story tabs), fed by the stream from the ledger head. */
@@ -355,11 +357,19 @@ export function App() {
   };
 
   /** Sends an emergency override; a refusal comes back worded, for the form to show where the Owner is looking. */
-  const overrideAction = async <T extends object>(send: () => Promise<T>): Promise<OverrideOutcome<T>> => {
+  /**
+   * Sends one override of `runId`. While one of the run's overrides is being sent, another (a double click, or the
+   * other form) answers a refusal without reaching the server, as decisions and gated moves do.
+   */
+  const overrideAction = async <T extends object>(runId: string, send: () => Promise<T>): Promise<OverrideOutcome<T>> => {
+    if (overriding.current.has(runId)) return { ok: false, error: "An override of this run is already being sent" };
+    overriding.current.add(runId);
     try {
       return { ok: true, ...(await send()) };
     } catch (e) {
       return { ok: false, error: errorMessage(e) };
+    } finally {
+      overriding.current.delete(runId);
     }
   };
 
@@ -445,12 +455,19 @@ export function App() {
     return result;
   });
 
+  /** True while the Changes run is live: the server refuses its changes, so none are asked for until it ends. */
+  const changesLive = runIsLive(runs, changesRunId);
   useEffect(() => {
     if (changesRunId === null) {
       setChanges(null);
       return;
     }
     const runId = changesRunId;
+    if (changesLive) {
+      // The runs list says when it ends, and this effect then reads the changes.
+      setChanges({ runId, changes: null, error: LIVE_RUN_CHANGES });
+      return;
+    }
     let cancelled = false;
     setChanges({ runId, changes: null, error: null });
     let fresh = false;
@@ -472,7 +489,7 @@ export function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [changesRunId, runChanges, subscribeEntries]);
+  }, [changesRunId, changesLive, runChanges, subscribeEntries]);
 
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
@@ -667,8 +684,8 @@ export function App() {
     changes: changes?.runId === changesRunId ? changes.changes : null,
     changesError: changes?.runId === changesRunId ? changes.error : null,
     runChanges,
-    onOverrideCommand: (runId, i) => overrideAction(() => api.overrideCommand(runId, i)),
-    onOverrideDiscard: (runId, reason) => overrideAction(() => api.overrideDiscard(runId, reason)),
+    onOverrideCommand: (runId, i) => overrideAction(runId, () => api.overrideCommand(runId, i)),
+    onOverrideDiscard: (runId, reason) => overrideAction(runId, () => api.overrideDiscard(runId, reason)),
     dir: api.listRunDir,
     file: api.getRunFile,
     diff: api.getRunDiff,

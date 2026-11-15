@@ -24,6 +24,7 @@ function setup(over: Partial<WorkbenchModel> = {}, run: AgentRun = run1) {
     // No commits by the agent (head is the fork point), so every changed file is uncommitted.
     changes: changes({ head: BASE }),
     entries: [],
+    projectEntries: [],
     onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 3 })),
     onOverrideCommand: vi.fn(async () => ({ ok: true as const })),
     ...over,
@@ -234,9 +235,16 @@ describe("OverrideSection", () => {
 
   it("disables both forms while another override of the run has not finished", () => {
     const command = overrideEntry("override.command", { overrideId: "ov1", program: "git", args: [], cwd: ".", reason: REASON });
-    setup({ entries: [command] });
+    setup({ projectEntries: [command] });
     expect(screen.getByText("An override is already running for this run")).toBeTruthy();
     expect((discardForm() as HTMLFieldSetElement).disabled).toBe(true);
+    expect((commandForm() as HTMLFieldSetElement).disabled).toBe(true);
+  });
+
+  it("reads the project's stream, not the Ledger's page, which may be every project's or still loading", () => {
+    const command = overrideEntry("override.command", { overrideId: "ov1", program: "git", args: [], cwd: ".", reason: REASON });
+    setup({ entries: [], projectEntries: [command] });
+    expect(screen.getByText("An override is already running for this run")).toBeTruthy();
     expect((commandForm() as HTMLFieldSetElement).disabled).toBe(true);
   });
 
@@ -246,7 +254,7 @@ describe("OverrideSection", () => {
       overrideId: "ov1", ok: true, exitCode: 0, signal: null, timedOut: false, durationMs: 5, output: "",
     });
     const other = { ...overrideEntry("override.discard", { overrideId: "ov2", reason: REASON, files: 1 }), payload: { runId: "run9", overrideId: "ov2" } };
-    setup({ entries: [done, command, other] });
+    setup({ projectEntries: [done, command, other] });
     expect(screen.queryByText("An override is already running for this run")).toBeNull();
     expect((discardForm() as HTMLFieldSetElement).disabled).toBe(false);
     expect((commandForm() as HTMLFieldSetElement).disabled).toBe(false);

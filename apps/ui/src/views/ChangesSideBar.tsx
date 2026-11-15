@@ -5,7 +5,7 @@ import { ADAPTER_NAMES } from "../components/AgentPanel";
 import { OverrideSection } from "../components/OverrideSection";
 import { clip } from "../components/text";
 import { errorMessage } from "../api";
-import { namesRun, useShell } from "../shell/model";
+import { namesRun, runIsLive, useShell } from "../shell/model";
 
 const LETTER: Record<ChangeStatus, string> = {
   added: "A", modified: "M", deleted: "D", typechange: "T", untracked: "U", unchanged: "",
@@ -138,6 +138,8 @@ export function ChangesSideBar() {
   const runs = [...model.runs].sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
   const runId = model.changesRunId;
   const run = runs.find((r) => r.id === runId);
+  /** A live run's working copy is not read: the changes' note says why, and the tree waits for the run to end. */
+  const live = runIsLive(model.runs, runId);
   const c = model.changes;
   /** Never opens a file whose name was hidden: its path is not a real one. */
   const openDiff = (f: ChangedFile) => {
@@ -176,6 +178,7 @@ export function ChangesSideBar() {
             <p className="note">Too many changes to list here.</p>
           ) : (
             <>
+              <h2>Changed files</h2>
               <p>
                 {plural(c.files.length, "file")} changed · +{c.files.reduce((a, f) => a + (f.added ?? 0), 0)} −
                 {c.files.reduce((a, f) => a + (f.deleted ?? 0), 0)}
@@ -207,8 +210,12 @@ export function ChangesSideBar() {
               </ul>
             </>
           )}
-          <h2>Files</h2>
-          <DirList key={runId} runId={runId} path="" label="Files" />
+          {!live && (
+            <>
+              <h2>Files</h2>
+              <DirList key={runId} runId={runId} path="" label="Files" />
+            </>
+          )}
           {run && <OverrideSection key={runId} run={run} />}
         </>
       )}

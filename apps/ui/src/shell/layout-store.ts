@@ -56,11 +56,17 @@ function readNamed(): Named[] {
     const raw = localStorage.getItem(LAYOUTS_KEY);
     const parsed: unknown = raw === null ? [] : JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (e): e is Named =>
-        typeof e === "object" && e !== null && typeof (e as Named).name === "string" && "layout" in e &&
-        (e as Named).name === (e as Named).name.trim() && nameProblem((e as Named).name) === null && !tooLarge((e as Named).layout),
-    );
+    return parsed.filter((e): e is Named => {
+      if (typeof e !== "object" || e === null || typeof (e as Named).name !== "string" || !("layout" in e)) return false;
+      const { name, layout } = e as Named;
+      if (name !== name.trim() || nameProblem(name) !== null) return false;
+      // One entry that cannot be measured (too deep to serialise) is skipped on its own, keeping the others.
+      try {
+        return !tooLarge(layout);
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return [];
   }

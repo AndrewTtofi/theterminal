@@ -58,6 +58,14 @@ export function namesRun(e: LedgerEntry, runId: string): boolean {
   return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
 }
 
+/**
+ * True when `runs` lists `runId` as running. The server refuses every view of a live run's working copy (409
+ * run_active), so nothing asks for one until the run is stopped or finished; an unknown run is asked about.
+ */
+export function runIsLive(runs: readonly AgentRun[], runId: string | null): boolean {
+  return runId !== null && runs.some((r) => r.id === runId && r.status === "running");
+}
+
 /** What an emergency override request came to: recorded, or refused with a message for the Owner. */
 export type OverrideOutcome<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };
 

@@ -62,6 +62,10 @@ export function terminalItems(entries: LedgerEntry[], runId: string | null): Ter
         push("override", `# OVERRIDE ${[str(p.program) ?? "", ...args].join(" ")}`);
         break;
       }
+      case "override.discard":
+        // What a discard runs is fixed, so the line says it; its git output follows with override.completed.
+        push("override", "# OVERRIDE discard: git reset --hard HEAD, then git clean -fd");
+        break;
       case "override.completed": {
         const output = str(p.output);
         if (output) push("override_output", output, p.ok === true);

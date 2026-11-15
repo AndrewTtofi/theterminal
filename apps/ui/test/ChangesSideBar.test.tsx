@@ -28,6 +28,7 @@ function setup(over: Partial<WorkbenchModel> = {}) {
     },
     selectedId: "p1",
     entries: [],
+    projectEntries: [],
     runs: [run1, run2],
     changesRunId: "run1",
     onSelectChangesRun: vi.fn(),
@@ -133,6 +134,23 @@ describe("ChangesSideBar", () => {
   it("says plainly that a live run's tree shows once the run stops", async () => {
     setup({ dir: vi.fn(async () => Promise.reject(new ApiError(409, "run_active", { message: "x" }))) });
     expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+  });
+
+  it("names the changed files and the tree with level-2 headings", async () => {
+    setup();
+    expect(screen.getByRole("heading", { level: 2, name: "Changed files" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Files" })).toBeTruthy();
+    await screen.findByText("notes.txt");
+  });
+
+  it("asks for no listing while the run it shows is live, and says why once", () => {
+    const note = "Changes show when the run is stopped or finished.";
+    const { model, emit } = setup({ changesRunId: "run2", changes: null, changesError: note });
+    emit(runEntry("agent.message", "run2"));
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    expect(screen.queryByRole("list", { name: "Files" })).toBeNull();
+    expect(model.dir).not.toHaveBeenCalled();
+    expect(screen.getByText("Stop the agent first.")).toBeTruthy();
   });
 
   it("asks for a project first", () => {

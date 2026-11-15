@@ -25,8 +25,11 @@ afterEach(() => localStorage.clear());
 describe("LearnSideBar", () => {
   it("ranks the topics for the current view first under their own heading", () => {
     setup({ contextView: "changes" });
-    expect(screen.getByRole("heading", { name: "For what you are looking at" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Everything else" })).toBeTruthy();
+    // The side bar's title names the view; its headings start at level 2, with no gap.
+    expect(screen.getByRole("heading", { level: 2, name: "For what you are looking at" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Everything else" })).toBeTruthy();
+    expect(screen.getAllByRole("heading", { level: 3 }).length).toBeGreaterThan(0);
+    expect(screen.queryAllByRole("heading", { level: 4 })).toHaveLength(0);
     expect(summaries()[0]).toContain(title("reading_a_diff"));
     expect(summaries()).toHaveLength(LEARN_TOPICS.length);
     expect(screen.getByText(/Short explanations so you can decide and audit well\. They are written into The Terminal, not generated\./)).toBeTruthy();

@@ -159,6 +159,22 @@ describe("StatusBar", () => {
       await userEvent.click(save);
       expect(l.saveAs).toHaveBeenCalledWith("Mine");
       expect(screen.queryByLabelText("Layout name")).toBeNull();
+      // Focus goes back to the button that opened the name form, not to the page.
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Save layout" }));
+    });
+
+    it("returns focus to Save layout when the name form is closed with Escape", async () => {
+      render(<StatusBar status={null} running={0} pending={0} {...noop} layout={layout()} />);
+      await userEvent.click(screen.getByRole("button", { name: "Save layout" }));
+      expect(document.activeElement).toBe(screen.getByLabelText("Layout name"));
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByLabelText("Layout name")).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Save layout" }));
+    });
+
+    it("shows a saved layout's name with hidden characters made visible", () => {
+      render(<StatusBar status={null} running={0} pending={0} {...noop} layout={layout({ current: "Guided", saved: ["Mi\u202Ene"] })} />);
+      expect(options().map((o) => o.textContent)).toEqual(["Guided", "Operator", "Mi\\u202ene"]);
     });
 
     it("shows why a save was refused, keeping the name to fix", async () => {

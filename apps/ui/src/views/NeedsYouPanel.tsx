@@ -1,28 +1,31 @@
 import { useEffect, useState } from "react";
 import type { PendingAgentAction, RunChanges } from "@theterminal/shared";
-import { errorMessage } from "../api";
+import { LIVE_RUN_CHANGES, errorMessage } from "../api";
 import { DecisionCard } from "../components/DecisionCard";
 import { DecisionContext } from "../components/DecisionContext";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
-import { useShell } from "../shell/model";
+import { runIsLive, useShell } from "../shell/model";
 
 /** A run's changes as the panel knows them: read, or a sentence said in their place (a live run's are not read). */
 type Known = { changes: RunChanges } | { note: string };
 
 /**
  * What the runs of `actions` have changed, read again whenever the set of actions changes (the model remembers
- * reads for 10 s). A refusal, such as 409 run_active while the run is live, becomes its sentence.
+ * reads for 10 s). A run the runs list says is live is not asked about: the server refuses to read a live run's
+ * working copy, and a pending decision's run is live until it stops, so its changes show once it has stopped or
+ * finished. Any other refusal becomes its sentence.
  */
 function useRunChanges(actions: PendingAgentAction[]): Record<string, Known> {
   const { model } = useShell();
-  const { runChanges } = model;
+  const { runChanges, runs } = model;
   const [known, setKnown] = useState<Record<string, Known>>({});
-  const key = actions.map((a) => `${a.id}:${a.runId}`).join("|");
+  const live = (runId: string) => runIsLive(runs, runId);
+  const asked = [...new Set(actions.map((a) => a.runId))].filter((r) => !live(r));
+  const key = asked.join("|");
   useEffect(() => {
     let cancelled = false;
-    const runIds = new Set(key === "" ? [] : key.split("|").map((k) => k.slice(k.indexOf(":") + 1)));
-    for (const runId of runIds) {
+    for (const runId of key === "" ? [] : key.split("|")) {
       runChanges(runId).then(
         (changes) => !cancelled && setKnown((k) => ({ ...k, [runId]: { changes } })),
         (e: unknown) => !cancelled && setKnown((k) => ({ ...k, [runId]: { note: errorMessage(e, "changes") } })),
@@ -32,7 +35,12 @@ function useRunChanges(actions: PendingAgentAction[]): Record<string, Known> {
       cancelled = true;
     };
   }, [key, runChanges]);
-  return known;
+  const out: Record<string, Known> = {};
+  for (const a of actions) {
+    if (live(a.runId)) out[a.runId] = { note: LIVE_RUN_CHANGES };
+    else if (known[a.runId]) out[a.runId] = known[a.runId]!;
+  }
+  return out;
 }
 
 /**

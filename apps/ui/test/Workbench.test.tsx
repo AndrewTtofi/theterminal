@@ -427,6 +427,47 @@ describe("Workbench", () => {
     expect(testDock.shell!.learnTopic).toBe("action_kinds");
   });
 
+  it("says in the live region which topic Learn opened, keeping focus on the button, and says it again on a repeat", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    const learn = within(strip).getByRole("button", { name: "Learn more" });
+    await userEvent.click(learn);
+    const region = document.querySelector<HTMLElement>('main [aria-live="polite"]')!;
+    expect(region.textContent).toBe("Opened Learn: Kinds of action");
+    expect(document.activeElement).toBe(learn);
+    const first = region.textContent;
+    await userEvent.click(learn);
+    // The same words again would not be read: the text changes (a trailing no-break space) while saying the same.
+    expect(region.textContent).not.toBe(first);
+    expect(region.textContent!.trim()).toBe("Opened Learn: Kinds of action");
+    expect(document.activeElement).toBe(learn);
+  });
+
+  it("says More context again on a repeat press", async () => {
+    render(<Workbench model={model({ pending: [pendingAction] })} />);
+    const more = within(screen.getByRole("region", { name: "Needs you" })).getByRole("button", { name: "More context" });
+    await userEvent.click(more);
+    const region = document.querySelector<HTMLElement>('main [aria-live="polite"]')!;
+    const first = region.textContent;
+    expect(first).toBe("Opened Needs you");
+    await userEvent.click(more);
+    expect(region.textContent).not.toBe(first);
+    expect(region.textContent!.trim()).toBe("Opened Needs you");
+  });
+
+  it("moves focus to the opened topic when the Learn more button that opened it is gone", async () => {
+    render(<Workbench model={model({ changesRunId: "run1" })} />);
+    await userEvent.click(view("Changes"));
+    const side = screen.getByRole("complementary", { name: "Side bar" });
+    const note = within(side).getByText(/^Read-only\. Agents change code/);
+    await userEvent.click(within(note).getByRole("button", { name: "Learn more" }));
+    expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.tagName).toBe("SUMMARY");
+    expect(focused.textContent).toContain("Reading a diff");
+    expect(document.querySelector('main [aria-live="polite"]')!.textContent).toBe("Opened Learn: Reading a diff");
+  });
+
   it("does not show the strip when nothing is pending", () => {
     render(<Workbench model={model()} />);
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();

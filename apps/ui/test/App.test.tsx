@@ -61,6 +61,7 @@ vi.mock("../src/api", () => ({
     }
   },
   errorMessage: vi.fn(() => "err"),
+  LIVE_RUN_CHANGES: "Changes show when the run is stopped or finished.",
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
@@ -888,6 +889,29 @@ describe("App Changes view", () => {
     expect(await screen.findByText("0 files changed · +0 −0")).toBeTruthy();
   });
 
+  it("asks nothing about a live run's changes, however many of its entries arrive, and reads them once it finishes", async () => {
+    const live = { ...run2, status: "running" as const };
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, live]);
+    m.getRunChanges.mockImplementation(async (runId) => changes({ runId }));
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    for (let seq = 8; seq < 13; seq++) act(() => h.onEntry!({ ...runEntry("agent.message", "run2"), seq, projectId: "A" }));
+    await act(async () => {});
+    expect(m.getRunChanges).not.toHaveBeenCalled();
+    expect(m.listRunDir).not.toHaveBeenCalled();
+
+    m.listRuns.mockResolvedValue([run1, { ...run2, status: "completed" as const }]);
+    act(() => h.onEntry!({ ...runEntry("agent.finished", "run2"), seq: 13, projectId: "A" }));
+    expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
+    expect(m.getRunChanges).toHaveBeenCalledWith("run2");
+    expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+  });
+
   it("discards through the override route, shows a refusal inside the form and the server's count after", async () => {
     vi.mocked(errorMessage).mockImplementation(() => "Stop the agent first: it is still working in this run");
     const refusal = new ApiError(409, "run_active");
@@ -910,6 +934,34 @@ describe("App Changes view", () => {
       ),
     );
     expect(within(form).queryByRole("alert")).toBeNull();
+  });
+
+  it("sends one override of a run at a time: a second request meanwhile is refused without reaching the server", async () => {
+    let finish!: () => void;
+    m.overrideCommand.mockReturnValue(new Promise((r) => (finish = () => r({ overrideId: "o1" }))));
+    m.overrideDiscard.mockResolvedValue({ overrideId: "o2", files: 0 });
+    render(<App />);
+    await waitFor(() => expect(testDock.shell).not.toBeNull());
+    const { onOverrideCommand, onOverrideDiscard } = testDock.shell!.model;
+    const input = { program: "git", args: ["status"], reason: "The agent broke the build" };
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    let third!: Promise<unknown>;
+    act(() => {
+      first = onOverrideCommand("run1", input);
+      second = onOverrideCommand("run1", input);
+      third = onOverrideDiscard("run1", "The agent broke the build");
+    });
+    expect(await second).toEqual({ ok: false, error: "An override of this run is already being sent" });
+    expect(await third).toEqual({ ok: false, error: "An override of this run is already being sent" });
+    expect(m.overrideCommand).toHaveBeenCalledTimes(1);
+    expect(m.overrideDiscard).not.toHaveBeenCalled();
+    finish();
+    await act(async () => void (await first));
+    expect(await first).toEqual({ ok: true, overrideId: "o1" });
+    // Once the first is answered, the next one is sent.
+    await act(async () => void (await testDock.shell!.model.onOverrideDiscard("run1", "The agent broke the build")));
+    expect(m.overrideDiscard).toHaveBeenCalledTimes(1);
   });
 
   it("runs a command through the override route", async () => {

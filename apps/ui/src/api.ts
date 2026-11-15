@@ -275,6 +275,12 @@ export function exportLedgerUrl(projectId: string | null): string {
 }
 
 /**
+ * Said in place of a run's changes, files or diffs while it runs. The server refuses to read a live run's working
+ * copy (the agent can still change its files and its git settings), so they show once the run is stopped or finished.
+ */
+export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finished.";
+
+/**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
@@ -311,7 +317,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
-    if (context === "changes" && e.code === "run_active") return "Changes show when the run is stopped or finished.";
+    if (context === "changes" && e.code === "run_active") return LIVE_RUN_CHANGES;
     if (e.code === "run_active") return "Stop the agent first: it is still working in this run";
     if (e.code === "unsafe_repository") {
       return "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.";

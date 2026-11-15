@@ -8,6 +8,7 @@ import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { NeedsYouPanel } from "../src/views/NeedsYouPanel";
 import { fakeDock, shellNav } from "./connections-harness";
 import { message } from "./feed-fixtures";
+import { run1 } from "./changes-fixtures";
 import { shipBlocked } from "./gate-fixtures";
 
 const pending = (over: Partial<PendingAgentAction> = {}): PendingAgentAction => ({
@@ -26,6 +27,7 @@ function renderPanel(over: Partial<WorkbenchModel> = {}, stripShown = false) {
   const nav = { ...shellNav(), stripShown };
   const model = {
     selectedId: "p1",
+    runs: [],
     pending: [],
     gate: null,
     intake: null,
@@ -68,6 +70,12 @@ describe("NeedsYouPanel", () => {
     await userEvent.click(within(panel()).getByRole("button", { name: "See changes" }));
     expect(model.onSelectChangesRun).toHaveBeenCalledWith("run1");
     expect(nav.showView).toHaveBeenCalledWith("changes");
+  });
+
+  it("asks nothing about a live run's changes and says when they show", () => {
+    const { model } = renderPanel({ pending: [pending()], runs: [{ ...run1, status: "running" }] });
+    expect(within(panel()).getByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    expect(model.runChanges).not.toHaveBeenCalled();
   });
 
   it("shows the live run's answer plainly in place of the file list", async () => {

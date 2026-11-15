@@ -95,6 +95,12 @@ describe("DecisionContext", () => {
     expect(said).toEqual(["Found the bug", "Writing the fix"]);
   });
 
+  it("skips a message entry whose payload is not an object", () => {
+    const entries = [message(1, "run1", "Found the bug"), { ...message(2, "run1", "x"), payload: null as unknown as Record<string, unknown> }];
+    renderContext({ entries });
+    expect(screen.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Found the bug"]);
+  });
+
   it("omits what the agent said when there are no entries or no messages", () => {
     const { rerender } = renderContext({ entries: null });
     expect(screen.queryByText("Before this, the agent said:")).toBeNull();
