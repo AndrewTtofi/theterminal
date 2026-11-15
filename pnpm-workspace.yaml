@@ -8,6 +8,8 @@ allowBuilds:
   # Optional native helpers of the bundled Gemini CLI. Its ACP mode needs neither, so their build scripts never run.
   "@github/keytar": false
   node-pty: false
+  # Squirrel.Windows target of electron-builder (via its auto-installed peer); unused (NSIS only). Its script only picks a 7-Zip binary.
+  electron-winstaller: false
 
 # Pin the docking library and its transitive packages to one reviewed version.
 overrides:

@@ -1,0 +1,20 @@
+{
+  "name": "@theterminal/desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "description": "The Terminal desktop app",
+  "author": "The Terminal contributors",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && vitest run",
+    "dev": "tsc -p tsconfig.json && electron ."
+  },
+  "devDependencies": {
+    "@theterminal/core": "workspace:*",
+    "electron": "44.10.1",
+    "electron-builder": "26.18.1"
+  }
+}
