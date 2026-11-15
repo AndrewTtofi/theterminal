@@ -1,10 +1,11 @@
 import { useEffect, useId, useState } from "react";
-import { PROVIDER_MODES } from "@theterminal/shared";
-import type { CatalogEntry, Connection, ConnectionField, LocalEngine, Provider } from "@theterminal/shared";
+import { PROVIDER_MODES, hasConnectionDetails } from "@theterminal/shared";
+import type { CatalogEntry, Connection, ConnectionField, ConnectionSummary, LocalEngine, Provider } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, api, errorMessage } from "../api";
 import type { ConnectionPatch, NewConnection } from "../api";
 import { OWN_LABEL, PROVIDER_NAMES, ProviderModeSection } from "../components/ProviderAuthSettings";
 import { SignInPanel } from "./SignInPanel";
+import { OWNER_ONLY_NOTE } from "./ConnectionsSideBar";
 import { useShell } from "../shell/model";
 import { engineText } from "./CapacityPanel";
 
@@ -271,7 +272,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           onChange={(e) => setName(e.target.value)}
         />
       </div>
-      {provider && info && (
+      {provider && info && info.acks && (
         <ProviderModeSection
           key={`${provider}:${info.providers[provider].mode}`}
           provider={provider}
@@ -347,16 +348,19 @@ export function ConnectionEditor({ id }: { id: string }) {
   const rest = id.slice("connection:".length);
   const newProvider = rest.startsWith("new:") ? rest.slice("new:".length) : null;
 
-  let conn: Connection | undefined;
+  let found: Connection | ConnectionSummary | undefined;
   let entry: CatalogEntry | undefined;
   if (newProvider) {
     entry = catalog.find((e) => e.provider === newProvider);
     // A single-connection provider that is already connected edits that connection.
-    if (entry?.single) conn = list.find((c) => c.provider === newProvider);
+    if (entry?.single) found = list.find((c) => c.provider === newProvider);
   } else {
-    conn = list.find((c) => c.id === rest);
-    entry = conn && catalog.find((e) => e.provider === conn!.provider);
+    found = list.find((c) => c.id === rest);
+    entry = found && catalog.find((e) => e.provider === found!.provider);
   }
+  // A summary is what a collaborator was given: there are no details here to edit, and the server would refuse anyway.
+  if (found !== undefined && !hasConnectionDetails(found)) return <p className="muted">{OWNER_ONLY_NOTE}</p>;
+  const conn: Connection | undefined = found;
 
   if (!entry || !entry.available) {
     return <p className="muted">{!newProvider && !loaded ? "Loading…" : "This connection no longer exists."}</p>;

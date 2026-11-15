@@ -580,5 +580,15 @@ describe("subscribeLedger", () => {
     vi.advanceTimersByTime(61_000);
     expect(ws.sent.length).toBe(2);
     stop();
+
+describe("a collaborator's run without an API key", () => {
+  it("names the provider and points at the Owner", () => {
+    expect(errorMessage(new ApiError(409, "api_key_required", { provider: "codex" }), "run")).toBe(
+      "No API key is configured for Codex. Ask the Owner to add one in Connections.",
+    );
+    expect(errorMessage(new ApiError(409, "api_key_required"), "run")).toBe("No API key is configured for this provider. Ask the Owner to add one in Connections.");
+    expect(errorMessage(new ApiError(409, "api_key_required", { provider: "<b>x</b>" }), "run")).toBe(
+      "No API key is configured for this provider. Ask the Owner to add one in Connections.",
+    );
   });
 });

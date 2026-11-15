@@ -10,6 +10,7 @@ import type {
   CapacityReport,
   CiStatus,
   Connection,
+  ConnectionSummary,
   DailyDigest,
   DigestDays,
   ConnectionKind,
@@ -98,10 +99,16 @@ async function request<T>(
 
 export type AgentsInfo = {
   adapters: AdapterId[];
-  /** apiKey: where a run's API key comes from; "environment" is the server's own variable (development fallback). */
+  /**
+   * apiKey: where a run's API key comes from; "environment" is the server's own variable (development fallback). The
+   * Owner alone is told; a collaborator's copy has no `apiKey` and no `acks`.
+   */
   providers: Record<Provider, { mode: AuthMode; available: boolean; apiKey?: "connection" | "environment" | "none" }>;
-  acks: Record<Provider, string>;
+  acks?: Record<Provider, string>;
 };
+
+/** The providers' names in error wording; a value the server did not send, or one not on this list, is not shown. */
+const PROVIDER_WORDS: Record<Provider, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
 
 export type NewConnection = {
   kind: ConnectionKind;
@@ -264,7 +271,8 @@ export const api = {
     const query = params.toString().replace(/\+/g, "%20");
     return request<LedgerEntry[]>(query === "" ? "/api/ledger" : `/api/ledger?${query}`);
   },
-  listConnections: () => request<Connection[]>("/api/connections"),
+  /** Every connection for the Owner; for anyone else a summary of each (what it is and whether it works). */
+  listConnections: () => request<Connection[] | ConnectionSummary[]>("/api/connections"),
   getConnectionCatalog: () => request<CatalogEntry[]>("/api/connections/catalog"),
   addConnection: (i: NewConnection) => request<Connection>("/api/connections", { method: "POST", body: i }),
   updateConnection: (id: string, patch: ConnectionPatch) =>
@@ -489,6 +497,12 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     }
     if (e.status === 400 && e.code === "duplicate_cloud_provider") {
       return "A run can be given only one connection per cloud provider. Untick the extra one.";
+    }
+    // A collaborator's run: the Owner has no API key for that provider, and only the Owner can add one.
+    if (e.code === "api_key_required") {
+      const provider = detailString(e, "provider");
+      const who = provider !== undefined && provider in PROVIDER_WORDS ? PROVIDER_WORDS[provider as Provider] : "this provider";
+      return `No API key is configured for ${who}. Ask the Owner to add one in Connections.`;
     }
     if (e.status === 502 && e.code === "cloud_credentials_failed") {
       return `Could not get credentials from "${detailString(e, "name") ?? "a cloud connection"}". The run did not start.`;

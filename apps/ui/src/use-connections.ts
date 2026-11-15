@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
-import type { CatalogEntry, Connection } from "@theterminal/shared";
+import type { CatalogEntry, Connection, ConnectionSummary } from "@theterminal/shared";
 import { api } from "./api";
 import type { ConnectionPatch, NewConnection } from "./api";
 
 /** The connections the side bar and the editor tabs share. Writes reject with the server's ApiError. */
 export type ConnectionsModel = {
   catalog: CatalogEntry[];
-  list: Connection[];
+  /** Every connection as the server shows it to this person: in full for the Owner, as summaries for anyone else. */
+  list: (Connection | ConnectionSummary)[];
   /** True once the list was read from the server; until then nothing is known to be missing. */
   loaded: boolean;
   /** The last attempt to read the list failed; `refresh()` retries. */
@@ -22,7 +23,7 @@ export type ConnectionsModel = {
 export function useConnections(): ConnectionsModel {
   // The shared catalog is the same code the server serves; it shows the list before the server answers.
   const [catalog, setCatalog] = useState<CatalogEntry[]>(() => [...CONNECTION_CATALOG]);
-  const [list, setList] = useState<Connection[]>([]);
+  const [list, setList] = useState<(Connection | ConnectionSummary)[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
   // Every refresh and every completed write takes a new number; a list response is applied only if its

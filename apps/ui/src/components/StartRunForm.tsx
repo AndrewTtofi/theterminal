@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { KIND_LABELS, visibleControls } from "@theterminal/shared";
-import type { AdapterId, AuthMode, Card, Connection, MachineCapacity, MachinePresence, Provider } from "@theterminal/shared";
+import type { AdapterId, AuthMode, Card, Connection, ConnectionSummary, MachineCapacity, MachinePresence, Provider, Role } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, LOCAL_MODEL_NOTE } from "../api";
 
 export const OFFLINE_NOTE = "You seem to be offline. Cloud models will not answer; a local model will.";
@@ -13,8 +13,10 @@ type Props = {
   providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
   /** The project's cards; the run can be tied to one of them. */
   cards: Card[];
-  /** Every connection; the enabled cloud accounts, MCP servers and local models are offered to the run. */
-  connections: Connection[];
+  /** Every connection (in full or as summaries); the enabled cloud accounts, MCP servers and local models are offered to the run. */
+  connections: ConnectionSummary[];
+  /** The role of the person at the form; below the Owner, a note says their runs use the Owner's API key. */
+  viewerRole?: Role;
   /** The card chosen when the form opens; one no longer in `cards` is not sent. */
   defaultCardId?: string | null;
   /** True when the server inferred that the internet is unreachable; adds a note for cloud runs, never blocks one. */
@@ -40,7 +42,7 @@ type Offer = Pick<Connection, "id" | "kind" | "provider" | "name">;
 /** Starts an agent run: the agent, an optional card, the prompt and the connections the run may use. */
 export function StartRunForm({
   adapters, providers, cards, connections, defaultCardId, offline = false, submitLabel = "Start agent", startedMessage, machines = [],
-  machineCapacity, onStart,
+  machineCapacity, onStart, viewerRole,
 }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
@@ -93,6 +95,10 @@ export function StartRunForm({
   // is this computer's own inference; nothing is known of a linked machine's internet, so the note is for runs here.
   const localChosen = localUsable && locals.some((c) => picked.includes(c.id));
   const offlineNote = target === null && offline && chosen !== "" && chosen !== "fake" && !localChosen;
+  /** A collaborator's run is on the Owner's API key for the provider, never on anyone's subscription or login. */
+  const apiKeyNote = viewerRole !== undefined && viewerRole !== "owner" && chosen !== "" && chosen !== "fake" && !localChosen
+    ? `Runs you start use the Owner's API key for ${ADAPTER_NAMES[chosen]}, never a personal subscription.`
+    : null;
   /** The linked machine answered, and none of the agent programs is available there: nothing can start. */
   const noAgentThere = target !== null && caps !== null && !adapters.some(available);
 
@@ -155,6 +161,7 @@ export function StartRunForm({
           ))}
         </select>
       </label>
+      {apiKeyNote !== null && <p className="note api-key-note">{apiKeyNote}</p>}
       <label>
         Card (optional)
         <select value={cardId} onChange={(e) => setCardId(e.target.value)}>

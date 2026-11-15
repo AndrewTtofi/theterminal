@@ -1,6 +1,6 @@
 import { visibleControls } from "@theterminal/shared";
 import type {
-  ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, Connection, MachineCapacity, MachinePresence, Provider,
+  ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, ConnectionSummary, MachineCapacity, MachinePresence, Provider, Role,
 } from "@theterminal/shared";
 import { runCost } from "./cost";
 import { StartRunForm } from "./StartRunForm";
@@ -22,8 +22,10 @@ type Props = {
   adapters: AdapterId[];
   /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
   providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
-  /** Every connection; the enabled cloud accounts and MCP servers are offered to the run. */
-  connections?: Connection[];
+  /** Every connection, in full or as summaries; the enabled cloud accounts and MCP servers are offered to the run. */
+  connections?: ConnectionSummary[];
+  /** Who is at the panel; the Owner when absent. Below the Owner, the start form says runs use the Owner's API key. */
+  viewer?: { role: Role };
   /** The project's cards; the run can be tied to one of them. */
   cards?: Card[];
   runs: AgentRun[];
@@ -55,7 +57,7 @@ export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.
 
 export function AgentPanel({
   adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, offline, onStart, onSelectRun, onStop, machines,
-  machineCapacity, machineName,
+  machineCapacity, machineName, viewer,
 }: Props) {
   const selected = runs.find((r) => r.id === selectedRunId);
 
@@ -65,6 +67,7 @@ export function AgentPanel({
       <StartRunForm
         adapters={adapters} providers={providers} cards={cards} connections={connections} offline={offline} onStart={onStart}
         {...(machines !== undefined && { machines })} {...(machineCapacity !== undefined && { machineCapacity })}
+        {...(viewer !== undefined && { viewerRole: viewer.role })}
       />
       <ul className="runs">
         {runs.map((r) => (
