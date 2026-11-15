@@ -74,3 +74,51 @@ export function watchBootstrapInvite(ledger: Pick<Ledger, "onAppend">, dataDir: 
     }
   });
 }
+
+/** What the bootstrap announcement reads of the remote listener (its `state()`). */
+export type RemoteForInvite = {
+  enabled: boolean;
+  listening: boolean;
+  port: number;
+  bind: string;
+  domain: string | null;
+  addresses: string[];
+  fingerprint: string | null;
+};
+
+const bracket = (address: string): string => (address.includes(":") ? `[${address}]` : address);
+
+/** `https://<domain, else first address, else bind>:<port>/join/<code>#fp=<fingerprint>`, like the invite routes. */
+export function remoteJoinUrl(remote: Omit<RemoteForInvite, "enabled" | "listening">, code: string): string {
+  const host = remote.domain ?? bracket(remote.addresses[0] ?? remote.bind);
+  return `https://${host}:${remote.port}/join/${code}#fp=${remote.fingerprint ?? ""}`;
+}
+
+/**
+ * At startup, after the remote listener started: while nobody has claimed the Owner identity and remote access is
+ * listening with a certificate, issues the bootstrap invite and calls `bootstrapInvite(url)` once (the CLI prints
+ * it). With an Owner credential it only removes a leftover file, and never calls `bootstrapInvite`.
+ */
+export function announceBootstrapInvite(deps: {
+  db: Db;
+  people: Pick<PeopleService, "invite" | "revokeInvite" | "hasOwnerCredential">;
+  dataDir: string;
+  remote: RemoteForInvite | null;
+  bootstrapInvite?: (url: string) => void;
+  now?: () => Date;
+}): void {
+  if (deps.people.hasOwnerCredential()) {
+    removeBootstrapInvite(deps.dataDir);
+    return;
+  }
+  const remote = deps.remote;
+  if (!remote?.enabled || !remote.listening || remote.fingerprint === null) return;
+  const url = issueBootstrapInvite({
+    db: deps.db,
+    people: deps.people,
+    dataDir: deps.dataDir,
+    urlFor: (code) => remoteJoinUrl(remote, code),
+    ...(deps.now && { now: deps.now }),
+  });
+  if (url !== null) deps.bootstrapInvite?.(url);
+}

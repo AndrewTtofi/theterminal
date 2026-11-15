@@ -8,7 +8,9 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { SessionStore } from "../../src/people/sessions.js";
 import { LockoutStore } from "../../src/people/lockouts.js";
 import { PeopleService } from "../../src/people/service.js";
-import { BOOTSTRAP_INVITE_FILE, issueBootstrapInvite, watchBootstrapInvite } from "../../src/server/bootstrap-invite.js";
+import {
+  BOOTSTRAP_INVITE_FILE, announceBootstrapInvite, issueBootstrapInvite, remoteJoinUrl, watchBootstrapInvite,
+} from "../../src/server/bootstrap-invite.js";
 
 const passkey: Credential = { kind: "passkey", credentialId: "cred-1", publicKey: "TESTKEY1", transports: ["internal"], label: "Laptop" };
 
@@ -92,5 +94,45 @@ describe("the Owner bootstrap invite", () => {
     const url = issue();
     expect(readFileSync(file(), "utf8")).toBe(`${url}\n`);
     if (process.platform !== "win32") expect(statSync(file()).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("announcing the bootstrap invite at startup", () => {
+  const FP = "AB:".repeat(31) + "AB";
+  const on = { enabled: true, listening: true, port: 4318, bind: "0.0.0.0", domain: null, addresses: ["192.0.2.10"], fingerprint: FP };
+
+  it("builds the join link from the domain, else the first address, else the bind, with the fingerprint", () => {
+    expect(remoteJoinUrl(on, "CODE")).toBe(`https://192.0.2.10:4318/join/CODE#fp=${FP}`);
+    expect(remoteJoinUrl({ ...on, domain: "tt.example.org" }, "CODE")).toBe(`https://tt.example.org:4318/join/CODE#fp=${FP}`);
+    expect(remoteJoinUrl({ ...on, addresses: [], bind: "2001:db8::1" }, "CODE")).toBe(`https://[2001:db8::1]:4318/join/CODE#fp=${FP}`);
+  });
+
+  it("calls bootstrapInvite once with the link while remote access listens and nobody owns the workspace", () => {
+    const seen: string[] = [];
+    announceBootstrapInvite({ db, people, dataDir, now, remote: on, bootstrapInvite: (u) => seen.push(u) });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(new RegExp(`^https://192\\.0\\.2\\.10:4318/join/[A-Za-z0-9_-]{22}#fp=${FP}$`));
+    expect(readFileSync(file(), "utf8")).toBe(`${seen[0]}\n`);
+  });
+
+  it("issues nothing while remote access is off, not listening or has no certificate", () => {
+    const seen: string[] = [];
+    for (const remote of [null, { ...on, enabled: false }, { ...on, listening: false }, { ...on, fingerprint: null }]) {
+      announceBootstrapInvite({ db, people, dataDir, now, remote, bootstrapInvite: (u) => seen.push(u) });
+    }
+    expect(seen).toEqual([]);
+    expect(ofType("person.invited")).toHaveLength(0);
+    expect(existsSync(file())).toBe(false);
+  });
+
+  it("after the Owner joined: never calls bootstrapInvite and removes a leftover file, even with remote access off", () => {
+    const url = issue()!;
+    people.join(url.split("/join/")[1]!.split("#")[0]!, "Owner", passkey);
+    writeFileSync(file(), "left over\n");
+    const seen: string[] = [];
+    announceBootstrapInvite({ db, people, dataDir, now, remote: null, bootstrapInvite: (u) => seen.push(u) });
+    expect(existsSync(file())).toBe(false);
+    announceBootstrapInvite({ db, people, dataDir, now, remote: on, bootstrapInvite: (u) => seen.push(u) });
+    expect(seen).toEqual([]);
   });
 });
