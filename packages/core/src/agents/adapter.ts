@@ -65,6 +65,8 @@ export interface AdapterStartOptions {
 export type RunCredentials = {
   apiKey?: string;
   cliHome?: string;
+  /** An empty directory of this run's own under the data folder for the CLI's config home: a collaborator's run reads none of the Owner's settings or logins. */
+  configHome?: string;
   googleCloudProject?: string;
   env: Record<string, string>;
   mcpServers: McpServerSpec[];

@@ -78,7 +78,7 @@ describe("narrate: board", () => {
       'The agent moved "Detect GPU" from Build to Ship',
     );
     expect(h(entry("card.moved", { cardId: "c1", from: "build", to: "ship" }, { kind: "human", id: "ana" }), ctx)).toBe(
-      'ana moved "Detect GPU" from Build to Ship',
+      'Someone moved "Detect GPU" from Build to Ship',
     );
     expect(h(entry("card.moved", { cardId: "c1", from: "build", to: "ship" }, runner), ctx)).toBe(
       'The workspace moved "Detect GPU" from Build to Ship',
@@ -928,6 +928,7 @@ describe("narration.ts purity", () => {
         "./connections.js",
         "./text.js",
         "./override.js",
+        "./people.js",
         "./learn.js",
         "./link.js",
         "./share.js",
@@ -943,5 +944,150 @@ describe("narration.ts purity", () => {
     expect(source).not.toMatch(/\bfetch\s*\(/);
     expect(source).not.toMatch(/\bprocess\b/);
     expect(source).not.toMatch(/\bglobalThis\b/);
+  });
+});
+
+describe("narrate: people", () => {
+  const p1: Actor = { kind: "human", id: "p1" };
+  const machineId = "ab".repeat(16);
+  const named: NarrationContext = {
+    ...ctx,
+    machineName: (id) => (id === machineId ? "GPU box" : undefined),
+    personName: (id) => ({ p1: "Reviewer One", p2: "Maint Two", owner: "Andrea" })[id],
+  };
+  const CERT = Array.from({ length: 32 }, (_, i) => i.toString(16).toUpperCase().padStart(2, "0")).join(":");
+
+  it("names a person from the context, the Owner without one, and anyone else as Someone", () => {
+    const moved = (actor: Actor, c?: NarrationContext) =>
+      h(entry("card.moved", { cardId: "c1", from: "build", to: "ship" }, actor), c);
+    expect(moved(p1, { ...ctx, personName: () => "Reviewer One" })).toBe('Reviewer One moved "Detect GPU" from Build to Ship');
+    expect(moved(p1)).toBe("Someone moved a card from Build to Ship");
+    expect(moved(owner)).toBe("Owner moved a card from Build to Ship");
+    expect(moved(owner, { personName: () => undefined })).toBe("Owner moved a card from Build to Ship");
+    expect(moved(owner, { personName: (id) => (id === "owner" ? "Andrea" : undefined) })).toBe("Andrea moved a card from Build to Ship");
+  });
+
+  it("shows a hostile name inert and survives a context that throws", () => {
+    const evil = "Eve\u202e\u0007<script>\n" + "x".repeat(100);
+    const out = h(entry("card.moved", { cardId: "c1", from: "build", to: "ship" }, p1), { personName: () => evil });
+    expect([...out].map((c) => c.charCodeAt(0)).filter((c) => c < 32 || (c >= 0x202a && c <= 0x202e))).toEqual([]);
+    expect(out).toContain("\\n");
+    expect(out).toContain("\\u202e");
+    expect(out.indexOf(" moved ")).toBeLessThanOrEqual(62);
+    const thrown = n(entry("card.moved", { cardId: "c1", from: "build", to: "ship" }, p1), {
+      personName: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(thrown.headline).toBe("Someone moved a card from Build to Ship");
+  });
+
+  it("names the person in each of Plan 6's and Plan 7's ten templates", () => {
+    const tenOf = (actor: Actor) => [
+      h(entry("machine.named", { name: "Mac" }, actor), named),
+      h(entry("machine.linking_enabled", { port: 4418, acknowledgement: "…" }, actor), named),
+      h(entry("machine.linking_disabled", {}, actor), named),
+      h(entry("machine.paired", { machineId, name: "GPU box", publicKey: "k", fingerprint: "0123456789abcdef", address: "a", role: "entered_code" }, actor), named),
+      h(entry("machine.unpaired", { machineId, name: "GPU box" }, actor), named),
+      h(entry("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "go", cardId: null, connectionIds: [] }, actor), named),
+      h(entry("link.decision_received", { runId: "r1", actionId: "a1", machineId, decision: "allow" }, actor), named),
+      h(entry("share.confirmed", { shareId: "s1", contentHash: "a".repeat(64), bytes: 10, sections: ["overview"], options: {}, headSeq: 1 }, actor), named),
+      h(entry("share.link_created", { linkId: "l1", shareId: "s1", tokenDigest: "b".repeat(64), expiresAt: "2026-11-15T18:00:00.000Z", port: 8080, scope: "this_computer" }, actor), named),
+      h(entry("share.revoked", { linkId: "l1", reason: "owner" }, actor), named),
+    ];
+    const byP1 = tenOf(p1);
+    expect(byP1).toHaveLength(10);
+    for (const line of byP1) expect(line.startsWith("Reviewer One")).toBe(true);
+    expect(byP1[6]).toBe("Reviewer One's decision arrived from GPU box: allowed");
+    const byOwner = tenOf(owner);
+    for (const line of byOwner) expect(line.startsWith("Andrea")).toBe(true);
+  });
+
+  it("keeps a decision arriving from another machine as the Owner's, never this machine's person", () => {
+    const system: Actor = { kind: "system", id: "link" };
+    expect(h(entry("link.decision_received", { runId: "r1", actionId: "a1", machineId, decision: "deny" }, system), named)).toBe(
+      "Owner's decision arrived from GPU box: denied",
+    );
+  });
+
+  it("uses no literal Owner outside actorName in narration.ts and digest.ts", () => {
+    for (const file of ["narration.ts", "digest.ts"]) {
+      const src = readFileSync(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), "utf8");
+      const start = src.indexOf("function actorName(");
+      const end = start < 0 ? -1 : src.indexOf("\n}\n", start);
+      const outside = start < 0 ? src : src.slice(0, start) + src.slice(end);
+      expect(outside.includes('"Owner'), file).toBe(false);
+      expect(outside.includes("`Owner"), file).toBe(false);
+    }
+  });
+
+  it("narrates invitations, joining and credentials", () => {
+    const invited = n(entry("person.invited", { inviteId: "i1", role: "reviewer", codeHash: "c".repeat(64), expiresAt: "2026-11-22T10:00:00.000Z" }), named);
+    expect(invited.headline).toBe("Andrea invited a reviewer");
+    expect(invited.topic).toBe("people");
+    expect(JSON.stringify(invited)).not.toContain("c".repeat(12));
+    expect(h(entry("person.invited", { inviteId: "i1", role: "maintainer", codeHash: "c".repeat(64), expiresAt: "2026-11-22T10:00:00.000Z" }))).toBe(
+      "Owner invited a maintainer",
+    );
+    expect(h(entry("person.invite_revoked", { inviteId: "i1" }))).toBe("Owner revoked an invitation");
+    const credential = { kind: "passkey", credentialId: "Y3JlZA", publicKey: "TESTKEY-cHVi", transports: ["usb"], label: "Laptop" };
+    const joined = n(entry("person.joined", { personId: "p1", inviteId: "i1", name: "Reviewer One", role: "reviewer", credential }, p1), named);
+    expect(joined.headline).toBe("Reviewer One joined as reviewer");
+    expect(JSON.stringify(joined)).not.toContain("TESTKEY");
+    expect(h(entry("person.joined", { personId: "p1", inviteId: "i1", name: "Eve\u202e", role: "viewer", credential }, p1))).toBe(
+      "Eve\\u202e joined as viewer",
+    );
+    const added = n(entry("person.credential_added", { personId: "p1", credential }, p1), named);
+    expect(added.headline).toBe('Reviewer One added a passkey ("Laptop")');
+    expect(JSON.stringify(added)).not.toContain("TESTKEY");
+    expect(JSON.stringify(added)).not.toContain("Y3JlZA");
+    const keyCred = { kind: "key", credentialId: "a2V5", publicKey: "TESTKEY-c3Br", label: "This browser" };
+    expect(h(entry("person.credential_added", { personId: "p1", credential: keyCred }, p1), named)).toBe('Reviewer One added a key ("This browser")');
+    // A label is chosen by the person: a line break in it is shown as an escape, so it cannot fake a second line.
+    const sneaky = { ...keyCred, label: 'x")\nOwner revoked\tall' };
+    const sneakyLine = h(entry("person.credential_added", { personId: "p1", credential: sneaky }, p1), named);
+    expect(sneakyLine).not.toContain("\n");
+    expect(sneakyLine).not.toContain("\t");
+    expect(sneakyLine).toContain("\\n");
+    expect(h(entry("person.credential_removed", { personId: "p1", credentialId: "a2V5" }, p1), named)).toBe("Reviewer One removed a credential");
+  });
+
+  it("narrates renames, role changes, removals, sign-ins and lockouts", () => {
+    expect(h(entry("person.renamed", { personId: "p1", name: "Ana" }, p1), named)).toBe('Reviewer One is now called "Ana"');
+    expect(h(entry("person.role_changed", { personId: "p2", from: "reviewer", to: "maintainer" }), named)).toBe("Andrea made Maint Two a maintainer");
+    expect(h(entry("person.role_changed", { personId: "p9", from: "maintainer", to: "viewer" }))).toBe("Owner made Someone a viewer");
+    expect(h(entry("person.removed", { personId: "p2" }), named)).toBe("Andrea removed Maint Two");
+    const system: Actor = { kind: "system", id: "auth" };
+    const signedIn = n(entry("person.signed_in", { personId: "p1", listener: "remote", method: "passkey" }, system), named);
+    expect(signedIn).toMatchObject({ headline: "Reviewer One signed in remotely", topic: "people", attention: false });
+    expect(h(entry("person.signed_in", { personId: "owner", listener: "local", method: "token" }, system))).toBe("Owner signed in locally");
+    const locked = n(entry("person.locked", { personId: "p1", until: "2026-11-15T10:15:00.000Z", failures: 5 }, system), named);
+    expect(locked).toMatchObject({ headline: "Reviewer One was locked out after 5 failed sign-ins", topic: "people", attention: true });
+  });
+
+  it("narrates remote access and certificate changes", () => {
+    const on = n(entry("remote.enabled", { port: 4318, bind: "0.0.0.0", domain: null, tls: "self_signed", fingerprint: CERT }), named);
+    expect(on).toMatchObject({ headline: "Andrea turned remote access on (this machine's addresses, port 4318)", topic: "remote", attention: true });
+    expect(h(entry("remote.enabled", { port: 443, bind: "0.0.0.0", domain: "example.org", tls: "acme", fingerprint: CERT }))).toBe(
+      "Owner turned remote access on (example.org, port 443)",
+    );
+    expect(h(entry("remote.disabled", {}))).toBe("Owner turned remote access off");
+    const system: Actor = { kind: "system", id: "remote" };
+    const cert = (tls: string) =>
+      n(entry("remote.certificate_changed", { tls, fingerprint: CERT, domain: null, expiresAt: "2036-11-15T10:00:00.000Z" }, system));
+    expect(cert("self_signed").headline).toBe("The remote certificate changed (self-signed, fingerprint 00:01:02…)");
+    expect(cert("acme").headline).toBe("The remote certificate changed (Let's Encrypt, fingerprint 00:01:02…)");
+    expect(cert("provided").headline).toBe("The remote certificate changed (own certificate files, fingerprint 00:01:02…)");
+    expect(cert("acme").topic).toBe("remote");
+  });
+
+  it("narrates who may sign a gate", () => {
+    const set = (requirement: unknown, c?: NarrationContext) => n(entry("gate.requirement_set", { gateId: "go_live", requirement }), c);
+    expect(set({ role: "reviewer" }, named).headline).toBe('Andrea set who may sign "Going live": a reviewer or above');
+    expect(set({ role: "owner" }).headline).toBe('Owner set who may sign "Going live": the Owner');
+    expect(set({ personId: "p2" }, named).headline).toBe('Andrea set who may sign "Going live": Maint Two only');
+    expect(set({ personId: "p9" }).headline).toBe('Owner set who may sign "Going live": Someone only');
+    expect(set(null).headline).toBe('Owner set who may sign "Going live" back to the default');
+    expect(set(null).topic).toBe("gate");
   });
 });

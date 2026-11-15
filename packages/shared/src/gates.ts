@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentAction, AgentRun } from "./agents.js";
 import { STAGES, type Card, type LedgerEntry, type Stage } from "./domain.js";
 import { INTAKE_DECISIONS, type Answers, type DecisionId } from "./intake.js";
+import { atLeast, ROLE_LABELS, ROLES, type Role } from "./people.js";
 import { formatUsd } from "./text.js";
 
 export const GATE_IDS = [
@@ -160,7 +161,38 @@ export type GateOutcome = "pass" | "needs_sign_off" | "blocked";
 export type GateEvaluation = Pick<
   GateDefinition,
   "id" | "title" | "explanation" | "risks" | "learn" | "acknowledgement" | "signOff"
-> & { conditions: ConditionResult[]; met: boolean; outcome: GateOutcome };
+> & {
+  conditions: ConditionResult[];
+  met: boolean;
+  outcome: GateOutcome;
+  /** Who may sign this gate off or waive it. */
+  requirement: GateRequirement;
+  /** Whether the person asking (the Owner when nobody is named) satisfies `requirement`. */
+  signable: boolean;
+};
+
+/** Who may sign a gate off or waive it: anyone at or above a role, or one named person only. */
+export type GateRequirement = { role: Role } | { personId: string };
+export const DEFAULT_GATE_REQUIREMENT: Record<GateId, GateRequirement> = {
+  plan_approved: { role: "reviewer" },
+  ready_to_ship: { role: "reviewer" },
+  network_exposure: { role: "owner" },
+  payments: { role: "owner" },
+  personal_data: { role: "owner" },
+  go_live: { role: "owner" },
+  over_budget: { role: "owner" },
+};
+
+/** Whether `signer` may sign under `req`: a role at or above it, or exactly the named person. */
+export function satisfies(req: GateRequirement, signer: { personId: string; role: Role }): boolean {
+  return "role" in req ? atLeast(signer.role, req.role) : signer.personId === req.personId;
+}
+
+/** A requirement in words: `a reviewer or above`, `the Owner`, or `<name> only`. */
+export function requirementLabel(req: GateRequirement, name: (personId: string) => string): string {
+  if ("personId" in req) return `${name(req.personId)} only`;
+  return req.role === "owner" ? "the Owner" : `a ${ROLE_LABELS[req.role].toLowerCase()} or above`;
+}
 
 export type GateDecisionInput = { gateId: GateId; decision: "sign_off" | "waive"; reason?: string; acknowledgement: string };
 export const gateDecisionInputSchema = z
@@ -250,6 +282,10 @@ export type CardStory = {
 const stageSchema = z.enum(STAGES);
 const id = z.string().min(1);
 const gateIdSchema = z.enum(GATE_IDS);
+const requirementSchema = z.union([
+  z.object({ role: z.enum(ROLES) }).strict(),
+  z.object({ personId: z.string().min(1).max(200) }).strict(),
+]);
 
 const ackMatches = (p: { gateId: GateId; acknowledgement: string }) =>
   p.acknowledgement === GATES.find((g) => g.id === p.gateId)?.acknowledgement;
@@ -300,5 +336,7 @@ export const gatePayloadSchemas = {
     })
     .strict()
     .refine(ackMatches, ackIssue),
+  /** `requirement: null` restores the gate's default. */
+  "gate.requirement_set": z.object({ gateId: gateIdSchema, requirement: requirementSchema.nullable() }).strict(),
 };
 export type GateEventType = keyof typeof gatePayloadSchemas;

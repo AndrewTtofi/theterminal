@@ -1,11 +1,12 @@
-import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
 import {
-  AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
+  AdapterUnavailableError, ApiKeyRequiredError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError,
+  RemoteRunError, ShuttingDownError,
 } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/changes.js";
@@ -27,7 +28,7 @@ import {
   DecisionNotApplicableError, HumanRequiredError, IntakeCompletedError, IntakeIncompleteError, NoIntakeError,
   SecretInTextError,
 } from "../intake/service.js";
-import { GateBlockedError, GateNotMetError, stageHasEntryGates, type GateService } from "../gates/service.js";
+import { GateBlockedError, GateNotMetError, GateRequirementError, stageHasEntryGates, type GateService, type Signer } from "../gates/service.js";
 import {
   GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
 } from "../github/client.js";
@@ -36,6 +37,12 @@ import {
   AddressNotAllowedError, LinkNotActiveError, PreviewNotFoundError, PreviewStaleError, ShareLinkActiveError, ShareTooLargeError,
   SnapshotMissingError, SnapshotTamperedError,
 } from "../share/errors.js";
+import { actorOf, needs } from "./auth.js";
+import { OwnerCredentialRequiredError } from "../people/service.js";
+import { RemoteInputError, RemoteStartError } from "./remote.js";
+import { AcmeError } from "./acme.js";
+import { CertificateError } from "./certs.js";
+import { trimmerFor } from "../ledger/trim.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -46,7 +53,12 @@ export type RouteDeps = {
   clean?: (s: string) => string;
 };
 
-const actor = { kind: "human", id: "owner" } as const;
+/** The person asking, as a gate's signer: the gates judge who may sign by their recorded role or by name. */
+const signerOf = (req: FastifyRequest): Signer => {
+  const p = req.principal;
+  if (!p) throw new Error("signerOf: the request has no principal");
+  return { personId: p.personId, role: p.role };
+};
 
 const moveBody = z.object({ to: stageSchema, gates: z.array(gateDecisionInputSchema).max(10).optional() }).strict();
 const STAGE_GATED = "Add the card to an earlier stage, then move it, so its readiness checks run.";
@@ -86,14 +98,30 @@ function publicIssue(issue: z.core.$ZodIssue): { path: (string | number)[]; code
 }
 
 /**
+ * The errors the gate routes and the move route raise over who may sign: fixed codes, the gate and its requirement
+ * only (a person id at most, never a name). Null for any other error.
+ */
+export function sendGateError(err: unknown, reply: FastifyReply): FastifyReply | null {
+  if (err instanceof GateRequirementError) {
+    return reply.code(403).send({ error: "gate_requires", gateId: err.gateId, requirement: err.requirement });
+  }
+  if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+  return null;
+}
+
+/**
  * The error reply for every route: a fixed code per known error, and nothing the request sent. Shared by the
  * workspace server and the link listener, so both answer the same way.
  */
 export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLogger): FastifyReply {
+  const gate = sendGateError(err, reply);
+  if (gate !== null) return gate;
   if (err instanceof ZodError) {
     return reply.code(400).send({ error: "invalid_input", issues: err.issues.map(publicIssue) });
   }
   if (err instanceof AdapterUnavailableError) return reply.code(400).send({ error: "invalid_input" });
+  // A collaborator's run with no API key for the provider: the provider's fixed name, nothing else.
+  if (err instanceof ApiKeyRequiredError) return reply.code(409).send({ error: "api_key_required", provider: err.provider });
   if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
   if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
   if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
@@ -106,6 +134,12 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
   if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
   if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
+  // Remote access: fixed codes only. `code` and `type` are the thrower's allowlisted names, never a path or a CA's text.
+  if (err instanceof OwnerCredentialRequiredError) return reply.code(409).send({ error: "owner_credential_required" });
+  if (err instanceof RemoteStartError) return reply.code(502).send({ error: "remote_start_failed" });
+  if (err instanceof RemoteInputError) return reply.code(400).send({ error: "invalid_input", code: err.code });
+  if (err instanceof AcmeError) return reply.code(502).send({ error: "acme_failed", type: err.type });
+  if (err instanceof CertificateError) return reply.code(400).send({ error: "certificate_invalid", code: err.code });
   if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
   if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
   if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
@@ -192,7 +226,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.setErrorHandler((err, _req, reply) => sendError(err, reply, app.log));
 
-  app.get("/api/health", async () => {
+  app.get("/api/health", needs("viewer"), async () => {
     const integrity = getIntegrity();
     const headSeq = ledger.headSeq();
     return integrity.ok
@@ -206,18 +240,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         };
   });
 
-  app.get("/api/projects", async () => board.listProjects());
+  app.get("/api/projects", needs("viewer"), async () => board.listProjects());
 
-  app.post("/api/projects", async (req, reply) => {
-    const project = board.createProject(actor, req.body as never);
+  app.post("/api/projects", needs("maintainer"), async (req, reply) => {
+    const project = board.createProject(actorOf(req), req.body as never);
     return reply.code(201).send(project);
   });
 
-  app.get<{ Params: { id: string } }>("/api/projects/:id/board", async (req) =>
-    board.getBoard(req.params.id),
-  );
+  app.get<{ Params: { id: string } }>("/api/projects/:id/board", needs("viewer"), async (req) => board.getBoard(req.params.id));
 
-  app.post<{ Params: { id: string } }>("/api/projects/:id/cards", async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/projects/:id/cards", needs("maintainer"), async (req, reply) => {
     const { stage } = cardInputSchema.parse(req.body);
     // A card created in Ship or Operate would skip the gates a move there runs. The intake's approved plan still
     // creates cards in those stages (IntakeService.complete), because approving the plan is itself a recorded
@@ -225,26 +257,28 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (stageHasEntryGates(stage)) {
       return reply.code(409).send({ error: "stage_gated", message: STAGE_GATED });
     }
-    const card = board.addCard(actor, req.params.id, req.body as never);
+    const card = board.addCard(actorOf(req), req.params.id, req.body as never);
     return reply.code(201).send(card);
   });
 
-  // Through the gates only: BoardService.moveCard is for tests and internal use.
-  app.post<{ Params: { id: string } }>("/api/cards/:id/move", async (req) => {
+  // Through the gates only: BoardService.moveCard is for tests and internal use. The person asking is the signer.
+  app.post<{ Params: { id: string } }>("/api/cards/:id/move", needs("reviewer"), async (req) => {
     const body = moveBody.parse(req.body);
-    return gates.move(actor, req.params.id, body.to, body.gates);
+    return gates.move(actorOf(req), req.params.id, body.to, body.gates, signerOf(req));
   });
 
-  app.get<{ Params: { id: string } }>("/api/cards/:id/gates", async (req) =>
-    gates.evaluate(req.params.id, gatesQuery.parse(req.query).to),
+  app.get<{ Params: { id: string } }>("/api/cards/:id/gates", needs("viewer"), async (req) =>
+    gates.evaluate(req.params.id, gatesQuery.parse(req.query).to, signerOf(req)),
   );
 
-  app.post<{ Params: { id: string } }>("/api/cards/:id/status", async (req) =>
-    board.setCardStatus(actor, req.params.id, statusBody.parse(req.body).to),
+  app.post<{ Params: { id: string } }>("/api/cards/:id/status", needs("maintainer"), async (req) =>
+    board.setCardStatus(actorOf(req), req.params.id, statusBody.parse(req.body).to),
   );
 
-  app.get("/api/ledger", async (req) => {
+  // A collaborator's copy of a connection entry has no config or field names (trimForRole); the Owner's is whole.
+  app.get("/api/ledger", needs("viewer"), async (req) => {
     const q = ledgerQuery.parse(req.query);
+    const trim = trimmerFor(req.principal);
     return ledger
       .list({
         ...(q.projectId !== undefined && { projectId: q.projectId }),
@@ -252,6 +286,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
         ...(q.limit !== undefined && { limit: q.limit }),
       })
-      .map((e) => displayEntry(e, deps.clean));
+      .map((e) => trim(displayEntry(e, deps.clean)));
   });
 }

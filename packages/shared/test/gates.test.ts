@@ -270,3 +270,49 @@ describe("shared story types", () => {
     expect(story.gateDecisions[0]?.kind).toBe("waived");
   });
 });
+
+describe("gate requirements", () => {
+  it("defaults to a reviewer for the plan and shipping, the Owner for the rest", async () => {
+    const { DEFAULT_GATE_REQUIREMENT } = await import("../src/index.js");
+    expect(DEFAULT_GATE_REQUIREMENT).toEqual({
+      plan_approved: { role: "reviewer" },
+      ready_to_ship: { role: "reviewer" },
+      network_exposure: { role: "owner" },
+      payments: { role: "owner" },
+      personal_data: { role: "owner" },
+      go_live: { role: "owner" },
+      over_budget: { role: "owner" },
+    });
+    expect(Object.keys(DEFAULT_GATE_REQUIREMENT).sort()).toEqual([...GATE_IDS].sort());
+  });
+
+  it("is satisfied by a role at or above, or by the named person only", async () => {
+    const { satisfies } = await import("../src/index.js");
+    expect(satisfies({ role: "reviewer" }, { personId: "x", role: "maintainer" })).toBe(true);
+    expect(satisfies({ role: "reviewer" }, { personId: "x", role: "viewer" })).toBe(false);
+    expect(satisfies({ role: "owner" }, { personId: "owner", role: "owner" })).toBe(true);
+    expect(satisfies({ personId: "a" }, { personId: "owner", role: "owner" })).toBe(false);
+    expect(satisfies({ personId: "a" }, { personId: "a", role: "viewer" })).toBe(true);
+  });
+
+  it("labels a requirement in words", async () => {
+    const { requirementLabel } = await import("../src/index.js");
+    const name = (id: string) => (id === "p1" ? "Reviewer One" : "Someone");
+    expect(requirementLabel({ role: "reviewer" }, name)).toBe("a reviewer or above");
+    expect(requirementLabel({ role: "maintainer" }, name)).toBe("a maintainer or above");
+    expect(requirementLabel({ role: "owner" }, name)).toBe("the Owner");
+    expect(requirementLabel({ personId: "p1" }, name)).toBe("Reviewer One only");
+  });
+
+  it("records a requirement or its reset, strictly", () => {
+    const s = gatePayloadSchemas["gate.requirement_set"];
+    expect(eventPayloadSchemas["gate.requirement_set"]).toBe(s);
+    expect(s.safeParse({ gateId: "go_live", requirement: { role: "maintainer" } }).success).toBe(true);
+    expect(s.safeParse({ gateId: "go_live", requirement: { personId: "p1" } }).success).toBe(true);
+    expect(s.safeParse({ gateId: "go_live", requirement: null }).success).toBe(true);
+    expect(s.safeParse({ gateId: "go_live", requirement: { role: "admin" } }).success).toBe(false);
+    expect(s.safeParse({ gateId: "go_live", requirement: { role: "owner", personId: "p1" } }).success).toBe(false);
+    expect(s.safeParse({ gateId: "nope", requirement: null }).success).toBe(false);
+    expect(s.safeParse({ gateId: "go_live", requirement: null, extra: 1 }).success).toBe(false);
+  });
+});

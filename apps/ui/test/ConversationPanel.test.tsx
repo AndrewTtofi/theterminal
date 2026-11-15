@@ -7,6 +7,7 @@ import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { ConversationPanel, conversationThread } from "../src/views/ConversationPanel";
 import { fakeDock, shellNav } from "./connections-harness";
 import { decided, ev, feedRun, message, requested } from "./feed-fixtures";
+import { OWNER_ME } from "./as-owner";
 
 const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
 const board: Board = {
@@ -44,6 +45,7 @@ function renderPanel(over: Partial<WorkbenchModel> = {}) {
     onSelectChangesRun: vi.fn(),
     projectOlder: { hasOlder: false, loading: false, error: null },
     onLoadOlderProject: vi.fn().mockResolvedValue(undefined),
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   const wrap = (m: WorkbenchModel) => (

@@ -121,7 +121,7 @@ export function bookClubSnapshot(): ShareSnapshot {
       {
         day: "2026-11-15",
         summary:
-          "12 ledger entries: 2 agent actions requested, 1 allowed and 0 denied by a human, 2 decisions by the Owner, 1 card moved, 2 agent runs started and 1 finished. Agent spend recorded that day: $0.10 (estimate).",
+          "12 ledger entries: 2 agent actions requested, 1 allowed and 0 denied by a human, 2 decisions by a human, 1 card moved, 2 agent runs started and 1 finished. Agent spend recorded that day: $0.10 (estimate).",
         counts: {
           entries: 12,
           actions: 2,

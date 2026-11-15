@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, setUnauthorizedHandler, shareDownloadUrl, shareSnapshotUrl, subscribeLedger } from "../src/api";
+import type { LedgerEntry, PresenceEntry } from "@theterminal/shared";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -469,5 +470,219 @@ describe("share api", () => {
     expect(errorMessage(new ApiError(409, "snapshot_tampered"))).toBe("This snapshot's file no longer matches the ledger. It will not be shared.");
     expect(errorMessage(new ApiError(404, "snapshot_missing"))).toBe("This snapshot's file is missing.");
     expect(errorMessage(new ApiError(409, "link_not_active"))).toBe("That link is no longer live.");
+  });
+});
+
+describe("subscribeLedger", () => {
+  class FakeWS {
+    static all: FakeWS[] = [];
+    sent: string[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((m: { data: string }) => void) | null = null;
+    onclose: ((e: { code: number }) => void) | null = null;
+    readyState = 0;
+    constructor(readonly url: string) {
+      FakeWS.all.push(this);
+    }
+    send(d: string) {
+      this.sent.push(d);
+    }
+    close() {
+      this.readyState = 3;
+    }
+    open() {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    emit(m: unknown) {
+      this.onmessage?.({ data: JSON.stringify(m) });
+    }
+  }
+  const WS = FakeWS as unknown as typeof WebSocket;
+  const entry = (seq: number) => ({ seq, type: "project.created" }) as unknown as LedgerEntry;
+  const people: PresenceEntry[] = [{ personId: "p1", name: "Rae", role: "reviewer", projectId: null, view: "board", since: "2026-11-15T00:00:00.000Z" }];
+
+  afterEach(() => {
+    FakeWS.all = [];
+    vi.useRealTimers();
+  });
+
+  it("on a 1008 close (revoked, removed, role changed) stops reconnecting, asks /api/me once, and a 401 goes to sign-in", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onUnauthorized = vi.fn();
+    setUnauthorizedHandler(onUnauthorized);
+    try {
+      subscribeLedger(0, () => {}, { WS });
+      const ws = FakeWS.all[0]!;
+      ws.open();
+      const sentBefore = ws.sent.length;
+      ws.onclose?.({ code: 1008 });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(FakeWS.all).toHaveLength(1);
+      expect(ws.sent.length).toBe(sentBefore);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![0]).toBe("/api/me");
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    } finally {
+      setUnauthorizedHandler(null);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("after a 1008 close of someone still signed in (their role changed) reconnects once and reports the new Me", async () => {
+    vi.useFakeTimers();
+    const me = { personId: "r1", name: "R", role: "maintainer", listener: "remote", method: "key", credentials: [], sessions: [] };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(me), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAccessChanged = vi.fn();
+    try {
+      const stop = subscribeLedger(0, () => {}, { WS, onAccessChanged });
+      FakeWS.all[0]!.onclose?.({ code: 1008 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onAccessChanged).toHaveBeenCalledWith(me);
+      expect(FakeWS.all).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(FakeWS.all).toHaveLength(2);
+      stop();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still reconnects after any other close", async () => {
+    vi.useFakeTimers();
+    const stop = subscribeLedger(0, () => {}, { WS });
+    FakeWS.all[0]!.onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(FakeWS.all).toHaveLength(2);
+    stop();
+  });
+
+  it("sends entries to onEntry and presence frames to onPresence", () => {
+    const entries: number[] = [];
+    const frames: PresenceEntry[][] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS, onPresence: (p) => frames.push(p) });
+    const ws = FakeWS.all[0]!;
+    ws.emit(entry(1));
+    ws.emit({ type: "presence", people });
+    ws.emit(entry(2));
+    expect(entries).toEqual([1, 2]);
+    expect(frames).toEqual([people]);
+    stop();
+  });
+
+  it("a presence frame never touches last: the entry after it is delivered, and seq <= last is still dropped", () => {
+    const entries: number[] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS });
+    const ws = FakeWS.all[0]!;
+    ws.emit({ type: "presence", people });
+    ws.emit(entry(1));
+    ws.emit(entry(1));
+    ws.emit({ type: "presence", people: [] });
+    ws.emit(entry(2));
+    expect(entries).toEqual([1, 2]);
+    stop();
+    // The reconnect URL resumes from the last entry, untouched by the presence frames.
+    const again = subscribeLedger(5, (e) => entries.push(e.seq), { WS });
+    FakeWS.all[1]!.emit(entry(4));
+    expect(entries).toEqual([1, 2]);
+    expect(FakeWS.all[1]!.url).toContain("afterSeq=5");
+    again();
+  });
+
+  it("still accepts the WebSocket constructor through opts and delivers entries without onPresence", () => {
+    const entries: number[] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS });
+    FakeWS.all[0]!.emit({ type: "presence", people });
+    FakeWS.all[0]!.emit(entry(3));
+    expect(entries).toEqual([3]);
+    stop();
+  });
+
+  it("sends presence on connect, when presence() changes, and as a heartbeat before the server's five-minute expiry", () => {
+    vi.useFakeTimers();
+    let where: { projectId: string | null; view: string | null } = { projectId: "p1", view: "board" };
+    const stop = subscribeLedger(0, () => {}, { WS, presence: () => where });
+    const ws = FakeWS.all[0]!;
+    expect(ws.sent).toEqual([]);
+    ws.open();
+    expect(ws.sent.map((d) => JSON.parse(d))).toEqual([{ type: "presence", projectId: "p1", view: "board" }]);
+    vi.advanceTimersByTime(5_000);
+    expect(ws.sent).toHaveLength(1); // unchanged and not yet due: nothing sent
+    where = { projectId: "p1", view: "ledger" };
+    vi.advanceTimersByTime(1_000);
+    expect(JSON.parse(ws.sent.at(-1)!)).toEqual({ type: "presence", projectId: "p1", view: "ledger" });
+    const n = ws.sent.length;
+    vi.advanceTimersByTime(60_000);
+    expect(ws.sent.length).toBeGreaterThan(n); // heartbeat, well under five minutes
+    expect(ws.sent.length).toBeLessThanOrEqual(n + 2);
+    stop();
+    const after = ws.sent.length;
+    vi.advanceTimersByTime(120_000);
+    expect(ws.sent).toHaveLength(after); // stopped: no more sends
+  });
+
+  it("heartbeats with no location when no presence() is given, so a connected person does not expire", () => {
+    vi.useFakeTimers();
+    const stop = subscribeLedger(0, () => {}, { WS });
+    const ws = FakeWS.all[0]!;
+    ws.open();
+    expect(JSON.parse(ws.sent[0]!)).toEqual({ type: "presence", projectId: null, view: null });
+    vi.advanceTimersByTime(61_000);
+    expect(ws.sent.length).toBe(2);
+    stop();
+  });
+});
+
+describe("a collaborator's run without an API key", () => {
+  it("names the provider and points at the Owner", () => {
+    expect(errorMessage(new ApiError(409, "api_key_required", { provider: "codex" }), "run")).toBe(
+      "No API key is configured for Codex. Ask the Owner to add one in Connections.",
+    );
+    expect(errorMessage(new ApiError(409, "api_key_required"), "run")).toBe("No API key is configured for this provider. Ask the Owner to add one in Connections.");
+    expect(errorMessage(new ApiError(409, "api_key_required", { provider: "<b>x</b>" }), "run")).toBe(
+      "No API key is configured for this provider. Ask the Owner to add one in Connections.",
+    );
+  });
+});
+
+describe("people api and the signed-out redirect", () => {
+  afterEach(() => setUnauthorizedHandler(null));
+  const reply = (status: number, body: unknown) =>
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })));
+
+  it("calls the handler on the auth hook's 401 only, and still throws", async () => {
+    const onUnauthorized = vi.fn();
+    setUnauthorizedHandler(onUnauthorized);
+    reply(401, { error: "unauthorized" });
+    await expect(api.listProjects()).rejects.toMatchObject({ status: 401, code: "unauthorized" });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    reply(401, { error: "invalid_credential" });
+    await expect(api.signInKeyChallenge()).rejects.toMatchObject({ code: "invalid_credential" });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes one of my sessions by its prefix", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.revokeMySession("ab12cd34");
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/me/sessions/ab12cd34");
+    expect(fetchMock.mock.calls[0]![1].method).toBe("DELETE");
+  });
+
+  it("words the people refusals", () => {
+    expect(errorMessage(new ApiError(404, "invite_invalid"))).toBe("This invitation is no longer valid. Ask the Owner for a new one.");
+    expect(errorMessage(new ApiError(423, "locked", { retryAfterS: 61 }))).toBe("Too many failed attempts. Try again in 2 minutes.");
+    expect(errorMessage(new ApiError(502, "remote_start_failed"))).toBe("The listener could not start. Is the port free?");
+    expect(errorMessage(new ApiError(502, "acme_failed", { type: "urn:ietf:params:acme:error:dns" }))).toBe(
+      "Let's Encrypt could not issue a certificate (urn:ietf:params:acme:error:dns). Check that the domain points here and port 80 is reachable.",
+    );
+    expect(errorMessage(new ApiError(502, "acme_failed", { type: "<b>\u202e" }))).not.toContain("\u202e");
+    // A read-only ledger is still worded as before.
+    expect(errorMessage(new ApiError(423, "ledger_read_only"))).toBe("Workspace is read-only");
   });
 });

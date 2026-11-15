@@ -7,6 +7,7 @@ import type { DockApi } from "../src/shell/Dock";
 import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { useConnections } from "../src/use-connections";
+import { OWNER_ME } from "./as-owner";
 
 export const AGENTS: AgentsInfo = {
   adapters: ["fake"],
@@ -61,7 +62,13 @@ export function shellNav(): Omit<ShellContextValue, "model" | "dock"> {
 /** Renders `children` inside the shell context, with the live connections model (backed by the mocked api). */
 export function renderWithConnections(
   children: ReactNode,
-  opts: { agentsInfo?: AgentsInfo | null; dock?: DockApi; onProviderAuthChange?: WorkbenchModel["onProviderAuthChange"] } = {},
+  opts: {
+    agentsInfo?: AgentsInfo | null;
+    dock?: DockApi;
+    onProviderAuthChange?: WorkbenchModel["onProviderAuthChange"];
+    status?: WorkbenchModel["status"];
+    me?: WorkbenchModel["me"];
+  } = {},
 ): { container: HTMLElement; dock: ReturnType<typeof fakeDock> } {
   const dock = (opts.dock ?? fakeDock()) as ReturnType<typeof fakeDock>;
   function Harness() {
@@ -70,6 +77,8 @@ export function renderWithConnections(
       agentsInfo: opts.agentsInfo === undefined ? AGENTS : opts.agentsInfo,
       onProviderAuthChange: opts.onProviderAuthChange ?? vi.fn().mockResolvedValue(true),
       connections,
+      status: opts.status ?? null,
+      me: opts.me === undefined ? OWNER_ME : opts.me,
     } as unknown as WorkbenchModel;
     return <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>{children}</ShellContext.Provider>;
   }

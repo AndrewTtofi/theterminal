@@ -131,10 +131,32 @@ describe("acquireDataDirLock", () => {
     expect(() => releaseDataDirLock(join(dir, "missing"), 111)).not.toThrow();
   });
 
-  it("the default liveness check treats this process as alive", () => {
+  it("a lock naming this process's own pid, which this process does not hold, is stale (PID 1 in a container)", () => {
+    // After docker kill or an OOM kill the lock names 1, and the next start is PID 1 again: it cannot be the holder.
     const dir = tmp();
     writeFileSync(lockFile(dir), `${process.pid}\n`);
-    expect(() => acquireDataDirLock(dir, 111)).toThrow(DataDirInUseError);
+    const lock = acquireDataDirLock(dir);
+    expect(readFileSync(lockFile(dir), "utf8")).toBe(`${process.pid}\n`);
+    expect(files(dir)).toEqual(["server.lock"]);
+    lock.release();
+    expect(existsSync(lockFile(dir))).toBe(false);
+  });
+
+  it("a lock naming another live pid is still refused by the default liveness check", () => {
+    const dir = tmp();
+    writeFileSync(lockFile(dir), `${process.ppid}\n`); // the test runner's parent: alive and not us
+    expect(() => acquireDataDirLock(dir)).toThrow(DataDirInUseError);
+    expect(readFileSync(lockFile(dir), "utf8")).toBe(`${process.ppid}\n`);
+  });
+
+  it("a lock this process holds itself is refused, and free again once released", () => {
+    const dir = tmp();
+    const lock = acquireDataDirLock(dir);
+    expect(() => acquireDataDirLock(dir)).toThrow(DataDirInUseError);
+    expect(() => acquireDataDirLock(join(dir, "."))).toThrow(DataDirInUseError);
+    lock.release();
+    acquireDataDirLock(dir).release();
+    expect(existsSync(lockFile(dir))).toBe(false);
   });
 });
 

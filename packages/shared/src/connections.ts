@@ -233,6 +233,26 @@ export type Connection = {
   updatedAt: string;
 };
 
+/**
+ * A connection as a collaborator sees it: what it is and whether it works, never its config, its private values or
+ * even the names of its secret fields. The test message is blanked too, since a tester may name what it looked for.
+ */
+export type ConnectionSummary = Pick<Connection, "id" | "kind" | "provider" | "name" | "enabled" | "status">;
+
+export function connectionSummary(c: Connection): ConnectionSummary {
+  return { id: c.id, kind: c.kind, provider: c.provider, name: c.name, enabled: c.enabled, status: { ...c.status, message: "" } };
+}
+
+/** True for a summary: the full record carries the names of its secret fields, a summary never does. */
+export function isConnectionSummary(c: Connection | ConnectionSummary): boolean {
+  return !hasConnectionDetails(c);
+}
+
+/** The full record, as the Owner alone is given it; false for a summary. */
+export function hasConnectionDetails(c: Connection | ConnectionSummary): c is Connection {
+  return "secretFields" in c;
+}
+
 export function catalogEntry(provider: ConnectionProvider): CatalogEntry {
   return CONNECTION_CATALOG.find((e) => e.provider === provider)!;
 }

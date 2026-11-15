@@ -100,7 +100,7 @@ describe("buildSnapshot", () => {
     const s = await build();
     expect(s.waiting).toHaveLength(1);
     expect(s.waiting[0]!.headline).toContain("wants to run the command");
-    expect(s.waiting[0]).toMatchObject({ kind: "action", assignee: "Owner", cardTitle: null });
+    expect(s.waiting[0]).toMatchObject({ kind: "action", assignee: "a reviewer or above", cardTitle: null });
     expect(s.waiting[0]!.since).toMatch(/^2026-11-15T/);
 
     expect(s.decisions.map((d) => d.kind)).toEqual(["gate_waiver", "action", "intake", "intake"]);
@@ -297,5 +297,56 @@ describe("buildSnapshot history and limits", () => {
     expect(s.decisions).toHaveLength(200);
     expect(s.decisionsOmitted).toBe(5);
     expect(s.numbers.decisionsMade).toBe(205);
+  });
+});
+
+describe("buildSnapshot attributions", () => {
+  const p1 = { kind: "human", id: "p1" } as const;
+
+  function joinReviewer(): void {
+    emit(w, null, "person.invited", { inviteId: "i1", role: "reviewer", codeHash: "b".repeat(64), expiresAt: "2099-01-01T00:00:00.000Z" }, human);
+    emit(w, null, "person.joined", {
+      personId: "p1", inviteId: "i1", name: "Reviewer One", role: "reviewer",
+      credential: { kind: "key", credentialId: "key-p1", publicKey: "TESTKEYp1", label: "CLI" },
+    }, p1);
+  }
+
+  beforeEach(() => {
+    projectId = w.board.createProject(human, { name: "Book Club", pitch: "Reading lists for a club" }).id;
+    w.intake.start(human, projectId, "Reading lists for a club");
+    joinReviewer();
+    const login = w.board.addCard(human, projectId, { title: "Login", stage: "build" }).id;
+    emit(w, projectId, "agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "go", cardId: login, worktree: "wt/r1" }, p1);
+    emit(w, projectId, "agent.finished", { runId: "r1", status: "completed", costUsd: null, error: null });
+    w.gates.move(p1, login, "ship", [
+      { gateId: "ready_to_ship", decision: "waive", reason: "Only a demo for the club", acknowledgement: ack("ready_to_ship") },
+    ]);
+  });
+
+  it("names the reviewer who waived, the Owner, and who may answer what waits", async () => {
+    const s = await build();
+    expect(s.owner).toBe("Owner");
+    expect(s.decisions[0]).toMatchObject({ kind: "gate_waiver", by: "Reviewer One" });
+    expect(s.decisions[0]!.headline).toContain("Reviewer One waived");
+    expect(s.waiting).toEqual([]);
+    startRun(w, projectId, "r2", "fake", null);
+    emit(w, projectId, "agent.action.requested", { runId: "r2", actionId: "a2", kind: "shell", tool: "Bash", summary: "ls", input: null });
+    expect((await build()).waiting[0]).toMatchObject({ kind: "action", assignee: "a reviewer or above" });
+    const started = s.digests[0]!.items.find((i) => i.headline.includes("started a Fake agent"));
+    expect(started!.headline).toMatch(/^Reviewer One started a Fake agent/);
+    expect(JSON.stringify(s)).not.toContain('"by":"Owner"');
+  });
+
+  it("uses the Owner's chosen name once renamed, and a fixed phrase for someone not on record", async () => {
+    emit(w, null, "person.renamed", { personId: "owner", name: "Dana" }, human);
+    // A decision whose signer has no record (an id nobody holds): the page does not invent a name.
+    const login = (w.db.prepare("SELECT id FROM cards WHERE title = 'Login'").get() as { id: string }).id;
+    emit(w, projectId, "gate.signed_off", {
+      gateId: "go_live", cardId: login, from: "ship", to: "operate", conditions: [], acknowledgement: ack("go_live"), signedBy: "ghost",
+    }, { kind: "human", id: "ghost" });
+    const s = await build();
+    expect(s.owner).toBe("Dana");
+    expect(s.decisions[0]).toMatchObject({ kind: "gate_sign_off", by: "a former collaborator" });
+    expect(s.decisions[1]).toMatchObject({ kind: "gate_waiver", by: "Reviewer One" });
   });
 });

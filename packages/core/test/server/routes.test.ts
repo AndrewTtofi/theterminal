@@ -7,8 +7,14 @@ import { BoardService } from "../../src/board/board-service.js";
 import { registerRoutes } from "../../src/server/routes.js";
 import { GateService } from "../../src/gates/service.js";
 import { IntakeService } from "../../src/intake/service.js";
-import { GATES, type GateEvaluation, type GateId } from "@theterminal/shared";
+import { GATES, type GateEvaluation, type GateId, type NewLedgerEntry } from "@theterminal/shared";
+import { commitEvents } from "../../src/events/commit.js";
 import { completeIntake, type World } from "../gates/setup.js";
+import { asNobody, asPrincipal, fakeAuth } from "../fixtures/principal.js";
+import { AcmeError } from "../../src/server/acme.js";
+import { CertificateError } from "../../src/server/certs.js";
+import { OwnerCredentialRequiredError } from "../../src/people/service.js";
+import { RemoteInputError, RemoteStartError } from "../../src/server/remote.js";
 
 let app: FastifyInstance;
 let db: ReturnType<typeof openDatabase>;
@@ -24,8 +30,23 @@ beforeEach(() => {
   gates = new GateService({ db, ledger });
   integrity = { ok: true, count: 0 };
   app = Fastify();
+  fakeAuth(app); // the Owner unless a test names someone else
   registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
 });
+
+/** A reviewer the gates can look up: unknown people may sign nothing. */
+function seedReviewer(id = "r1", name = "Reviewer One"): void {
+  commitEvents(db, ledger, () => ({
+    events: [
+      { projectId: null, actor: { kind: "human", id: "owner" }, type: "person.invited", payload: { inviteId: `i-${id}`, role: "reviewer", codeHash: "c".repeat(64), expiresAt: "2099-01-01T00:00:00.000Z" } },
+      {
+        projectId: null, actor: { kind: "human", id }, type: "person.joined",
+        payload: { personId: id, inviteId: `i-${id}`, name, role: "reviewer", credential: { kind: "key", credentialId: `key-${id}`, publicKey: "TESTKEYr1", label: "CLI" } },
+      },
+    ] as NewLedgerEntry[],
+    result: () => undefined,
+  }));
+}
 
 async function mkProject(name = "Acme") {
   const res = await app.inject({ method: "POST", url: "/api/projects", payload: { name, pitch: "p" } });
@@ -167,6 +188,32 @@ describe("routes", () => {
       expect(res.json()).toMatchObject({ id: c.id, stage: "ship" });
     });
 
+    it("a reviewer signing go_live is 403 gate_requires naming the gate and the Owner, and nothing is recorded", async () => {
+      seedReviewer();
+      const c = await plannedCard();
+      const head = ledger.headSeq();
+      const raised = (await app.inject({ url: `/api/cards/${c.id}/gates?to=operate` })).json() as GateEvaluation[];
+      expect(raised.map((g) => g.id)).toContain("go_live");
+      const res = await app.inject({
+        method: "POST", url: `/api/cards/${c.id}/move`, headers: asPrincipal("r1", "reviewer"),
+        payload: { to: "operate", gates: raised.map((g) => signOff(g.id)) },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ error: "gate_requires", gateId: "go_live", requirement: { role: "owner" } });
+      expect(ledger.headSeq()).toBe(head);
+    });
+
+    it("GET /api/cards/:id/gates judges signable for the person asking", async () => {
+      seedReviewer();
+      const c = await plannedCard();
+      const forOwner = (await app.inject({ url: `/api/cards/${c.id}/gates?to=operate` })).json() as GateEvaluation[];
+      const forReviewer = (await app.inject({ url: `/api/cards/${c.id}/gates?to=operate`, headers: asPrincipal("r1", "reviewer") })).json() as GateEvaluation[];
+      expect(forOwner.find((g) => g.id === "go_live")!.signable).toBe(true);
+      expect(forReviewer.find((g) => g.id === "go_live")!.signable).toBe(false);
+      const ship = (await app.inject({ url: `/api/cards/${c.id}/gates?to=ship`, headers: asPrincipal("r1", "reviewer") })).json() as GateEvaluation[];
+      expect(ship.find((g) => g.id === "ready_to_ship")!.signable).toBe(true);
+    });
+
     it("a sign-off whose conditions do not hold is 409 gate_not_met naming the gate and the unmet conditions", async () => {
       const p = await mkProject();
       const c = await mkCard(p.id, "build");
@@ -269,6 +316,32 @@ describe("routes", () => {
     expect(res.json()).toEqual({ error: "ledger_read_only" });
   });
 
+  it("maps the remote listener's and ACME's errors to their fixed codes, never a path or the CA's text", async () => {
+    const a = Fastify();
+    fakeAuth(a);
+    registerRoutes(a, { board, gates, ledger, getIntegrity: () => integrity });
+    const throws = new Map<string, () => never>([
+      ["start", () => { throw new RemoteStartError(); }],
+      ["input", () => { throw new RemoteInputError("invalid_bind"); }],
+      ["acme", () => { throw new AcmeError("urn:ietf:params:acme:error:dns"); }],
+      ["cert", () => { throw new CertificateError("path_denied"); }],
+      ["owner", () => { throw new OwnerCredentialRequiredError(); }],
+    ]);
+    a.get<{ Params: { which: string } }>("/boom/:which", async (req) => throws.get(req.params.which)!());
+    const expected: Record<string, [number, unknown]> = {
+      start: [502, { error: "remote_start_failed" }],
+      input: [400, { error: "invalid_input", code: "invalid_bind" }],
+      acme: [502, { error: "acme_failed", type: "urn:ietf:params:acme:error:dns" }],
+      cert: [400, { error: "certificate_invalid", code: "path_denied" }],
+      owner: [409, { error: "owner_credential_required" }],
+    };
+    for (const [which, [status, body]] of Object.entries(expected)) {
+      const res = await a.inject({ url: `/boom/${which}` });
+      expect(res.statusCode, which).toBe(status);
+      expect(res.json(), which).toEqual(body);
+    }
+  });
+
   it("500 without leaking internals", async () => {
     const db = openDatabase(":memory:");
     const boom = new BoardService(db, new Ledger(db));
@@ -276,9 +349,51 @@ describe("routes", () => {
       throw new Error("secret detail");
     };
     const a = Fastify();
+    fakeAuth(a);
     registerRoutes(a, { board: boom, gates, ledger, getIntegrity: () => integrity });
     const res = await a.inject({ url: "/api/projects" });
     expect(res.statusCode).toBe(500);
     expect(res.json()).toEqual({ error: "internal" });
+  });
+});
+
+describe("who acts", () => {
+  it("every write is recorded as the person who made it, through the principal", async () => {
+    const owners = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Acme" } });
+    expect(owners.statusCode).toBe(201);
+    expect(ledger.list().at(-1)).toMatchObject({ type: "project.created", actor: { kind: "human", id: "owner" } });
+
+    const theirs = await app.inject({ method: "POST", url: "/api/projects", headers: asPrincipal("m1", "maintainer"), payload: { name: "Beta" } });
+    expect(theirs.statusCode).toBe(201);
+    expect(ledger.list().at(-1)).toMatchObject({ type: "project.created", actor: { kind: "human", id: "m1" } });
+
+    const card = await app.inject({
+      method: "POST", url: `/api/projects/${(theirs.json() as { id: string }).id}/cards`, headers: asPrincipal("m1", "maintainer"),
+      payload: { title: "T", stage: "plan" },
+    });
+    expect(card.statusCode).toBe(201);
+    expect(ledger.list().at(-1)).toMatchObject({ type: "card.created", actor: { kind: "human", id: "m1" } });
+  });
+
+  it("the route checks the role itself: a viewer's write is 403 and nobody's is 401, with no auth hook in front", async () => {
+    const head = ledger.headSeq();
+    const viewer = await app.inject({ method: "POST", url: "/api/projects", headers: asPrincipal("v1", "viewer"), payload: { name: "Acme" } });
+    expect(viewer.statusCode).toBe(403);
+    expect(viewer.json()).toEqual({ error: "forbidden", required: "maintainer" });
+    const nobody = await app.inject({ method: "POST", url: "/api/projects", headers: asNobody, payload: { name: "Acme" } });
+    expect(nobody.statusCode).toBe(401);
+    const read = await app.inject({ url: "/api/projects", headers: asNobody });
+    expect(read.statusCode).toBe(401);
+    expect(ledger.headSeq()).toBe(head);
+  });
+
+  it("no route file keeps an Owner constant: the only `id: \"owner\"` literal under server/ is auth's", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = join(import.meta.dirname, "..", "..", "src", "server");
+    const offenders = readdirSync(dir)
+      .filter((f) => f.endsWith(".ts") && f !== "auth.ts")
+      .filter((f) => /id:\s*"owner"/.test(readFileSync(join(dir, f), "utf8")));
+    expect(offenders).toEqual([]);
   });
 });

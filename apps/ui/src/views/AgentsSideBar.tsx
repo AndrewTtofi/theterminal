@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { AgentPanel } from "../components/AgentPanel";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 
 /** Start form and run list; the selected run's actions show in the Agent feed panel. */
 export function AgentsSideBar() {
@@ -28,6 +28,7 @@ export function AgentsSideBar() {
         if (runId) dock()?.focus("agent_feed");
       }}
       onStop={model.onStopRun}
+      viewer={{ role: roleOf(model) }}
       machines={model.machines?.paired ?? []}
       {...(model.machines?.capacity !== undefined && { machineCapacity: model.machines?.capacity })}
       {...(model.narration?.machineName !== undefined && { machineName: model.narration?.machineName })}

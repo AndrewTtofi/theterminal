@@ -21,6 +21,7 @@ vi.mock("../src/api", async (importOriginal) => {
 
 import { api, ApiError } from "../src/api";
 import { ConnectionEditor } from "../src/views/ConnectionEditor";
+import type { Status } from "../src/api";
 import { AGENTS, connection, renderWithConnections } from "./connections-harness";
 import { localEngines, report } from "./capacity-fixtures";
 
@@ -61,6 +62,23 @@ describe("ConnectionEditor", () => {
     expect(container.innerHTML).not.toContain(KEY);
     expect(dock.open).toHaveBeenCalledWith("connection:c1", "Claude (Anthropic)", "main");
     expect(dock.close).toHaveBeenCalledWith("connection:new:claude");
+  });
+
+  it("names the server's encrypted secret store instead of the keychain when the server keeps secrets in a file", async () => {
+    m.listConnections.mockResolvedValue([connection()]);
+    const status = { connections: { enabled: 1, failed: 0, keychain: "ok", secretStore: "file" } } as unknown as Status;
+    const { container } = renderWithConnections(<ConnectionEditor id="connection:c1" />, { status });
+    await waitFor(() => expect(keyInput().placeholder).toBe("Stored in this server's encrypted secret store"));
+    expect(container.textContent).not.toContain("keychain");
+  });
+
+  it("shows anyone but the Owner the Owner-only line and no form", async () => {
+    m.listConnections.mockResolvedValue([connection()]);
+    const me = { personId: "m1", name: "M", role: "maintainer", listener: "remote", method: "key", credentials: [], sessions: [] } as const;
+    renderWithConnections(<ConnectionEditor id="connection:c1" />, { me: { ...me, credentials: [], sessions: [] } });
+    await waitFor(() => expect(m.listConnections).toHaveBeenCalled());
+    expect(await screen.findByText(/Only the Owner/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   });
 
   it("Replace edits a stored secret and sends only the new value", async () => {

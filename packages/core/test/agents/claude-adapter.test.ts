@@ -345,6 +345,18 @@ describe("ClaudeAdapter", () => {
     expect(h.events.filter((e) => e.type === "action_result")).toEqual([]);
   });
 
+  it("a run with its own config home keeps Claude Code out of the user's ~/.claude: CLAUDE_CONFIG_DIR points at it", async () => {
+    const q = fakeQuery([success(0)]);
+    const configHome = join(DATA_DIR, "projects", "p1", "run-homes", "r1");
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...harness().opts, credentials: { env: {}, mcpServers: [], configHome } });
+    const env = q.calls[0]!.options.env!;
+    expect(env.CLAUDE_CONFIG_DIR).toBe(configHome);
+    expect(env.ANTHROPIC_API_KEY).toBe(FAKE_KEY);
+    const plain = fakeQuery([success(0)]);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: plain.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
+    expect(plain.calls[0]!.options.env!.CLAUDE_CONFIG_DIR).toBeUndefined();
+  });
+
   it("api_key mode passes the configured key and drops anything that could redirect or override it", async () => {
     const q = fakeQuery([success(0)]);
     await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);

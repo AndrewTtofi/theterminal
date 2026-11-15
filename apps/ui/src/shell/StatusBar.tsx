@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { plural, visibleControls } from "@theterminal/shared";
-import type { CiStatus } from "@theterminal/shared";
+import { ROLE_LABELS, plural, visibleControls } from "@theterminal/shared";
+import type { CiStatus, Me } from "@theterminal/shared";
+import { clip } from "../components/text";
 import type { Status } from "../api";
 import { PRESET_LABELS } from "./dock-layout";
 import type { PresetId } from "./dock-layout";
@@ -33,9 +34,12 @@ type Props = {
   onSelectView: (view: ViewId) => void;
   onResetLayout: () => void;
   layout: LayoutControls;
+  /** Who is signed in; the item is left out while unknown. */
+  me?: Me | null;
 };
 
-export function StatusBar({ status, running, pending, onSelectView, onResetLayout, layout }: Props) {
+export function StatusBar({ status, running, pending, onSelectView, onResetLayout, layout, me }: Props) {
+  const remote = status?.remote;
   const runningCount = status?.runningAgents ?? running;
   const needsYou = status ? status.pendingDecisions + status.intakeDecisions : pending;
   const cost = (status?.todayCostUsd ?? 0).toFixed(2);
@@ -57,6 +61,11 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
   return (
     <footer className="status-bar" aria-label="Status bar">
       <div className="status-left">
+        {me && (
+          <button type="button" className="status-item" onClick={() => onSelectView("people")}>
+            {`You: ${clip(visibleControls(me.name), 60)} (${ROLE_LABELS[me.role]})`}
+          </button>
+        )}
         <span className="status-item">Agents running: {runningCount}</span>
         <span className="status-item">
           Today: ${cost}
@@ -105,6 +114,15 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
               {OFFLINE_TITLE}
             </span>
           </>
+        )}
+        {remote && (
+          <button
+            type="button"
+            className={`status-item${remote.enabled && remote.label !== undefined ? " attention" : ""}`}
+            onClick={() => onSelectView("people")}
+          >
+            {!remote.enabled ? "Remote: off" : remote.label !== undefined ? `Remote: on · ${visibleControls(remote.label)}` : "Remote: on"}
+          </button>
         )}
         <NetworkAnnouncement state={network} />
         <CiItem ci={status?.ci ?? null} />

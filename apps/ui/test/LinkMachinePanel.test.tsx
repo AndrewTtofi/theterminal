@@ -15,6 +15,7 @@ import type { WorkbenchModel } from "../src/shell/model";
 import { LinkMachinePanel } from "../src/views/LinkMachinePanel";
 import { fakeDock, shellNav } from "./connections-harness";
 import { PEER_FP, SELF_FP, machine, overview, self } from "./machines-fixtures";
+import { OWNER_ME } from "./as-owner";
 
 const m = vi.mocked(api);
 const CODE = encodePairingCode(PEER_FP, new Uint8Array([1, 2, 3, 4]));
@@ -32,6 +33,7 @@ function renderPanel(machines: Partial<WorkbenchModel["machines"]> = {}) {
   const model = {
     machines: { overview: overview(), error: null, refresh, ...machines },
     subscribeEntries,
+    me: OWNER_ME,
   } as unknown as WorkbenchModel;
   const view = render(
     <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...nav }}>

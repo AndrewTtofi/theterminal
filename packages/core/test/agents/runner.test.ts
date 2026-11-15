@@ -1144,3 +1144,59 @@ describe("AgentRunner with a local model", () => {
     expect("apiKey" in seen[0]!.localModel!).toBe(false);
   });
 });
+
+describe("a run forced onto an API key", () => {
+  /** What the adapter saw of its config home while it ran. */
+  type HomeSeen = { exists: boolean; entries: string[] | null };
+  /** An adapter that records what it was started with (and the state of its config home then), and ends as told. */
+  const capturing = (end: () => Promise<{ status: "completed" }> = async () => ({ status: "completed" })) => {
+    const seen: RunCredentials[] = [];
+    const homes: HomeSeen[] = [];
+    const adapter: AgentAdapter = {
+      id: "claude",
+      start: async (o) => {
+        seen.push(o.credentials);
+        const home = o.credentials.configHome;
+        homes.push({ exists: home !== undefined && existsSync(home), entries: home !== undefined && existsSync(home) ? readdirSync(home) : null });
+        return end();
+      },
+    };
+    return { adapter, seen, homes };
+  };
+
+  it("gets an empty config home of its own under the data folder while it runs, so the CLI cannot find the Owner's login, and the home goes when the run ends; the Owner's run gets none", async () => {
+    const { adapter, seen, homes } = capturing();
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { claude: adapter }, extraSecrets: () => [], dataDir,
+      credentials: () => ({ connectionId: "c1", name: "Claude", apiKey: FAKE_KEY }),
+    });
+    runners.push(runner);
+    const forced = await runner.start({ kind: "human", id: "m1" }, { projectId, adapter: "claude", prompt: "p", forceApiKey: true });
+    await untilFinished(forced.id);
+    expect(forced.authMode).toBe("api_key");
+    const home = seen[0]!.configHome!;
+    expect(home).toBe(join(dataDir, "projects", projectId, "run-homes", forced.id));
+    expect(homes[0]).toEqual({ exists: true, entries: [] });
+    expect(seen[0]!.apiKey).toBe(FAKE_KEY);
+    await vi.waitFor(() => expect(existsSync(home)).toBe(false));
+    expect(existsSync(join(dataDir, "projects", projectId))).toBe(true); // only the run's own home goes
+
+    const owners = await runner.start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(owners.id);
+    expect(seen[1]!.configHome).toBeUndefined();
+    expect(homes[1]).toEqual({ exists: false, entries: null });
+  });
+
+  it("removes the run's config home when the adapter fails too", async () => {
+    const { adapter, seen } = capturing(async () => { throw new Error("the CLI crashed"); });
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { claude: adapter }, extraSecrets: () => [], dataDir,
+      credentials: () => ({ connectionId: "c1", name: "Claude", apiKey: FAKE_KEY }),
+    });
+    runners.push(runner);
+    const forced = await runner.start({ kind: "human", id: "m1" }, { projectId, adapter: "claude", prompt: "p", forceApiKey: true });
+    await untilFinished(forced.id);
+    expect(getRun(db, forced.id)!.status).toBe("failed");
+    await vi.waitFor(() => expect(existsSync(seen[0]!.configHome!)).toBe(false));
+  });
+});

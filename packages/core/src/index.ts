@@ -13,11 +13,28 @@ export type { GateDecision, IntakeRow, IntakeState } from "./events/projections.
 export type { CardStory } from "@theterminal/shared";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
-export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "./server/auth.js";
+export {
+  registerAuth, TOKEN_COOKIE, SESSION_COOKIE, PUBLIC_ROUTE, PUBLIC_ROUTES, ROUTE_ROLES, APP_HOST, routeKey, requireRole, needs, actorOf,
+  assertRoutesHaveRoles, sessionCookieOptions, clientKey, listenerOf, remoteHostAllowed,
+} from "./server/auth.js";
+export type { AuthDeps, HostRule, Principal, RoleGuard } from "./server/auth.js";
+export { registerGateRoutes, sendGateError } from "./server/gates-routes.js";
+export type { GateRouteDeps } from "./server/gates-routes.js";
 export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export { DataDirInUseError } from "./server/data-dir-lock.js";
-export type { RunningServer } from "./server/server.js";
+export type { RunningServer, RemoteOptions } from "./server/server.js";
+export {
+  RemoteListener, RemoteStartError, RemoteInputError, REMOTE_KEY_SECRET, REMOTE_FILES_SECRET, HEALTHZ_PATH, REMOTE_IDLE_TIMEOUT_MS,
+  ADDRESS_CACHE_MS, readRemoteState, checkRemoteHost,
+} from "./server/remote.js";
+export type { RemoteDeps, EnableInput, RemoteView, RemoteInputCode } from "./server/remote.js";
+export { registerRemoteRoutes, remoteStatus, remoteLabel } from "./server/remote-routes.js";
+export type { RemoteRoutesDeps, RemoteStatus } from "./server/remote-routes.js";
+export { AcmeManager, AcmeError, selectAcmeClient, fakeAcme, ACME_DIRECTORY, ACME_STAGING } from "./server/acme.js";
+export type { AcmeClientLike, AcmeDeps } from "./server/acme.js";
+export { CertificateError, selfSignedTlsCertificate, certFingerprint, loadProvided, localAddresses } from "./server/certs.js";
+export type { CertMaterial } from "./server/certs.js";
 export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
 export {
@@ -43,8 +60,8 @@ export {
   DecisionNotApplicableError, NoIntakeError,
 } from "./intake/service.js";
 export type { IntakeServiceDeps, IntakeProjectDecisions, RecordedTextDeps } from "./intake/service.js";
-export { GateService, GateBlockedError, GateNotMetError } from "./gates/service.js";
-export type { GateServiceDeps } from "./gates/service.js";
+export { GateService, GateBlockedError, GateNotMetError, GateRequirementError } from "./gates/service.js";
+export type { GateServiceDeps, Signer } from "./gates/service.js";
 export { gateFacts, evaluateConditions } from "./gates/conditions.js";
 export { registerIntakeRoutes } from "./server/intake-routes.js";
 export type { IntakeRouteDeps } from "./server/intake-routes.js";
@@ -55,6 +72,18 @@ export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
 export { workspaceCounts, listMachines, getMachine, getLinkRun, listLinkRuns, applyMirrored, mirroredIds } from "./events/projections.js";
 export type { WorkspaceCounts } from "./events/projections.js";
+export {
+  getPerson, listPeople, listCredentials, findCredential, getInvite, getInviteByHash, listInvites, getRemoteState, getGateRequirement,
+} from "./events/projections.js";
+export { SessionStore } from "./people/sessions.js";
+export type { Session } from "./people/sessions.js";
+export { ChallengeStore, CHALLENGE_TTL_MS, CHALLENGE_MAX, CHALLENGE_PER_CLIENT } from "./people/challenges.js";
+export { LockoutStore, LOCKOUT_MAX_KEYS } from "./people/lockouts.js";
+export {
+  PeopleService, InviteInvalidError, OwnerCredentialRequiredError, LastCredentialError, SelfChangeError, OwnerRoleError,
+  CredentialExistsError, LockedError, LOCKOUT_FAILURES, LOCKOUT_MS, OWNER_INVITE_TTL_MS,
+} from "./people/service.js";
+export type { PeopleServiceDeps } from "./people/service.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
 export { FakeAdapter } from "./agents/fake-adapter.js";
@@ -73,6 +102,8 @@ export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";
 export { SecretStoreUnavailableError, SECRET_SERVICE, MAX_SECRET_BYTES, ChunkedSecretStore } from "./secrets/store.js";
 export type { SecretStore } from "./secrets/store.js";
 export { MemorySecretStore } from "./secrets/memory-store.js";
+export { FileSecretStore, KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-store.js";
+export type { SecretStoreKind } from "./secrets/file-store.js";
 export { KeychainSecretStore } from "./secrets/keychain-store.js";
 export type { KeyringEntryLike, KeyringEntryFactory } from "./secrets/keychain-store.js";
 export { ConnectionService, ConflictError, SecretInConfigError, UnknownFieldError } from "./connections/service.js";

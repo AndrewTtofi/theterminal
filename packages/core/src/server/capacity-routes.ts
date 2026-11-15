@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import type { AuthMode, CapacityReport, HardwareInfo, LocalEngine, MachineCapacity, Provider } from "@theterminal/shared";
+import { OWNER_ID, type AuthMode, type CapacityReport, type CapacitySource, type HardwareInfo, type LocalEngine, type MachineCapacity, type Provider } from "@theterminal/shared";
 import { capacityReport } from "../capacity/report.js";
 import type { ConnectionService } from "../connections/service.js";
 import type { Db } from "../db.js";
+import { actorOf, needs } from "./auth.js";
 
 export type CapacityRouteDeps = {
   db: Db;
@@ -19,8 +20,17 @@ export type CapacityRouteDeps = {
   now?: () => number;
 };
 
-const actor = { kind: "human", id: "owner" } as const;
 const LOCAL_ENGINES_TTL_MS = 30_000;
+
+/** A source as anyone but the Owner gets it: without its plan, budget and sign-in mode. */
+export type CollaboratorCapacitySource = Omit<CapacitySource, "plan" | "monthlyBudgetUsd" | "mode">;
+/** The report as anyone but the Owner gets it: every source, on the report and on each linked machine, reduced the same way. */
+export type CollaboratorCapacityReport = Omit<CapacityReport, "sources" | "machines"> & {
+  sources: CollaboratorCapacitySource[];
+  machines: (Omit<MachineCapacity, "sources"> & { sources: CollaboratorCapacitySource[] })[];
+};
+
+const collaboratorSource = ({ plan: _plan, monthlyBudgetUsd: _budget, mode: _mode, ...rest }: CapacitySource): CollaboratorCapacitySource => rest;
 
 /** Capacity: usage per provider, budgets, observed rate limits and this computer. Errors are mapped in routes.ts. */
 export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRouteDeps): { report: () => Promise<CapacityReport> } {
@@ -46,15 +56,24 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
     });
   };
 
-  app.get("/api/capacity", async (): Promise<CapacityReport> => {
+  // Usage, this computer and the linked machines; connections appear by id, kind, provider and name only. What the
+  // Owner pays for (plan, budget) and how they sign in (mode) is theirs alone, on this computer and on every linked
+  // machine alike: a collaborator's sources go without.
+  app.get("/api/capacity", needs("viewer"), async (req): Promise<CapacityReport | CollaboratorCapacityReport> => {
     const [machines, engines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
-    return local(machines, engines);
+    const report = await local(machines, engines);
+    if (req.principal?.personId === OWNER_ID) return report;
+    return {
+      ...report,
+      sources: report.sources.map(collaboratorSource),
+      machines: report.machines.map((m) => ({ ...m, sources: m.sources.map(collaboratorSource) })),
+    };
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.
-  app.post("/api/capacity/detect", async (): Promise<HardwareInfo> => {
+  app.post("/api/capacity/detect", needs("owner"), async (req): Promise<HardwareInfo> => {
     const [info] = await Promise.all([hardware(), detect()]);
-    await connections.writeHardware(actor, info);
+    await connections.writeHardware(actorOf(req), info);
     return info;
   });
 

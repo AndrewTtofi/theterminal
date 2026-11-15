@@ -107,11 +107,12 @@ export type WorkforceRow = {
   inputTokens: number | null;
   outputTokens: number | null;
 };
-export type WaitingItem = { kind: "action" | "intake"; headline: string; since: string | null; cardTitle: string | null; assignee: "Owner" };
+export type WaitingItem = { kind: "action" | "intake"; headline: string; since: string | null; cardTitle: string | null; assignee: string };
 export type DecisionItem = {
   kind: "intake" | "gate_sign_off" | "gate_waiver" | "action";
   headline: string;
-  by: "Owner";
+  /** The signer's display name. */
+  by: string;
   at: string;
   reason: string | null;
   evidence: Evidence;
@@ -134,7 +135,8 @@ export type ShareSnapshot = {
   options: ShareOptions;
   hidden: string[];
   project: { name: string; pitch: string; createdAt: string };
-  owner: "Owner";
+  /** The Owner's display name. */
+  owner: string;
   progress: Record<Stage, { total: number; done: number }>;
   currentStage: Stage | null;
   numbers: ShareNumbers;

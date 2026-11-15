@@ -5,7 +5,7 @@ import { DecisionCard } from "../components/DecisionCard";
 import { DecisionContext } from "../components/DecisionContext";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
-import { runIsLive, useShell } from "../shell/model";
+import { gateAccess, runIsLive, useShell } from "../shell/model";
 
 /** A run's changes as the panel knows them: read, or a sentence said in their place (a live run's are not read). */
 type Known = { changes: RunChanges } | { note: string };
@@ -105,6 +105,7 @@ export function NeedsYouPanel() {
             onCancel={model.onCancelGate}
             readOnly={stripShown}
             autoFocus={false}
+            {...gateAccess(model)}
           />
         </>
       )}

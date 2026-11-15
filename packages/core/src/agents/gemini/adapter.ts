@@ -322,8 +322,10 @@ export class GeminiAdapter implements AgentAdapter {
       writeFileSync(join(policies, "theterminal.toml"), POLICY_TOML);
       if (o.authMode === "api_key") {
         // An isolated home of our own: our settings apply, and nothing of the user's ~/.gemini (settings,
-        // policies, hooks, trusted folders, credentials) is read or copied.
-        const home = join(this.dataDir, "projects", o.projectId, "gemini-home");
+        // policies, hooks, trusted folders, credentials) is read or copied. The runner's per-run home when it gives
+        // one (a collaborator's run, which must find nothing of the Owner's or of other runs), otherwise the
+        // project's shared one.
+        const home = o.credentials.configHome ?? join(this.dataDir, "projects", o.projectId, "gemini-home");
         mkdirSync(join(home, ".gemini"), { recursive: true });
         writeFileSync(join(home, ".gemini", "settings.json"), JSON.stringify(HOME_SETTINGS));
         env.GEMINI_CLI_HOME = home;
@@ -353,7 +355,7 @@ export class GeminiAdapter implements AgentAdapter {
     if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject, extraEnv }), ...this.fakeEnv }; // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv }), ...this.fakeEnv };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv, configHome: credentials.configHome }), ...this.fakeEnv };
   }
 }
 

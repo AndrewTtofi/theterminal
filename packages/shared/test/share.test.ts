@@ -128,3 +128,15 @@ describe("share event payloads", () => {
     expect(stopped.safeParse({ linkId: "l1", reason: "restart", x: 1 }).success).toBe(false);
   });
 });
+
+describe("people on a share page", () => {
+  it("types the Owner, a decision's signer and a waiting item's assignee as names, not the literal Owner", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const src = readFileSync(fileURLToPath(new URL("../src/share.ts", import.meta.url)), "utf8");
+    expect(src).not.toMatch(/(owner|by|assignee): "Owner"/);
+    expect(src).toMatch(/\bowner: string;/);
+    expect(src).toMatch(/\bby: string;/);
+    expect(src).toMatch(/\bassignee: string\b/);
+  });
+});

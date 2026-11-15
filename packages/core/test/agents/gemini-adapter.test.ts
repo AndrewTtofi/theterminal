@@ -257,6 +257,20 @@ describe("GeminiAdapter", () => {
     expect(prompt.params).toEqual({ sessionId: "fake-session", prompt: [{ type: "text", text: "do it" }] });
   });
 
+  it("api_key mode writes its settings into the runner's per-run config home when it gives one, never into the project's shared home", async () => {
+    script([{ type: "message", text: "Hello" }]);
+    const h = harness();
+    const configHome = join(outside, "projects", "p1", "run-homes", "run-1");
+    mkdirSync(configHome, { recursive: true });
+    h.opts.credentials.configHome = configHome;
+    expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
+    const snap = readLog().find((e) => e.initialize)!.initialize;
+    expect(snap.env.GEMINI_CLI_HOME).toBe(configHome);
+    expect(snap.settings).toEqual(HOME_SETTINGS);
+    expect(JSON.parse(readFileSync(join(configHome, ".gemini", "settings.json"), "utf8"))).toEqual(HOME_SETTINGS);
+    expect(existsSync(join(outside, "projects", "p1", "gemini-home"))).toBe(false);
+  });
+
   it("api_key mode passes only the configured key; inherited Gemini, Google, Vertex and git variables are stripped", async () => {
     script([]);
     await adapter().start(harness().opts);

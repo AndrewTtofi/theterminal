@@ -10,6 +10,7 @@ import { fakeDock, shellNav } from "./connections-harness";
 import { message } from "./feed-fixtures";
 import { run1 } from "./changes-fixtures";
 import { shipBlocked } from "./gate-fixtures";
+import { OWNER_ME } from "./as-owner";
 
 const pending = (over: Partial<PendingAgentAction> = {}): PendingAgentAction => ({
   id: "a1", runId: "run1", kind: "file_edit", tool: "Edit", summary: "Edit src/a.ts",
@@ -39,6 +40,7 @@ function renderPanel(over: Partial<WorkbenchModel> = {}, stripShown = false) {
     onDecide: vi.fn(),
     onResolveGate: vi.fn().mockResolvedValue(true),
     onCancelGate: vi.fn(),
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   render(

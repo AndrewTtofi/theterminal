@@ -21,6 +21,7 @@ vi.mock("../src/api", async (importOriginal) => {
 import { api } from "../src/api";
 import { ConnectionsSideBar } from "../src/views/ConnectionsSideBar";
 import { connection, renderWithConnections } from "./connections-harness";
+import type { ConnectionSummary } from "@theterminal/shared";
 
 const m = vi.mocked(api);
 
@@ -199,5 +200,45 @@ describe("ConnectionsSideBar", () => {
     renderWithConnections(<ConnectionsSideBar />);
     await screen.findByRole("button", { name: "Add another AWS" });
     expect(screen.queryByRole("button", { name: "AWS: Staging" })).toBeNull();
+  });
+});
+
+describe("ConnectionsSideBar for a collaborator", () => {
+  const summary: ConnectionSummary = {
+    id: "c1", kind: "llm", provider: "claude", name: "Claude", enabled: true, status: { state: "ok", message: "", testedAt: "2026-01-01T00:00:00Z" },
+  };
+
+  it("renders summaries read-only: the state and the Owner-only line, no switch, no editor tab", async () => {
+    m.listConnections.mockResolvedValue([summary, { ...summary, id: "c2", provider: "codex", name: "Codex", enabled: false }]);
+    const { dock } = renderWithConnections(<ConnectionsSideBar />);
+    await screen.findByText("Only the Owner can see or change connection details.");
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add another/ })).toBeNull();
+    const claude = screen.getByText("Claude (Anthropic)").closest("li")!;
+    expect(claude.querySelector(".status-dot")!.classList.contains("ok")).toBe(true);
+    expect(within(claude).queryByRole("button")).toBeNull();
+    await userEvent.click(screen.getByText("Claude (Anthropic)"));
+    expect(dock.open).not.toHaveBeenCalled();
+    // A hostile name renders as text, never as markup.
+    m.listConnections.mockResolvedValue([{ ...summary, kind: "cloud", provider: "aws", name: "<img src=x onerror=alert(1)>" }, { ...summary, id: "c3", kind: "cloud", provider: "aws", name: "Two" }]);
+    renderWithConnections(<ConnectionsSideBar />);
+    await screen.findByText("<img src=x onerror=alert(1)>");
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("a collaborator with no connections yet sees the Owner-only line and cannot open an editor tab", async () => {
+    m.listConnections.mockResolvedValue([]);
+    const { dock } = renderWithConnections(<ConnectionsSideBar viewer={{ role: "maintainer" }} />);
+    await waitFor(() => expect(m.listConnections).toHaveBeenCalled());
+    expect(screen.getByText("Only the Owner can see or change connection details.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "GitHub" })).toBeNull();
+    expect(dock.open).not.toHaveBeenCalled();
+  });
+
+  it("the Owner sees no such line", async () => {
+    m.listConnections.mockResolvedValue([connection()]);
+    renderWithConnections(<ConnectionsSideBar />);
+    await screen.findByRole("switch", { name: "Enable Claude (Anthropic)" });
+    expect(screen.queryByText("Only the Owner can see or change connection details.")).toBeNull();
   });
 });

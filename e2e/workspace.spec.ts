@@ -6,6 +6,8 @@ const layoutSelect = (page: Page) => statusBar(page).getByRole("combobox", { nam
 
 test("Guided by default: ask in the Conversation, decide in the strip with more context in the Needs-you tab", async ({ page }) => {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
+  // The workspace shows once it knows who is signed in.
+  await expect(page.getByRole("navigation", { name: "Views" })).toBeVisible();
   // A fresh browser: the Guided layout, with the Board and the Conversation only.
   expect(await tabNames(page)).toEqual(["Board", "Conversation"]);
   await expect(layoutSelect(page).locator("option:checked")).toHaveText("Guided");

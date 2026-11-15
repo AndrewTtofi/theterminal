@@ -8,7 +8,7 @@
 import type { AgentEventType } from "./agents.js";
 import type { LedgerEntry } from "./domain.js";
 import type { EventType } from "./events.js";
-import { adapterLabel, narrate, type NarrationContext, type NarrationTopic } from "./narration.js";
+import { actorName, adapterLabel, narrate, type NarrationContext, type NarrationTopic } from "./narration.js";
 import { formatUsd, plural } from "./text.js";
 
 export const DIGEST_MAX_ITEMS = 100;
@@ -131,7 +131,7 @@ function summarise(c: DigestCounts): string {
   const sentence =
     `${plural(c.entries, "ledger entry", "ledger entries")}: ` +
     `${plural(c.actions, "agent action")} requested, ${c.allowed} allowed and ${c.denied} denied by a human, ` +
-    `${plural(c.decisions, "decision")} by the Owner, ${plural(c.cardsMoved, "card")} moved, ` +
+    `${plural(c.decisions, "decision")} by a human, ${plural(c.cardsMoved, "card")} moved, ` +
     `${plural(c.runsStarted, "agent run")} started and ${c.runsFinished} finished.`;
   return c.spendUsd === null ? sentence : `${sentence} Agent spend recorded that day: ${formatUsd(c.spendUsd)} (estimate).`;
 }
@@ -149,7 +149,7 @@ function itemOf(e: LedgerEntry, ctx: NarrationContext): DigestItem {
     const p = payloadOf(e);
     const cardId = typeof p.cardId === "string" ? p.cardId : undefined;
     const title = cardId !== undefined && ctx.cardTitle ? ctx.cardTitle(cardId) : undefined;
-    if (!title) headline = `Owner started a ${adapterLabel(p.adapter)} agent`;
+    if (!title) headline = `${actorName(e.actor, ctx)} started a ${adapterLabel(p.adapter)} agent`;
   }
   return { seq: e.seq, time: utcTime(e.ts), headline, topic: n.topic, attention: n.attention };
 }

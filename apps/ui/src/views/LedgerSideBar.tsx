@@ -1,6 +1,6 @@
 import type { NarrationTopic } from "@theterminal/shared";
 import { exportLedgerUrl } from "../api";
-import { LEDGER_TOPICS, useShell } from "../shell/model";
+import { LEDGER_TOPICS, gateFor, roleOf, useShell } from "../shell/model";
 import type { LedgerScope } from "../shell/model";
 
 const SCOPES: { value: LedgerScope; label: string }[] = [
@@ -19,6 +19,8 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   connection: "Connections",
   settings: "Settings",
   machine: "Machines",
+  people: "People",
+  remote: "Remote access",
   other: "Other",
 };
 
@@ -27,6 +29,8 @@ export function LedgerSideBar() {
   const toggle = (topic: NarrationTopic, on: boolean) =>
     model.onLedgerTopicsChange(LEDGER_TOPICS.filter((t) => (t === topic ? on : model.ledgerTopics.includes(t))));
   // Every project's entries, one project's, or nothing to export yet (this project chosen, none selected).
+  // The export carries every entry's payload: a reviewer's and above.
+  const mayExport = gateFor(roleOf(model), "reviewer");
   const exportFrom = model.ledgerScope === "all" ? null : (model.selectedId ?? undefined);
   return (
     <div className="ledger-side">
@@ -63,7 +67,11 @@ export function LedgerSideBar() {
         Open ledger panel
       </button>
       <p className="ledger-export">
-        {exportFrom === undefined ? (
+        {mayExport.disabled ? (
+          <button type="button" disabled title={mayExport.title} aria-describedby="ledger-export-note">
+            Export for audit
+          </button>
+        ) : exportFrom === undefined ? (
           <>
             <button type="button" disabled aria-describedby="ledger-export-hint ledger-export-note">
               Export for audit

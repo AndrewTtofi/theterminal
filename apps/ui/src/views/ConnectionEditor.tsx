@@ -1,14 +1,21 @@
 import { useEffect, useId, useState } from "react";
-import { PROVIDER_MODES } from "@theterminal/shared";
-import type { CatalogEntry, Connection, ConnectionField, LocalEngine, Provider } from "@theterminal/shared";
+import { PROVIDER_MODES, hasConnectionDetails } from "@theterminal/shared";
+import type { CatalogEntry, Connection, ConnectionField, ConnectionSummary, LocalEngine, Provider } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, api, errorMessage } from "../api";
 import type { ConnectionPatch, NewConnection } from "../api";
 import { OWN_LABEL, PROVIDER_NAMES, ProviderModeSection } from "../components/ProviderAuthSettings";
 import { SignInPanel } from "./SignInPanel";
-import { useShell } from "../shell/model";
+import { OWNER_ONLY_NOTE } from "./ConnectionsSideBar";
+import { roleOf, useShell } from "../shell/model";
 import { engineText } from "./CapacityPanel";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
+const FILE_STORE_NOTE = "Stored in this server's encrypted secret store. Never written to the ledger or the API.";
+/** Where a stored secret is, as the server says: its own encrypted file on a server install, else the keychain. */
+const storedIn = (status: { connections: { secretStore?: "keychain" | "file" | "memory" } } | null) =>
+  status?.connections.secretStore === "file"
+    ? { placeholder: "Stored in this server's encrypted secret store", note: FILE_STORE_NOTE }
+    : { placeholder: "Stored in your keychain", note: KEYCHAIN_NOTE };
 const DETECTED_NOTE = "Filled in by detection. Use Detect this computer in the Capacity view.";
 const ENV_VARS: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
@@ -114,6 +121,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
   // Hardware is written by detection only: its values are shown, never edited here.
   const detected = entry.kind === "hardware";
   const info = model.agentsInfo;
+  const store = storedIn(model.status);
 
   const act = async (task: () => Promise<void>) => {
     setError(null);
@@ -191,7 +199,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
                 data-lpignore="true"
                 spellCheck={false}
                 value={secrets[f.name] ?? ""}
-                placeholder={stored ? "Stored in your keychain" : ""}
+                placeholder={stored ? store.placeholder : ""}
                 disabled={locked || busy}
                 onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
               />
@@ -204,7 +212,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
                 data-lpignore="true"
                 spellCheck={false}
                 value={secrets[f.name] ?? ""}
-                placeholder={stored ? "Stored in your keychain" : ""}
+                placeholder={stored ? store.placeholder : ""}
                 disabled={locked || busy}
                 onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
               />
@@ -216,7 +224,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
             )}
           </div>
           {f.help && <p className="field-help">{f.help}</p>}
-          <p className="field-help">{KEYCHAIN_NOTE}</p>
+          <p className="field-help">{store.note}</p>
         </div>
       );
     }
@@ -271,7 +279,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           onChange={(e) => setName(e.target.value)}
         />
       </div>
-      {provider && info && (
+      {provider && info && info.acks && info.providers[provider].mode !== undefined && (
         <ProviderModeSection
           key={`${provider}:${info.providers[provider].mode}`}
           provider={provider}
@@ -347,16 +355,21 @@ export function ConnectionEditor({ id }: { id: string }) {
   const rest = id.slice("connection:".length);
   const newProvider = rest.startsWith("new:") ? rest.slice("new:".length) : null;
 
-  let conn: Connection | undefined;
+  let found: Connection | ConnectionSummary | undefined;
   let entry: CatalogEntry | undefined;
   if (newProvider) {
     entry = catalog.find((e) => e.provider === newProvider);
     // A single-connection provider that is already connected edits that connection.
-    if (entry?.single) conn = list.find((c) => c.provider === newProvider);
+    if (entry?.single) found = list.find((c) => c.provider === newProvider);
   } else {
-    conn = list.find((c) => c.id === rest);
-    entry = conn && catalog.find((e) => e.provider === conn!.provider);
+    found = list.find((c) => c.id === rest);
+    entry = found && catalog.find((e) => e.provider === found!.provider);
   }
+  // A summary is what a collaborator was given: there are no details here to edit, and the server would refuse anyway.
+  if (found !== undefined && !hasConnectionDetails(found)) return <p className="muted">{OWNER_ONLY_NOTE}</p>;
+  // Only the Owner sees or changes connection details; the server refuses anyone else's Save, Test and Remove.
+  if (roleOf(model) !== "owner") return <p className="muted">{OWNER_ONLY_NOTE}</p>;
+  const conn: Connection | undefined = found;
 
   if (!entry || !entry.available) {
     return <p className="muted">{!newProvider && !loaded ? "Loading…" : "This connection no longer exists."}</p>;

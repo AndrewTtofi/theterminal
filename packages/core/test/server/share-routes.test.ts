@@ -9,6 +9,8 @@ import { SHARE_HEADER_CSP } from "../../src/share/render.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -206,5 +208,50 @@ describe("share API", { timeout: 30_000 }, () => {
       expect(res.status, `${method} ${path}`).toBe(401);
       expect(await res.text()).not.toContain("<html");
     }
+  });
+});
+
+describe("who may share", { timeout: 30_000 }, () => {
+  async function startSeeded() {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-share-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
+    running.push(s);
+    const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
+      localFetch(base(s) + path, {
+        method,
+        headers: { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]!, ...(body !== undefined && { "content-type": "application/json" }) },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      });
+    return { s, theirs };
+  }
+
+  it("a reviewer's preview is 403; the Owner's confirm is recorded as the Owner through the principal", async () => {
+    const { s, theirs } = await startSeeded();
+    const id = await project(s);
+    const refused = await theirs("reviewer", "POST", `/api/projects/${id}/share/preview`, {});
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "forbidden", required: "owner" });
+    const maintainer = await theirs("maintainer", "POST", `/api/projects/${id}/share/confirm`, { previewId: "x", contentHash: "0".repeat(64) });
+    expect(maintainer.status).toBe(403);
+
+    await confirmed(s, id);
+    const entries = await json<{ type: string; actor: { kind: string; id: string } }[]>(send(s, "GET", "/api/ledger"));
+    expect(entries.find((e) => e.type === "share.confirmed")!.actor).toEqual({ kind: "human", id: "owner" });
+  });
+
+  it("a viewer sees the saved pages and the live links, never the addresses a link may bind", async () => {
+    const { s, theirs } = await startSeeded();
+    const id = await project(s);
+    const { record } = await confirmed(s, id);
+    expect((await theirs("viewer", "GET", "/api/share/links")).status).toBe(200);
+    expect((await theirs("viewer", "GET", `/api/projects/${id}/share/snapshots`)).status).toBe(200);
+    expect((await theirs("viewer", "GET", `/api/share/snapshots/${record.id}`)).status).toBe(200);
+    const addresses = await theirs("viewer", "GET", "/api/share/addresses");
+    expect(addresses.status).toBe(403);
+    expect(await addresses.json()).toEqual({ error: "forbidden", required: "owner" });
+    const link = await theirs("maintainer", "POST", `/api/share/snapshots/${record.id}/links`, { address: "127.0.0.1", ttlMinutes: 10 });
+    expect(link.status).toBe(403);
   });
 });

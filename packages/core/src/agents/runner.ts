@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -88,6 +89,20 @@ export class RemoteRunError extends Error {
     this.name = "RemoteRunError";
   }
 }
+
+/**
+ * A collaborator's run must use an API key, and none is configured for the provider: neither a key connection nor
+ * the server's own variable. Agents never run on the Owner's logins for anyone but the Owner.
+ */
+export class ApiKeyRequiredError extends Error {
+  constructor(readonly provider: Provider) {
+    super(`collaborators run agents on API keys; no API key is configured for ${provider}`);
+    this.name = "ApiKeyRequiredError";
+  }
+}
+
+/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
+export const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
 /** A run id: what a path, a branch name (`run/<id>`) and a linked machine's request may carry. */
 export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
@@ -184,6 +199,15 @@ const promptSchema = z.string().min(1).max(MAX.prompt);
 const INTERNAL_ERROR = "internal error";
 const NOT_ALLOWED_RESULT = "adapter reported a result for an action that was not allowed";
 
+/** Removes a run's own config home once the CLI has exited. Best effort: the folder is under the data folder, and the next run gets its own. */
+function removeRunHome(home: string): void {
+  try {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    // left in place (Windows may hold a handle a moment longer)
+  }
+}
+
 function errorMessage(e: unknown): string {
   try {
     return e instanceof Error ? e.message : String(e);
@@ -279,12 +303,14 @@ export class AgentRunner {
    * Starts a run. `runId` is given by a linked machine that asked for the run (it names the run on both machines):
    * it must be an id (RUN_ID_PATTERN, else ZodError) that no run has (ConflictError); by default a new id is made.
    * `foreignCard` says `cardId` names a card on that machine, so it is recorded without a local card to check.
+   * `forceApiKey` is set for anyone but the Owner: the run is `api_key` whatever the provider's mode, and without a
+   * key (a connection's, else the server's variable) it is refused with ApiKeyRequiredError before anything is recorded.
    */
   async start(
     actor: Actor,
     input: {
       projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; runId?: string;
-      foreignCard?: boolean;
+      foreignCard?: boolean; forceApiKey?: boolean;
     },
   ): Promise<AgentRun> {
     if (input.runId === undefined) return this.startRun(actor, input, this.newId());
@@ -302,7 +328,10 @@ export class AgentRunner {
 
   private async startRun(
     actor: Actor,
-    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean },
+    input: {
+      projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean;
+      forceApiKey?: boolean;
+    },
     runId: string,
   ): Promise<AgentRun> {
     const { db, ledger, worktrees } = this.deps;
@@ -334,15 +363,21 @@ export class AgentRunner {
       ...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp), ...(localModel?.apiKey ? [localModel.apiKey] : []),
     ];
 
-    // A local model needs no login: the provider's own mode and connection are not used.
-    const authMode: AuthMode =
-      input.adapter === "fake" || localModel !== null ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
-    const creds = input.adapter === "fake" || localModel !== null ? null : (this.deps.credentials?.(input.adapter) ?? null);
+    // A local model needs no login: the provider's own mode and connection are not used. A collaborator's run is on
+    // an API key whatever the mode says, and never starts without one.
+    const provider: Provider | null = input.adapter === "fake" || localModel !== null ? null : input.adapter;
+    const authMode: AuthMode = provider === null ? "none" : input.forceApiKey ? "api_key" : new ProviderSettings(db, ledger).getMode(provider);
+    const creds = provider === null ? null : (this.deps.credentials?.(provider) ?? null);
+    if (provider !== null && input.forceApiKey && !creds?.apiKey && !process.env[API_KEY_ENV[provider]]) throw new ApiKeyRequiredError(provider);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
     const env: Record<string, string> = Object.assign({}, ...grants.map((g) => g.env));
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
+    // A collaborator's run gets an empty config home of its own (created just before the launch, removed when the run
+    // ends): the CLI reads none of the Owner's settings and finds none of the Owner's logins, whatever its default
+    // home holds, and nothing of another run.
+    if (provider !== null && input.forceApiKey) credentials.configHome = join(this.deps.dataDir, "projects", input.projectId, "run-homes", runId);
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
     // Its key stays in `localModel`, never in `env`: Codex lets every `env` name through to the agent's commands.
     if (localModel !== null) credentials.localModel = localModel;
@@ -384,6 +419,7 @@ export class AgentRunner {
       this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
       throw e;
     }
+    if (credentials.configHome !== undefined) mkdirSync(credentials.configHome, { recursive: true });
     this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials, runSecrets);
     return run;
   }
@@ -575,6 +611,7 @@ export class AgentRunner {
         console.error(`agent run ${run.id} could not be finished: ${e instanceof Error ? e.name : "error"}`);
       } finally {
         this.sessions.delete(run.id);
+        if (credentials.configHome !== undefined) removeRunHome(credentials.configHome);
       }
     })().finally(() => this.unsettled.delete(run.id));
   }

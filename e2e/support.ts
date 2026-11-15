@@ -293,3 +293,40 @@ export async function addCard(page: Page, stage: string, title: string) {
   await page.getByLabel(`Add card to ${stage}`).press("Enter");
   await expect(page.getByRole("region", { name: stage }).getByRole("button", { name: `Open the story of ${title}` })).toBeVisible();
 }
+
+/** The People panel in the dock (the dock group holding it carries the same name, so it is found by its class). */
+export const peoplePanel = (page: Page) => page.locator("section.people-panel");
+
+/**
+ * A platform passkey authenticator for the page, through the Chrome DevTools Protocol: it makes resident credentials,
+ * verifies the user and answers every prompt by itself. It belongs to the page, across navigations.
+ */
+export async function virtualAuthenticator(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+}
+
+/**
+ * Makes an invitation with this role from the People side bar and returns the link the dialog shows once. Given a
+ * fingerprint, checks that the dialog shows it beside the link (to be sent some other way).
+ */
+export async function invite(owner: Page, role: "Viewer" | "Reviewer" | "Maintainer", fingerprint?: string): Promise<string> {
+  await openView(owner, "People");
+  await owner.locator(".people-side").getByRole("button", { name: "Invite someone" }).click();
+  const dialog = owner.getByRole("dialog", { name: "Invite someone" });
+  await dialog.getByRole("radio", { name: new RegExp(`^${role}`) }).check();
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const link = dialog.getByLabel("Invitation link");
+  await expect(link).toHaveValue(/\/join\//);
+  const url = await link.inputValue();
+  if (fingerprint !== undefined) await expect(dialog.getByText(`Certificate fingerprint: ${fingerprint}`)).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+  return url;
+}

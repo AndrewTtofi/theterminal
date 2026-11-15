@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +10,8 @@ import WebSocket from "ws";
 import { createServer, selectFetch, selectSecretStore, selectSts, type RunningServer } from "../../src/server/server.js";
 import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
-import { ChunkedSecretStore } from "../../src/secrets/store.js";
+import { ChunkedSecretStore, SecretStoreUnavailableError } from "../../src/secrets/store.js";
+import { FileSecretStore, KeyInsideDataDirError } from "../../src/secrets/file-store.js";
 import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
@@ -291,6 +293,55 @@ describe("createServer", { timeout: 30_000 }, () => {
     expect(list).toHaveLength(1);
   });
 
+  it("starts only with every route in the role table, and the hook is wired: the Owner by token, HEAD as GET, no proxy trust", async () => {
+    // Starting at all means assertRoutesHaveRoles(app) returned [] for every route this server registers.
+    const s = await start({ dataDir: tmp(), port: 0 });
+    const health = await fetch(base(s) + "/api/health", { headers: { ...auth(s), "x-forwarded-for": "203.0.113.9" } });
+    expect(health.status).toBe(200);
+    const head = await fetch(base(s) + "/api/projects", { method: "HEAD", headers: auth(s) });
+    expect(head.status).toBe(200);
+    const anonymous = await fetch(base(s) + "/api/projects");
+    expect(anonymous.status).toBe(401);
+    const unknown = await fetch(base(s) + "/api/nope", { headers: auth(s) });
+    expect(unknown.status).toBe(404);
+    // The ledger holds nothing about the Owner yet: the token still names them, with the virtual Owner's name.
+    const status = await (await fetch(base(s) + "/api/status", { headers: auth(s) })).json();
+    expect(status).toBeTypeOf("object");
+  });
+
+  it("answers GET /api/presence with who is on the event stream", async () => {
+    const s = await start({ dataDir: tmp(), port: 0 });
+    expect(await (await fetch(base(s) + "/api/presence", { headers: auth(s) })).json()).toEqual([]);
+    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });
+    ws.on("error", () => undefined);
+    // Entries (with seq) come first; the presence frame (no seq) follows the backlog.
+    const frame = await new Promise<{ type: string; people: { personId: string }[] }>((resolve) =>
+      ws.on("message", (d) => {
+        const m = JSON.parse(String(d));
+        if (!("seq" in m)) resolve(m);
+      }),
+    );
+    expect(frame.type).toBe("presence");
+    expect(frame.people.map((p) => p.personId)).toEqual(["owner"]);
+    const listed = (await (await fetch(base(s) + "/api/presence", { headers: auth(s) })).json()) as { personId: string; role: string }[];
+    expect(listed).toMatchObject([{ personId: "owner", role: "owner" }]);
+    ws.terminate();
+  });
+
+  it("serves the people routes: the Owner by token reads Me and invites, the join page is public", async () => {
+    const s = await start({ dataDir: tmp(), port: 0 });
+    const me = await fetch(base(s) + "/api/me", { headers: auth(s) });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({ personId: "owner", role: "owner", method: "token", listener: "local" });
+    const created = await post(s, "/api/people/invites", { role: "viewer" });
+    expect(created.status).toBe(201);
+    const { url, fingerprint } = (await created.json()) as { url: string; fingerprint: string | null };
+    expect(url).toMatch(new RegExp(`^http://theterminal\\.localhost:${s.port}/join/[A-Za-z0-9_-]{22}$`));
+    expect(fingerprint).toBeNull();
+    const join = await fetch(base(s) + "/api/join/" + url.split("/join/")[1]);
+    expect(await join.json()).toMatchObject({ role: "viewer", passkeys: false });
+  });
+
   it("closes promptly with a WebSocket client connected", async () => {
     const s = await start({ dataDir: tmp(), port: 0 });
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });
@@ -354,15 +405,35 @@ describe("createServer", { timeout: 30_000 }, () => {
       const uiDir = join(root, "ui");
       mkdirSync(join(uiDir, ".git"), { recursive: true });
       writeFileSync(join(uiDir, "index.html"), "<html>ui</html>");
-      for (const f of [".env", ".git/config", "token", "TOKEN", "ledger.db", "ledger.db-wal", "ledger.db-shm", "x.DB"]) {
+      for (const f of [".env", ".git/config", "token", "TOKEN", "ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "x.DB"]) {
         writeFileSync(join(uiDir, f), "secret");
       }
       const s = await start({ dataDir: join(root, "data"), uiDir, port: 0 });
-      for (const path of ["/.env", "/.git/config", "/token", "/TOKEN", "/ledger.db", "/ledger.db-wal", "/ledger.db-shm", "/x.DB"]) {
+      for (const path of ["/.env", "/.git/config", "/token", "/TOKEN", "/ledger.db", "/ledger.db-wal", "/ledger.db-shm", "/ledger.db-journal", "/x.DB"]) {
         const res = await rawGet(s.port, path);
         expect(res.status, path).toBe(404);
         expect(res.body, path).not.toContain("secret");
       }
+      expect((await rawGet(s.port, "/")).status).toBe(200);
+    });
+
+    it("refuses the encrypted secrets file and the configured key file inside uiDir, whatever they are named", async () => {
+      const root = tmp();
+      const uiDir = join(root, "ui");
+      mkdirSync(join(uiDir, "keys"), { recursive: true });
+      writeFileSync(join(uiDir, "index.html"), "<html>ui</html>");
+      writeFileSync(join(uiDir, "secrets.enc.json"), "secret");
+      writeFileSync(join(uiDir, "keys", "a.txt"), "public");
+      // A key file placed inside the UI folder by mistake: the store creates it there, and it must still never be served.
+      const keyFile = join(uiDir, "keys", "k.txt");
+      const s = await start({ dataDir: join(root, "data"), uiDir, port: 0, secrets: undefined, secretStore: "file", secretKeyFile: keyFile });
+      expect(existsSync(keyFile)).toBe(true);
+      for (const path of ["/secrets.enc.json", "/SECRETS.ENC.JSON", "/keys/k.txt"]) {
+        const res = await rawGet(s.port, path);
+        expect(res.status, path).toBe(404);
+        expect(res.body, path).not.toContain("secret");
+      }
+      expect((await rawGet(s.port, "/keys/a.txt")).status).toBe(200);
       expect((await rawGet(s.port, "/")).status).toBe(200);
     });
 
@@ -373,24 +444,131 @@ describe("createServer", { timeout: 30_000 }, () => {
   });
 });
 
+describe("the file secret store", () => {
+  const dirs = () => {
+    const root = mkdtempSync(join(tmpdir(), "tt-file-store-"));
+    return { dataDir: join(root, "data"), keyFile: join(root, "key", "secret.key") };
+  };
+
+  it("is chosen only by the flags, never by the environment", () => {
+    expect(selectSecretStore({ THETERMINAL_SECRET_STORE: "file" }).kind).toBe("keychain");
+    expect(selectSecretStore({ ...{ THETERMINAL_FAKE_AGENT: "1" }, THETERMINAL_SECRET_STORE: "file" }).kind).toBe("keychain");
+    const { dataDir, keyFile } = dirs();
+    const chosen = selectSecretStore({ VITEST: "true" }, undefined, { store: "file", keyFile, dataDir });
+    expect(chosen.kind).toBe("file");
+    expect(chosen.store).toBeInstanceOf(FileSecretStore);
+    expect(selectSecretStore({}, undefined, { store: "keychain", keyFile, dataDir }).kind).toBe("keychain");
+  });
+
+  it("refuses a key file inside the data folder unless allowed", () => {
+    const { dataDir } = dirs();
+    const keyFile = join(dataDir, "secret.key");
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile, dataDir })).toThrow(KeyInsideDataDirError);
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile, dataDir })).toThrow(
+      "Refusing to start: the secret key file is inside the data directory",
+    );
+    expect(selectSecretStore({}, undefined, { store: "file", keyFile, dataDir, allowKeyInDataDir: true }).kind).toBe("file");
+  });
+
+  it("needs a key file and a data folder", () => {
+    const { dataDir, keyFile } = dirs();
+    expect(() => selectSecretStore({}, undefined, { store: "file", dataDir })).toThrow();
+    expect(() => selectSecretStore({}, undefined, { store: "file", keyFile })).toThrow();
+  });
+
+  it("a server on the file store creates the key at startup and keeps secrets encrypted in the data folder", async () => {
+    const { dataDir, keyFile } = dirs();
+    const s = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile });
+    running.push(s);
+    expect(existsSync(keyFile)).toBe(true);
+    expect(statSync(keyFile).size).toBe(32);
+    if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(dataDir, "secret.key"))).toBe(false);
+  });
+
+  it("a server refuses to start when the file store's key is unusable, and releases the lock", async () => {
+    const { dataDir, keyFile } = dirs();
+    mkdirSync(join(keyFile, ".."), { recursive: true });
+    writeFileSync(keyFile, Buffer.alloc(31, 7));
+    const err = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect((err as Error).message).toBe("secret key file unavailable");
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+  });
+
+  it("a server refuses to start when a 32-byte key does not open the existing secrets file, and releases the lock", async () => {
+    const { dataDir, keyFile } = dirs();
+    const first = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile });
+    await first.close();
+    // Ciphertext under the first key; a restored or swapped key of the right size must not pass the start.
+    await new FileSecretStore({ file: join(dataDir, "secrets.enc.json"), keyFile }).set("connection/x", "sk-TESTKEY-0000000000");
+    writeFileSync(keyFile, randomBytes(32));
+    const err = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect((err as Error).message).toBe("the secret key does not open the secrets file");
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+    openReleased(dataDir).close();
+  });
+
+  it("a server refuses to start with the key file inside its data folder, and releases the lock", async () => {
+    const { dataDir } = dirs();
+    await expect(
+      createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: join(dataDir, "k", "secret.key") }),
+    ).rejects.toBeInstanceOf(KeyInsideDataDirError);
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+    expect(existsSync(join(dataDir, "k", "secret.key"))).toBe(false);
+  });
+});
+
+describe("the Owner bootstrap invite at startup", () => {
+  it("is not issued while remote access is off, and the server never calls bootstrapInvite", async () => {
+    const dataDir = tmp();
+    const seen: string[] = [];
+    await start({ dataDir, port: 0, bootstrapInvite: (u) => seen.push(u) });
+    expect(seen).toEqual([]);
+    expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
+  });
+
+  it("a leftover bootstrap file is removed at startup once the Owner has a credential", async () => {
+    const dataDir = tmp();
+    const s = await start({ dataDir, port: 0 });
+    await stop(s);
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    commitEvent(db, new Ledger(db), () => ({
+      event: {
+        projectId: null, actor: { kind: "human", id: "owner" }, type: "person.credential_added",
+        payload: { personId: "owner", credential: { kind: "key", credentialId: "key-1", publicKey: "TESTKEY1", label: "Key" } },
+      },
+      result: () => undefined,
+    }));
+    db.close();
+    writeFileSync(join(dataDir, "bootstrap-invite"), "https://192.0.2.10:4318/join/old#fp=AA\n");
+    await start({ dataDir, port: 0 });
+    expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
+  });
+});
+
 describe("test doubles for connections", () => {
   const FAKE = { THETERMINAL_FAKE_AGENT: "1" };
 
+  const storeOf = (...args: Parameters<typeof selectSecretStore>) => selectSecretStore(...args).store;
+
   it("uses the memory secret store only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_SECRET_STORE=memory", () => {
-    expect(selectSecretStore({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
-    expect(selectSecretStore({ THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
-    expect(selectSecretStore({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
-    expect(selectSecretStore(FAKE)).toBeInstanceOf(ChunkedSecretStore);
+    expect(storeOf({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    expect(selectSecretStore({ ...FAKE, THETERMINAL_SECRET_STORE: "memory" }).kind).toBe("memory");
+    expect(storeOf({ THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(storeOf({ THETERMINAL_FAKE_AGENT: "0", THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(ChunkedSecretStore);
+    expect(selectSecretStore(FAKE)).toMatchObject({ kind: "keychain", store: expect.any(ChunkedSecretStore) });
     const injected = new MemorySecretStore();
-    expect(selectSecretStore({}, injected)).toBe(injected);
+    expect(selectSecretStore({}, injected)).toEqual({ store: injected, kind: "memory" });
   });
 
   it("refuses to fall back to the real keychain under vitest: a test server must inject its store or set the flags", () => {
     expect(() => selectSecretStore({ VITEST: "true" })).toThrow(/keychain/);
     expect(() => selectSecretStore({ VITEST: "true", THETERMINAL_SECRET_STORE: "memory" })).toThrow(/keychain/);
-    expect(selectSecretStore({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    expect(storeOf({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
     const injected = new MemorySecretStore();
-    expect(selectSecretStore({ VITEST: "true" }, injected)).toBe(injected);
+    expect(storeOf({ VITEST: "true" }, injected)).toBe(injected);
   });
 
   it("uses the fake HTTP stub only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", async () => {

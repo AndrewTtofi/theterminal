@@ -10,9 +10,16 @@ import { openDatabase, type Db } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
-import { registerAuth, APP_HOST } from "./auth.js";
+import { registerAuth, assertRoutesHaveRoles, APP_HOST } from "./auth.js";
+import { AUTH_THROTTLE, Throttle } from "./throttle.js";
+import { SessionStore } from "../people/sessions.js";
+import { ChallengeStore } from "../people/challenges.js";
+import { LockoutStore } from "../people/lockouts.js";
+import { PeopleService } from "../people/service.js";
+import { getPerson } from "../events/projections.js";
 import { registerStaticUi } from "./static-ui.js";
 import { acquireDataDirLock } from "./data-dir-lock.js";
+import { announceBootstrapInvite, watchBootstrapInvite } from "./bootstrap-invite.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
@@ -20,10 +27,15 @@ import { registerIntakeRoutes } from "./intake-routes.js";
 import { registerStoryRoutes } from "./story-routes.js";
 import { registerChangesRoutes } from "./changes-routes.js";
 import { registerOverrideRoutes } from "./override-routes.js";
+import { registerPeopleRoutes } from "./people-routes.js";
+import { RemoteListener, type EnableInput } from "./remote.js";
+import { registerRemoteRoutes } from "./remote-routes.js";
+import { AcmeManager } from "./acme.js";
 import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
+import { registerGateRoutes } from "./gates-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { wireLink } from "./link-wiring.js";
 import type { LinkService } from "../link/service.js";
@@ -47,7 +59,10 @@ import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
+import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
+import {
+  ADAPTERS, PROVIDERS, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider, type TlsMode,
+} from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
@@ -58,7 +73,7 @@ import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
 import { redact, secretEnvValues } from "../agents/redact.js";
-import { AgentRunner } from "../agents/runner.js";
+import { API_KEY_ENV, AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
@@ -73,10 +88,39 @@ export type RunningServer = {
   port: number;
   token: string;
   integrity: VerifyResult;
+  /** `https://<domain or first address>:<port>/` while the remote listener is up, else null. Read live. */
+  readonly remoteUrl: string | null;
+  /** The served certificate's SHA-256 fingerprint while the remote listener is up, else null. Read live. */
+  readonly fingerprint: string | null;
   close(): Promise<void>;
 };
 
+/** The CLI's remote flags, as `createServer({ remote })` takes them. */
+export type RemoteOptions = {
+  /** `--remote`: turn remote access on at start, as the system actor `cli`. Without it the recorded state decides. */
+  enabled?: boolean;
+  port?: number;
+  bind?: string;
+  domain?: string;
+  tls?: TlsMode;
+  certFile?: string;
+  keyFile?: string;
+  /** Tests only: the plain ACME challenge listener's port (Let's Encrypt connects to 80). */
+  acmePort?: number;
+};
+
 const DEFAULT_PORT = 4317;
+/** The server itself, turning remote access on because the command line said so. */
+const CLI_ACTOR: Actor = { kind: "system", id: "cli" };
+/**
+ * Timeouts on the shared HTTP server, which the TLS listener's decrypted sockets go through too: the whole request
+ * (headers and body) within a minute, the headers within half of it, and an idle keep-alive connection closed after
+ * thirty seconds. Loopback requests never come near them; a slow or silent network client does.
+ */
+const REQUEST_TIMEOUT_MS = 60_000;
+const HEADERS_TIMEOUT_MS = 30_000;
+const KEEP_ALIVE_TIMEOUT_MS = 30_000;
+
 const PORT_ATTEMPTS = 21; // the requested port plus 20 above it
 
 function loadToken(dataDir: string, given?: string): string {
@@ -238,16 +282,35 @@ export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitco
 }
 
 /**
- * Where connection secrets live: the injected store, else the OS keychain. Under THETERMINAL_FAKE_AGENT=1 (tests and
- * demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ * Where connection secrets live: the injected store, else the encrypted file store when the flags ask for it (the
+ * CLI's `--secret-store file`; never from the environment), else the OS keychain. Under THETERMINAL_FAKE_AGENT=1
+ * (tests and demos only), THETERMINAL_SECRET_STORE=memory selects an in-process store; it is ignored otherwise.
+ * The file store refuses a key file inside the data folder (KeyInsideDataDirError) unless `allowKeyInDataDir`: a
+ * backup of the data folder must not hold the key and the ciphertext together.
  */
-export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
-  if (injected) return injected;
-  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+export function selectSecretStore(
+  env: NodeJS.ProcessEnv = process.env,
+  injected?: SecretStore,
+  flags: { store?: "keychain" | "file"; keyFile?: string; dataDir?: string; allowKeyInDataDir?: boolean } = {},
+): { store: SecretStore; kind: SecretStoreKind } {
+  if (injected) {
+    const kind = injected instanceof FileSecretStore ? "file" : injected instanceof MemorySecretStore ? "memory" : "keychain";
+    return { store: injected, kind };
+  }
+  if (flags.store === "file") {
+    const { keyFile, dataDir } = flags;
+    if (!keyFile || !dataDir) throw new Error("the file secret store needs a key file and a data folder");
+    assertKeyOutsideDataDir(keyFile, dataDir, flags.allowKeyInDataDir ?? false);
+    return { store: new FileSecretStore({ file: join(dataDir, SECRETS_FILE), keyFile, createKey: true }), kind: "file" };
+  }
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return { store: new MemorySecretStore(), kind: "memory" };
   // Test-time guard (vitest sets VITEST): a test server that names no store never reaches the real keychain.
   if (env.VITEST) throw new Error("Refusing to use the real keychain under vitest: inject `secrets` or set the test flags");
-  return new ChunkedSecretStore(new KeychainSecretStore());
+  return { store: new ChunkedSecretStore(new KeychainSecretStore()), kind: "keychain" };
 }
+
+/** The file store's ciphertext, inside the data folder (its key is not). */
+export const SECRETS_FILE = "secrets.enc.json";
 
 const FAKE_TOKEN = { access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" };
 const AZURE_TOKEN_URL = /^https:\/\/login\.microsoftonline\.com\/[^/]+\/oauth2\/v2\.0\/token$/;
@@ -408,9 +471,6 @@ export function selectLocalEngines(
   return realLocalEngines;
 }
 
-/** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
-const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
-
 export async function createServer(opts: {
   dataDir: string;
   port?: number;
@@ -429,6 +489,16 @@ export async function createServer(opts: {
   bundled?: Partial<BundledPrograms>;
   /** Where connection secrets live. Default: the OS keychain (see selectSecretStore). */
   secrets?: SecretStore;
+  /** `file`: the encrypted file store, with its key at `secretKeyFile` (the CLI's `--secret-store`). */
+  secretStore?: "keychain" | "file";
+  secretKeyFile?: string;
+  /** Lets `secretKeyFile` sit inside the data folder (refused otherwise). */
+  allowKeyInDataDir?: boolean;
+  /**
+   * Called once at startup with the Owner bootstrap link, while remote access listens and nobody has claimed the
+   * Owner identity (the CLI prints it). The link is also written to `<dataDir>/bootstrap-invite` (mode 0600).
+   */
+  bootstrapInvite?: (url: string) => void;
   /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
   fetch?: typeof fetch;
   /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
@@ -450,6 +520,11 @@ export async function createServer(opts: {
   remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
+  /**
+   * The remote (network, TLS) listener. With `enabled`, it is turned on at start as the system actor `cli`, whatever
+   * the ledger says; otherwise the recorded state decides (startIfEnabled). On a headless server the flag is the switch.
+   */
+  remote?: RemoteOptions;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -505,7 +580,17 @@ export async function createServer(opts: {
     // whose outcomes infer the network state. Local-model detection and the link client keep the plain fetch.
     const network = new NetworkObserver();
     const fetchFn = observedFetch(selectFetch(process.env, opts.fetch), network);
-    const secrets = selectSecretStore(process.env, opts.secrets);
+    const { store: secrets, kind: secretStoreKind } = selectSecretStore(process.env, opts.secrets, {
+      store: opts.secretStore,
+      keyFile: opts.secretKeyFile,
+      dataDir: opts.dataDir,
+      allowKeyInDataDir: opts.allowKeyInDataDir,
+    });
+    // The file store is verified at startup: its key is created when missing, so it exists before the first secret is
+    // saved, and every existing entry must open with it. The operator chose this store explicitly: a key (or
+    // ciphertext file) it cannot use, including a right-sized key that does not open the file, refuses the start with
+    // SecretStoreUnavailableError, unlike the keychain, which is reported and lets the server start.
+    if (secrets instanceof FileSecretStore) secrets.verify();
     const connections = new ConnectionService({
       db,
       ledger,
@@ -550,9 +635,10 @@ export async function createServer(opts: {
       extraEnv: fakeLoginEnv(),
       // Minted cloud values too: the runner keeps every one for the life of the process (declared below; read lazily).
       secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
-      record: (provider, ok) =>
+      // Recorded as the person who started the login (the route names them from the principal).
+      record: (provider, ok, actor) =>
         commitEvent(db, ledger, () => ({
-          event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
+          event: { projectId: null, actor, type: "connection.signin", payload: { provider, ok } },
           result: () => undefined,
         })),
     });
@@ -592,6 +678,19 @@ export async function createServer(opts: {
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });
 
+    // People: one session store, one challenge store, one lockout store, one service and one auth throttle for the
+    // whole server. The auth hook reads sessions and people here; the sign-in routes, the remote listener and the
+    // event stream take the rest from this same object as they are wired.
+    const sessions = new SessionStore(db);
+    const lockouts = new LockoutStore();
+    const people = {
+      sessions,
+      lockouts,
+      challenges: new ChallengeStore(),
+      throttle: new Throttle(AUTH_THROTTLE),
+      service: new PeopleService({ db, ledger, sessions, lockouts, recorded }),
+    };
+
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
     // Share: the share page's cleaner and service.
@@ -627,15 +726,33 @@ export async function createServer(opts: {
     });
     const shareLinks = (): number => links.activeCount();
 
-    const app = Fastify();
+    const app = Fastify({ requestTimeout: REQUEST_TIMEOUT_MS, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
     let boundPort = 0;
+    let stopBootstrapWatch = (): void => undefined;
+    // The network listener: off until the ledger or the command line says otherwise. Its decrypted sockets go to this
+    // same app, told apart by request.listener. Certificates from Let's Encrypt come through the ACME manager, whose
+    // client is the fake CA only under the test flags (selectAcmeClient).
+    const acme = new AcmeManager({ secrets, dataDir: opts.dataDir });
+    const remoteListener = new RemoteListener({
+      http: app.server, db, ledger, secrets, people: people.service, dataDir: opts.dataDir, uiDir: opts.uiDir ?? null, acme,
+      ...(opts.secretKeyFile !== undefined && { secretKeyFile: opts.secretKeyFile }),
+    });
+    const remoteView = () => remoteListener.state();
     try {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       if (!ledger.readOnly) links.recoverOnStartup(); // no link's listener survives a restart
-      registerAuth(app, { token, port: () => boundPort });
-      registerLedgerStream(app, ledger, cleanMirrored);
+      registerAuth(app, {
+        token,
+        port: () => boundPort,
+        // The remote listener's own names and port: anything else over TLS is 403 bad_host.
+        hostRule: () => remoteListener.hostRule(),
+        sessions: people.sessions,
+        person: (id) => getPerson(db, id),
+      });
+      registerLedgerStream(app, ledger, cleanMirrored, { sessions: people.sessions });
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
+      registerGateRoutes(app, { gates, principal: (req) => req.principal });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,
@@ -652,6 +769,9 @@ export async function createServer(opts: {
       registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
       registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
+      // Invite links name the remote listener's real address and fingerprint while it is up.
+      registerPeopleRoutes(app, { db, ledger, ...people, recorded, port: () => boundPort, remote: remoteView });
+      registerRemoteRoutes(app, { remote: remoteListener, principalOf: (req) => req.principal });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
@@ -659,6 +779,8 @@ export async function createServer(opts: {
         machines: () => linkService.counts(),
         network: () => network.state(),
         shareLinks,
+        remote: remoteView,
+        secretStore: () => secretStoreKind,
       });
       registerGitHubRoutes(app, { github });
       registerShareRoutes(app, { db, ledger, share });
@@ -668,12 +790,15 @@ export async function createServer(opts: {
         localEngines: selectLocalEngines(process.env, opts.localEngines), machines: () => wired.capacity.all(),
       }).report;
       registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, db, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
-      if (opts.uiDir) registerStaticUi(app, opts.uiDir);
+      if (opts.uiDir) registerStaticUi(app, opts.uiDir, { deny: opts.secretKeyFile === undefined ? [] : [opts.secretKeyFile] });
       // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
       await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported
       // Runs on linked machines survive a restart: the runner left them alone; follow each from its cursor again.
       if (!ledger.readOnly) remote.resume();
       await app.ready();
+      // Every route needs a place in the role table: an unlisted one would answer 500 to everybody, so refuse to start.
+      const unlisted = assertRoutesHaveRoles(app);
+      if (unlisted.length > 0) throw new Error(`Refusing to start: routes without a role: ${unlisted.join(", ")}`);
 
       const first = opts.port ?? DEFAULT_PORT;
       let lastError: unknown;
@@ -692,7 +817,30 @@ export async function createServer(opts: {
       if (lastError) {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
+
+      // The network listener, once the app answers: `--remote` turns it on as the system actor (the bootstrap invite is
+      // the way in when no Owner credential exists yet); otherwise the recorded state decides. A server asked for
+      // remote access never comes up without it: any failure here (a bad flag or certificate file, a port in use, a
+      // refused certificate order, a read-only ledger) fails the start, and the catch below closes everything.
+      if (opts.remote?.enabled) {
+        const { enabled: _on, ...flags } = opts.remote;
+        const input: EnableInput = Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined));
+        await remoteListener.enable(CLI_ACTOR, input);
+      } else {
+        await remoteListener.startIfEnabled();
+      }
+      // The Owner bootstrap link: issued once per start while nobody owns the workspace and remote access listens; the
+      // file holding it goes as soon as the Owner joins (and at any start after that).
+      stopBootstrapWatch = watchBootstrapInvite(ledger, opts.dataDir);
+      if (!ledger.readOnly) {
+        announceBootstrapInvite({
+          db, people: people.service, dataDir: opts.dataDir, remote: remoteListener.state(),
+          ...(opts.bootstrapInvite && { bootstrapInvite: opts.bootstrapInvite }),
+        });
+      }
     } catch (err) {
+      stopBootstrapWatch();
+      await remoteListener.close().catch(() => undefined);
       await remote.shutdown();
       await linkService.shutdown();
       await links.shutdown();
@@ -702,14 +850,31 @@ export async function createServer(opts: {
       throw err;
     }
 
+    /** The remote listener's address while it is up: the domain, else its first real address (never the wildcard bind). */
+    const remoteUrl = (): string | null => {
+      const s = remoteListener.state();
+      if (!s.enabled || !s.listening) return null;
+      const address = s.addresses[0] ?? s.bind;
+      return `https://${s.domain ?? (address.includes(":") ? `[${address}]` : address)}:${s.port}/`;
+    };
+
     return {
       url: `http://${APP_HOST}:${boundPort}/?token=${token}`,
       loopbackUrl: `http://127.0.0.1:${boundPort}/`,
       port: boundPort,
       token,
       integrity,
+      get remoteUrl() {
+        return remoteUrl();
+      },
+      get fingerprint() {
+        const s = remoteListener.state();
+        return s.enabled && s.listening ? s.fingerprint : null;
+      },
       async close() {
         try {
+          stopBootstrapWatch();
+          await remoteListener.close(); // the network listener goes first: nothing from outside reaches the rest of the shutdown
           await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart
           await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await links.shutdown(); // closes every share link's listener and records it, while the db is open

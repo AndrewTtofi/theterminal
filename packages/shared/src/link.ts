@@ -203,7 +203,11 @@ export const helloResponseSchema = z.object({ v, machineId, name: machineNameSch
 export const pairRequestSchema = z.object({ v, machineId, name: machineNameSchema, port, proof }).strict();
 export const pairResponseSchema = z.object({ v, machineId, name: machineNameSchema, port, proof }).strict();
 export const remoteStartSchema = z
-  .object({ v, projectId: id, projectName, adapter: z.enum(ADAPTERS), prompt, cardId, connectionIds })
+  .object({
+    v, projectId: id, projectName, adapter: z.enum(ADAPTERS), prompt, cardId, connectionIds,
+    /** The requester started this run for a collaborator: the worker runs it on an API key, never on a login. */
+    forceApiKey: z.boolean().optional(),
+  })
   .strict();
 export const remoteDecisionSchema = z.object({ v, decision, reason: z.string().max(500) }).strict();
 export const mirrorFrameSchema = z.object({ origin: mirroredOriginSchema, signature }).strict();

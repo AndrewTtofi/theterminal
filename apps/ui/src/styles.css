@@ -475,3 +475,28 @@ pre.proposed .add { background: rgba(46, 160, 67, 0.15); }
 pre.proposed .del { background: rgba(199, 78, 57, 0.15); }
 .agent-said { margin: 4px 0; padding-left: 18px; }
 .agent-said li { white-space: pre-wrap; }
+
+/* Plan 8: the join and sign-in pages, and the People view. */
+.standalone-page { max-width: 640px; margin: 48px auto; padding: 0 16px; color: var(--fg); }
+.standalone-page h1 { color: var(--fg-strong); font-size: 1.5rem; }
+.standalone-page h1:focus { outline: none; }
+.standalone-page form { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.standalone-page .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.standalone-page [role="alert"] { color: #f5c6cb; }
+.standalone-page .attention, .fingerprints .attention { color: var(--attention); font-weight: 600; }
+.fingerprints dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+.fingerprints dd { margin: 0; }
+.fingerprints code, .fingerprint { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.people-side section, .people-panel section { margin-bottom: 16px; }
+.people-side ul, .people-panel ul { list-style: none; padding: 0; margin: 4px 0; }
+.dot.online { background: var(--ok); }
+.dot.offline { background: var(--muted); }
+.people-panel { padding: 12px; overflow: auto; }
+.people-panel table { border-collapse: collapse; width: 100%; }
+.people-panel th, .people-panel td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.people-panel .remote-form label { display: block; margin: 4px 0; }
+.invite-dialog { position: fixed; inset: 10% auto auto 50%; transform: translateX(-50%); max-width: 520px; z-index: 50; background: var(--panel); color: var(--fg); border: 1px solid var(--line-strong); padding: 16px; }
+.invite-dialog .role-choice { display: flex; gap: 8px; margin: 6px 0; }
+.invite-dialog .role-choice .note { display: block; }
+.invite-dialog input[readonly] { width: 100%; font-family: ui-monospace, monospace; }
+.people-side .dot { display: inline-block; }

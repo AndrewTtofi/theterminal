@@ -3,7 +3,7 @@ import type { FormEvent, KeyboardEvent } from "react";
 import { parsePairingCode } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
 import type { PairingCode } from "../api";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 import { NO_IDENTITY, fingerprintGroups, shownName, useMachinesRefresh } from "./MachinesSideBar";
 
 /** How often the Enter a code tab asks again, so machines found on the network appear while it is open. */
@@ -290,7 +290,7 @@ function EnterCode({ onLinked }: { onLinked: (l: Linked) => void }) {
 }
 
 /** The Link a machine tab: show a one-time code here, or enter the one another computer shows. */
-export function LinkMachinePanel(_props: { id: string }) {
+function LinkMachinePanelOwned(_props: { id: string }) {
   const { model } = useShell();
   const { overview, error, refresh } = model.machines;
   const uid = useId();
@@ -357,4 +357,12 @@ export function LinkMachinePanel(_props: { id: string }) {
       </p>
     </section>
   );
+}
+
+/** Linking is the Owner's alone (every route behind it is): anyone else is told so and nothing is asked. */
+export function LinkMachinePanel(_props: { id: string }) {
+  const { model } = useShell();
+  const Owned = LinkMachinePanelOwned;
+  if (roleOf(model) !== "owner") return <p className="empty">Only the Owner links and manages machines.</p>;
+  return <Owned id={_props.id} />;
 }

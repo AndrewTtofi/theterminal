@@ -7,6 +7,7 @@ import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { changes, listing, run1, runEntry } from "./changes-fixtures";
 import { shellNav } from "./connections-harness";
+import { OWNER_ME } from "./as-owner";
 
 const run2: AgentRun = { ...run1, id: "run2", adapter: "claude", prompt: "Fix it", status: "running", startedAt: "2026-11-15T11:00:00.000Z" };
 
@@ -37,6 +38,7 @@ function setup(over: Partial<WorkbenchModel> = {}) {
     dir: vi.fn(async (_runId: string, path: string) => tree[path] ?? listing(path, [])),
     onOpenDiff: vi.fn(),
     onOpenFile: vi.fn(),
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   const shell: ShellContextValue = { model, dock: () => null, ...shellNav() };

@@ -40,6 +40,24 @@ const FAKE_GEMINI_SCRIPT = JSON.stringify([
   { type: "message", text: "Done." },
 ]);
 
+// The collaboration servers' fake agent (people.spec.ts, remote.spec.ts): the same read and shell steps, but nothing
+// a collaborator reads holds a test key, so their leak watchers can refuse any "TESTKEY" at all. Only in a run given
+// the Azure connection, a second shell step prints that secret, which the run's redaction must hide.
+const COLLAB_SCRIPT = JSON.stringify([
+  { propose: { tool: "Read", kind: "file_read", summary: "Read README.md", input: { path: "README.md" }, paths: ["README.md"] } },
+  {
+    propose: { tool: "Bash", kind: "shell", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" }, paths: [] },
+    result: { ok: true, output: "(fake) one GPU" },
+    write: { path: "notes.txt", content: "shared notes\nhello\n" },
+  },
+  {
+    whenEnv: "AZURE_CLIENT_SECRET",
+    propose: { tool: "Bash", kind: "shell", summary: "Run: printenv", input: { command: "printenv" }, paths: [] },
+    result: { ok: true, output: "env=AZURE_CLIENT_SECRET={{AZURE_CLIENT_SECRET}}" },
+  },
+  { message: "I wrote notes.txt." },
+]);
+
 // Read once, when the agent server is created: the fake adapter and the provider CLI overrides.
 const AT_CREATE = {
   THETERMINAL_FAKE_AGENT: "1",
@@ -94,15 +112,18 @@ const offlineFetch: typeof fetch = async (input) => {
   return json(404, {});
 };
 
-// Starts three core servers (serving the built UI) for the whole run and exposes their urls to the tests:
-// TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled), and
+// Starts five core servers (serving the built UI) for the whole run and exposes their urls to the tests:
+// TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled),
 // TT_E2E_PEER_URL for a second agent computer with no internet, which link.spec.ts pairs with the agent server and
-// offline.spec.ts uses offline.
+// offline.spec.ts uses offline, and two collaboration servers with the fake agent: TT_E2E_PEOPLE_URL (remote access
+// off, people.spec.ts) and TT_E2E_REMOTE_OWNER_URL (remote.spec.ts), whose remote TLS listener is on from the start at
+// TT_E2E_REMOTE_URL with the self-signed certificate TT_E2E_FINGERPRINT. Each spec gets a workspace of its own, so the
+// people it invites, removes and re-roles, and remote access going off, touch no other spec.
 type Server = Awaited<ReturnType<typeof createServer>>;
 
 export default async function globalSetup() {
   const uiDir = join(import.meta.dirname, "..", "apps", "ui", "dist");
-  const dirs = [mkdtempSync(join(tmpdir(), "tt-e2e-")), mkdtempSync(join(tmpdir(), "tt-e2e-agent-")), mkdtempSync(join(tmpdir(), "tt-e2e-peer-"))];
+  const dirs = ["tt-e2e-", "tt-e2e-agent-", "tt-e2e-peer-", "tt-e2e-people-", "tt-e2e-remote-"].map((p) => mkdtempSync(join(tmpdir(), p)));
   const servers: Server[] = [];
   let restoreRunEnv = () => {};
   const teardown = async () => {
@@ -134,6 +155,28 @@ export default async function globalSetup() {
       const peer = await createServer({ dataDir: dirs[2]!, port: 0, uiDir, ...linkOpts(), fetch: offlineFetch });
       servers.push(peer);
       process.env.TT_E2E_PEER_URL = peer.url;
+
+      const restoreCollabEnv = setEnv({ THETERMINAL_FAKE_SCRIPT: COLLAB_SCRIPT });
+      try {
+        const people = await createServer({ dataDir: dirs[3]!, port: 0, uiDir, ...linkOpts() });
+        servers.push(people);
+        process.env.TT_E2E_PEOPLE_URL = people.url;
+        // Remote access on at start, as the CLI's --remote does (the system actor, so no Owner credential is needed
+        // yet): loopback only, and port 0, which picks a free port once and records it, so turning remote access on
+        // again from the People view listens on the same address. The Owner bootstrap link it issues is not printed.
+        const remote = await createServer({
+          dataDir: dirs[4]!, port: 0, uiDir, ...linkOpts(),
+          remote: { enabled: true, port: 0, bind: "127.0.0.1" },
+          bootstrapInvite: () => {},
+        });
+        servers.push(remote);
+        process.env.TT_E2E_REMOTE_OWNER_URL = remote.url;
+        if (remote.remoteUrl === null || remote.fingerprint === null) throw new Error("the remote listener did not start");
+        process.env.TT_E2E_REMOTE_URL = remote.remoteUrl;
+        process.env.TT_E2E_FINGERPRINT = remote.fingerprint;
+      } finally {
+        restoreCollabEnv();
+      }
     } finally {
       restoreCreateEnv();
     }

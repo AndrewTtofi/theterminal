@@ -1,4 +1,4 @@
-import { GATES } from "@theterminal/shared";
+import { DEFAULT_GATE_REQUIREMENT, GATES } from "@theterminal/shared";
 import type { GateEvaluation, GateId } from "@theterminal/shared";
 
 /** A gate evaluation built from the catalog: `unmet` lists the condition labels left unmet. */
@@ -21,6 +21,8 @@ export function evaluation(id: GateId, conditions: { label: string; met: boolean
     })),
     met,
     outcome: !met ? "blocked" : def.signOff ? "needs_sign_off" : "pass",
+    requirement: DEFAULT_GATE_REQUIREMENT[def.id],
+    signable: true,
   };
 }
 

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { linkSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 /** Thrown when another live server holds the data folder's lock. The message is fixed: it holds no path or pid. */
 export class DataDirInUseError extends Error {
@@ -50,14 +50,31 @@ function isYoung(file: string): boolean {
   }
 }
 
+/**
+ * The data folders this process holds the lock for, by real path. A lock naming our own pid that is not in here was
+ * left by an earlier process that had the same pid: in a container the server is PID 1 on every start, so after
+ * docker kill or an OOM kill the lock names 1 and `process.kill(1, 0)` succeeds. A lock cannot be held by the
+ * process that is only now starting, so that lock is stale.
+ */
+const heldHere = new Set<string>();
+
+function folderKey(dataDir: string): string {
+  try {
+    return realpathSync.native(dataDir);
+  } catch {
+    return resolve(dataDir);
+  }
+}
+
 const uniqueName = (dataDir: string, kind: string) => join(dataDir, `${LOCK_FILE}.${kind}-${randomBytes(8).toString("hex")}`);
 
 /**
  * Takes `<dataDir>/server.lock` for `pid`, so that only one server (the CLI or the desktop app) opens a data folder
  * at a time. The pid is written to a unique temp file and published with a hard link, so the lock never exists
  * half-written. A held lock throws DataDirInUseError: one whose pid is alive, or one that is empty or unparsable and
- * still young. Any other lock is stale and taken over: it is renamed away, confirmed unchanged, removed, and the
- * publish is tried once more. release() removes the file only while it still names our pid.
+ * still young. A lock naming this process's own pid is held only while this process took it (see `heldHere`).
+ * Any other lock is stale and taken over: it is renamed away, confirmed unchanged, removed, and the publish is tried
+ * once more. release() removes the file only while it still names our pid.
  */
 export function acquireDataDirLock(
   dataDir: string,
@@ -65,6 +82,8 @@ export function acquireDataDirLock(
   isAlive: (pid: number) => boolean = processAlive,
 ): { release(): void } {
   const file = join(dataDir, LOCK_FILE);
+  const key = folderKey(dataDir);
+  const live = (holder: number): boolean => (holder === process.pid ? heldHere.has(key) : isAlive(holder));
   const temp = uniqueName(dataDir, "tmp");
   writeFileSync(temp, `${pid}\n`, { flag: "wx", mode: 0o600 });
   try {
@@ -76,11 +95,12 @@ export function acquireDataDirLock(
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
         if (attempt > 0) throw new DataDirInUseError();
       }
-      takeOverIfStale(dataDir, file, isAlive);
+      takeOverIfStale(dataDir, file, live);
     }
   } finally {
     rmSync(temp, { force: true });
   }
+  if (pid === process.pid) heldHere.add(key);
   return { release: () => releaseDataDirLock(dataDir, pid) };
 }
 
@@ -90,6 +110,7 @@ export function acquireDataDirLock(
  */
 export function releaseDataDirLock(dataDir: string, pid: number = process.pid): void {
   const file = join(dataDir, LOCK_FILE);
+  if (pid === process.pid) heldHere.delete(folderKey(dataDir));
   try {
     if (parsePid(readText(file)) === pid) rmSync(file, { force: true });
   } catch {

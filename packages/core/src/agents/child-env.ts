@@ -18,6 +18,11 @@ export type ChildEnvOptions = {
   base?: NodeJS.ProcessEnv;
   /** Login modes only: CODEX_HOME (codex) / GEMINI_CLI_HOME (gemini). Ignored for claude and in api_key mode. */
   cliHome?: string;
+  /**
+   * api_key mode only: a directory of the run's own for the CLI's config home (CLAUDE_CONFIG_DIR / CODEX_HOME /
+   * GEMINI_CLI_HOME), so the CLI reads none of the user's settings and finds none of the user's logins. HOME is left as it is.
+   */
+  configHome?: string;
   /** Gemini only: GOOGLE_CLOUD_PROJECT. */
   googleCloudProject?: string;
   /**
@@ -76,6 +81,9 @@ export function baseChildEnv(
  * only the given key is added, then a cloud grant's allowlisted variables (`extraEnv`). Login modes pass no key, so the CLI's own stored login is used untouched.
  * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
  */
+/** Where each CLI keeps its settings and its login, as the variable that moves it. */
+export const CONFIG_HOME_VAR: Record<Provider, string> = { claude: "CLAUDE_CONFIG_DIR", codex: "CODEX_HOME", gemini: "GEMINI_CLI_HOME" };
+
 export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
   const extra = Object.entries(opts.extraEnv ?? {});
   for (const [k] of extra) {
@@ -98,6 +106,7 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
     if (provider === "codex" && mode === "chatgpt") env.CODEX_HOME = opts.cliHome;
     else if (provider === "gemini" && mode === "google") env.GEMINI_CLI_HOME = opts.cliHome;
   }
+  if (mode === "api_key" && opts.configHome) env[CONFIG_HOME_VAR[provider]] = opts.configHome;
   if (provider === "gemini" && opts.googleCloudProject) env.GOOGLE_CLOUD_PROJECT = opts.googleCloudProject;
   // Cloud variables never come from `base`, only from a grant; what the CLI itself needs is never moved.
   for (const [k, v] of extra) if (env[k] === undefined) env[k] = v;

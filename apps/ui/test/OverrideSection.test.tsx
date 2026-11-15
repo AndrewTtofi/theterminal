@@ -8,6 +8,7 @@ import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { BASE, changes, run1 } from "./changes-fixtures";
 import { shellNav } from "./connections-harness";
+import { OWNER_ME } from "./as-owner";
 
 const REASON = "The agent left a broken build";
 const REFUSED = "Stop the agent first: it is still working in this run";
@@ -27,6 +28,7 @@ function setup(over: Partial<WorkbenchModel> = {}, run: AgentRun = run1) {
     projectEntries: [],
     onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 3 })),
     onOverrideCommand: vi.fn(async () => ({ ok: true as const })),
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   const shell: ShellContextValue = { model, dock: () => null, ...shellNav() };

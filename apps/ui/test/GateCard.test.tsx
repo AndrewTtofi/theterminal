@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GATES } from "@theterminal/shared";
@@ -215,3 +215,100 @@ describe("GateCards", () => {
     expect(document.activeElement).toBe(document.body);
   });
 });
+
+describe("GateCards: who may sign", () => {
+  const people = [
+    { id: "owner", name: "Owner", removedAt: null },
+    { id: "m1", name: "Maintainer <b>One</b>", removedAt: null },
+    { id: "gone", name: "Removed Person", removedAt: "2026-11-01T00:00:00.000Z" },
+  ];
+  const prompt = (evaluations: GateEvaluation[]): GatePrompt => ({
+    cardId: "c1", cardTitle: "Login", to: "ship", evaluations, note: null, revision: 0, refreshing: false,
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("says who may sign under the sentence, naming a person inertly", () => {
+    render(<GateCards gate={prompt([{ ...shipMet(), requirement: { personId: "m1" } }])} onResolve={vi.fn()} onCancel={vi.fn()} people={people} />);
+    const c = card("Ready to ship");
+    expect(within(c).getByText("Who may sign: Maintainer <b>One</b> only")).toBeTruthy();
+    expect(c.querySelector("b")).toBeNull();
+  });
+
+  it("a gate the viewer cannot sign: Sign off and Waive disabled, with the exact line", async () => {
+    const owner = { ...shipMet(), id: "payments" as const, title: "Taking payments", requirement: { role: "owner" as const }, signable: false };
+    render(
+      <GateCards
+        gate={prompt([owner, { ...shipBlocked(), signable: false }])}
+        onResolve={vi.fn()} onCancel={vi.fn()} viewer={{ personId: "r1", role: "reviewer" }}
+      />,
+    );
+    const pay = card("Taking payments");
+    await userEvent.click(within(pay).getByRole("checkbox"));
+    expect((within(pay).getByRole("button", { name: "Sign off" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(pay).getByText("You cannot sign this gate. It needs the Owner.")).toBeTruthy();
+    const ship = card("Ready to ship");
+    await userEvent.click(within(ship).getByRole("checkbox"));
+    await userEvent.type(within(ship).getByLabelText("Why are you proceeding anyway?"), "a reason long enough");
+    expect((within(ship).getByRole("button", { name: "Waive" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(ship).getByText("You cannot sign this gate. It needs a reviewer or above.")).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "Change who may sign" })).toBeNull();
+  });
+
+  it("a viewer sees both buttons disabled with the role title", async () => {
+    render(
+      <GateCards
+        gate={prompt([shipMet(), { ...shipBlocked(), id: "payments" as const, title: "Taking payments" }])}
+        onResolve={vi.fn()} onCancel={vi.fn()} viewer={{ personId: "v1", role: "viewer" }}
+      />,
+    );
+    const signOff = within(card("Ready to ship")).getByRole("button", { name: "Sign off" }) as HTMLButtonElement;
+    const waive = within(card("Taking payments")).getByRole("button", { name: "Waive" }) as HTMLButtonElement;
+    await userEvent.click(within(card("Ready to ship")).getByRole("checkbox"));
+    for (const b of [signOff, waive]) {
+      expect(b.disabled).toBe(true);
+      expect(b.title).toBe("Your role (Viewer) cannot do this.");
+    }
+  });
+
+  it("the Owner's select lists the roles and each current person, and posts a named person", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ gateId: "ready_to_ship", requirement: { personId: "m1" } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onRequirementChanged = vi.fn();
+    render(
+      <GateCards
+        gate={prompt([shipMet()])} onResolve={vi.fn()} onCancel={vi.fn()}
+        people={people} projectId="p 1" onRequirementChanged={onRequirementChanged}
+      />,
+    );
+    const select = within(card("Ready to ship")).getByRole("combobox", { name: "Change who may sign" }) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      "A reviewer or above", "A maintainer or above", "The Owner", "Maintainer <b>One</b>",
+    ]);
+    expect(select.value).toBe("role:reviewer");
+    await userEvent.selectOptions(select, "person:m1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe("/api/projects/p%201/gates/ready_to_ship/requirement");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ requirement: { personId: "m1" } });
+    await vi.waitFor(() => expect(onRequirementChanged).toHaveBeenCalled());
+    expect(within(card("Ready to ship")).getByText("Who may sign: Maintainer <b>One</b> only")).toBeTruthy();
+  });
+
+  it("no select for a read-only copy, or without a project", () => {
+    const { unmount } = render(<GateCards gate={prompt([shipMet()])} onResolve={vi.fn()} onCancel={vi.fn()} readOnly projectId="p1" />);
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByText("Who may sign: a reviewer or above")).toBeTruthy();
+    unmount();
+    render(<GateCards gate={prompt([shipMet()])} onResolve={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+});
+

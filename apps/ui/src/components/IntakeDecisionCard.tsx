@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { visibleControls } from "@theterminal/shared";
 import type { DecisionId, IntakeDecisionView } from "@theterminal/shared";
+import { gateFor, useViewerRole } from "../shell/model";
 
 type Props = {
   decision: IntakeDecisionView;
@@ -24,6 +25,7 @@ export function IntakeDecisionCard({ decision: d, onDecide }: Props) {
   const [chosen, setChosen] = useState<string | null>(d.chosen);
   const [why, setWhy] = useState("");
   const [busy, setBusy] = useState(false);
+  const may = gateFor(useViewerRole(), "reviewer");
   const decidedLabel = d.options.find((o) => o.id === d.chosen)?.label ?? d.chosen;
   const name = `plan-decision-${d.id}`;
 
@@ -79,7 +81,7 @@ export function IntakeDecisionCard({ decision: d, onDecide }: Props) {
           Why (optional)
           <input value={why} maxLength={1000} onChange={(e) => setWhy(e.target.value)} />
         </label>
-        <button type="button" disabled={busy || chosen === null} onClick={() => void decide()}>
+        <button type="button" disabled={busy || chosen === null || may.disabled} title={may.title} onClick={() => void decide()}>
           Decide
         </button>
       </div>

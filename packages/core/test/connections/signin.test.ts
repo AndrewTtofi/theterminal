@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { LedgerEntry, Provider } from "@theterminal/shared";
+
+const owner = { kind: "human", id: "owner" } as const;
 import { InvalidCliHomeError, SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
 import { ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
@@ -116,7 +118,7 @@ describe("signInLines", () => {
 describe("SignInManager", { timeout: 15000 }, () => {
   it("starts the login command and reports the safe lines, then success, and records it", async () => {
     const { m, recorded } = manager({ exit: 0 });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     expect(m.get(id)?.state).toBe("running");
     const done = await settle(m, id);
     expect(done).toEqual({ state: "succeeded", lines: ["https://auth.openai.com/codex/device", "ABCD-12345"] });
@@ -125,7 +127,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
 
   it("reports a failed login", async () => {
     const { m, recorded } = manager({ exit: 1 });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     expect((await settle(m, id)).state).toBe("failed");
     expect(recorded).toEqual([{ provider: "codex", ok: false }]);
   });
@@ -133,7 +135,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
   it("never shows a line with an email or a path, nor the user's home", async () => {
     const home = homedir();
     const { m } = manager({ lines: [`Saved to ${home}/.codex/auth.json`, "Logged in as someone@example.com", "ABCD-12345"] });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     const done = await settle(m, id);
     expect(done.lines).toEqual(["ABCD-12345"]);
     expect(JSON.stringify(done)).not.toContain(home);
@@ -142,15 +144,15 @@ describe("SignInManager", { timeout: 15000 }, () => {
 
   it("allows one sign-in per provider at a time", async () => {
     const { m } = manager({ hang: true });
-    m.start("codex");
-    expect(() => m.start("codex")).toThrow(/already running/);
-    expect(() => m.start("claude")).not.toThrow();
+    m.start("codex", owner);
+    expect(() => m.start("codex", owner)).toThrow(/already running/);
+    expect(() => m.start("claude", owner)).not.toThrow();
   });
 
   it("kills the login after the timeout", async () => {
     const pidFile = join(tempDir(), "pid");
     const { m, recorded } = manager({ hang: true, pidFile }, { timeoutMs: 300 });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     const done = await settle(m, id);
     expect(done.state).toBe("failed");
     const pid = Number(readFileSync(pidFile, "utf8"));
@@ -162,7 +164,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
   it("kills the login on cancel and on shutdown", async () => {
     const pidA = join(tempDir(), "a");
     const { m, recorded } = manager({ hang: true, pidFile: pidA });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     await waitForFile(pidA);
     expect(m.cancel(id)).toBe(true);
     expect((await settle(m, id)).state).toBe("failed");
@@ -173,7 +175,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
 
     const pidB = join(tempDir(), "b");
     const second = manager({ hang: true, pidFile: pidB });
-    second.m.start("codex");
+    second.m.start("codex", owner);
     await waitForFile(pidB);
     await second.m.shutdown();
     await new Promise((r) => setTimeout(r, 100));
@@ -186,7 +188,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     const envFile = join(tempDir(), "env");
     const { m } = manager({ envFile });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     await settle(m, id);
     const names = JSON.parse(readFileSync(envFile, "utf8")) as string[];
     expect(names).not.toContain("OPENAI_API_KEY");
@@ -196,15 +198,15 @@ describe("SignInManager", { timeout: 15000 }, () => {
 
   it("refuses Gemini, whose CLI signs in only in a terminal, and a provider that is not installed", () => {
     const { m } = manager({});
-    expect(() => m.start("gemini")).toThrow(/terminal/);
+    expect(() => m.start("gemini", owner)).toThrow(/terminal/);
     const missing = manager({}, { program: () => null });
-    expect(() => missing.m.start("codex")).toThrow(/not installed/);
+    expect(() => missing.m.start("codex", owner)).toThrow(/not installed/);
   });
 
   it("refuses a relative CLI home folder with a fixed message, before anything starts", async () => {
     const pidFile = join(tempDir(), "pid");
     const { m } = manager({ pidFile }, { cliHome: () => "relative/codex-home" });
-    expect(() => m.start("codex")).toThrow(new InvalidCliHomeError());
+    expect(() => m.start("codex", owner)).toThrow(new InvalidCliHomeError());
     expect(new InvalidCliHomeError().message).toBe("The CLI home folder must be an absolute path");
     expect((await m.status()).codex).toBe("unknown");
     await new Promise((r) => setTimeout(r, 100));
@@ -216,7 +218,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
     const pidFile = join(dir, "pid");
     const grandchildPidFile = join(dir, "grandchild");
     const { m } = manager({ hang: true, ignoreTerm: true, pidFile, grandchildPidFile });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     await waitForFile(grandchildPidFile);
     await waitForFile(pidFile);
     m.cancel(id);
@@ -232,7 +234,7 @@ describe("SignInManager", { timeout: 15000 }, () => {
     const pidFile = join(dir, "pid");
     const grandchildPidFile = join(dir, "grandchild");
     const { m } = manager({ hang: true, ignoreTerm: true, pidFile, grandchildPidFile, grandchildIgnoreTerm: true });
-    const { id } = m.start("codex");
+    const { id } = m.start("codex", owner);
     await waitForFile(grandchildPidFile);
     await waitForFile(pidFile);
     const [pid, grandchild] = [pidFile, grandchildPidFile].map((f) => Number(readFileSync(f, "utf8")));
@@ -256,10 +258,10 @@ describe("SignInManager", { timeout: 15000 }, () => {
     // The fixture script is read at each start, so the second login can be made to hang.
     const extraEnv: Record<string, string> = { THETERMINAL_FAKE_LOGIN: JSON.stringify({ exit: 0 }) };
     const { m } = manager({}, { extraEnv });
-    const { id: first } = m.start("codex");
+    const { id: first } = m.start("codex", owner);
     expect((await settle(m, first)).state).toBe("succeeded");
     extraEnv.THETERMINAL_FAKE_LOGIN = JSON.stringify({ hang: true });
-    const { id: second } = m.start("codex");
+    const { id: second } = m.start("codex", owner);
     expect(m.get(first)?.state).toBe("succeeded"); // a panel may still be polling it
     expect(m.get(second)?.state).toBe("running");
     m.cancel(second);

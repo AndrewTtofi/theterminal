@@ -115,7 +115,7 @@ describe("digestDay", () => {
 
   it("summarises the day in one exact sentence", () => {
     expect(d.summary).toBe(
-      "10 ledger entries: 1 agent action requested, 1 allowed and 0 denied by a human, 1 decision by the Owner, 1 card moved, 1 agent run started and 1 finished. Agent spend recorded that day: $0.25 (estimate).",
+      "10 ledger entries: 1 agent action requested, 1 allowed and 0 denied by a human, 1 decision by a human, 1 card moved, 1 agent run started and 1 finished. Agent spend recorded that day: $0.25 (estimate).",
     );
   });
 
@@ -145,6 +145,17 @@ describe("digestDay", () => {
     const noCard = digestDay(DAY, fixtureDay(), {});
     expect(noCard.items.find((i) => i.seq === 4)?.headline).toBe("Owner started a Fake agent");
     expect(JSON.stringify(noCard)).not.toContain("secret plan");
+  });
+
+  it("names the person who started an agent, with or without the card", () => {
+    const e = make();
+    const p1: Actor = { kind: "human", id: "p1" };
+    const run = { runId: "r1", adapter: "fake", authMode: "none", prompt: "secret plan", worktree: "wt/r1" };
+    const entries = [e("agent.started", { ...run, cardId: "c1" }, p1), e("agent.started", { ...run, runId: "r2", cardId: "c9" }, p1)];
+    const named = digestDay(DAY, entries, { ...ctx, personName: (id) => (id === "p1" ? "Reviewer One" : undefined) });
+    expect(named.items.map((i) => i.headline)).toEqual(['Reviewer One started a Fake agent on "Login"', "Reviewer One started a Fake agent"]);
+    expect(digestDay(DAY, entries, {}).items.map((i) => i.headline)).toEqual(["Someone started a Fake agent", "Someone started a Fake agent"]);
+    expect(JSON.stringify(named)).not.toContain("secret plan");
   });
 
   it("carries the narration's attention and time", () => {
@@ -184,7 +195,7 @@ describe("digestDay", () => {
     ]);
     expect(out.counts).toMatchObject({ entries: 3, actions: 0, allowed: 0, denied: 1, decisions: 2, runsFinished: 1, spendUsd: null });
     expect(out.summary).toBe(
-      "3 ledger entries: 0 agent actions requested, 0 allowed and 1 denied by a human, 2 decisions by the Owner, 0 cards moved, 0 agent runs started and 1 finished.",
+      "3 ledger entries: 0 agent actions requested, 0 allowed and 1 denied by a human, 2 decisions by a human, 0 cards moved, 0 agent runs started and 1 finished.",
     );
   });
 

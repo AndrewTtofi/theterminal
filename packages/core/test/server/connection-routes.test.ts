@@ -8,6 +8,8 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_HTTP", "THETERMINAL_SECRET_STORE",
@@ -233,7 +235,7 @@ describe("connections API", { timeout: 15000 }, () => {
     });
     expect(stub).toHaveBeenCalledOnce();
     const st = await json<{ connections: unknown }>(get(s, "/api/status"));
-    expect(st.connections).toEqual({ enabled: 1, failed: 1, keychain: "ok" });
+    expect(st.connections).toEqual({ enabled: 1, failed: 1, keychain: "ok", secretStore: "memory" });
   });
 
   it("starts with an unavailable keychain, refuses writes with 503 and reports it in /api/status", async () => {
@@ -246,7 +248,7 @@ describe("connections API", { timeout: 15000 }, () => {
     expect(await json(get(s, "/api/connections"))).toEqual([]);
     expect(await (await get(s, "/api/ledger")).text()).not.toContain("connection.added");
     const st = await json<{ connections: unknown }>(get(s, "/api/status"));
-    expect(st.connections).toEqual({ enabled: 0, failed: 0, keychain: "unavailable" });
+    expect(st.connections).toEqual({ enabled: 0, failed: 0, keychain: "unavailable", secretStore: "memory" });
   });
 
   it("GET /api/agents reports where each provider's API key comes from", async () => {
@@ -274,7 +276,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0 };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok", secretStore: "memory" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -293,7 +295,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25, monthCostUsd: 0.25 });
 
     await addClaude(s);
-    expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+    expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
   });
 });
 
@@ -456,5 +458,79 @@ describe("GET /api/status network (inferred from the Owner's own calls)", { time
     const status = await get(s, "/api/status");
     expect(status.status).toBe(200);
     expect(((await status.json()) as { network: Network }).network).toMatchObject({ state: "offline", lastError: "ENOTFOUND" });
+  });
+});
+
+describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
+  async function startSeeded() {
+    for (const k of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]) delete process.env[k];
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-conn-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
+    running.push(s);
+    const asRole = (role: "viewer" | "reviewer" | "maintainer") => ({ cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]! });
+    const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
+      localFetch(base(s) + path, {
+        method, headers: { ...asRole(role), ...(body !== undefined && { "content-type": "application/json" }) },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      });
+    return { s, theirs };
+  }
+
+  it("GET /api/connections is a summary for a maintainer: id, kind, provider, name, enabled and the test state; the Owner gets everything but values", async () => {
+    const { s, theirs } = await startSeeded();
+    const added = (await (await addClaude(s, { config: { plan: "Max 5x" } })).json()) as Connection;
+    const res = await theirs("maintainer", "GET", "/api/connections");
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    for (const field of ["config", "private", "secretFields", KEY, "Max 5x"]) expect(text).not.toContain(field);
+    const list = JSON.parse(text) as Record<string, unknown>[];
+    expect(list).toEqual([{ id: added.id, kind: "llm", provider: "claude", name: "Claude", enabled: true, status: { state: "untested", message: "", testedAt: null } }]);
+    const owners = (await json<Connection[]>(get(s, "/api/connections")))[0]!;
+    expect(owners).toMatchObject({ id: added.id, config: { plan: "Max 5x" }, secretFields: ["apiKey"], private: {} });
+    expect(JSON.stringify(owners)).not.toContain(KEY);
+  });
+
+  it("a maintainer may not read one connection, change it or test it", async () => {
+    const { s, theirs } = await startSeeded();
+    const added = (await (await addClaude(s)).json()) as Connection;
+    for (const [method, path, body] of [
+      ["GET", `/api/connections/${added.id}`, undefined],
+      ["PATCH", `/api/connections/${added.id}`, { enabled: false }],
+      ["POST", `/api/connections/${added.id}/test`, undefined],
+      ["DELETE", `/api/connections/${added.id}`, undefined],
+      ["POST", "/api/connections", { kind: "llm", provider: "codex", name: "Codex" }],
+      ["GET", "/api/connections/catalog", undefined],
+      ["GET", "/api/connections/signin-status", undefined],
+    ] as const) {
+      const res = await theirs("maintainer", method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect(await res.json()).toEqual({ error: "forbidden", required: "owner" });
+    }
+    expect((await json<Connection[]>(get(s, "/api/connections")))[0]).toMatchObject({ enabled: true });
+  });
+
+  it("GET /api/status for a collaborator is trimmed: counts only, no budget, no keychain state and nothing about remote access", async () => {
+    const { s, theirs } = await startSeeded();
+    await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: KEY }, config: { monthlyBudgetUsd: "40" } });
+    const owners = await json<Record<string, unknown>>(get(s, "/api/status"));
+    expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
+    expect(owners.remote).toEqual({ enabled: false, listening: false, label: "off" });
+    expect(owners.monthlyBudgetUsd).toBe(40);
+    for (const role of ["viewer", "reviewer", "maintainer"] as const) {
+      const res = await theirs(role, "GET", "/api/status");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.connections).toEqual({ enabled: 1, failed: 0 });
+      expect(body).not.toHaveProperty("remote");
+      // What the Owner pays for is theirs alone: the summed budget goes the way of each source's budget in capacity.
+      expect(body).not.toHaveProperty("monthlyBudgetUsd");
+      expect(JSON.stringify(body)).not.toContain("keychain");
+      expect(JSON.stringify(body)).not.toContain("40");
+      expect(Object.keys(body).sort()).toEqual(
+        ["ci", "connections", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
+      );
+    }
   });
 });

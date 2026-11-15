@@ -8,6 +8,7 @@ import type { ShareAddress, SharePreview } from "../src/api";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { fakeDock, shellNav } from "./connections-harness";
+import { OWNER_ME } from "./as-owner";
 
 export const SHARE_ID = "5a7c0e1f9b2d4c3a8e6f00112233aabb";
 export const HASH = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12";
@@ -106,6 +107,7 @@ export function renderShare(
     selectedId: over.selectedId === undefined ? "p1" : over.selectedId,
     share: shareModel(over.share),
     digests: digestsModel(over.digests),
+    me: OWNER_ME,
   } as unknown as WorkbenchModel;
   const result = render(<ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>{children}</ShellContext.Provider>);
   return { ...result, model, dock };

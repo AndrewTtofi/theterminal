@@ -2,7 +2,7 @@ import { useContext, useId, useState } from "react";
 import { ACTION_KIND_MEANS, ACTION_TOPIC, actionPhrase, visibleControls } from "@theterminal/shared";
 import type { AgentAction } from "@theterminal/shared";
 import { ApiError } from "../api";
-import { ShellContext } from "../shell/model";
+import { ShellContext, gateFor, useViewerRole } from "../shell/model";
 
 type Props = {
   action: AgentAction;
@@ -46,6 +46,8 @@ export function DecisionCard({ action, projectName, onDecide, onMore, readOnly =
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  /** Deciding is a reviewer's: below that the card is shown without its buttons. */
+  const may = gateFor(useViewerRole(), "reviewer");
 
   const decide = async (decision: "allow" | "deny", why?: string) => {
     if (busy) return;
@@ -103,6 +105,8 @@ export function DecisionCard({ action, projectName, onDecide, onMore, readOnly =
       {hidden !== null && <p className="note">{hidden} characters hidden — full input not shown</p>}
       {readOnly ? (
         <p className="note">Decide in the strip above</p>
+      ) : may.disabled ? (
+        <p className="note">{may.title}</p>
       ) : denying ? (
         <div className="decision-actions">
           <label>

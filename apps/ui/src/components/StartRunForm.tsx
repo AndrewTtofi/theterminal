@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { KIND_LABELS, visibleControls } from "@theterminal/shared";
-import type { AdapterId, AuthMode, Card, Connection, MachineCapacity, MachinePresence, Provider } from "@theterminal/shared";
+import type { AdapterId, AuthMode, Card, Connection, ConnectionSummary, MachineCapacity, MachinePresence, Provider, Role } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, LOCAL_MODEL_NOTE } from "../api";
+import { gateFor, useViewerRole } from "../shell/model";
 
 export const OFFLINE_NOTE = "You seem to be offline. Cloud models will not answer; a local model will.";
 
@@ -10,11 +11,13 @@ export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", code
 type Props = {
   adapters: AdapterId[];
   /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
-  providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
+  providers?: Partial<Record<Provider, { available: boolean; mode?: AuthMode }>>;
   /** The project's cards; the run can be tied to one of them. */
   cards: Card[];
-  /** Every connection; the enabled cloud accounts, MCP servers and local models are offered to the run. */
-  connections: Connection[];
+  /** Every connection (in full or as summaries); the enabled cloud accounts, MCP servers and local models are offered to the run. */
+  connections: ConnectionSummary[];
+  /** The role of the person at the form; below the Owner, a note says their runs use the Owner's API key. */
+  viewerRole?: Role;
   /** The card chosen when the form opens; one no longer in `cards` is not sent. */
   defaultCardId?: string | null;
   /** True when the server inferred that the internet is unreachable; adds a note for cloud runs, never blocks one. */
@@ -40,8 +43,12 @@ type Offer = Pick<Connection, "id" | "kind" | "provider" | "name">;
 /** Starts an agent run: the agent, an optional card, the prompt and the connections the run may use. */
 export function StartRunForm({
   adapters, providers, cards, connections, defaultCardId, offline = false, submitLabel = "Start agent", startedMessage, machines = [],
-  machineCapacity, onStart,
+  machineCapacity, onStart, viewerRole: givenRole,
 }: Props) {
+  // The role given, else the shell's: starting a run is a maintainer's.
+  const shellRole = useViewerRole();
+  const viewerRole: Role = givenRole ?? shellRole;
+  const may = gateFor(viewerRole, "maintainer");
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -93,6 +100,10 @@ export function StartRunForm({
   // is this computer's own inference; nothing is known of a linked machine's internet, so the note is for runs here.
   const localChosen = localUsable && locals.some((c) => picked.includes(c.id));
   const offlineNote = target === null && offline && chosen !== "" && chosen !== "fake" && !localChosen;
+  /** A collaborator's run is on the Owner's API key for the provider, never on anyone's subscription or login. */
+  const apiKeyNote = viewerRole !== "owner" && chosen !== "" && chosen !== "fake" && !localChosen
+    ? `Runs you start use the Owner's API key for ${ADAPTER_NAMES[chosen]}, never a personal subscription.`
+    : null;
   /** The linked machine answered, and none of the agent programs is available there: nothing can start. */
   const noAgentThere = target !== null && caps !== null && !adapters.some(available);
 
@@ -155,6 +166,7 @@ export function StartRunForm({
           ))}
         </select>
       </label>
+      {apiKeyNote !== null && <p className="note api-key-note">{apiKeyNote}</p>}
       <label>
         Card (optional)
         <select value={cardId} onChange={(e) => setCardId(e.target.value)}>
@@ -216,7 +228,7 @@ export function StartRunForm({
       )}
       {offlineNote && <p className="note offline-note">{OFFLINE_NOTE}</p>}
       {noAgentThere && <p className="note" role="status">{`${targetName} reports no agent program available, so nothing can start there.`}</p>}
-      <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
+      <button type="submit" disabled={!chosen || !prompt.trim() || starting || may.disabled} title={may.title}>
         {submitLabel}
       </button>
       <p className="started" role="status" aria-live="polite">

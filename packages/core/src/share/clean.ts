@@ -1,5 +1,5 @@
 import { homedir, userInfo } from "node:os";
-import type { ShareSnapshot } from "@theterminal/shared";
+import { OWNER_ID, ROLES, requirementLabel, type ShareSnapshot } from "@theterminal/shared";
 import { redact, truncate } from "../agents/redact.js";
 import { pathScrubber, usernameScrubber } from "../agents/scrub-paths.js";
 
@@ -61,9 +61,22 @@ export function shareCleaner(deps: CleanerDeps): ShareClean {
   };
 }
 
+/** What the page calls someone no longer on record. */
+export const FORMER_COLLABORATOR = "a former collaborator";
+
+/**
+ * The words the page uses for people when no one chose them: the Owner's name until renamed, the phrase for someone
+ * not on record, and each role requirement (`a reviewer or above`, `the Owner`). Fixed copy, like the labels below,
+ * so a username that is one of those words never corrupts them; any other name is cleaned as free text.
+ */
+const FIXED_PEOPLE_WORDS: ReadonlySet<string> = new Set([
+  "Owner", FORMER_COLLABORATOR, ...ROLES.map((role) => requirementLabel({ role }, () => OWNER_ID)),
+]);
+
 /**
  * A copy of the snapshot with every free-text field cleaned and capped at SHARE_TEXT_MAX: the project's name and
- * pitch, the summary and idea, stack choices and reasons, headlines, card titles, decision reasons, gate details,
+ * pitch, people's names (the owner, who decided, who may answer), the summary and idea, stack choices and reasons,
+ * headlines, card titles, decision reasons, gate details,
  * digest summaries and items, prompts and hardware names. Enums, ids, dates, numbers and fixed labels (states,
  * stages, adapters, kinds, gate titles, adapter labels, the hidden lines) are not text anyone wrote and come out
  * exactly as they went in, so a username that is also one of those words never corrupts them.
@@ -71,14 +84,16 @@ export function shareCleaner(deps: CleanerDeps): ShareClean {
 export function cleanSnapshot(s: ShareSnapshot, clean: ShareClean): ShareSnapshot {
   const t = (x: string) => clean.text(x, SHARE_TEXT_MAX);
   const opt = (x: string | null) => (x === null ? null : t(x));
+  const who = (x: string) => (FIXED_PEOPLE_WORDS.has(x) ? x : t(x));
   return {
     ...s,
     project: { ...s.project, name: t(s.project.name), pitch: t(s.project.pitch) },
+    owner: who(s.owner),
     summary: opt(s.summary),
     idea: opt(s.idea),
     stack: s.stack.map((r) => ({ ...r, choice: t(r.choice), why: t(r.why) })),
-    waiting: s.waiting.map((w) => ({ ...w, headline: t(w.headline), cardTitle: opt(w.cardTitle) })),
-    decisions: s.decisions.map((d) => ({ ...d, headline: t(d.headline), reason: opt(d.reason) })),
+    waiting: s.waiting.map((w) => ({ ...w, headline: t(w.headline), cardTitle: opt(w.cardTitle), assignee: who(w.assignee) })),
+    decisions: s.decisions.map((d) => ({ ...d, headline: t(d.headline), reason: opt(d.reason), by: who(d.by) })),
     readiness: s.readiness.map((r) => ({ ...r, detail: opt(r.detail), cardTitle: opt(r.cardTitle) })),
     digests: s.digests.map((d) => ({ ...d, summary: t(d.summary), items: d.items.map((i) => ({ ...i, headline: t(i.headline) })) })),
     asks: s.asks.map((a) => ({ ...a, cardTitle: opt(a.cardTitle), prompt: t(a.prompt) })),

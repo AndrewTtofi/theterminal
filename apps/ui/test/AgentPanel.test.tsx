@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
+import { renderAsOwner as render } from "./as-owner";
 import userEvent from "@testing-library/user-event";
 import type { AgentAction, AgentRun, Connection } from "@theterminal/shared";
 import { AgentPanel } from "../src/components/AgentPanel";
@@ -235,5 +236,24 @@ describe("AgentPanel", () => {
     );
     expect(screen.getByRole("button", { name: /^fake on GPU box: do a thing/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^fake: do a thing/ })).toBeTruthy();
+  });
+});
+
+describe("AgentPanel for a collaborator", () => {
+  it("says under the agent that runs use the Owner's API key for that provider, never a personal subscription", async () => {
+    render(
+      <AgentPanel adapters={["claude", "codex", "fake"]} runs={[]} selectedRunId={null} viewer={{ role: "maintainer" }}
+        onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+    );
+    expect(screen.getByText("Runs you start use the Owner's API key for Claude, never a personal subscription.")).toBeTruthy();
+    await userEvent.selectOptions(screen.getByLabelText("Agent"), "codex");
+    expect(screen.getByText("Runs you start use the Owner's API key for Codex, never a personal subscription.")).toBeTruthy();
+    await userEvent.selectOptions(screen.getByLabelText("Agent"), "fake");
+    expect(screen.queryByText(/use the Owner's API key/)).toBeNull();
+  });
+
+  it("the Owner sees no such note", () => {
+    render(<AgentPanel adapters={["claude"]} runs={[]} selectedRunId={null} onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />);
+    expect(screen.queryByText(/use the Owner's API key/)).toBeNull();
   });
 });

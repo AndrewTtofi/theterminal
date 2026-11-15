@@ -1,10 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { OverrideService } from "../override/service.js";
+import { actorOf, needs } from "./auth.js";
 
 export type OverrideRouteDeps = { overrides: OverrideService };
-
-const actor = { kind: "human", id: "owner" } as const;
 
 // Shapes only: the service checks lengths, refuses secrets and scrubs what it records.
 const commandBody = z
@@ -21,9 +20,9 @@ type Params = { Params: { id: string } };
 export function registerOverrideRoutes(app: FastifyInstance, deps: OverrideRouteDeps): void {
   const { overrides } = deps;
 
-  app.post<Params>("/api/runs/:id/override/command", async (req, reply) => {
+  app.post<Params>("/api/runs/:id/override/command", needs("owner"), async (req, reply) => {
     const body = commandBody.parse(req.body);
-    const result = await overrides.command(actor, req.params.id, {
+    const result = await overrides.command(actorOf(req), req.params.id, {
       program: body.program,
       args: body.args ?? [],
       ...(body.cwd !== undefined && { cwd: body.cwd }),
@@ -32,8 +31,8 @@ export function registerOverrideRoutes(app: FastifyInstance, deps: OverrideRoute
     return reply.code(201).send(result);
   });
 
-  app.post<Params>("/api/runs/:id/override/discard", async (req) => {
+  app.post<Params>("/api/runs/:id/override/discard", needs("owner"), async (req) => {
     const { reason } = discardBody.parse(req.body);
-    return overrides.discard(actor, req.params.id, reason);
+    return overrides.discard(actorOf(req), req.params.id, reason);
   });
 }

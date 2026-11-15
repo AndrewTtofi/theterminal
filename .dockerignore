@@ -1,0 +1,21 @@
+# Not apps/desktop: the frozen lockfile needs its package.json (the Dockerfile's --filter keeps it out of the install).
+node_modules
+**/node_modules
+**/dist
+# Every dot folder and dotfile, at any depth: version control, tooling, caches and credentials live there, and the
+# build needs none of them (there is no .npmrc; pnpm reads package.json, pnpm-workspace.yaml and pnpm-lock.yaml).
+.*
+**/.*
+e2e
+docs
+test-results
+playwright-report
+apps/desktop/stage
+apps/desktop/release
+**/*.db
+# Never send credentials or keys into the build context.
+*.pem
+**/*.pem
+*.key
+**/*.key
+**/secret*.key

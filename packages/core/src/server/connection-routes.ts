@@ -1,6 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, PROVIDERS, type CiStatus } from "@theterminal/shared";
+import {
+  CONNECTION_CATALOG, CONNECTION_KINDS, CONNECTION_PROVIDERS, OWNER_ID, PROVIDERS, connectionSummary, type CiStatus,
+} from "@theterminal/shared";
+import { NotFoundError } from "../board/board-service.js";
 import type { ConnectionService } from "../connections/service.js";
 import { CliNotInstalledError, InvalidCliHomeError, SignInRunningError, TerminalRequiredError, type SignInManager } from "../connections/signin.js";
 import type { Db } from "../db.js";
@@ -8,6 +11,10 @@ import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
 import type { IntakeService } from "../intake/service.js";
 import type { NetworkState } from "../network.js";
+import { actorOf, needs } from "./auth.js";
+import { remoteStatus } from "./remote-routes.js";
+import type { RemoteView } from "./remote.js";
+import type { SecretStoreKind } from "../secrets/file-store.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -23,9 +30,11 @@ export type ConnectionRouteDeps = {
   network: () => NetworkState;
   /** Share links being served right now: the live listeners, never the projection's rows. */
   shareLinks: () => number;
+  /** The remote listener's state; the Owner's status carries `remote` from it, nobody else's does. */
+  remote: () => RemoteView;
+  /** Where secrets live (the keychain, the encrypted file, or memory under the test flags); the Owner's status says. */
+  secretStore: () => SecretStoreKind;
 };
-
-const actor = { kind: "human", id: "owner" } as const;
 
 // Shapes only: the service checks fields, values and config against the catalog.
 const values = z.record(z.string(), z.string());
@@ -51,15 +60,20 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks, remote, secretStore } = deps;
 
-  app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
+  app.get("/api/connections/catalog", needs("owner"), async () => CONNECTION_CATALOG);
 
-  app.get("/api/connections", async () => connections.list());
+  // The Owner sees each connection's config, private values and the names of its secret fields; anyone else sees
+  // what it is and whether it works (ConnectionSummary), enough to give a run access to it by name.
+  app.get("/api/connections", needs("viewer"), async (req) => {
+    const list = connections.list();
+    return req.principal?.personId === OWNER_ID ? list : list.map(connectionSummary);
+  });
 
-  app.post("/api/connections", async (req, reply) => {
+  app.post("/api/connections", needs("owner"), async (req, reply) => {
     const body = addBody.parse(req.body);
-    const added = await connections.add(actor, {
+    const added = await connections.add(actorOf(req), {
       kind: body.kind,
       provider: body.provider,
       name: body.name,
@@ -70,9 +84,15 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     return reply.code(201).send(added);
   });
 
-  app.patch<{ Params: { id: string } }>("/api/connections/:id", async (req) => {
+  app.get<{ Params: { id: string } }>("/api/connections/:id", needs("owner"), async (req) => {
+    const found = connections.list().find((c) => c.id === req.params.id);
+    if (!found) throw new NotFoundError("connection", req.params.id);
+    return found;
+  });
+
+  app.patch<{ Params: { id: string } }>("/api/connections/:id", needs("owner"), async (req) => {
     const body = patchBody.parse(req.body);
-    return connections.update(actor, req.params.id, {
+    return connections.update(actorOf(req), req.params.id, {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.config !== undefined && { config: body.config }),
       ...(body.enabled !== undefined && { enabled: body.enabled }),
@@ -81,23 +101,23 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     });
   });
 
-  app.delete<{ Params: { id: string } }>("/api/connections/:id", async (req, reply) => {
-    await connections.remove(actor, req.params.id);
+  app.delete<{ Params: { id: string } }>("/api/connections/:id", needs("owner"), async (req, reply) => {
+    await connections.remove(actorOf(req), req.params.id);
     return reply.code(204).send();
   });
 
   // The UI sends this with no body and no content-type.
-  app.post<{ Params: { id: string } }>("/api/connections/:id/test", async (req) => connections.test(actor, req.params.id));
+  app.post<{ Params: { id: string } }>("/api/connections/:id/test", needs("owner"), async (req) => connections.test(actorOf(req), req.params.id));
 
   // Sign-in to the Owner's own subscriptions: the provider's official login command, never its credentials.
-  app.get("/api/connections/signin-status", async () => signin.status());
+  app.get("/api/connections/signin-status", needs("owner"), async () => signin.status());
 
   // The UI sends this with no body and no content-type.
-  app.post<{ Params: { provider: string } }>("/api/connections/signin/:provider", async (req, reply) => {
+  app.post<{ Params: { provider: string } }>("/api/connections/signin/:provider", needs("owner"), async (req, reply) => {
     const provider = z.enum(PROVIDERS).parse(req.params.provider);
     if (ledger.readOnly) return reply.code(423).send({ error: "ledger_read_only" });
     try {
-      return reply.code(202).send(signin.start(provider));
+      return reply.code(202).send(signin.start(provider, actorOf(req)));
     } catch (e) {
       if (e instanceof SignInRunningError) return reply.code(409).send({ error: "signin_running" });
       if (e instanceof CliNotInstalledError) return reply.code(422).send({ error: "not_installed" });
@@ -107,29 +127,28 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     }
   });
 
-  app.get<{ Params: { id: string } }>("/api/connections/signin/:id", async (req, reply) => {
+  app.get<{ Params: { id: string } }>("/api/connections/signin/:id", needs("owner"), async (req, reply) => {
     const view = signin.get(req.params.id);
     return view ?? reply.code(404).send({ error: "not_found" });
   });
 
-  app.delete<{ Params: { id: string } }>("/api/connections/signin/:id", async (req, reply) =>
+  app.delete<{ Params: { id: string } }>("/api/connections/signin/:id", needs("owner"), async (req, reply) =>
     signin.cancel(req.params.id) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" }),
   );
 
-  app.get("/api/status", async () => {
+  // The status bar. A collaborator gets the counts and states only: the budget, the keychain, and anything added for
+  // the Owner later (remote access, say), stays out of their copy, which is built from this fixed list of fields.
+  app.get("/api/status", needs("viewer"), async (req) => {
     // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
     void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
     const intakeProjects = intake.openDecisionsByProject();
-    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
-    return {
+    const shared = {
       runningAgents: counts.runningAgents,
       pendingDecisions: counts.pendingDecisions,
       todayCostUsd: counts.todayCostUsd,
       monthCostUsd: counts.monthCostUsd,
-      // The sum of the enabled model connections' budgets; null when none has one.
-      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
-      connections: { ...counts.connections, keychain: connections.keychainState() },
+      connections: { enabled: counts.connections.enabled, failed: counts.connections.failed },
       ci: ci(),
       // Undecided plan decisions over every open intake, and the projects they belong to.
       intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0),
@@ -138,6 +157,17 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       // Only the fixed fields: the state, when it began and the system code that made it offline. No URL or message.
       network: network(),
       shareLinks: shareLinks(),
+    };
+    if (req.principal?.personId !== OWNER_ID) return shared;
+    // What the Owner pays for is theirs alone (as each source's budget is in capacity), and so is the address: the
+    // summed budget and `remote` (with its label) are on their copy only, by the fixed list above.
+    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
+    return {
+      ...shared,
+      // The sum of the enabled model connections' budgets; null when none has one.
+      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
+      connections: { ...shared.connections, keychain: connections.keychainState(), secretStore: secretStore() },
+      remote: remoteStatus(remote(), req.principal),
     };
   });
 }

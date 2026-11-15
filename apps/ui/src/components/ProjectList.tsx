@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Project } from "@theterminal/shared";
+import { gateFor, useViewerRole } from "../shell/model";
 
 type Props = {
   projects: Project[];
@@ -10,6 +11,7 @@ type Props = {
 
 export function ProjectList({ projects, selectedId, onSelect, onCreate }: Props) {
   const [name, setName] = useState("");
+  const may = gateFor(useViewerRole(), "maintainer");
   return (
     <nav className="projects" aria-label="Projects">
       <h2>Projects</h2>
@@ -31,7 +33,14 @@ export function ProjectList({ projects, selectedId, onSelect, onCreate }: Props)
           setName("");
         }}
       >
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="+ New project" aria-label="New project name" />
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="+ New project"
+          aria-label="New project name"
+          disabled={may.disabled}
+          title={may.title}
+        />
       </form>
     </nav>
   );

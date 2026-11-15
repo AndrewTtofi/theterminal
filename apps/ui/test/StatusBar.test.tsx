@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { StatusBar } from "../src/shell/StatusBar";
 import type { LayoutControls } from "../src/shell/StatusBar";
 import type { Status } from "../src/api";
+import type { Me } from "@theterminal/shared";
 
 const status = (over: Partial<Status["connections"]> = {}): Status => ({
   runningAgents: 2,
@@ -286,6 +287,50 @@ describe("StatusBar", () => {
       const { rerender } = render(<StatusBar status={net("unknown")} running={0} pending={0} {...noop} />);
       rerender(<StatusBar status={net("online")} running={0} pending={0} {...noop} />);
       expect(screen.getByTestId("network-announcement").textContent).toBe("");
+    });
+  });
+
+  describe("people and remote access", () => {
+    const me = (over: Partial<Me> = {}): Me => ({
+      personId: "r1", name: "Reviewer One", role: "reviewer", listener: "remote", method: "passkey", credentials: [], sessions: [], ...over,
+    });
+
+    it("puts You: <name> (<role>) first, and it opens the People view", async () => {
+      const onSelectView = vi.fn();
+      render(<StatusBar status={status()} running={0} pending={0} {...noop} onSelectView={onSelectView} me={me()} />);
+      const left = screen.getByRole("contentinfo", { name: "Status bar" }).querySelector(".status-left")!;
+      const first = left.firstElementChild as HTMLElement;
+      expect(first.textContent).toBe("You: Reviewer One (Reviewer)");
+      await userEvent.click(within(left as HTMLElement).getByRole("button", { name: "You: Reviewer One (Reviewer)" }));
+      expect(onSelectView).toHaveBeenCalledWith("people");
+    });
+
+    it("shows a hostile name inert, with its invisible characters made visible", () => {
+      render(<StatusBar status={status()} running={0} pending={0} {...noop} me={me({ name: "<img src=x>\u202eevil" })} />);
+      const you = screen.getByRole("button", { name: /^You: / });
+      expect(you.querySelector("img")).toBeNull();
+      expect(you.textContent).not.toContain("\u202e");
+      expect(you.textContent).toContain("<img src=x>");
+    });
+
+    it("says Remote: on with the address in the attention colour for the Owner, and without it for everyone else", async () => {
+      const onSelectView = vi.fn();
+      const on = (label?: string): Status => ({ ...status(), remote: { enabled: true, listening: true, ...(label !== undefined && { label }) } });
+      const { rerender } = render(<StatusBar status={on("tt-test.local:4318")} running={0} pending={0} {...noop} onSelectView={onSelectView} me={me({ role: "owner" })} />);
+      const owner = screen.getByRole("button", { name: "Remote: on · tt-test.local:4318" });
+      expect(owner.className).toContain("attention");
+      await userEvent.click(owner);
+      expect(onSelectView).toHaveBeenCalledWith("people");
+      rerender(<StatusBar status={on()} running={0} pending={0} {...noop} onSelectView={onSelectView} me={me()} />);
+      const other = screen.getByRole("button", { name: "Remote: on" });
+      expect(other.className).not.toContain("attention");
+      rerender(<StatusBar status={{ ...status(), remote: { enabled: false, listening: false } }} running={0} pending={0} {...noop} me={me()} />);
+      expect(screen.getByRole("button", { name: "Remote: off" })).toBeTruthy();
+    });
+
+    it("shows no remote item before the server reports one", () => {
+      render(<StatusBar status={status()} running={0} pending={0} {...noop} me={me()} />);
+      expect(screen.queryByText(/^Remote:/)).toBeNull();
     });
   });
 });

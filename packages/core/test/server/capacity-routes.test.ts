@@ -7,6 +7,8 @@ import { fakeHardware } from "../../src/capacity/hardware.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, selectHardware, selectLocalEngines, type RunningServer } from "../../src/server/server.js";
+import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_HARDWARE", "THETERMINAL_FAKE_HTTP", "THETERMINAL_FAKE_SCRIPT"] as const;
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -263,5 +265,56 @@ describe("linked machines in the capacity API", { timeout: 30_000 }, () => {
   it("GET /api/capacity has no machines when none is paired", async () => {
     const s = await start();
     expect((await json<CapacityReport>(send(s, "GET", "/api/capacity"))).machines).toEqual([]);
+  });
+});
+
+describe("GET /api/capacity for a collaborator", { timeout: 30_000 }, () => {
+  it("names each source by provider, connection and usage, never its plan, budget or sign-in mode", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-capacity-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const s = await start({ dataDir });
+    await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: KEY }, config: { plan: "Max 5x", monthlyBudgetUsd: "40" } });
+    const owners = await json<CapacityReport>(send(s, "GET", "/api/capacity"));
+    const claude = owners.sources.find((x) => x.provider === "claude")!;
+    expect(claude).toMatchObject({ plan: "Max 5x", monthlyBudgetUsd: 40, mode: "api_key" });
+    for (const p of COLLABORATORS) {
+      const res = await localFetch(`http://127.0.0.1:${s.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
+      expect(res.status, p.role).toBe(200);
+      const text = await res.text();
+      for (const word of ["plan", "monthlyBudgetUsd", "mode", "Max 5x", KEY]) expect(text, `${p.role}: ${word}`).not.toContain(word);
+      const theirs = JSON.parse(text) as CapacityReport;
+      expect(theirs.sources.map((x) => Object.keys(x).sort())).toEqual(
+        owners.sources.map(() => ["connectionId", "month", "name", "provider", "rateLimits", "today"]),
+      );
+      expect(theirs.sources.find((x) => x.provider === "claude")).toMatchObject({ connectionId: claude.connectionId, name: "Claude" });
+    }
+  });
+
+  it("trims every linked machine's sources the same way: no plan, budget or sign-in mode of another computer's Owner", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-capacity-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const requester = await start({ dataDir });
+    const worker = await start();
+    await send(worker, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Box Claude", secrets: { apiKey: KEY }, config: { plan: "Max 20x", monthlyBudgetUsd: "120" } });
+    await pairServers(requester, worker);
+    const owners = await json<CapacityReport>(send(requester, "GET", "/api/capacity"));
+    expect(owners.machines).toHaveLength(1);
+    const theirsOnBox = owners.machines[0]!.sources.find((x) => x.provider === "claude")!;
+    expect(theirsOnBox).toMatchObject({ plan: "Max 20x", monthlyBudgetUsd: 120, mode: "api_key" });
+    for (const p of COLLABORATORS) {
+      const res = await localFetch(`http://127.0.0.1:${requester.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
+      expect(res.status, p.role).toBe(200);
+      const text = await res.text();
+      for (const word of ["plan", "monthlyBudgetUsd", "mode", "Max 20x", KEY]) expect(text, `${p.role}: ${word}`).not.toContain(word);
+      const theirs = JSON.parse(text) as CapacityReport;
+      expect(theirs.machines).toHaveLength(1);
+      expect(theirs.machines[0]!.sources.map((x) => Object.keys(x).sort())).toEqual(
+        owners.machines[0]!.sources.map(() => ["connectionId", "month", "name", "provider", "rateLimits", "today"]),
+      );
+      expect(theirs.machines[0]!.sources.find((x) => x.provider === "claude")).toMatchObject({ connectionId: theirsOnBox.connectionId, name: "Box Claude" });
+      expect(theirs.machines[0]!.connections).toEqual(owners.machines[0]!.connections);
+    }
   });
 });

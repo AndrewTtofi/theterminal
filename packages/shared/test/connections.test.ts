@@ -6,7 +6,11 @@ import {
   KIND_LABELS,
   connectionConfigSchema,
   connectionNameSchema,
+  connectionSummary,
   eventPayloadSchemas,
+  hasConnectionDetails,
+  isConnectionSummary,
+  type Connection,
 } from "../src/index.js";
 
 const ok = (type: keyof typeof eventPayloadSchemas, payload: unknown) =>
@@ -274,5 +278,31 @@ describe("agent.rate_limited", () => {
     bad("agent.rate_limited", { runId: "r1", retryAfterS: 1.5 });
     bad("agent.rate_limited", { runId: "r1", retryAfterS: null, text: "x" });
     bad("agent.rate_limited", { runId: "r1" });
+  });
+});
+
+describe("connectionSummary", () => {
+  const full: Connection = {
+    id: "c1", kind: "github", provider: "github", name: "GitHub", enabled: true,
+    config: { repo: "club/site" }, private: { note: "x" }, secretFields: ["token"],
+    status: { state: "failed", message: "Cannot see repository club/site (HTTP 404)", testedAt: "2026-01-01T00:00:00Z" },
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  };
+
+  it("keeps what a connection is and whether it works, and drops config, private values, secret names and the test message", () => {
+    const summary = connectionSummary(full);
+    expect(summary).toEqual({
+      id: "c1", kind: "github", provider: "github", name: "GitHub", enabled: true,
+      status: { state: "failed", message: "", testedAt: "2026-01-01T00:00:00Z" },
+    });
+    expect(JSON.stringify(summary)).not.toMatch(/config|private|secretFields|club\/site|token/);
+  });
+
+  it("tells a summary from the full record", () => {
+    expect(hasConnectionDetails(full)).toBe(true);
+    expect(isConnectionSummary(full)).toBe(false);
+    const summary = connectionSummary(full);
+    expect(hasConnectionDetails(summary)).toBe(false);
+    expect(isConnectionSummary(summary)).toBe(true);
   });
 });

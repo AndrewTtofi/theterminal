@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, type RunningServer } from "../src/server/server.js";
 import { MemorySecretStore } from "../src/secrets/memory-store.js";
+import { FileSecretStore } from "../src/secrets/file-store.js";
 import { fakeDiscovery } from "../src/link/discovery.js";
 import type { ReadyMessage } from "../src/host.js";
+import { USAGE } from "../src/cli-support.js";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
 const TIMEOUT = 30_000;
@@ -29,7 +33,7 @@ function tmp(): string {
 }
 
 const CORE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
-const USAGE = "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir PATH] [--core-dir ABSOLUTE_PATH]";
+
 
 function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}): Spawned {
   const child = spawn(process.execPath, [CLI, ...args], {
@@ -43,6 +47,33 @@ function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}):
   const exit = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
   children.push({ child, exit });
   return { child, stdout: () => out, stderr: () => err, exit };
+}
+
+/** Resolves once the child's stdout holds `text`; rejects if it exits first. */
+function untilOutput(spawned: Spawned, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (spawned.stdout().includes(text)) {
+        clearInterval(timer);
+        resolve();
+      }
+    };
+    const timer = setInterval(check, 50);
+    void spawned.exit.then((code) => {
+      clearInterval(timer);
+      check();
+      reject(new Error(`exited ${code} before printing: ${spawned.stderr()}`));
+    });
+  });
+}
+
+/** A port nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const s = net.createServer();
+  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+  const port = (s.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => s.close(() => resolve()));
+  return port;
 }
 
 function firstMessage(child: ChildProcess): Promise<unknown> {
@@ -150,6 +181,101 @@ describe("theterminal start as a host's child process", () => {
     expect(text).toContain("is inside the UI directory");
     expect(text).toContain("<data>");
     if (process.platform !== "win32") expect(statSync(log).mode & 0o777).toBe(0o600);
+  });
+
+  it("the usage line names every flag", () => {
+    for (const flag of ["--remote", "--remote-port", "--remote-bind", "--remote-domain", "--remote-tls", "--tls-cert", "--tls-key",
+      "--secret-store", "--secret-key-file", "--allow-key-in-data-dir"]) {
+      expect(USAGE).toContain(`[${flag}`);
+    }
+  });
+
+  it("--secret-store file without --secret-key-file exits 1", { timeout: TIMEOUT }, async () => {
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--secret-store", "file"]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("--secret-store file needs --secret-key-file\n");
+    expect(stdout()).toBe("");
+  });
+
+  it("--remote-tls acme without --remote-domain exits 1", { timeout: TIMEOUT }, async () => {
+    const { exit, stderr } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--remote", "--remote-tls", "acme"]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("--remote-tls acme needs --remote-domain\n");
+  });
+
+  it("a --secret-key-file inside --data-dir exits 1 and writes no key", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(dir, "secret.key");
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", dir, "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("Refusing to start: the secret key file is inside the data directory\n");
+    expect(stdout()).toBe("");
+    expect(existsSync(keyFile)).toBe(false);
+  });
+
+  it("--remote on a port in use exits 1 with the fixed line, so a server asked for remote access never comes up without it", { timeout: TIMEOUT }, async () => {
+    const blocker = net.createServer();
+    await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
+    const busy = (blocker.address() as AddressInfo).port;
+    try {
+      const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--remote", "--remote-bind", "127.0.0.1", "--remote-port", String(busy)]);
+      expect(await exit).toBe(1);
+      expect(stderr()).toBe("The Terminal could not start: the remote listener could not start\n");
+      expect(stdout()).toBe("");
+    } finally {
+      await new Promise((r) => blocker.close(r));
+    }
+  });
+
+  it("an unusable key file exits 1 with a fixed line", { timeout: TIMEOUT }, async () => {
+    const keyFile = join(tmp(), "secret.key");
+    writeFileSync(keyFile, Buffer.alloc(31, 7));
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("The Terminal could not start: secret key file unavailable\n");
+    expect(stdout()).toBe("");
+  });
+
+  it("a 32-byte key that does not open the existing secrets file exits 1 with a fixed line", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(tmp(), "secret.key");
+    await new FileSecretStore({ file: join(dir, "secrets.enc.json"), keyFile, createKey: true }).set("connection/x", "sk-TESTKEY-0000000000");
+    writeFileSync(keyFile, randomBytes(32));
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", dir, "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("The Terminal could not start: the secret key does not open the secrets file\n");
+    expect(stdout()).toBe("");
+  });
+
+  it("a restart without --remote while the ledger says remote is on prints the token-free address", { timeout: TIMEOUT * 2 }, async () => {
+    const dir = tmp();
+    const port = await freePort();
+    const first = startCli(["start", "--data-dir", dir, "--port", "0", "--remote", "--remote-port", String(port), "--remote-bind", "127.0.0.1"], false);
+    await untilOutput(first, "The Terminal is running at");
+    expect(first.stdout()).toContain("The Terminal is running at http://127.0.0.1:");
+    expect(first.stdout()).not.toContain("token=");
+    first.child.kill("SIGTERM");
+    await first.exit;
+
+    // The headless service log is the same place: the recorded state turns remote on again, so no token goes there.
+    const second = startCli(["start", "--data-dir", dir, "--port", "0"], false);
+    await untilOutput(second, "The Terminal is running at");
+    expect(second.stdout()).toContain("The Terminal is running at http://127.0.0.1:");
+    expect(second.stdout()).not.toContain("token=");
+    expect(second.stdout()).not.toContain("theterminal.localhost");
+    second.child.kill("SIGTERM");
+    await second.exit;
+  });
+
+  it("--secret-store file creates the key file at startup, outside the data folder", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(tmp(), "key", "secret.key");
+    const { ready, stdout } = await startReady(dir, ["--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(ready).toMatchObject({ type: "ready" });
+    expect(statSync(keyFile).size).toBe(32);
+    if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(dir, "secret.key"))).toBe(false);
+    expect(stdout()).not.toContain("Open this link once");
   });
 
   it("a real --core-dir is used for the bundled programs", { timeout: TIMEOUT }, async () => {

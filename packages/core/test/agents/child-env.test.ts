@@ -80,6 +80,18 @@ describe("buildChildEnv", () => {
     expect(keys(env, /^(gemini_|google_|vertex)/i)).toEqual([]);
   });
 
+  it.each([
+    ["claude", "CLAUDE_CONFIG_DIR", "subscription"],
+    ["codex", "CODEX_HOME", "chatgpt"],
+    ["gemini", "GEMINI_CLI_HOME", "google"],
+  ] as const)("%s api_key with a configHome points the CLI's config at it (%s), and a login mode ignores it", (p, variable, login) => {
+    const env = buildChildEnv(p, "api_key", { apiKey: "k", dataDir: DATA_DIR, base, configHome: "/data/theterminal/run-homes/r1" });
+    expect(env[variable]).toBe("/data/theterminal/run-homes/r1");
+    expect(env.HOME).toBe("/home/alice");
+    expect(buildChildEnv(p, "api_key", { apiKey: "k", dataDir: DATA_DIR, base })[variable]).toBeUndefined();
+    expect(buildChildEnv(p, login, { dataDir: DATA_DIR, base, configHome: "/data/theterminal/run-homes/r1" })[variable]).toBeUndefined();
+  });
+
   it("api_key mode without a key sets none", () => {
     const env = buildChildEnv("codex", "api_key", { dataDir: DATA_DIR, base });
     expect(keys(env, /^(openai_|codex_)/i)).toEqual([]);

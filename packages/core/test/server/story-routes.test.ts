@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { registerStoryRoutes } from "../../src/server/story-routes.js";
+import { fakeAuth } from "../fixtures/principal.js";
 import type { CardStory, LedgerEntry } from "@theterminal/shared";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
@@ -144,6 +145,7 @@ describe("export streaming", { timeout: 20000 }, () => {
       }
     }).immediate();
     const app = Fastify();
+    fakeAuth(app);
     registerStoryRoutes(app, { db, ledger });
     await app.listen({ port: 0, host: "127.0.0.1" });
     try {
