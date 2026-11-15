@@ -167,10 +167,11 @@ describe("ledger websocket", () => {
   it("unsubscribes from the ledger when the socket closes", async () => {
     const { ws } = connect();
     await new Promise((r) => ws.on("open", r));
+    // The stream itself keeps one listener (role changes and removals close sockets); the socket's own goes with it.
     const before = (ledger as unknown as { listeners: Set<unknown> }).listeners.size;
-    expect(before).toBe(1);
+    expect(before).toBe(2);
     ws.close();
-    await waitFor(() => (ledger as unknown as { listeners: Set<unknown> }).listeners.size === 0);
+    await waitFor(() => (ledger as unknown as { listeners: Set<unknown> }).listeners.size === 1);
   });
 });
 
@@ -321,14 +322,15 @@ describe("presence over the ledger stream", () => {
     expect(sweep.mock.calls.length).toBe(calls);
   });
 
-  async function restartWith(reg: PresenceRegistry) {
+  async function restartWith(reg: PresenceRegistry, extra: { pingMs?: number } = {}) {
     await app.close();
     const db = openDatabase(":memory:");
     ledger = new Ledger(db);
     sessions = new SessionStore(db);
+    presence = reg;
     app = Fastify();
     registerAuth(app, { token: TOKEN, port: () => port, hostRule: () => null, sessions, person: (id) => people.get(id) ?? null });
-    registerLedgerStream(app, ledger, undefined, { sessions, presence: reg, sweepMs: 60_000 });
+    registerLedgerStream(app, ledger, undefined, { sessions, presence: reg, sweepMs: 60_000, ...extra });
     await app.listen({ port: 0, host: "127.0.0.1" });
     port = (app.server.address() as { port: number }).port;
   }
@@ -363,6 +365,34 @@ describe("presence over the ledger stream", () => {
     expect(await first.closed).toEqual({ code: 1008, reason: "too many connections" });
     expect(second.ws.readyState).toBe(WebSocket.OPEN);
     expect(names(reg.list())).toEqual(["Rae"]);
+  });
+
+  it("pings every socket and terminates one that stops answering, so a dead remote socket is detected", async () => {
+    await restartWith(new PresenceRegistry(), { pingMs: 50 });
+    const { id } = sessions.create("p-viewer", "local", "passkey");
+    const mute = new WebSocket(`ws://127.0.0.1:${port}/api/events`, { headers: { cookie: `${SESSION_COOKIE}=${id}` }, autoPong: false });
+    sockets.push(mute);
+    const muteClosed = new Promise<number>((resolve) => mute.on("close", (code) => resolve(code)));
+    const live = connectAs("p-reviewer");
+    await waitFor(() => live.frames.length === 1);
+    await opened(mute);
+    expect(await muteClosed).toBe(1006); // terminated without a close frame: it never answered a ping
+    await new Promise((r) => setTimeout(r, 200)); // four more ping rounds
+    expect(live.ws.readyState).toBe(WebSocket.OPEN);
+    expect(names(presence.list())).toEqual(["Rae"]);
+  });
+
+  it("closes a person's sockets with 1008 when their role changes or they are removed; others stay", async () => {
+    const viewer = connectAs("p-viewer");
+    const reviewer = connectAs("p-reviewer");
+    await waitFor(() => viewer.frames.length >= 1 && reviewer.frames.length >= 1);
+    ledger.append({ projectId: null, actor: { kind: "human", id: "owner" }, type: "person.role_changed", payload: { personId: "p-viewer", from: "viewer", to: "reviewer" } });
+    expect(await viewer.closed).toEqual({ code: 1008, reason: "role changed" });
+    expect(reviewer.ws.readyState).toBe(WebSocket.OPEN);
+    await waitFor(() => names(presence.list()).join() === "Rae");
+    ledger.append({ projectId: null, actor: { kind: "human", id: "owner" }, type: "person.removed", payload: { personId: "p-reviewer" } });
+    expect(await reviewer.closed).toEqual({ code: 1008, reason: "removed" });
+    expect(presence.list()).toEqual([]);
   });
 
   it("GET /api/presence lists the same, for a viewer, from the events-ws plugin alone", async () => {

@@ -11,6 +11,10 @@ import { PresenceRegistry } from "./presence.js";
 const PAGE = 500;
 /** A client frame is a small JSON object; anything larger is refused by the socket itself. */
 const MAX_CLIENT_FRAME = 4096;
+/** How often each socket is pinged; one that has not answered by the next ping is terminated. */
+export const EVENTS_PING_MS = 30_000;
+/** Entries that end a person's open sockets: their role (and so what they may see) changed, or they are gone. */
+const CLOSES_SOCKETS: Record<string, string> = { "person.role_changed": "role changed", "person.removed": "removed" };
 
 export type LedgerStreamOptions = {
   /** Sockets are closed with 1008 "revoked" when their session (by id hash) or their person is revoked. */
@@ -21,9 +25,20 @@ export type LedgerStreamOptions = {
   sweepMs?: number;
   /** Client presence frames each socket may send per window; the rest are dropped. Default 10 per 10 s. */
   presenceRate?: { max: number; windowMs: number };
+  /** The ping interval; a socket that misses one is terminated. Default EVENTS_PING_MS. */
+  pingMs?: number;
 };
 
-type Client = { send: (data: string) => void; close: (code: number, reason: string) => void; personId: string; sessionHash: string | null };
+type Client = {
+  send: (data: string) => void;
+  close: (code: number, reason: string) => void;
+  ping: () => void;
+  terminate: () => void;
+  /** Cleared at each ping, set by the pong: false at the next ping means the peer is gone. */
+  alive: boolean;
+  personId: string;
+  sessionHash: string | null;
+};
 
 const hashOf = (id: string): string => createHash("sha256").update(id).digest("hex");
 
@@ -34,7 +49,9 @@ const hashOf = (id: string): string => createHash("sha256").update(id).digest("h
  * The same socket carries presence: the server sends { type: "presence", people } once on connect and on every change
  * (an entry always has "seq", a presence frame never does), and the client sends { type: "presence", projectId, view }.
  * The principal is required; each socket keeps only sha256(sessionId), so a single-session revoke closes exactly that
- * session's sockets. GET /api/presence answers the same list.
+ * session's sockets; a role change or removal closes every socket of the person (1008), so what they may see is judged
+ * again on reconnect. Each socket is pinged on an interval and terminated when it stops answering, so an idle remote
+ * connection whose peer is gone does not linger. GET /api/presence answers the same list.
  */
 export function registerLedgerStream(
   app: FastifyInstance,
@@ -51,21 +68,40 @@ export function registerLedgerStream(
     const data = frame(people);
     for (const c of clients.values()) c.send(data);
   });
-  const stopRevoke = opts.sessions?.onRevoke((personId, sessionIdHash) => {
+  const closeAll = (personId: string, sessionIdHash: string | null, reason: string): void => {
     for (const [id, c] of clients) {
       if (c.personId !== personId) continue;
       if (sessionIdHash !== null && c.sessionHash !== sessionIdHash) continue;
       clients.delete(id);
       presence.leave(id);
-      c.close(1008, "revoked");
+      c.close(1008, reason);
     }
+  };
+  const stopRevoke = opts.sessions?.onRevoke((personId, sessionIdHash) => closeAll(personId, sessionIdHash, "revoked"));
+  const stopRoles = ledger.onAppend((e) => {
+    const reason = CLOSES_SOCKETS[e.type];
+    const personId = (e.payload as { personId?: unknown }).personId;
+    if (reason !== undefined && typeof personId === "string") closeAll(personId, null, reason);
   });
   const sweeper = setInterval(() => presence.sweep(), opts.sweepMs ?? 30_000);
   sweeper.unref();
+  const pinger = setInterval(() => {
+    for (const c of clients.values()) {
+      if (!c.alive) {
+        c.terminate(); // its close event removes it from clients and presence
+        continue;
+      }
+      c.alive = false;
+      c.ping();
+    }
+  }, opts.pingMs ?? EVENTS_PING_MS);
+  pinger.unref();
   app.addHook("onClose", async () => {
     clearInterval(sweeper);
+    clearInterval(pinger);
     stopPresence();
     stopRevoke?.();
+    stopRoles();
     clients.clear();
   });
 
@@ -149,12 +185,19 @@ export function registerLedgerStream(
       // The backlog read above is synchronous, so no presence change or revoke was missed while it ran. The list goes
       // once, after the backlog (a client's first message stays its first entry); this socket missed its own join's
       // broadcast on purpose.
-      clients.set(socketId, {
+      const client: Client = {
         send: sendRaw,
         close: (code, reason) => socket.close(code, reason),
+        ping: () => {
+          if (socket.readyState === socket.OPEN) socket.ping();
+        },
+        terminate: () => socket.terminate(),
+        alive: true,
         personId: principal.personId,
         sessionHash: principal.sessionId === null ? null : hashOf(principal.sessionId),
-      });
+      };
+      socket.on("pong", () => (client.alive = true));
+      clients.set(socketId, client);
       sendRaw(frame(presence.list()));
     });
   });
