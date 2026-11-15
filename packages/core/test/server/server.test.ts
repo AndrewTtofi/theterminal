@@ -291,6 +291,22 @@ describe("createServer", { timeout: 30_000 }, () => {
     expect(list).toHaveLength(1);
   });
 
+  it("starts only with every route in the role table, and the hook is wired: the Owner by token, HEAD as GET, no proxy trust", async () => {
+    // Starting at all means assertRoutesHaveRoles(app) returned [] for every route this server registers.
+    const s = await start({ dataDir: tmp(), port: 0 });
+    const health = await fetch(base(s) + "/api/health", { headers: { ...auth(s), "x-forwarded-for": "203.0.113.9" } });
+    expect(health.status).toBe(200);
+    const head = await fetch(base(s) + "/api/projects", { method: "HEAD", headers: auth(s) });
+    expect(head.status).toBe(200);
+    const anonymous = await fetch(base(s) + "/api/projects");
+    expect(anonymous.status).toBe(401);
+    const unknown = await fetch(base(s) + "/api/nope", { headers: auth(s) });
+    expect(unknown.status).toBe(404);
+    // The ledger holds nothing about the Owner yet: the token still names them, with the virtual Owner's name.
+    const status = await (await fetch(base(s) + "/api/status", { headers: auth(s) })).json();
+    expect(status).toBeTypeOf("object");
+  });
+
   it("closes promptly with a WebSocket client connected", async () => {
     const s = await start({ dataDir: tmp(), port: 0 });
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });

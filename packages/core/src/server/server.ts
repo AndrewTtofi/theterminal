@@ -10,7 +10,13 @@ import { openDatabase, type Db } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
-import { registerAuth, APP_HOST } from "./auth.js";
+import { registerAuth, assertRoutesHaveRoles, APP_HOST } from "./auth.js";
+import { AUTH_THROTTLE, Throttle } from "./throttle.js";
+import { SessionStore } from "../people/sessions.js";
+import { ChallengeStore } from "../people/challenges.js";
+import { LockoutStore } from "../people/lockouts.js";
+import { PeopleService } from "../people/service.js";
+import { getPerson } from "../events/projections.js";
 import { registerStaticUi } from "./static-ui.js";
 import { acquireDataDirLock } from "./data-dir-lock.js";
 import { registerLedgerStream } from "./events-ws.js";
@@ -592,6 +598,19 @@ export async function createServer(opts: {
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });
 
+    // People: one session store, one challenge store, one lockout store, one service and one auth throttle for the
+    // whole server. The auth hook reads sessions and people here; the sign-in routes, the remote listener and the
+    // event stream take the rest from this same object as they are wired.
+    const sessions = new SessionStore(db);
+    const lockouts = new LockoutStore();
+    const people = {
+      sessions,
+      lockouts,
+      challenges: new ChallengeStore(),
+      throttle: new Throttle(AUTH_THROTTLE),
+      service: new PeopleService({ db, ledger, sessions, lockouts, recorded }),
+    };
+
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
     // Share: the share page's cleaner and service.
@@ -633,7 +652,14 @@ export async function createServer(opts: {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       if (!ledger.readOnly) links.recoverOnStartup(); // no link's listener survives a restart
-      registerAuth(app, { token, port: () => boundPort });
+      registerAuth(app, {
+        token,
+        port: () => boundPort,
+        // No remote listener is wired yet: a request that somehow arrives over TLS is refused.
+        hostRule: () => null,
+        sessions: people.sessions,
+        person: (id) => getPerson(db, id),
+      });
       registerLedgerStream(app, ledger, cleanMirrored);
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
       const settings = new ProviderSettings(db, ledger);
@@ -674,6 +700,9 @@ export async function createServer(opts: {
       // Runs on linked machines survive a restart: the runner left them alone; follow each from its cursor again.
       if (!ledger.readOnly) remote.resume();
       await app.ready();
+      // Every route needs a place in the role table: an unlisted one would answer 500 to everybody, so refuse to start.
+      const unlisted = assertRoutesHaveRoles(app);
+      if (unlisted.length > 0) throw new Error(`Refusing to start: routes without a role: ${unlisted.join(", ")}`);
 
       const first = opts.port ?? DEFAULT_PORT;
       let lastError: unknown;
