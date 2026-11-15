@@ -53,13 +53,18 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Whether `value` nests deeper than `max`, walked without recursion. */
-function deeperThan(value: unknown, max: number): boolean {
+/**
+ * Whether `value` nests deeper than `max`, or holds an object with an own `__proto__` key, walked without recursion.
+ * JSON.parse makes `__proto__` an own key, but the canonical encoding leaves it out of the signed bytes, so a frame
+ * carrying one would store bytes its signature does not cover. `constructor` and `prototype` encode faithfully and stay.
+ */
+function unsafeShape(value: unknown, max: number): boolean {
   const stack: [unknown, number][] = [[value, 1]];
   while (stack.length > 0) {
     const [v, depth] = stack.pop()!;
     if (typeof v !== "object" || v === null) continue;
     if (depth > max) return true;
+    if (!Array.isArray(v) && Object.hasOwn(v, "__proto__")) return true;
     for (const child of Array.isArray(v) ? v : Object.values(v)) stack.push([child, depth + 1]);
   }
   return false;
@@ -68,7 +73,7 @@ function deeperThan(value: unknown, max: number): boolean {
 /** The first problem with a frame's shape and bounds, before its signature is looked at; null when there is none. */
 function shapeProblem(raw: unknown): { problem: FrameRefusal } | { frame: MirrorFrame } {
   if (!isRecord(raw)) return { problem: "invalid_frame" };
-  if (deeperThan(raw, MAX_FRAME_DEPTH)) return { problem: "invalid_payload" };
+  if (unsafeShape(raw, MAX_FRAME_DEPTH)) return { problem: "invalid_payload" };
   const origin = raw.origin;
   if (isRecord(origin) && typeof origin.type === "string" && !LISTED.has(origin.type)) return { problem: "not_mirrorable" };
   let parsed;
