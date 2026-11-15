@@ -5,7 +5,7 @@ import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Actor, Person, Role } from "@theterminal/shared";
 import { SessionStore } from "../../src/people/sessions.js";
-import { PUBLIC_ROUTE, SESSION_COOKIE, TOKEN_COOKIE, registerAuth } from "../../src/server/auth.js";
+import { APP_HOST, PUBLIC_ROUTE, SESSION_COOKIE, TOKEN_COOKIE, registerAuth } from "../../src/server/auth.js";
 import { registerLedgerStream } from "../../src/server/events-ws.js";
 import { closeAll, harness, pinnedRequest, type Harness } from "../fixtures/remote-harness.js";
 
@@ -50,10 +50,10 @@ async function remoteWithAuth(): Promise<Remote> {
 const cookie = (r: Remote, personId: string, on: "local" | "remote"): string =>
   `${SESSION_COOKIE}=${r.sessions.create(personId, on, "passkey").id}`;
 
-/** One plain-HTTP request to the local listener. */
+/** One plain-HTTP request to the local listener, on the app hostname (where alone a local session is honoured). */
 function localRequest(port: number, path: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path, headers: { host: `${APP_HOST}:${port}`, ...headers } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c: string) => (body += c));

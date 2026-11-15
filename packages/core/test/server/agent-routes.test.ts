@@ -24,6 +24,7 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { narrate, type LedgerEntry, type Role } from "@theterminal/shared";
 import type { RemoteRunService } from "../../src/link/remote-runs.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 import { asPrincipal, fakeAuth } from "../fixtures/principal.js";
 
 const ENV_KEYS = [
@@ -830,7 +831,7 @@ describe("collaborators run agents on API keys and are named on what they do", {
     const as = (role: Role): Record<string, string> =>
       role === "owner" ? { authorization: `Bearer ${s.token}` } : { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]! };
     const send = (role: Role, method: string, path: string, body?: unknown) =>
-      fetch(base(s) + path, {
+      localFetch(base(s) + path, {
         method, headers: { ...as(role), ...(body !== undefined && { "content-type": "application/json" }) },
         ...(body !== undefined && { body: JSON.stringify(body) }),
       });

@@ -9,6 +9,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { holdPort } from "../link/helpers.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -264,7 +265,7 @@ describe("who may see and change linking", { timeout: 15000 }, () => {
     const cookies = seedPeople(dataDir);
     const s = await start({ dataDir });
     const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
-      fetch(`http://127.0.0.1:${s.port}${path}`, {
+      localFetch(`http://127.0.0.1:${s.port}${path}`, {
         method,
         headers: { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]!, ...(body !== undefined && { "content-type": "application/json" }) },
         ...(body !== undefined && { body: JSON.stringify(body) }),

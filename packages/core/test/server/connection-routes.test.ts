@@ -9,6 +9,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "THETERMINAL_FAKE_HTTP", "THETERMINAL_SECRET_STORE",
@@ -470,7 +471,7 @@ describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
     running.push(s);
     const asRole = (role: "viewer" | "reviewer" | "maintainer") => ({ cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]! });
     const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
-      fetch(base(s) + path, {
+      localFetch(base(s) + path, {
         method, headers: { ...asRole(role), ...(body !== undefined && { "content-type": "application/json" }) },
         ...(body !== undefined && { body: JSON.stringify(body) }),
       });

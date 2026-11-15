@@ -11,6 +11,7 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -37,7 +38,7 @@ async function start() {
 }
 
 const send = (s: RunningServer, method: string, path: string, headers: Record<string, string>, body?: unknown) =>
-  fetch(`http://127.0.0.1:${s.port}${path}`, {
+  localFetch(`http://127.0.0.1:${s.port}${path}`, {
     method,
     headers: { ...headers, ...(body !== undefined && { "content-type": "application/json" }) },
     ...(body !== undefined && { body: JSON.stringify(body) }),

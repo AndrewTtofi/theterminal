@@ -5,11 +5,12 @@ import WebSocket from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun, Connection, Role } from "@theterminal/shared";
 import type { FakeStep } from "../../src/agents/fake-adapter.js";
-import { ROUTE_ROLES } from "../../src/server/auth.js";
+import { APP_HOST, ROUTE_ROLES } from "../../src/server/auth.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"] as const;
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -38,7 +39,7 @@ const script: FakeStep[] = [
 ];
 
 const send = (s: RunningServer, method: string, path: string, headers: Record<string, string>, body?: unknown) =>
-  fetch(`http://127.0.0.1:${s.port}${path}`, {
+  localFetch(`http://127.0.0.1:${s.port}${path}`, {
     method,
     headers: { ...headers, ...(body !== undefined && { "content-type": "application/json" }) },
     ...(body !== undefined && { body: JSON.stringify(body) }),
@@ -101,7 +102,7 @@ const OWNER_FIELDS = ['"secretFields":', '"private":', '"privateFields":', '"con
 /** Everything the ledger stream sends `headers` up to its first presence frame (which follows the backlog). */
 function streamBacklog(s: RunningServer, headers: Record<string, string>): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events?afterSeq=0`, { headers });
+    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events?afterSeq=0`, { headers: { host: `${APP_HOST}:${s.port}`, ...headers } });
     const got: string[] = [];
     ws.on("message", (d) => {
       const text = String(d);

@@ -10,6 +10,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -218,7 +219,7 @@ describe("who may share", { timeout: 30_000 }, () => {
     const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     const theirs = (role: "viewer" | "reviewer" | "maintainer", method: string, path: string, body?: unknown) =>
-      fetch(base(s) + path, {
+      localFetch(base(s) + path, {
         method,
         headers: { cookie: cookies[COLLABORATORS.find((p) => p.role === role)!.id]!, ...(body !== undefined && { "content-type": "application/json" }) },
         ...(body !== undefined && { body: JSON.stringify(body) }),

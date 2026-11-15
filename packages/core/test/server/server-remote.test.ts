@@ -13,10 +13,11 @@ import { commitEvent } from "../../src/events/commit.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { SessionStore } from "../../src/people/sessions.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
-import { SESSION_COOKIE, TOKEN_COOKIE } from "../../src/server/auth.js";
+import { APP_HOST, SESSION_COOKIE, TOKEN_COOKIE } from "../../src/server/auth.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { freePort, pinnedRequest } from "../fixtures/remote-harness.js";
 import { seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
@@ -82,7 +83,7 @@ const stop = async (s: RunningServer) => {
 
 const remotePort = (s: RunningServer): number => Number(new URL(s.remoteUrl!).port);
 const owner = (s: RunningServer) => ({ authorization: `Bearer ${s.token}` });
-const local = (s: RunningServer, path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${s.port}${path}`, init);
+const local = (s: RunningServer, path: string, init: RequestInit = {}) => localFetch(`http://127.0.0.1:${s.port}${path}`, init);
 const localJson = (s: RunningServer, method: string, path: string, headers: Record<string, string>, body?: unknown) =>
   local(s, path, {
     method, headers: { ...headers, ...(body !== undefined && { "content-type": "application/json" }) },
@@ -145,10 +146,10 @@ function eventsOverTls(port: number, headers: Record<string, string>): Promise<{
   });
 }
 
-/** One plain request to the local listener, with raw control over the headers. */
+/** One plain request to the local listener on the app hostname, with raw control over the headers. */
 function plainLocal(port: number, path: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path, headers: { host: `${APP_HOST}:${port}`, ...headers } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c: string) => (body += c));

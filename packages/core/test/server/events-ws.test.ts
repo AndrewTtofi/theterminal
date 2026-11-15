@@ -7,7 +7,7 @@ import { SessionStore } from "../../src/people/sessions.js";
 import { registerAuth } from "../../src/server/auth.js";
 import { registerLedgerStream } from "../../src/server/events-ws.js";
 import { PresenceRegistry, type PresenceEntry } from "../../src/server/presence.js";
-import { SESSION_COOKIE } from "../../src/server/auth.js";
+import { APP_HOST, SESSION_COOKIE } from "../../src/server/auth.js";
 import type { Person, Role } from "@theterminal/shared";
 
 const TOKEN = "ws-token";
@@ -55,7 +55,8 @@ afterEach(async () => {
 });
 
 function connect(query = "", headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, path = "/api/events") {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}${path}${query}`, { headers });
+  // On the app hostname, where alone a local session is honoured (a `host` in `headers` replaces it).
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${path}${query}`, { headers: { host: `${APP_HOST}:${port}`, ...headers } });
   sockets.push(ws);
   const messages: { seq: number }[] = [];
   const frames: PresenceEntry[][] = [];
@@ -370,7 +371,7 @@ describe("presence over the ledger stream", () => {
   it("pings every socket and terminates one that stops answering, so a dead remote socket is detected", async () => {
     await restartWith(new PresenceRegistry(), { pingMs: 50 });
     const { id } = sessions.create("p-viewer", "local", "passkey");
-    const mute = new WebSocket(`ws://127.0.0.1:${port}/api/events`, { headers: { cookie: `${SESSION_COOKIE}=${id}` }, autoPong: false });
+    const mute = new WebSocket(`ws://127.0.0.1:${port}/api/events`, { headers: { host: `${APP_HOST}:${port}`, cookie: `${SESSION_COOKIE}=${id}` }, autoPong: false });
     sockets.push(mute);
     const muteClosed = new Promise<number>((resolve) => mute.on("close", (code) => resolve(code)));
     const live = connectAs("p-reviewer");
@@ -399,7 +400,7 @@ describe("presence over the ledger stream", () => {
     const a = connectAs("p-reviewer");
     await waitFor(() => a.frames.length === 1);
     const { id } = sessions.create("p-viewer", "local", "passkey");
-    const res = await app.inject({ method: "GET", url: "/api/presence", headers: { host: `127.0.0.1:${port}`, cookie: `${SESSION_COOKIE}=${id}` } });
+    const res = await app.inject({ method: "GET", url: "/api/presence", headers: { host: `${APP_HOST}:${port}`, cookie: `${SESSION_COOKIE}=${id}` } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(presence.list());
     expect(res.json().map((p: PresenceEntry) => p.name)).toEqual(["Rae"]);

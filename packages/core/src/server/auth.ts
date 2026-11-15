@@ -252,6 +252,16 @@ export function assertRoutesHaveRoles(app: FastifyInstance): string[] {
   return missing;
 }
 
+/** The pages that sign people in: on the local listener they are served on APP_HOST only (a loopback Host is redirected). */
+const SIGN_IN_PAGES: ReadonlySet<string> = new Set(["GET /sign-in", "GET /join/*"]);
+/** The public routes that mint a session: on the local listener they refuse any Host but APP_HOST. */
+const SESSION_MINTING_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/join/:code/passkey/verify",
+  "POST /api/join/:code/key",
+  "POST /api/auth/passkey/verify",
+  "POST /api/auth/key/verify",
+]);
+
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 function tokenMatches(expected: Buffer, given: unknown): boolean {
@@ -264,10 +274,11 @@ const isPublicRoute = (key: string | null, config: unknown): boolean =>
 /**
  * The guard on every request, for both listeners, in this order: the listener; the Host (local: the app hostname or
  * loopback with the local port; remote: the remote listener's rule, `/healthz` exempt); on remote, the token is
- * never compared (a bearer or `/?token=` is 401 before anything else); public routes pass with no principal; the
- * Origin (local: the same three hosts over http; remote: `https://<host>` only), on WebSocket upgrades too; the
- * principal (local: the token as the Owner; else the session cookie, bound to this listener, for a current person);
- * the route's minimum role, from the table, failing closed.
+ * never compared (a bearer or `/?token=` is 401 before anything else); on local, a loopback Host is redirected to the
+ * app hostname for the sign-in and join pages and refused for the routes that mint a session; public routes pass
+ * with no principal; the Origin (local: the same three hosts over http; remote: `https://<host>` only), on WebSocket
+ * upgrades too; the principal (local: the token as the Owner; else the session cookie, bound to this listener and,
+ * on local, to the app hostname, for a current person); the route's minimum role, from the table, failing closed.
  */
 export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
   const expected = digest(deps.token);
@@ -332,6 +343,12 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
             .redirect("/", 302);
         }
       }
+      // Sessions, like the token cookie, live on the app hostname alone (see APP_HOST): the pages that sign people
+      // in are bounced there, and the routes that mint a session refuse a loopback Host outright.
+      if (host !== appHost) {
+        if (request.method === "GET" && key !== null && SIGN_IN_PAGES.has(key)) return reply.redirect(`http://${appHost}${request.url}`, 302);
+        if (key !== null && SESSION_MINTING_ROUTES.has(key)) return reject(403, { error: "bad_host" });
+      }
     }
 
     // Default-deny, keyed on the matched route (find-my-way matches the decoded path, so the raw URL cannot be trusted).
@@ -361,7 +378,8 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
       }
     }
     if (principal === null) {
-      const sessionId = cookies[SESSION_COOKIE];
+      // A local session is honoured on the app hostname alone, where it was minted.
+      const sessionId = listener === "local" && host !== appHost ? undefined : cookies[SESSION_COOKIE];
       const session = sessionId === undefined ? null : deps.sessions.lookup(sessionId, listener);
       const person = session === null ? null : deps.person(session.personId);
       if (session === null || person === null || person.removedAt !== null) return reject(401, { error: "unauthorized" });

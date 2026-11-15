@@ -8,6 +8,7 @@ import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, selectHardware, selectLocalEngines, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
+import { localFetch } from "../fixtures/local-fetch.js";
 
 const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_HARDWARE", "THETERMINAL_FAKE_HTTP", "THETERMINAL_FAKE_SCRIPT"] as const;
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -278,7 +279,7 @@ describe("GET /api/capacity for a collaborator", { timeout: 15000 }, () => {
     const claude = owners.sources.find((x) => x.provider === "claude")!;
     expect(claude).toMatchObject({ plan: "Max 5x", monthlyBudgetUsd: 40, mode: "api_key" });
     for (const p of COLLABORATORS) {
-      const res = await fetch(`http://127.0.0.1:${s.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
+      const res = await localFetch(`http://127.0.0.1:${s.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
       expect(res.status, p.role).toBe(200);
       const text = await res.text();
       for (const word of ["plan", "monthlyBudgetUsd", "mode", "Max 5x", KEY]) expect(text, `${p.role}: ${word}`).not.toContain(word);

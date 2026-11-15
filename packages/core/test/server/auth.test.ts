@@ -69,6 +69,11 @@ beforeEach(async () => {
     listenerOf: () => listener,
   });
   app.get("/", { config: PUBLIC_ROUTE }, async () => "ui");
+  // The pages and the routes that mint a session, as static-ui and the people routes register them.
+  app.get("/sign-in", { config: PUBLIC_ROUTE }, async () => "page");
+  app.get("/join/*", { config: PUBLIC_ROUTE }, async () => "page");
+  app.post("/api/auth/key/verify", async () => ({ minted: true }));
+  app.post("/api/join/:code/key", async () => ({ minted: true }));
   app.get("/private", async () => "secret");
   // Routes from the role table that no route file registers yet, so the hook's decisions can be read back.
   app.get("/api/me", async (request) => ({ principal: request.principal, listener: request.listener, ip: request.ip }));
@@ -261,7 +266,7 @@ describe("auth guard (local listener)", () => {
   });
 
   it("rejects a wrong cookie", async () => {
-    const res = await app.inject({ url: "/api/projects", headers: { host: HOST, cookie: `${TOKEN_COOKIE}=bad` } });
+    const res = await app.inject({ url: "/api/projects", headers: { host: APP, cookie: `${TOKEN_COOKIE}=bad` } });
     expect(res.statusCode).toBe(401);
   });
 
@@ -289,7 +294,7 @@ describe("principals", () => {
 
   it("a session created on local gives a principal with the person's current name and role", async () => {
     const cookie = sessionCookie("p-reviewer");
-    const first = await app.inject({ url: "/api/me", headers: { host: HOST, cookie } });
+    const first = await app.inject({ url: "/api/me", headers: { host: APP, cookie } });
     expect(first.statusCode).toBe(200);
     expect(first.json().principal).toMatchObject({
       personId: "p-reviewer", name: "reviewer person", role: "reviewer", method: "passkey", listener: "local",
@@ -297,7 +302,7 @@ describe("principals", () => {
     expect(first.json().principal.sessionId).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // A rename and a role change show on the next request: the principal reads the person, not the session.
     people.set("p-reviewer", person("p-reviewer", "maintainer", { name: "Renamed" }));
-    const second = await app.inject({ url: "/api/me", headers: { host: HOST, cookie } });
+    const second = await app.inject({ url: "/api/me", headers: { host: APP, cookie } });
     expect(second.json().principal).toMatchObject({ name: "Renamed", role: "maintainer" });
   });
 
@@ -308,24 +313,24 @@ describe("principals", () => {
     expect((await app.inject({ url: "/api/me", headers: { host: REMOTE_HOST, cookie: local } })).statusCode).toBe(401);
     expect((await app.inject({ url: "/api/me", headers: { host: REMOTE_HOST, cookie: remote } })).statusCode).toBe(200);
     listener = "local";
-    expect((await app.inject({ url: "/api/me", headers: { host: HOST, cookie: remote } })).statusCode).toBe(401);
-    expect((await app.inject({ url: "/api/me", headers: { host: HOST, cookie: local } })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/api/me", headers: { host: APP, cookie: remote } })).statusCode).toBe(401);
+    expect((await app.inject({ url: "/api/me", headers: { host: APP, cookie: local } })).statusCode).toBe(200);
   });
 
   it("a removed person's live session is 401, and so is a session of nobody", async () => {
     const gone = sessionCookie("p-gone");
-    const res = await app.inject({ url: "/api/me", headers: { host: HOST, cookie: gone } });
+    const res = await app.inject({ url: "/api/me", headers: { host: APP, cookie: gone } });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ error: "unauthorized" });
     const nobody = sessionCookie("p-unknown");
-    expect((await app.inject({ url: "/api/me", headers: { host: HOST, cookie: nobody } })).statusCode).toBe(401);
+    expect((await app.inject({ url: "/api/me", headers: { host: APP, cookie: nobody } })).statusCode).toBe(401);
   });
 
   it("a revoked, malformed or unknown session cookie is 401", async () => {
     const { id } = sessions.create("p-viewer", "local", "passkey");
     sessions.revoke(id);
     for (const cookie of [`${SESSION_COOKIE}=${id}`, `${SESSION_COOKIE}=short`, `${SESSION_COOKIE}=${"A".repeat(43)}`]) {
-      expect((await app.inject({ url: "/api/me", headers: { host: HOST, cookie } })).statusCode).toBe(401);
+      expect((await app.inject({ url: "/api/me", headers: { host: APP, cookie } })).statusCode).toBe(401);
     }
   });
 
@@ -335,9 +340,58 @@ describe("principals", () => {
   });
 
   it("actorOf is the signed-in person", async () => {
-    const res = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: HOST, cookie: sessionCookie("p-maintainer") } });
+    const res = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: APP, cookie: sessionCookie("p-maintainer") } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ kind: "human", id: "p-maintainer" });
+  });
+});
+
+describe("local sessions live on the app hostname alone", () => {
+  // Browsers do not separate cookies by port: a tt_session on 127.0.0.1 or localhost would reach every other local
+  // server. So the session is minted and honoured on APP_HOST only, and the pages that sign people in are bounced there.
+  it("a session cookie is honoured on the app hostname and 401 on a loopback Host", async () => {
+    const cookie = sessionCookie("p-reviewer");
+    expect((await app.inject({ url: "/api/me", headers: { host: APP, cookie } })).statusCode).toBe(200);
+    for (const host of [HOST, `localhost:${PORT}`, `LocalHost:${PORT}`]) {
+      const res = await app.inject({ url: "/api/me", headers: { host, cookie } });
+      expect(res.statusCode, host).toBe(401);
+      expect(res.json()).toEqual({ error: "unauthorized" });
+    }
+    // The token is not a session: it still works on loopback, as before.
+    expect((await app.inject({ url: "/api/me", headers: bearer })).statusCode).toBe(200);
+  });
+
+  it("GET /sign-in and /join/<code> on a loopback Host redirect to the app hostname, keeping the path and query", async () => {
+    for (const host of [HOST, `localhost:${PORT}`]) {
+      for (const url of ["/sign-in", "/join/abc_-123", "/join/abc?x=1"]) {
+        const res = await app.inject({ url, headers: { host } });
+        expect(res.statusCode, `${host}${url}`).toBe(302);
+        expect(res.headers.location, `${host}${url}`).toBe(`http://${APP}${url}`);
+        expect(res.headers["set-cookie"]).toBeUndefined();
+      }
+    }
+    for (const url of ["/sign-in", "/join/abc_-123"]) {
+      const res = await app.inject({ url, headers: { host: APP } });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.body).toBe("page");
+    }
+    // Other public pages are untouched, and a bad Host is still refused before any redirect.
+    expect((await app.inject({ url: "/", headers: { host: HOST } })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/sign-in", headers: { host: `evil.example:${PORT}` } })).statusCode).toBe(403);
+  });
+
+  it("the routes that mint a session are 403 bad_host on a loopback Host and run on the app hostname", async () => {
+    for (const url of ["/api/auth/key/verify", "/api/join/abc/key"]) {
+      for (const host of [HOST, `localhost:${PORT}`]) {
+        const res = await app.inject({ method: "POST", url, headers: { host }, payload: {} });
+        expect(res.statusCode, `${host}${url}`).toBe(403);
+        expect(res.json()).toEqual({ error: "bad_host" });
+        expect(res.headers["set-cookie"]).toBeUndefined();
+      }
+      const ok = await app.inject({ method: "POST", url, headers: { host: APP }, payload: {} });
+      expect(ok.statusCode, url).toBe(200);
+      expect(ok.json()).toEqual({ minted: true });
+    }
   });
 });
 
@@ -441,38 +495,38 @@ describe("remote listener", () => {
 
 describe("roles", () => {
   it("requireRole: 403 with the required role for a rank below, pass at or above", async () => {
-    const forbidden = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: HOST, cookie: sessionCookie("p-reviewer") } });
+    const forbidden = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: APP, cookie: sessionCookie("p-reviewer") } });
     expect(forbidden.statusCode).toBe(403);
     expect(forbidden.json()).toEqual({ error: "forbidden", required: "maintainer" });
     for (const id of ["p-maintainer", "owner"]) {
-      const ok = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: HOST, cookie: sessionCookie(id) } });
+      const ok = await app.inject({ method: "POST", url: "/api/me/sign-out", headers: { host: APP, cookie: sessionCookie(id) } });
       expect(ok.statusCode).toBe(200);
     }
   });
 
   it("the table decides on every request: a viewer reads the board and may not export the ledger or create a project", async () => {
     const cookie = sessionCookie("p-viewer");
-    expect((await app.inject({ url: "/api/projects", headers: { host: HOST, cookie } })).statusCode).toBe(200);
-    const exp = await app.inject({ url: "/api/ledger/export", headers: { host: HOST, cookie } });
+    expect((await app.inject({ url: "/api/projects", headers: { host: APP, cookie } })).statusCode).toBe(200);
+    const exp = await app.inject({ url: "/api/ledger/export", headers: { host: APP, cookie } });
     expect(exp.statusCode).toBe(403);
     expect(exp.json()).toEqual({ error: "forbidden", required: "reviewer" });
-    const create = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "X" }, headers: { host: HOST, cookie } });
+    const create = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "X" }, headers: { host: APP, cookie } });
     expect(create.statusCode).toBe(403);
     expect(create.json()).toEqual({ error: "forbidden", required: "maintainer" });
-    const invites = await app.inject({ url: "/api/people/invites", headers: { host: HOST, cookie: sessionCookie("p-maintainer") } });
+    const invites = await app.inject({ url: "/api/people/invites", headers: { host: APP, cookie: sessionCookie("p-maintainer") } });
     expect(invites.statusCode).toBe(403);
     expect(invites.json()).toEqual({ error: "forbidden", required: "owner" });
   });
 
   it("a reviewer exports the ledger and the Owner reads the invites", async () => {
-    expect((await app.inject({ url: "/api/ledger/export", headers: { host: HOST, cookie: sessionCookie("p-reviewer") } })).statusCode).toBe(200);
+    expect((await app.inject({ url: "/api/ledger/export", headers: { host: APP, cookie: sessionCookie("p-reviewer") } })).statusCode).toBe(200);
     expect((await app.inject({ url: "/api/people/invites", headers: bearer })).statusCode).toBe(200);
   });
 
   it("HEAD takes its GET's role", async () => {
-    const viewer = await app.inject({ method: "HEAD", url: "/api/ledger/export", headers: { host: HOST, cookie: sessionCookie("p-viewer") } });
+    const viewer = await app.inject({ method: "HEAD", url: "/api/ledger/export", headers: { host: APP, cookie: sessionCookie("p-viewer") } });
     expect(viewer.statusCode).toBe(403);
-    const reviewer = await app.inject({ method: "HEAD", url: "/api/ledger/export", headers: { host: HOST, cookie: sessionCookie("p-reviewer") } });
+    const reviewer = await app.inject({ method: "HEAD", url: "/api/ledger/export", headers: { host: APP, cookie: sessionCookie("p-reviewer") } });
     expect(reviewer.statusCode).toBe(200);
     expect(routeKey("HEAD", "/api/ledger/export")).toBe("GET /api/ledger/export");
     expect(routeKey("post", "/api/projects")).toBe("POST /api/projects");
@@ -535,7 +589,7 @@ describe("assertRoutesHaveRoles", () => {
 
 describe("session cookie and client key", () => {
   it("the session cookie is HttpOnly, SameSite=Strict, Path=/, and Secure only on remote", async () => {
-    const local = await app.inject({ method: "POST", url: "/api/me/credentials/passkey/verify", headers: { host: HOST, cookie: sessionCookie("p-viewer") } });
+    const local = await app.inject({ method: "POST", url: "/api/me/credentials/passkey/verify", headers: { host: APP, cookie: sessionCookie("p-viewer") } });
     expect(local.statusCode).toBe(200);
     const localCookie = String(local.headers["set-cookie"]);
     expect(localCookie).toContain(`${SESSION_COOKIE}=`);
