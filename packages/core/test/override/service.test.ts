@@ -137,8 +137,15 @@ describe("command", () => {
 
   it("kills a program that runs too long", async () => {
     service = new OverrideService(depsWith({ timeoutMs: 200 }));
-    const { overrideId } = await service.command(owner, run.id, node("setTimeout(()=>{},5000)"));
-    expect(await completion(overrideId)).toMatchObject({ ok: false, timedOut: true, signal: "SIGKILL", exitCode: null });
+    const { overrideId } = await service.command(owner, run.id, node("console.log(process.pid);setTimeout(()=>{},5000)"));
+    const done = await completion(overrideId);
+    expect(done).toMatchObject({ ok: false, timedOut: true, signal: "SIGKILL", exitCode: null });
+    // The completion is recorded at the timeout, not when the kill lands: on Windows `taskkill` is asynchronous, so
+    // the program may still hold its working directory (the worktree) for a moment. Wait until it is gone before the
+    // cleanup removes that directory (the program ends by itself after 5 s in any case).
+    const pid = Number(done.output.trim());
+    expect(pid).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 10_000 });
   });
 
   it("kills a program whose output passes the buffer and keeps what was read", async () => {

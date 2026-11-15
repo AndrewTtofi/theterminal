@@ -28,6 +28,13 @@ function expectNoFragment(text: string, secret: string): void {
 const FAKE = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_KEY = "sk-TESTKEY0123456789abcdef";
 const CMD = "item/commandExecution/requestApproval";
+
+// The "through the runner" tests start runs through AgentRunner: each start creates the project repository and the
+// worktree through runGit, whose hardening checks make five or six git processes of every call, about fifty per start,
+// then the fake app-server's process. Seconds on Windows CI, where a process start is slow and the suite shares two
+// cores; the default 5 s is too short for one start there.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
 const FILE = "item/fileChange/requestApproval";
 const CWD = join("tmp", "worktree");
 
@@ -172,7 +179,8 @@ describe("CodexAdapter (fake app-server)", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
-    rmSync(dir, { recursive: true, force: true });
+    // Windows: a git or fake-CLI process going away may still hold a file in the directory for a moment.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   /** For tests that build the adapter before script(): filled in by script(), still a fixed object per adapter. */
@@ -489,6 +497,8 @@ describe("CodexAdapter (fake app-server)", () => {
     }
   }, 60_000);
 
+  // Twelve runs through the runner, each a run start (about fifty git processes: see GIT_TEST_TIMEOUT_MS) and the
+  // fake app-server's process: 5 to 10 s each on Windows CI, where the 60 s given elsewhere ran out mid-loop.
   it("through the runner: a key split across two stderr chunks leaves no fragment in agent.finished or anywhere in the ledger", async () => {
     const db = openDatabase(":memory:");
     const ledger = new Ledger(db);
@@ -513,7 +523,7 @@ describe("CodexAdapter (fake app-server)", () => {
     } finally {
       await runner.shutdown();
     }
-  }, 60_000);
+  }, process.platform === "win32" ? 240_000 : 60_000);
 
   it("through the runner: a stored secret across the old command and stdin caps leaves no fragment in the record", async () => {
     const db = openDatabase(":memory:");
