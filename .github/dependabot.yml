@@ -14,10 +14,9 @@
 version: 2
 updates:
   - package-ecosystem: npm
-    directories:
-      - /
-      - /packages/*
-      - /apps/*
+    # The root only: pnpm resolves the whole workspace from the one lockfile, so a bump of a package declared in
+    # several workspace packages is one pull request instead of one per directory.
+    directory: /
     schedule:
       interval: weekly
       day: monday
@@ -35,6 +34,12 @@ updates:
       npm-security:
         applies-to: security-updates
         update-types: [minor, patch]
+    ignore:
+      # The Node types follow the oldest Node the server supports (package.json engines: node >=22). A newer
+      # major of @types/node describes APIs that Node 22 lacks, so only its minor and patch updates are taken
+      # until engines moves.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
