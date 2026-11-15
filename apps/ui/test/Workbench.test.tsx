@@ -154,9 +154,10 @@ describe("Workbench", () => {
     render(<Workbench model={model()} />);
     await userEvent.click(view("Agents"));
     expect(view("Agents").getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("combobox", { name: "Agent" })).toBeTruthy();
-    expect(screen.getByLabelText("Prompt")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start agent" })).toBeTruthy();
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    expect(agents.getByRole("combobox", { name: "Agent" })).toBeTruthy();
+    expect(agents.getByLabelText("Prompt")).toBeTruthy();
+    expect(agents.getByRole("button", { name: "Start agent" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Projects" })).toBeNull();
 
     await userEvent.click(view("Board"));
@@ -176,8 +177,9 @@ describe("Workbench", () => {
     const m = model();
     render(<Workbench model={m} />);
     await userEvent.click(view("Agents"));
-    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    await userEvent.type(agents.getByLabelText("Prompt"), "hello");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", []);
   });
 
@@ -389,9 +391,10 @@ describe("Workbench", () => {
     const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
     render(<Workbench model={m} />);
     await userEvent.click(view("Agents"));
-    await userEvent.selectOptions(screen.getByLabelText("Card (optional)"), "Login");
-    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(screen.getByRole("region", { name: "Agents" }));
+    await userEvent.selectOptions(agents.getByLabelText("Card (optional)"), "Login");
+    await userEvent.type(agents.getByLabelText("Prompt"), "hello");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", [], "c1");
   });
 
@@ -423,6 +426,9 @@ describe("Workbench", () => {
       expect(panels(container)).toEqual(["board", "conversation"]);
       expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
       expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
+      const conversation = container.querySelector<HTMLElement>('[data-panel="conversation"]')!;
+      expect(within(conversation).getByRole("region", { name: "Conversation" })).toBeTruthy();
+      expect(within(conversation).getByRole("region", { name: "Ask an agent" })).toBeTruthy();
     });
 
     it("keeps a decision in the strip with the Guided layout in the Connections view, and badges it", async () => {

@@ -28,9 +28,10 @@ function useThrottled(value: number, ms: number): number {
  * `keys` are the items' keys, oldest first; each item element carries its key as `data-key`. While the Owner reads
  * further up, the item at the top of the view stays where it is even when old items are dropped above it (the list
  * sets `overflow-anchor: none` and this hook does the anchoring), `fresh` counts the items that arrived since (at
- * most once a second), and `jump` scrolls back to the bottom and follows again.
+ * most once a second), and `jump` scrolls back to the bottom and follows again. `version` names content that can
+ * grow inside the newest item (a run's answers): while following, a change scrolls to the bottom again.
  */
-export function useFollowBottom<E extends HTMLElement>(keys: readonly string[]) {
+export function useFollowBottom<E extends HTMLElement>(keys: readonly string[], version: string | number = 0) {
   const ref = useRef<E | null>(null);
   // The newest key when the Owner scrolled away (the empty string for an empty list); null while following.
   const [seen, setSeen] = useState<string | null>(null);
@@ -60,7 +61,7 @@ export function useFollowBottom<E extends HTMLElement>(keys: readonly string[]) 
       if (item) el.scrollTop = item.offsetTop - offset;
     }
     capture();
-  }, [newest, oldest, seen]);
+  }, [newest, oldest, seen, version]);
 
   const onScroll = () => {
     const el = ref.current;

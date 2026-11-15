@@ -285,7 +285,8 @@ describe("App needs-you strip", () => {
     m.listAllPendingActions.mockResolvedValue([pendingAction("a1", "A", "run ls"), pendingAction("b1", "B", "run make")]);
     render(<App />);
     const strip = await screen.findByRole("region", { name: "Needs you" });
-    expect(screen.getByText("Select or create a project.")).toBeTruthy();
+    // The Board and the Conversation both ask for a project.
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
     const cards = strip.querySelectorAll("article");
     expect([...cards].map((c) => c.getAttribute("aria-label"))).toEqual(["Decision: run ls", "Decision: run make"]);
     expect(cards[0]!.textContent).toContain("Project A");
@@ -335,7 +336,8 @@ describe("App provider settings", () => {
     render(<App />);
     await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
-    expect(screen.getByText("Select or create a project.")).toBeTruthy();
+    // The Board and the Conversation both ask for a project.
+    expect(screen.getAllByText("Select or create a project.")).toHaveLength(2);
   });
 
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
@@ -731,9 +733,10 @@ describe("App readiness gates", () => {
     m.startRun.mockResolvedValue({ id: "r1" } as never);
     await openA();
     await userEvent.click(within(views()).getByRole("button", { name: "Agents" }));
-    await userEvent.selectOptions(await screen.findByLabelText("Card (optional)"), "Login");
-    await userEvent.type(screen.getByLabelText("Prompt"), "add sign-in");
-    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    const agents = within(await screen.findByRole("region", { name: "Agents" }));
+    await userEvent.selectOptions(await agents.findByLabelText("Card (optional)"), "Login");
+    await userEvent.type(agents.getByLabelText("Prompt"), "add sign-in");
+    await userEvent.click(agents.getByRole("button", { name: "Start agent" }));
     expect(m.startRun).toHaveBeenCalledWith("A", { adapter: "claude", prompt: "add sign-in", cardId: "c1" });
   });
 

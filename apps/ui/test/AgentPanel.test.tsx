@@ -75,7 +75,7 @@ describe("AgentPanel", () => {
       <AgentPanel adapters={["fake"]} runs={[run]} selectedRunId={null} actions={[act]}
         onStart={vi.fn()} onSelectRun={onSelectRun} onStop={vi.fn()} />,
     );
-    const btn = screen.getByRole("button", { name: /completed · \$0\.50/ });
+    const btn = screen.getByRole("button", { name: /completed · \$0\.50 \(estimate\)/ });
     await userEvent.click(btn);
     expect(onSelectRun).toHaveBeenCalledWith("run1");
     rerender(

@@ -92,9 +92,9 @@ legend { color: var(--muted); padding: 0 4px; }
 .projects button:hover:not(:disabled) { background: var(--hover); }
 .projects button.selected { background: var(--selected); color: var(--fg-strong); }
 .projects input, .column input { width: 100%; }
-.agent-panel label { display: block; margin-bottom: 8px; }
-.agent-panel select { display: block; width: 100%; margin-top: 2px; }
-.agent-panel textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
+.start-run label { display: block; margin-bottom: 8px; }
+.start-run select { display: block; width: 100%; margin-top: 2px; }
+.start-run textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
 .run-connections { border: 1px solid var(--line-strong); margin: 0 0 8px; padding: 4px 8px; }
 .run-connections legend { color: var(--muted); padding: 0 4px; }
 .run-connections label { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
@@ -194,6 +194,24 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .feed-items li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
 .agent-feed .live { margin: 0; font-size: 12px; color: var(--muted); }
 .agent-feed .jump, .terminal .jump { align-self: center; font-size: 12px; }
+
+/* Conversation: the asks and answers scroll; the Ask form stays below them. */
+.conversation { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; padding: 8px 12px; }
+.conversation .thread { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; margin: 0; padding: 0; list-style: none; }
+.conversation .thread:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.conversation .thread > li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.conversation article header { display: flex; gap: 8px; align-items: baseline; }
+.conversation article h3 { margin: 0; }
+.conversation article time, .conversation .result { color: var(--muted); font-size: 12px; }
+.conversation blockquote { margin: 6px 0; padding: 4px 8px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation .agent-says { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation .result { margin: 6px 0 4px; }
+.conversation .actions { display: flex; gap: 6px; }
+.conversation .jump { align-self: center; font-size: 12px; }
+.conversation .ask { border-top: 1px solid var(--line-strong); padding-top: 8px; }
+.conversation .ask > .note { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.board-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+.board-head .spend { margin: 0; color: var(--muted); font-size: 12px; }
 .terminal-lines { background: var(--panel); padding: 6px 8px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .terminal-lines li { white-space: pre-wrap; word-break: break-word; }
 .terminal-lines .term-command, .terminal-lines .term-typed { color: var(--fg-strong); }
