@@ -172,8 +172,9 @@ export type WorkbenchModel = {
      */
     onPreview(): Promise<boolean>;
     /**
-     * Saves the previewed page: true once saved; false, sending nothing, with no preview or while a confirm is in
-     * flight. A refusal rejects with the server's error; a stale or expired preview is dropped first.
+     * Saves the previewed page: true once saved, and the preview is dropped (another save needs a new preview);
+     * false, sending nothing, with no preview or while a confirm is in flight. A refusal rejects with the server's
+     * error; a stale or expired preview is dropped first.
      */
     onConfirm(): Promise<boolean>;
     snapshots: ShareSnapshotRecord[];

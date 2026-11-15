@@ -49,8 +49,18 @@ describe("SharePanel", () => {
     await userEvent.click(confirmButton());
     expect(model.share.onConfirm).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("Saved. Open, download or share it from the Share view.")).toBeTruthy();
-    expect(ack.checked).toBe(false);
-    expect(confirmButton().disabled).toBe(true);
+    expect(ack.isConnected).toBe(false);
+  });
+
+  it("clears the preview once saved, keeping Saved. on screen, so another save needs a new preview", async () => {
+    const { model } = renderShare(<SharePanel id="share" />, { share: { preview: preview() } });
+    await userEvent.click(screen.getByRole("checkbox", { name: ACK }));
+    await userEvent.click(confirmButton());
+    expect(await screen.findByText("Saved. Open, download or share it from the Share view.")).toBeTruthy();
+    expect(screen.queryByTitle("Share page preview")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm and save snapshot" })).toBeNull();
+    expect(screen.getByText(NO_PREVIEW)).toBeTruthy();
+    expect(model.share.onConfirm).toHaveBeenCalledTimes(1);
   });
 
   it("on a stale preview says so and clears the preview", async () => {

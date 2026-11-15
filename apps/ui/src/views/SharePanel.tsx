@@ -21,18 +21,23 @@ export function SharePanel(_props: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  /** The preview the server refused as stale: hidden here at once, whatever the model still holds. */
+  /**
+   * The preview that is done with, hidden here at once whatever the model still holds: one the server refused as
+   * stale, or one already saved (a second save needs a new preview, never the same previewId twice).
+   */
   const [dropped, setDropped] = useState<string | null>(null);
   const previewId = preview?.previewId ?? null;
   const shownId = useRef(previewId);
 
-  // A new preview starts unread: the acknowledgement and the last outcome go.
+  // A new preview starts unread: the acknowledgement and the last outcome go. Clearing the preview after a save
+  // keeps "Saved." on screen.
   useEffect(() => {
     if (shownId.current === previewId) return;
     shownId.current = previewId;
     setAck(false);
+    if (previewId === null) return;
     setSaved(false);
-    if (previewId !== null) setError(null);
+    setError(null);
   }, [previewId]);
 
   const confirm = async () => {
@@ -44,6 +49,7 @@ export function SharePanel(_props: { id: string }) {
       if (await onConfirm()) {
         setSaved(true);
         setAck(false);
+        if (previewId !== null) setDropped(previewId);
       }
     } catch (e) {
       if (isStale(e) && previewId !== null) setDropped(previewId);

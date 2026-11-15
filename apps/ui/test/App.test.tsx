@@ -1073,7 +1073,7 @@ describe("App Share view", () => {
     expect(screen.queryByTitle("Share page preview")).toBeNull();
   });
 
-  it("confirms a preview and reloads the snapshots", async () => {
+  it("confirms a preview, drops it, and reloads the snapshots", async () => {
     m.previewShare.mockResolvedValue(preview());
     m.confirmShare.mockResolvedValue(snapshotRecord());
     await openShare();
@@ -1084,6 +1084,10 @@ describe("App Share view", () => {
     await userEvent.click(screen.getByRole("button", { name: "Confirm and save snapshot" }));
     expect(await screen.findByText("Saved. Open, download or share it from the Share view.")).toBeTruthy();
     await waitFor(() => expect(m.listShareSnapshots).toHaveBeenCalledWith("A"));
+    // The confirmed preview is gone: saving again needs a new preview, and its previewId is never sent twice.
+    expect(screen.queryByTitle("Share page preview")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm and save snapshot" })).toBeNull();
+    expect(m.confirmShare).toHaveBeenCalledTimes(1);
   });
 
   it("creates a link for a snapshot and revokes it", async () => {

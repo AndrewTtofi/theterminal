@@ -775,6 +775,8 @@ export function App() {
         confirming.current = true;
         try {
           await api.confirmShare(projectId, p.previewId, p.contentHash);
+          // Saved: the preview is done with, so another save needs a new preview, never the same previewId twice.
+          setSharePreview((prev) => (prev?.previewId === p.previewId ? null : prev));
           refreshShare.current();
           return true;
         } catch (e) {
