@@ -98,6 +98,9 @@ legend { color: var(--muted); padding: 0 4px; }
 .runs button.selected { background: var(--selected); color: var(--fg-strong); }
 .needs-you-list li { margin-bottom: 6px; }
 .ledger-side label { display: block; padding: 2px 0; }
+.ledger-side fieldset + fieldset { margin-top: 8px; }
+.ledger-export { margin: 12px 0 0; }
+.ledger-export .note { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
 .side-group { margin-bottom: 12px; }
 .side-group h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 8px 0 4px; }
 .connections-search { width: 100%; margin: 4px 0 8px; }
@@ -167,6 +170,11 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .ledger > h2 { display: none; }
 .feed-run { margin: 0 0 8px; color: var(--fg-strong); }
 .run-actions li { padding: 2px 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.ledger li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
+.action-status { color: var(--muted); }
+.run-messages li { padding: 2px 0; font-size: 12px; white-space: pre-wrap; }
+details.raw > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); padding: 6px; margin: 2px 0 4px; white-space: pre-wrap; word-break: break-word; }
 .feed-error { color: var(--danger); }
 
 /* Messages */
@@ -174,6 +182,7 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .error { background: #4a1d22; color: #f5c6cb; padding: 4px 16px; }
 .decision-card { background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; padding: 8px; margin-bottom: 6px; }
 .decision-card pre { overflow: auto; max-height: 160px; background: var(--panel); padding: 6px; }
+.decision-card .means { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
 .decision-card .project-name, .decision-card .note { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
 .decision-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .warning { background: #3d3112; color: #f1deb0; border: 1px solid #7a6320; border-radius: 2px; padding: 6px; margin-top: 6px; }

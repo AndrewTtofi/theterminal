@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, LedgerEntry, PendingAgentAction, Project,
+  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, LedgerEntry, NarrationContext, NarrationTopic,
+  PendingAgentAction, Project,
 } from "@theterminal/shared";
+import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
+import { LEDGER_TOPICS } from "./shell/model";
 import type { LedgerScope, WorkbenchModel } from "./shell/model";
 import { useConnections } from "./use-connections";
 
@@ -41,6 +44,7 @@ export function App() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
+  const [ledgerTopics, setLedgerTopics] = useState<NarrationTopic[]>(LEDGER_TOPICS);
   const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
@@ -234,6 +238,10 @@ export function App() {
     };
   }, [ledgerScope, run]);
 
+  const titles = new Map(board ? Object.values(board.columns).flat().map((c) => [c.id, c.title] as const) : []);
+  const adapters = new Map(runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
+  const narration: NarrationContext = { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id) };
+
   const model: WorkbenchModel = {
     projects,
     selectedId,
@@ -291,6 +299,9 @@ export function App() {
     entries: ledgerScope === "all" ? allEntries : entries,
     ledgerScope,
     onLedgerScopeChange: setLedgerScope,
+    ledgerTopics,
+    onLedgerTopicsChange: setLedgerTopics,
+    narration,
     onProviderAuthChange: async (provider, mode, acknowledgement) => {
       try {
         setError(null);

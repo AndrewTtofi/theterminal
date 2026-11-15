@@ -23,9 +23,24 @@ const action: AgentAction = {
 describe("DecisionCard", () => {
   it("shows the title and collapsible details", () => {
     render(<DecisionCard action={action} onDecide={vi.fn()} />);
-    expect(screen.getByText("Agent wants to: run npm test")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 3 }).textContent).toBe('Agent wants to run the command "npm test"');
     expect(screen.getByText("Details")).toBeTruthy();
     expect(document.querySelector("pre")?.textContent).toContain("npm test");
+  });
+
+  it("says what the kind of action means, and keeps the summary in its label", () => {
+    const { container } = render(<DecisionCard action={action} onDecide={vi.fn()} />);
+    expect(container.querySelector("p.means")?.textContent).toBe(
+      "Runs a program on this computer, inside the agent's working copy. It can read and change files there and reach the network.",
+    );
+    expect(screen.getByRole("article", { name: "Decision: run npm test" })).toBeTruthy();
+  });
+
+  it("phrases other kinds from their input", () => {
+    const read = { ...action, kind: "file_read" as const, tool: "Read", summary: "Read: a.md", input: { file_path: "docs/a.md" } };
+    const { container } = render(<DecisionCard action={read} onDecide={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 3 }).textContent).toBe("Agent wants to read docs/a.md");
+    expect(container.querySelector("p.means")?.textContent).toBe("Reads a file inside the agent's working copy of the project. Nothing changes.");
   });
 
   it("allows", async () => {
@@ -108,6 +123,13 @@ describe("DecisionCard", () => {
     expect(container.querySelector("pre.command")?.textContent).toBe(
       "a\\u0085b\\u009bc\\u200bd\\u200fe\\u202af\\u202eg\\u2066h\\u2069i j",
     );
+  });
+
+  it("makes hidden characters in a shell command visible", () => {
+    const sneaky = { ...action, input: { command: "echo safe\u202e; rm -rf ./out" } };
+    const { container } = render(<DecisionCard action={sneaky} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")?.textContent).toBe("echo safe\\u202e; rm -rf ./out");
+    expect(container.querySelector("details pre")?.textContent).toContain("echo safe\\u202e;");
   });
 
   it("shows no command block for other kinds of action", () => {

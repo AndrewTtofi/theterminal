@@ -33,8 +33,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
-    /** What the error names, when the server sends it: the connection whose cloud credentials could not be had. */
-    readonly detail?: string,
+    /** The rest of the error body (everything but `error`), when the server sent more; callers narrow it. */
+    readonly detail?: unknown,
   ) {
     super(`${status} ${code}`);
     this.name = "ApiError";
@@ -55,12 +55,14 @@ async function request<T>(
   });
   if (!res.ok) {
     let code = "internal";
-    let detail: string | undefined;
+    let detail: unknown;
     try {
-      const body = (await res.json()) as { error?: string; name?: unknown; adapter?: unknown };
-      code = body.error ?? code;
-      if (code === "cloud_credentials_failed" && typeof body.name === "string") detail = body.name;
-      if (code === "mcp_unsupported" && typeof body.adapter === "string") detail = body.adapter;
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+        const { error, ...rest } = body as Record<string, unknown>;
+        if (typeof error === "string") code = error;
+        if (Object.keys(rest).length > 0) detail = rest;
+      }
     } catch {
       // non-JSON error body: keep the default code
     }
@@ -171,13 +173,26 @@ export const CODEX_MCP_NOTE =
 export const GEMINI_MCP_NOTE =
   "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
 
+/** A string field of an error's detail, or undefined. */
+function detailString(e: ApiError, key: string): string | undefined {
+  const d = e.detail;
+  if (typeof d !== "object" || d === null) return undefined;
+  const v = (d as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Where the audit export downloads from: every project's entries, or one project's. */
+export function exportLedgerUrl(projectId: string | null): string {
+  return projectId === null ? "/api/ledger/export" : `/api/ledger/export?projectId=${encodeURIComponent(projectId)}`;
+}
+
 /** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
 export function errorMessage(e: unknown, context?: "run"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
-    if (e.status === 400 && e.code === "mcp_unsupported") return e.detail === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
     if (e.status === 400 && e.code === "duplicate_mcp_server") {
       return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
     }
@@ -185,7 +200,7 @@ export function errorMessage(e: unknown, context?: "run"): string {
       return "A run can be given only one connection per cloud provider. Untick the extra one.";
     }
     if (e.status === 502 && e.code === "cloud_credentials_failed") {
-      return `Could not get credentials from "${e.detail ?? "a cloud connection"}". The run did not start.`;
+      return `Could not get credentials from "${detailString(e, "name") ?? "a cloud connection"}". The run did not start.`;
     }
     if (e.status === 409 && e.code === "conflict") return "Already connected";
     if (e.code === "secret_in_config") return "That field must not contain a key or token";

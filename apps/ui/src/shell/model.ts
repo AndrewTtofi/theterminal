@@ -8,6 +8,8 @@ import type {
   CapacityReport,
   GitHubOverview,
   LedgerEntry,
+  NarrationContext,
+  NarrationTopic,
   PendingAgentAction,
   Project,
   Provider,
@@ -19,6 +21,9 @@ import type { DockApi } from "./Dock";
 import type { ViewId } from "./views";
 
 export type LedgerScope = "project" | "all";
+
+/** Every narration topic, in the order the ledger's filter lists them. */
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];
 
 /** Everything the shell shows and every action it can take; App owns the data and the API calls. */
 export type WorkbenchModel = {
@@ -46,6 +51,11 @@ export type WorkbenchModel = {
   entries: LedgerEntry[];
   ledgerScope: LedgerScope;
   onLedgerScopeChange: (scope: LedgerScope) => void;
+  /** Which narration topics the ledger shows; every topic by default. */
+  ledgerTopics: NarrationTopic[];
+  onLedgerTopicsChange: (topics: NarrationTopic[]) => void;
+  /** What narration may know beyond an entry: card titles from the board, adapter names from the runs. */
+  narration: NarrationContext;
 
   /** Resolves true when the server accepted the change. */
   onProviderAuthChange: (provider: Provider, mode: AuthMode, acknowledgement?: string) => Promise<boolean>;

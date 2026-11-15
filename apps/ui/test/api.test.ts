@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, errorMessage } from "../src/api";
+import { api, ApiError, errorMessage, exportLedgerUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -17,7 +17,35 @@ describe("run refusals from the server", () => {
   it("carries which agent refused MCP servers", async () => {
     respond(400, { error: "mcp_unsupported", adapter: "gemini" });
     const err = await api.startRun("p1", { adapter: "gemini", prompt: "go", connectionIds: ["m1"] }).catch((e: unknown) => e);
-    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: "gemini" });
+    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: { adapter: "gemini" } });
+  });
+});
+
+describe("error detail", () => {
+  it("carries the rest of the error body as the detail, whatever its shape", async () => {
+    respond(409, { error: "gate_blocked", gates: [{ id: "payments", met: false }] });
+    const err = await api.moveCard("c1", "ship").catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: "gate_blocked", detail: { gates: [{ id: "payments", met: false }] } });
+  });
+
+  it("has no detail for a bare error or a non-JSON body", async () => {
+    respond(404, { error: "not_found" });
+    expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "not_found", detail: undefined });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "internal", detail: undefined });
+  });
+
+  it("ignores a detail of the wrong type when wording a message", () => {
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", { name: 7 }), "run")).toBe(
+      'Could not get credentials from "a cloud connection". The run did not start.',
+    );
+  });
+});
+
+describe("audit export", () => {
+  it("links every project's ledger, or one project's", () => {
+    expect(exportLedgerUrl(null)).toBe("/api/ledger/export");
+    expect(exportLedgerUrl("p/1 x")).toBe("/api/ledger/export?projectId=p%2F1%20x");
   });
 });
 
@@ -68,7 +96,7 @@ describe("connections api", () => {
     expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
     respond(502, { error: "cloud_credentials_failed", name: "AWS dev" });
     await expect(api.startRun("p1", { adapter: "claude", prompt: "go" })).rejects.toMatchObject({
-      status: 502, code: "cloud_credentials_failed", detail: "AWS dev",
+      status: 502, code: "cloud_credentials_failed", detail: { name: "AWS dev" },
     });
   });
 
@@ -98,13 +126,13 @@ describe("errorMessage", () => {
     expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
       "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
     );
-    expect(errorMessage(new ApiError(400, "mcp_unsupported", "gemini"), "run")).toBe(
+    expect(errorMessage(new ApiError(400, "mcp_unsupported", { adapter: "gemini" }), "run")).toBe(
       "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.",
     );
     expect(errorMessage(new ApiError(400, "duplicate_mcp_server"), "run")).toBe(
       "Two of the selected MCP servers would get the same name in this run. Untick one of them.",
     );
-    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", "AWS dev"), "run")).toBe(
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", { name: "AWS dev" }), "run")).toBe(
       'Could not get credentials from "AWS dev". The run did not start.',
     );
   });

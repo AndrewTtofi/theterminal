@@ -80,6 +80,9 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     entries: [entry],
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
+    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
+    onLedgerTopicsChange: vi.fn(),
+    narration: {},
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
     github: { overview: null, error: null, refresh: vi.fn() },
@@ -148,14 +151,14 @@ describe("Workbench", () => {
     const { container } = render(<Workbench model={model({ selectedRunId: "run1", runActions: [action] })} />);
     const feed = container.querySelector<HTMLElement>('[data-panel="agent_feed"]')!;
     expect(within(feed).getByText(/Detect GPU/)).toBeTruthy();
-    expect(within(feed).getByText(/read README\.md · allowed · decided by policy/)).toBeTruthy();
+    expect(within(feed).getByRole("listitem").textContent).toMatch(/Allowed to read read README\.md.*allowed · decided by policy/);
   });
 
   it("keeps the ledger in an aside labelled Ledger in the bottom panel", () => {
     const { container } = render(<Workbench model={model()} />);
     const panel = container.querySelector<HTMLElement>('[data-panel="ledger"]')!;
     const aside = within(panel).getByRole("complementary", { name: "Ledger" });
-    expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created project "Local Model Hub"');
+    expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created the project "Local Model Hub"');
   });
 
   it("switches the ledger scope from the Ledger side bar", async () => {

@@ -46,6 +46,7 @@ vi.mock("../src/api", () => ({
     }
   },
   errorMessage: () => "err",
+  exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
   subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
     const sub = { after, cb };
     h.subs.add(sub);
@@ -212,7 +213,7 @@ describe("App needs-you strip", () => {
     await waitFor(() => expect([...h.subs].map((x) => x.after)).toContain(7));
     expect(screen.queryByText("Needs you")).toBeNull();
     act(() => h.onEntry?.(agentEntry(8, "B")));
-    expect(await screen.findByText("Agent wants to: run make")).toBeTruthy();
+    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Project B");
   });
 
@@ -334,6 +335,45 @@ describe("App ledger scope", () => {
 
     await userEvent.click(screen.getByRole("radio", { name: "This project" }));
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+  });
+
+  it("narrates with the card titles on the board and the adapters of the runs", async () => {
+    const card = { id: "c9", projectId: "A", title: "Login", stage: "build", status: "todo", createdAt: "" };
+    m.getBoard.mockResolvedValue({ ...mk("A"), columns: { ...mk("A").columns, build: [card] } } as Board);
+    m.listRuns.mockResolvedValue([
+      { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w",
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+    ]);
+    m.listLedger.mockResolvedValue([
+      { ...entry(1, "A", "x"), type: "card.moved", payload: { cardId: "c9", from: "build", to: "ship" } },
+      { ...entry(2, "A", "x"), type: "agent.message", actor: { kind: "agent", id: "r1" }, payload: { runId: "r1", text: "hi" } },
+    ]);
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(ledger().textContent).toContain('Owner moved "Login" from Build to Ship'));
+    await waitFor(() => expect(ledger().textContent).toContain('The Claude agent said: "hi"'));
+  });
+
+  it("filters the ledger by topic and exports the scope it shows", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listLedger.mockImplementation((projectId) =>
+      Promise.resolve(projectId === null ? [entry(1, "A", "Project A"), entry(2, "B", "Project B")] : [entry(1, "A", "Project A")]),
+    );
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    expect(screen.getByRole("link", { name: "Export for audit" }).getAttribute("href")).toBe("/export?projectId=A");
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Board" }));
+    expect(within(ledger()).queryAllByRole("listitem")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("checkbox", { name: "Board" }));
+    expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    expect(screen.getByRole("link", { name: "Export for audit" }).getAttribute("href")).toBe("/export");
   });
 });
 

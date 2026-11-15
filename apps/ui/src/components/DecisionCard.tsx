@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ACTION_KIND_MEANS, actionPhrase, visibleControls } from "@theterminal/shared";
 import type { AgentAction } from "@theterminal/shared";
 import { ApiError } from "../api";
 
@@ -18,24 +19,16 @@ function hiddenChars(input: unknown): number | null {
   return Math.max(0, totalChars - shown);
 }
 
-/** C0 and C1 controls other than a line break and a tab, and bidi and zero-width characters. */
-const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
-const SHORT_ESCAPES: Record<string, string> = { "\b": "\\b", "\f": "\\f", "\r": "\\r" };
-
-/** Characters that could hide, reorder or restyle what is shown, as JSON escapes (`\r`, `\u001b`, `\u202e`). */
-const visibleControls = (s: string): string =>
-  s.replace(HIDDEN_CHARS, (c) => SHORT_ESCAPES[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-
 /**
  * The full command of a shell action (the title is capped), or null. For input to a running command
- * (`codex.stdin`) it is the text that will be typed, not the command already running, with its control
- * characters made visible.
+ * (`codex.stdin`) it is the text that will be typed, not the command already running. Either way its control,
+ * bidi and zero-width characters are made visible.
  */
 function shellCommand(action: AgentAction): string | null {
   if (action.kind !== "shell" || typeof action.input !== "object" || action.input === null) return null;
   const { command, reason } = action.input as { command?: unknown; reason?: unknown };
   if (action.tool === "codex.stdin") return typeof reason === "string" ? visibleControls(reason) : null;
-  return typeof command === "string" ? command : null;
+  return typeof command === "string" ? visibleControls(command) : null;
 }
 
 export function DecisionCard({ action, projectName, onDecide }: Props) {
@@ -63,11 +56,12 @@ export function DecisionCard({ action, projectName, onDecide }: Props) {
   return (
     <article className="decision-card" aria-label={`Decision: ${action.summary}`}>
       {projectName !== undefined && <p className="project-name">{projectName}</p>}
-      <h3>Agent wants to: {action.summary}</h3>
+      <h3>Agent wants to {actionPhrase(action)}</h3>
+      <p className="means">{ACTION_KIND_MEANS[action.kind] ?? ACTION_KIND_MEANS.other}</p>
       {command !== null && <pre className="command">{command}</pre>}
       <details>
         <summary>Details</summary>
-        <pre>{JSON.stringify(action.input, null, 2)}</pre>
+        <pre>{visibleControls(JSON.stringify(action.input, null, 2) ?? "")}</pre>
       </details>
       {hidden !== null && <p className="note">{hidden} characters hidden — full input not shown</p>}
       {denying ? (
