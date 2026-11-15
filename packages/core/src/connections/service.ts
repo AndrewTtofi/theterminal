@@ -13,6 +13,7 @@ import {
   type ConnectionKind,
   type ConnectionProvider,
   type FieldStorage,
+  type CapacityHardware,
   type HardwareInfo,
   type NewLedgerEntry,
   type Provider,
@@ -608,10 +609,11 @@ export class ConnectionService {
     });
   }
 
-  /** The last detection recorded in an enabled This computer connection, or null. */
-  hardware(): HardwareInfo | null {
-    const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER && r.enabled === 1);
-    return row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
+  /** The last detection recorded in the This computer connection, with whether it is enabled; null when none. */
+  hardware(): CapacityHardware | null {
+    const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
+    const info = row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
+    return row && info ? { ...info, enabled: row.enabled === 1 } : null;
   }
 
   /** The plan and monthly budget of each enabled model connection. */

@@ -75,7 +75,9 @@ describe("StatusBar", () => {
     const { rerender } = render(<StatusBar status={{ ...status(), monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
     const bar = screen.getByRole("contentinfo", { name: "Status bar" });
     expect(bar.textContent).toContain("Today: $0.40 · Month: $12.00 of $50.00");
-    expect(screen.getByText("· Month: $12.00 of $50.00", { exact: false }).className).not.toContain("attention");
+    const monthItem = screen.getByText("· Month: $12.00 of $50.00", { exact: false });
+    expect(monthItem.className).not.toContain("attention");
+    expect(monthItem.getAttribute("title")).toBe("Includes estimates: Claude's cost is computed by its SDK, not billed by the provider.");
     rerender(<StatusBar status={{ ...status(), monthCostUsd: 50, monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
     expect(screen.getByText("· Month: $50.00 of $50.00", { exact: false }).className).toContain("attention");
   });

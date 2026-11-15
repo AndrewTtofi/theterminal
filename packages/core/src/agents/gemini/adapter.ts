@@ -613,12 +613,6 @@ class GeminiRun {
     };
   }
 
-  /**
-   * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
-   * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
-   * An open private key block is never cut: it is held until its END marker arrives, and only the end of the run
-   * flushes one still open, as REDACTED. One that reaches MAX_HELD_BLOCK goes out as REDACTED at once.
-   */
   /** Emits rate_limited once when `message` reads as a rate limit (a heuristic, so the count is an estimate). */
   private noteRateLimit(message: string): void {
     if (this.rateLimited || !GEMINI_RATE_LIMIT.test(message)) return;
@@ -626,6 +620,12 @@ class GeminiRun {
     this.o.emit({ type: "rate_limited" });
   }
 
+  /**
+   * Streamed chunks are joined into one message: flushed whole before any tool activity and when the run ends; while
+   * streaming, after a pause or at MESSAGE_MAX_WAIT_MS, and when large, with its tail held back (see `streamCut`).
+   * An open private key block is never cut: it is held until its END marker arrives, and only the end of the run
+   * flushes one still open, as REDACTED. One that reaches MAX_HELD_BLOCK goes out as REDACTED at once.
+   */
   private text(t: string): void {
     this.pendingText += t;
     while (this.pendingText.length >= MAX_HELD_BLOCK) {

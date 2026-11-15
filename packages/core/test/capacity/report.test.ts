@@ -17,13 +17,13 @@ function seed() {
          VALUES (?, 'p1', ?, 'api_key', 'p', 'completed', 'wt', ?, ?, ?, ?)`,
       )
       .run(`r${++n}`, adapter, cost, tokens[0], tokens[1], at(started));
-  const limit = (adapter: string, when: Date, retry: number | null = null) =>
-    db.prepare("INSERT INTO rate_limits (run_id, adapter, at, retry_after_s) VALUES ('r', ?, ?, ?)").run(adapter, at(when), retry);
+  const limit = (adapter: string, when: Date, retry: number | null = null, runId = "r") =>
+    db.prepare("INSERT INTO rate_limits (run_id, adapter, at, retry_after_s) VALUES (?, ?, ?, ?)").run(runId, adapter, at(when), retry);
   return { db, run, limit };
 }
 
 const MODES: Record<Provider, AuthMode> = { claude: "api_key", codex: "chatgpt", gemini: "google" };
-const report = (db: Db, budgets: Budget[] = [], hardware: HardwareInfo | null = null) =>
+const report = (db: Db, budgets: Budget[] = [], hardware: (HardwareInfo & { enabled: boolean }) | null = null) =>
   capacityReport(db, { budgets: () => budgets, modes: (p) => MODES[p], hardware: () => hardware, now: () => NOW });
 const source = (r: ReturnType<typeof report>, p: Provider) => r.sources.find((s) => s.provider === p)!;
 
@@ -73,6 +73,19 @@ describe("capacityReport", () => {
     expect(source(report(db), "gemini").today.costUsd).toEqual({ value: 0.05, basis: "reported" });
   });
 
+  it("counts each run once however many rate limits it hit, per adapter", () => {
+    const { db, limit } = seed();
+    const hourAgo = new Date(NOW.getTime() - 3600_000);
+    limit("claude", new Date(NOW.getTime() - 3 * 3600_000), null, "r1");
+    limit("claude", new Date(NOW.getTime() - 2 * 3600_000), 30, "r1");
+    limit("claude", hourAgo, null, "r1");
+    limit("claude", hourAgo, null, "r2");
+    limit("codex", hourAgo, null, "r1");
+    const r = report(db);
+    expect(source(r, "claude").rateLimits).toEqual({ last24h: 2, lastAt: hourAgo.toISOString(), basis: "estimate" });
+    expect(source(r, "codex").rateLimits.last24h).toBe(1);
+  });
+
   it("counts observed rate limits within the last 24 hours per adapter, as an estimate", () => {
     const { db, limit } = seed();
     const twoHoursAgo = new Date(NOW.getTime() - 2 * 3600_000);
@@ -87,10 +100,12 @@ describe("capacityReport", () => {
 
   it("takes the connection, plan and budget from budgets() and the hardware from its source", () => {
     const { db } = seed();
-    const hw: HardwareInfo = { cpu: "Fake CPU", cores: 8, memoryGb: 32, gpu: null, gpuMemoryGb: null, platform: "linux", wsl: false, detectedAt: NOW.toISOString() };
+    const hw: HardwareInfo & { enabled: boolean } = { enabled: true, cpu: "Fake CPU", cores: 8, memoryGb: 32, gpu: null, gpuMemoryGb: null, platform: "linux", wsl: false, detectedAt: NOW.toISOString() };
     const r = report(db, [{ connectionId: "c1", provider: "claude", name: "Work Claude", plan: "Max 5x", monthlyBudgetUsd: 50 }], hw);
     expect(source(r, "claude")).toMatchObject({ connectionId: "c1", name: "Work Claude", plan: "Max 5x", monthlyBudgetUsd: 50 });
     expect(source(r, "gemini").monthlyBudgetUsd).toBeNull();
     expect(r.hardware).toEqual(hw);
+    const off = report(db, [], { ...hw, enabled: false });
+    expect(off.hardware).toEqual({ ...hw, enabled: false });
   });
 });

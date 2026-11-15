@@ -100,6 +100,14 @@ describe("CapacitySideBar", () => {
     expect(section.textContent).toContain("Running inside WSL: the GPU is the Windows machine's.");
   });
 
+  it("says This computer is turned off in Connections when the Owner disabled it", async () => {
+    renderSideBar({ report: report({ hardware: { ...hardware, enabled: false } }) });
+    const section = screen.getByRole("region", { name: "This computer" });
+    expect(within(section).getByText("Turned off in Connections")).toBeTruthy();
+    expect(within(section).queryByText("Not detected yet")).toBeNull();
+    expect(section.textContent).not.toContain("CPU:");
+  });
+
   it("says when the report could not be loaded", () => {
     renderSideBar({ error: "request_failed" });
     expect(screen.getByText("Could not load capacity")).toBeTruthy();

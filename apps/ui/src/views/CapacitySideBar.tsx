@@ -95,7 +95,13 @@ export function CapacitySideBar() {
       </button>
       <section aria-labelledby={`${uid}-hw`}>
         <h3 id={`${uid}-hw`}>This computer</h3>
-        {report.hardware ? <HardwareLines hw={report.hardware} /> : <p className="empty">Not detected yet</p>}
+        {report.hardware === null ? (
+          <p className="empty">Not detected yet</p>
+        ) : report.hardware.enabled ? (
+          <HardwareLines hw={report.hardware} />
+        ) : (
+          <p className="empty">Turned off in Connections</p>
+        )}
         <button type="button" onClick={() => void detect()} disabled={detecting}>
           Detect this computer
         </button>

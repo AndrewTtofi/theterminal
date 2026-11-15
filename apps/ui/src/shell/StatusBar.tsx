@@ -2,6 +2,8 @@ import type { CiStatus } from "@theterminal/shared";
 import type { Status } from "../api";
 import type { ViewId } from "./views";
 
+const MONTH_TITLE = "Includes estimates: Claude's cost is computed by its SDK, not billed by the provider.";
+
 type Props = {
   /** The server's latest status; null until the first answer arrives. */
   status: Status | null;
@@ -29,7 +31,9 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
         <span className="status-item">
           Today: ${cost}
           {budget !== null && (
-            <span className={month >= budget ? "attention" : undefined}>{` · Month: $${month.toFixed(2)} of $${budget.toFixed(2)}`}</span>
+            <span className={month >= budget ? "attention" : undefined} title={MONTH_TITLE}>
+              {` · Month: $${month.toFixed(2)} of $${budget.toFixed(2)}`}
+            </span>
           )}
         </span>
         <button

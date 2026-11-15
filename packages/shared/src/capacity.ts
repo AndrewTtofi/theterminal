@@ -16,6 +16,7 @@ export type CapacitySource = {
   monthlyBudgetUsd: number | null;
   today: UsageWindow;
   month: UsageWindow;
+  /** `last24h`: runs that hit at least one rate limit in the last 24 hours (each run counted once). */
   rateLimits: { last24h: number; lastAt: string | null; basis: "estimate" };
 };
 
@@ -30,4 +31,7 @@ export type HardwareInfo = {
   detectedAt: string;
 };
 
-export type CapacityReport = { sources: CapacitySource[]; hardware: HardwareInfo | null; generatedAt: string };
+/** The last detection, and whether the Owner left This computer on (`enabled`) in Connections. */
+export type CapacityHardware = HardwareInfo & { enabled: boolean };
+
+export type CapacityReport = { sources: CapacitySource[]; hardware: CapacityHardware | null; generatedAt: string };
