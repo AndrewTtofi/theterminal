@@ -98,7 +98,11 @@ export type LinkManagerDeps = {
   newId?: () => string;
   /** 32 random bytes, base64url. Tests inject one; anything not shaped like that is refused. */
   randomToken?: () => string;
+  /** Where a background failure is reported (default `console.error`); it is only ever given a fixed sentence. */
+  log?: (message: string) => void;
 };
+
+const END_NOT_RECORDED = "The Terminal: a share link was closed but its end could not be recorded";
 
 type EndKind = "revoked" | "expired" | "stopped";
 type EndReason = "owner" | "too_many_failures" | "shutdown" | "restart";
@@ -116,13 +120,39 @@ type LiveLink = {
 
 const digestOf = (token: string): Buffer => createHash("sha256").update(token, "utf8").digest();
 
+/** The page's CSP, plus the one directive a meta tag cannot carry: no one may frame the page. */
+const HEADER_CSP = `${SHARE_CSP}; frame-ancestors 'none'`;
+
 /** Every response, page or refusal, carries these. */
 function secure(reply: FastifyReply): FastifyReply {
   return reply
-    .header("Content-Security-Policy", SHARE_CSP)
+    .header("Content-Security-Policy", HEADER_CSP)
     .header("X-Content-Type-Options", "nosniff")
     .header("Referrer-Policy", "no-referrer")
     .header("Cache-Control", "no-store");
+}
+
+/**
+ * One link listener's Fastify options: bounded and quiet. A request that arrives while the listener closes goes
+ * through the routes like any other (they answer 404 `{}` once the link stops serving) instead of Fastify's bare
+ * 503, so every response carries the security headers.
+ */
+export function shareFastifyOptions() {
+  return {
+    logger: false,
+    bodyLimit: 1024,
+    routerOptions: { maxParamLength: 100 },
+    exposeHeadRoutes: false,
+    forceCloseConnections: true,
+    return503OnClosing: false,
+    connectionTimeout: SHARE_REQUEST_TIMEOUT_MS,
+    requestTimeout: SHARE_REQUEST_TIMEOUT_MS,
+    keepAliveTimeout: 5_000,
+    maxRequestsPerSocket: 100,
+    frameworkErrors: (_err: unknown, _req: unknown, reply: FastifyReply) => {
+      void secure(reply).code(400).send({});
+    },
+  } as const;
 }
 
 /**
@@ -140,6 +170,7 @@ export class ShareLinkManager {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly randomToken: () => string;
+  private readonly log: (message: string) => void;
   private readonly live = new Map<string, LiveLink>();
   /** Projects with a create in flight, so two concurrent creates cannot both pass the one-link check. */
   private readonly pending = new Set<string>();
@@ -154,6 +185,7 @@ export class ShareLinkManager {
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => randomUUID());
     this.randomToken = deps.randomToken ?? (() => randomBytes(TOKEN_BYTES).toString("base64url"));
+    this.log = deps.log ?? ((message) => console.error(message));
   }
 
   async create(actor: Actor, shareId: string, address: string, ttlMinutes: number): Promise<{ link: ShareLink; url: string }> {
@@ -175,21 +207,7 @@ export class ShareLinkManager {
     try {
       const linkId = this.newId();
       const expiresAt = new Date(this.now().getTime() + ttl * 60_000);
-      const app = Fastify({
-        logger: false,
-        bodyLimit: 1024,
-        routerOptions: { maxParamLength: 100 },
-        exposeHeadRoutes: false,
-        forceCloseConnections: true,
-        return503OnClosing: true,
-        connectionTimeout: SHARE_REQUEST_TIMEOUT_MS,
-        requestTimeout: SHARE_REQUEST_TIMEOUT_MS,
-        keepAliveTimeout: 5_000,
-        maxRequestsPerSocket: 100,
-        frameworkErrors: (_err, _req, reply) => {
-          void secure(reply).code(400).send({});
-        },
-      });
+      const app = Fastify(shareFastifyOptions());
       app.server.maxConnections = SHARE_MAX_CONNECTIONS;
       app.server.headersTimeout = SHARE_HEADERS_TIMEOUT_MS;
       app.removeAllContentTypeParsers();
@@ -213,7 +231,7 @@ export class ShareLinkManager {
           const supplied = (request.params as { token: string }).token;
           if (!link.serving) return secure(reply).code(404).send({});
           if (this.now().getTime() >= expiresAt.getTime()) {
-            void this.end(link, "expired").catch(() => undefined);
+            void this.end(link, "expired").catch(this.reportEnd);
             return secure(reply).code(404).send({});
           }
           if (timingSafeEqual(digestOf(supplied), expected)) {
@@ -221,7 +239,7 @@ export class ShareLinkManager {
           }
           // Only something shaped like a token is a guess; a browser's /favicon.ico is not.
           if (TOKEN_SHAPE.test(supplied) && ++failures >= MAX_TOKEN_FAILURES) {
-            void this.end(link, "revoked", "too_many_failures").catch(() => undefined);
+            void this.end(link, "revoked", "too_many_failures").catch(this.reportEnd);
           }
           return secure(reply).code(404).send({});
         },
@@ -249,7 +267,7 @@ export class ShareLinkManager {
 
       this.live.set(linkId, link);
       link.timer = setTimeout(() => {
-        void this.end(link, "expired").catch(() => undefined);
+        void this.end(link, "expired").catch(this.reportEnd);
       }, Math.max(0, expiresAt.getTime() - this.now().getTime()));
       link.timer.unref();
       return { link: entry, url: `http://${address}:${boundPort}/${token}` };
@@ -284,8 +302,13 @@ export class ShareLinkManager {
 
   async shutdown(): Promise<void> {
     this.closed = true;
-    await Promise.all([...this.live.values()].map((l) => this.end(l, "stopped", "shutdown").catch(() => undefined)));
+    await Promise.all([...this.live.values()].map((l) => this.end(l, "stopped", "shutdown").catch(this.reportEnd)));
   }
+
+  /** A background end (timer, guesses, shutdown) has no caller to throw to: say so, without the error's text. */
+  private readonly reportEnd = (): void => {
+    this.log(END_NOT_RECORDED);
+  };
 
   private hasActive(projectId: string): boolean {
     for (const l of this.live.values()) if (l.projectId === projectId) return true;

@@ -1,11 +1,12 @@
 import { request as httpRequest } from "node:http";
+import Fastify from "fastify";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import type { LedgerEntry } from "@theterminal/shared";
 import {
   AddressNotAllowedError, LinkNotActiveError, MAX_TOKEN_FAILURES, ShareLinkActiveError, ShareLinkManager,
-  shareAddresses, type LinkManagerDeps, type ShareAddress,
+  shareAddresses, shareFastifyOptions, type LinkManagerDeps, type ShareAddress,
 } from "../../src/share/link-server.js";
 import { HumanRequiredError } from "../../src/intake/service.js";
 import { NotFoundError } from "../../src/board/board-service.js";
@@ -15,6 +16,7 @@ import { emit, human, world, type World } from "./setup.js";
 const HTML = "<!doctype html><html><head><title>Book Club · The Terminal</title></head><body>ok</body></html>";
 const HASH = createHash("sha256").update(HTML).digest("hex");
 const LOOPBACK: ShareAddress[] = [{ address: "127.0.0.1", scope: "this_computer", label: "This computer only" }];
+const HEADER_CSP = `${SHARE_CSP}; frame-ancestors 'none'`;
 const T0 = new Date("2026-11-15T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** A token-shaped string (43 base64url characters, like a real one) that is not the link's token. */
@@ -125,7 +127,7 @@ describe("ShareLinkManager", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(HTML);
     expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
-    expect(res.headers.get("content-security-policy")).toBe(SHARE_CSP);
+    expect(res.headers.get("content-security-policy")).toBe(HEADER_CSP);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -154,6 +156,7 @@ describe("ShareLinkManager", () => {
       expect(r.status).toBe(404);
       expect(r.body).toBe("{}");
       expect(r.headers["x-content-type-options"]).toBe("nosniff");
+      expect(r.headers["content-security-policy"]).toBe(HEADER_CSP);
     }
     expect(wrong.headers["content-type"]).toBe(unknown.headers["content-type"]);
   });
@@ -345,6 +348,31 @@ describe("ShareLinkManager", () => {
     await m.shutdown();
     await expect(m.create(human, shareId, "127.0.0.1", 60)).rejects.toThrow();
     expect(m.activeCount()).toBe(0);
+  });
+
+  it("lets a request that reaches a closing listener through to the routes (404 {} with the headers), never a bare 503", async () => {
+    // Over real sockets the window is too small to hit (closing drops every connection), so drive the listener's
+    // own options through inject: with Fastify's return503OnClosing a closing app answers 503 without our headers.
+    const app = Fastify(shareFastifyOptions());
+    app.get("/x", async (_req, reply) => reply.header("x-content-type-options", "nosniff").code(404).send({}));
+    await app.ready();
+    const closing = app.close();
+    const r = await app.inject({ method: "GET", url: "/x" });
+    await closing;
+    expect([r.statusCode, r.body, r.headers["x-content-type-options"]]).toEqual([404, "{}", "nosniff"]);
+  });
+
+  it("logs a fixed sentence when a background end cannot be recorded, and still closes the listener", async () => {
+    const log = vi.fn();
+    const { w, m, shareId } = setup({ log });
+    const { url } = await m.create(human, shareId, "127.0.0.1", 60);
+    w.ledger.readOnly = true;
+    for (let i = 0; i < MAX_TOKEN_FAILURES; i++) await raw(portOf(url), `/${wrongToken(i)}`);
+    await vi.waitFor(() => expect(log).toHaveBeenCalledWith("The Terminal: a share link was closed but its end could not be recorded"));
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(m.activeCount()).toBe(0);
+    await expect(fetch(url).then((r) => r.status)).rejects.toThrow();
+    w.ledger.readOnly = false;
   });
 
   it("lists links by project", async () => {
