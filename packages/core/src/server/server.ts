@@ -50,7 +50,7 @@ import { fakeAgentEnv } from "../agents/child-env.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
-import { secretEnvValues } from "../agents/redact.js";
+import { redact, secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
@@ -543,6 +543,12 @@ export async function createServer(opts: {
     });
 
     const clean = (runId: string, s: string, max: number) => runner.cleanFor(runId)(s, max);
+    // What a linked machine sent is shown through this machine's own cleaning (redact, scrub, redact), never trusted
+    // as the worker cleaned it: the ledger keeps the signed bytes, every view and export gets this.
+    const cleanMirrored = (s: string): string => {
+      const secrets = [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()];
+      return redact(recorded.scrub(redact(s, secrets)), secrets);
+    };
     const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which, settling: (id) => runner.settling(id) });
 
     const intake = new IntakeService({ db, ledger, recorded });
@@ -556,8 +562,8 @@ export async function createServer(opts: {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       registerAuth(app, { token, port: () => boundPort });
-      registerLedgerStream(app, ledger);
-      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
+      registerLedgerStream(app, ledger, cleanMirrored);
+      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,
@@ -567,9 +573,10 @@ export async function createServer(opts: {
         // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
         available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
+        clean: cleanMirrored,
       });
       registerIntakeRoutes(app, { intake });
-      registerStoryRoutes(app, { db, ledger });
+      registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
       registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
       registerConnectionRoutes(app, {

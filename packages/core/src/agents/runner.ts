@@ -443,28 +443,35 @@ export class AgentRunner {
     return (text, max) => this.clean(text, max, scrub, s?.secrets);
   }
 
-  /** After a restart nothing is waiting any more: deny every pending action and fail every running run. */
+  /**
+   * After a restart nothing is waiting any more: deny every pending action and fail every running run of this
+   * machine. A run on a linked machine (`machine_id` set) is left alone: it still runs there, its state arrives as
+   * mirrored entries, and this machine records nothing about it itself.
+   */
   recoverOnStartup(): void {
     const { db, ledger } = this.deps;
     if (ledger.readOnly) return;
     const pending = db
       .prepare(
         `SELECT a.id, a.run_id, r.project_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-         WHERE a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+         WHERE a.status = 'pending' AND r.machine_id IS NULL ORDER BY a.requested_at, a.rowid`,
       )
       .all() as { id: string; run_id: string; project_id: string }[];
     for (const a of pending) {
       if (!this.sessions.has(a.run_id)) this.settle(a.project_id, a.run_id, a.id, "deny", "workspace restarted");
     }
-    const running = db.prepare("SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at, rowid").all() as {
-      id: string;
-    }[];
+    const running = db
+      .prepare("SELECT id FROM agent_runs WHERE status = 'running' AND machine_id IS NULL ORDER BY started_at, rowid")
+      .all() as { id: string }[];
     for (const r of running) {
       if (!this.sessions.has(r.id)) this.close(r.id, "failed", "workspace restarted", "workspace restarted");
     }
   }
 
-  /** Stops every running run and waits for the adapters to return. */
+  /**
+   * Stops every running run of this process and waits for the adapters to return. Only runs with a session here are
+   * stopped: a run on a linked machine has none, so this machine never records it as stopped.
+   */
   async shutdown(): Promise<void> {
     this.closing = true;
     const all = [...this.sessions.entries()];

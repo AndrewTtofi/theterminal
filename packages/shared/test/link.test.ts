@@ -24,6 +24,9 @@ import {
   parsePairingCode,
   remoteDecisionSchema,
   remoteStartSchema,
+  innerEntry,
+  runIdOf,
+  type LedgerEntry,
 } from "../src/index.js";
 
 const ok = (type: keyof typeof eventPayloadSchemas, payload: unknown) =>
@@ -284,5 +287,40 @@ describe("wire schemas", () => {
     expect(machineCapacitySchema.safeParse({ ...capacity, adapters: ["other"] }).success).toBe(false);
     expect(machineCapacitySchema.safeParse({ ...capacity, connections: [{ id: "c1", kind: "llm", provider: "x", name: "n" }] }).success).toBe(false);
     expect(machineCapacitySchema.safeParse({ ...capacity, localModels: [{ ...capacity.localModels[0], engine: "vllm" }] }).success).toBe(false);
+  });
+});
+
+describe("innerEntry and runIdOf", () => {
+  const H = "a".repeat(64);
+  const entry = (type: string, payload: unknown, over: Partial<LedgerEntry> = {}): LedgerEntry => ({
+    seq: 7, id: "e7", ts: "2026-11-15T00:00:00.000Z", projectId: "p1", actor: { kind: "system", id: "link" },
+    type: type as LedgerEntry["type"], payload, prevHash: H, hash: H, ...over,
+  });
+  const origin = {
+    seq: 3, id: "w3", ts: "2026-11-14T00:00:00.000Z", projectId: "p1", actor: { kind: "agent", id: "r1" },
+    type: "agent.message", payload: { runId: "r1", text: "hi" }, prevHash: H, hash: H,
+  };
+
+  it("returns any other entry as it is, and its payload's runId", () => {
+    const e = entry("agent.message", { runId: "r1", text: "hi" });
+    expect(innerEntry(e)).toBe(e);
+    expect(runIdOf(e)).toBe("r1");
+    expect(runIdOf(entry("card.moved", { cardId: "c1", from: "idea", to: "build" }))).toBeUndefined();
+    expect(runIdOf(entry("agent.message", { runId: 5 }))).toBeUndefined();
+    expect(runIdOf(entry("agent.message", null))).toBeUndefined();
+  });
+
+  it("unwraps a link.mirrored entry to the worker's own entry, and reads its run", () => {
+    const e = entry("link.mirrored", { machineId: "b".repeat(32), origin, signature: "c".repeat(128) });
+    expect(innerEntry(e)).toEqual(origin);
+    expect(runIdOf(e)).toBe("r1");
+  });
+
+  it("leaves a link.mirrored entry whose origin is unreadable as it is", () => {
+    for (const bad of [null, "x", { ...origin, type: "card.moved" }, { ...origin, payload: [] }, { ...origin, actor: null }]) {
+      const e = entry("link.mirrored", { machineId: "b".repeat(32), origin: bad, signature: "c".repeat(128) });
+      expect(innerEntry(e)).toBe(e);
+    }
+    expect(runIdOf(entry("link.mirrored", { origin: { ...origin, type: "card.moved" } }))).toBeUndefined();
   });
 });

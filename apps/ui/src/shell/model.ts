@@ -26,6 +26,7 @@ import type {
   RunChanges,
   Stage,
 } from "@theterminal/shared";
+import { innerEntry, runIdOf } from "@theterminal/shared";
 import type { AgentsInfo, LinkOverview, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
@@ -51,11 +52,14 @@ export type GatePrompt = {
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
 export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "machine", "other"];
 
-/** True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. */
+/**
+ * True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. A
+ * linked machine's mirrored entry counts as the worker entry it carries.
+ */
 export function namesRun(e: LedgerEntry, runId: string): boolean {
-  if (!e.type.startsWith("agent.") && !e.type.startsWith("override.")) return false;
-  const p = e.payload;
-  return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
+  const inner = innerEntry(e);
+  if (!inner.type.startsWith("agent.") && !inner.type.startsWith("override.")) return false;
+  return runIdOf(inner) === runId;
 }
 
 /**

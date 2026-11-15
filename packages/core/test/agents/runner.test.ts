@@ -22,6 +22,8 @@ import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
+import { acceptMirroredLine } from "../../src/link/mirrored.js";
+import { pairAndRequest, remoteRun } from "../link/remote-fixtures.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const EXTRA_SECRET = "extra-secret-value-0001";
@@ -450,6 +452,35 @@ describe("AgentRunner with the FakeAdapter", () => {
       ["agent.action.decided", { kind: "system", id: "policy" }],
       ["agent.finished", { kind: "system", id: "runner" }],
     ]);
+  });
+
+  it("recoverOnStartup and shutdown leave a linked machine's runs and their pending actions alone", async () => {
+    // A run on a linked machine, mirrored here: running, with a pending action, and no session in this process.
+    const remote = await remoteRun("run-on-gpu-box", projectId);
+    pairAndRequest(db, ledger, remote);
+    for (const e of [remote.started(), remote.requested("remote-act-1")]) {
+      expect(acceptMirroredLine(db, ledger, remote.runId, remote.line(e)).ok).toBe(true);
+    }
+    // And a local run of this machine, which a restart does fail.
+    const first = fakeRunner([{ propose: write }]);
+    const local = await first.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilPending(2);
+
+    const restarted = makeRunner({});
+    restarted.recoverOnStartup();
+    expect(getRun(db, local.id)).toMatchObject({ status: "failed", error: "workspace restarted" });
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "running", machineId: remote.machineId, error: null });
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "remote-act-1", status: "pending" })]);
+    // Nothing was recorded locally about the remote run: only what the worker sent, mirrored.
+    const recordedHere = ledger.list().filter((e) => e.type.startsWith("agent.") && (e.payload as { runId?: string }).runId === remote.runId);
+    expect(recordedHere).toEqual([]);
+
+    const before = ledger.headSeq();
+    await restarted.shutdown();
+    await first.shutdown();
+    expect(ledger.list({ afterSeq: before }).filter((e) => JSON.stringify(e.payload).includes(remote.runId))).toEqual([]);
+    expect(getRun(db, remote.runId)!.status).toBe("running");
+    expect(listActions(db, remote.runId)[0]!.status).toBe("pending");
   });
 
   it("recoverOnStartup does nothing when the ledger is read-only", async () => {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ADAPTERS, PROVIDERS, agentPayloadSchemas } from "./agents.js";
 import { CONNECTION_KINDS, CONNECTION_PROVIDERS, connectionPayloadSchemas } from "./connections.js";
+import type { LedgerEntry } from "./domain.js";
 
 /**
  * Linked machines: two Terminals on one local network, paired once with a code, after which a run started on one
@@ -118,6 +119,27 @@ export const mirroredOriginSchema = z
     }
   });
 export type MirroredOrigin = z.infer<typeof mirroredOriginSchema>;
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const LISTED: readonly string[] = MIRRORABLE_TYPES;
+
+/**
+ * The worker's own entry that a `link.mirrored` entry carries (its own seq, id, ts and actor), so a mirrored entry is
+ * filtered and shown as the entry it reports; any other entry, and a mirrored one whose origin is unreadable, as it is.
+ * A shape check only: it trusts nothing (the requester checked the signature before committing) and never throws.
+ */
+export function innerEntry(e: LedgerEntry): LedgerEntry {
+  if (e.type !== "link.mirrored" || !isObject(e.payload)) return e;
+  const o = e.payload.origin;
+  if (!isObject(o) || typeof o.type !== "string" || !LISTED.includes(o.type) || !isObject(o.payload) || !isObject(o.actor)) return e;
+  return o as unknown as LedgerEntry;
+}
+
+/** The run an entry names in its payload (a mirrored entry's: the worker entry's), or undefined. */
+export function runIdOf(e: LedgerEntry): string | undefined {
+  const p = innerEntry(e).payload;
+  return isObject(p) && typeof p.runId === "string" ? p.runId : undefined;
+}
 
 export const linkPayloadSchemas = {
   "machine.identity_created": z.object({ machineId, publicKey, fingerprint }).strict(),

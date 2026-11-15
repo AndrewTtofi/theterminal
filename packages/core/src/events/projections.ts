@@ -1,3 +1,4 @@
+import { MIRRORABLE_TYPES } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, LinkRun, LinkRunState, Machine,
   PendingAgentAction, QuestionId,
@@ -172,10 +173,65 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "link.changes_imported":
       db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);
       break;
-    // link.mirrored is applied by Task 8's applyMirrored; until then it projects nothing.
+    case "link.mirrored":
+      applyMirrored(db, e);
+      break;
     default: // gate.blocked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
+}
+
+const MIRRORED: ReadonlySet<string> = new Set(MIRRORABLE_TYPES);
+
+/**
+ * A linked machine's entry, committed here as `link.mirrored`: the worker's own entry (`payload.origin`, with its own
+ * seq, ts and actor) is applied as if local, the run is marked as running on that machine, and the link run's cursor
+ * moves to the worker's seq.
+ *
+ * The frame was checked before it was committed (`acceptMirroredLine`); this reducer still refuses, rolling the commit
+ * back, anything that would let a worker touch state outside the run it was asked to run: a run never requested of
+ * that machine, another project, an existing run id, or an action of another run (actions are settled by id alone).
+ */
+export function applyMirrored(db: Db, e: LedgerEntry): void {
+  const p = e.payload as Payload;
+  const inner = p.origin as LedgerEntry;
+  if (!MIRRORED.has(inner.type)) throw new Error("mirrored entry of a type that is not mirrored");
+  const ip = inner.payload as Payload;
+  const runId = ip.runId as string;
+  const link = db
+    .prepare("SELECT project_id, state FROM link_runs WHERE run_id = ? AND machine_id = ? AND direction = 'requested'")
+    .get(runId, p.machineId) as { project_id: string; state: LinkRunState } | undefined;
+  if (!link) throw new Error("mirrored entry for a run not requested of that machine");
+  const projectOk = inner.projectId === link.project_id || (inner.type === "connection.used" && inner.projectId === null);
+  if (!projectOk || e.projectId !== inner.projectId) throw new Error("mirrored entry outside the run's project");
+  if (inner.type === "agent.action.requested" || inner.type === "agent.action.decided" || inner.type === "agent.action.completed") {
+    const owner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?").get(ip.actionId) as { run_id: string } | undefined;
+    const ok = inner.type === "agent.action.requested" ? owner === undefined : owner?.run_id === runId;
+    if (!ok) throw new Error("mirrored entry about an action of another run");
+  }
+  if (inner.type !== "agent.started" && inner.type !== "connection.used") {
+    const run = db.prepare("SELECT machine_id FROM agent_runs WHERE id = ?").get(runId) as { machine_id: string | null } | undefined;
+    if (run && run.machine_id !== p.machineId) throw new Error("mirrored entry about a run of another machine");
+  }
+
+  applyEvent(db, inner); // an existing run id fails agent.started's INSERT and rolls the commit back
+  if (inner.type === "agent.started") db.prepare("UPDATE agent_runs SET machine_id = ? WHERE id = ?").run(p.machineId, runId);
+  // requested → running → finished; a run already imported or failed keeps its state.
+  const state = inner.type === "agent.finished" && (link.state === "requested" || link.state === "running")
+    ? "finished"
+    : link.state === "requested" ? "running" : link.state;
+  db.prepare("UPDATE link_runs SET last_seq = ?, state = ?, updated_at = ? WHERE run_id = ?").run(inner.seq, state, e.ts, runId);
+}
+
+/** The worker entry ids already mirrored for a run, read from the ledger. */
+export function mirroredIds(db: Db, runId: string): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT json_extract(payload, '$.origin.id') AS id FROM ledger
+       WHERE type = 'link.mirrored' AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.origin.payload.runId') = ? ELSE 0 END`,
+    )
+    .all(runId) as { id: string }[];
+  return new Set(rows.map((r) => r.id));
 }
 
 /** An intake event must name an intake of its own project; otherwise the append rolls back instead of writing orphan rows. */

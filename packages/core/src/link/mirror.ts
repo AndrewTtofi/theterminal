@@ -37,7 +37,9 @@ export type FrameRefusal =
   | "wrong_project"
   | "out_of_order"
   | "duplicate"
-  | "foreign_action";
+  | "foreign_action"
+  /** The frame passed every check, but committing it was refused (the projection rolled it back). */
+  | "conflict";
 
 export class MirrorFrameError extends Error {
   constructor(readonly reason: FrameRefusal) {
@@ -242,7 +244,8 @@ export function displayOrigin(origin: MirroredOrigin, clean: (s: string) => stri
   return { ...origin, actor: { ...origin.actor }, payload: cleanStrings(origin.payload, clean) };
 }
 
-function cleanStrings(value: unknown, clean: (s: string) => string): unknown {
+/** A copy of a JSON value with every string in it passed through `clean`; own keys only, `__proto__` kept as a key. */
+export function cleanStrings(value: unknown, clean: (s: string) => string): unknown {
   if (typeof value === "string") return clean(value);
   if (Array.isArray(value)) return value.map((v) => cleanStrings(v, clean));
   if (isRecord(value)) {

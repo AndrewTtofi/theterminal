@@ -14,6 +14,7 @@ import type { ProviderSettings } from "../agents/settings.js";
 import { NotFoundError } from "../board/board-service.js";
 import type { Db } from "../db.js";
 import { listAllPendingActions, listPendingActions } from "../events/projections.js";
+import { remoteDisplay } from "../link/mirrored.js";
 
 export type AgentRouteDeps = {
   db: Db;
@@ -25,6 +26,8 @@ export type AgentRouteDeps = {
   available: (p: Provider) => boolean;
   /** Where a run's API key would come from right now: a connection wins over the server's environment variable. */
   apiKey: (p: Provider) => ApiKeySource;
+  /** This machine's redaction, for runs on a linked machine. Default: the built-in patterns. */
+  clean?: (s: string) => string;
 };
 
 export type ApiKeySource = "connection" | "environment" | "none";
@@ -49,6 +52,7 @@ const providerAuthBody = z.object({
 /** Agent runs, decisions and the per-provider auth settings. Errors are mapped by the handler in routes.ts. */
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps): void {
   const { db, runner, settings, adapters, available, apiKey } = deps;
+  const shown = remoteDisplay(db, deps.clean);
 
   const requireProject = (id: string) => {
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
@@ -89,17 +93,20 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.get<{ Params: { id: string } }>("/api/projects/:id/runs", async (req) => {
     requireProject(req.params.id);
-    return runner.listRuns(req.params.id);
+    return runner.listRuns(req.params.id).map(shown.run);
   });
 
   app.get<{ Params: { id: string } }>("/api/projects/:id/pending-actions", async (req) => {
     requireProject(req.params.id);
-    return listPendingActions(db, req.params.id);
+    return listPendingActions(db, req.params.id).map(shown.action);
   });
 
-  app.get("/api/pending-actions", async () => listAllPendingActions(db));
+  app.get("/api/pending-actions", async () => listAllPendingActions(db).map(shown.action));
 
-  app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => runner.getRun(req.params.id));
+  app.get<{ Params: { id: string } }>("/api/runs/:id", async (req) => {
+    const { run, actions } = runner.getRun(req.params.id);
+    return { run: shown.run(run), actions: actions.map(shown.action) };
+  });
 
   app.post<{ Params: { id: string } }>("/api/runs/:id/stop", async (req) => {
     runner.stop(actor, req.params.id);

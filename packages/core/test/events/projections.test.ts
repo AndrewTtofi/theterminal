@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, LINKING_ACK, type GateId } from "@theterminal/shared";
+import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, LINKING_ACK, type GateId, type LedgerEntry } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -10,9 +10,10 @@ import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
   countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting, listActions, listAllPendingActions,
-  listGateDecisions, listLinkRuns, listMachines, listOpenIntakes, listPendingActions, listRuns, projectSpendUsd,
+  listGateDecisions, listLinkRuns, listMachines, listOpenIntakes, listPendingActions, listRuns, mirroredIds, projectSpendUsd,
   rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
+import { pairAndRequest, remoteRun, type RemoteRun } from "../link/remote-fixtures.js";
 
 describe("workspaceCounts", () => {
   it("sums cost only over runs started on the local calendar day", () => {
@@ -526,5 +527,137 @@ describe("linked-machine projections", () => {
     db.prepare("INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, updated_at) VALUES ('x', 'm', 'requested', 'p', 'requested', 't')").run();
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
+  });
+});
+
+describe("mirrored remote runs (applyMirrored)", () => {
+  const PROJECT = "p1";
+  let remote: RemoteRun;
+
+  beforeEach(async () => {
+    emit("project.created", { projectId: PROJECT, name: "Demo", pitch: "" }, human, PROJECT);
+    remote = await remoteRun("run-remote-1", PROJECT);
+    pairAndRequest(db, ledger, remote);
+  });
+
+  /** Commits the worker entry as the requester does: link.mirrored, by the link, in the origin's project. */
+  const mirror = (entry: LedgerEntry, machineId = remote.machineId, via = remote) => {
+    const frame = JSON.parse(via.line(entry)) as { origin: LedgerEntry; signature: string };
+    return emit("link.mirrored", { machineId, origin: frame.origin, signature: frame.signature }, link, frame.origin.projectId);
+  };
+  const tables = ["agent_runs", "agent_actions", "link_runs", "rate_limits"];
+  const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+
+  it("an inner agent.started creates the run with the machine it runs on, and the link run is running at its seq", () => {
+    const started = remote.started("c1");
+    const e = mirror(started);
+    expect(getRun(db, remote.runId)).toMatchObject({
+      id: remote.runId, projectId: PROJECT, cardId: "c1", adapter: "fake", status: "running", machineId: remote.machineId,
+      worktree: `projects/${PROJECT}/worktrees/${remote.runId}`, startedAt: started.ts,
+    });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "running", lastSeq: started.seq, updatedAt: e.ts, error: null });
+  });
+
+  it("an inner agent.action.requested is a pending action Needs-you lists, with the project's name", () => {
+    mirror(remote.started());
+    mirror(remote.message("Looking"));
+    const req = remote.requested("act-1", "nvidia-smi");
+    mirror(req);
+    expect(listAllPendingActions(db)).toEqual([
+      expect.objectContaining({ id: "act-1", runId: remote.runId, status: "pending", projectId: PROJECT, projectName: "Demo", summary: "Run: nvidia-smi" }),
+    ]);
+    expect(getLinkRun(db, remote.runId)!.lastSeq).toBe(req.seq);
+  });
+
+  it("decided, completed and finished entries settle the action, end the run, and finish the link run", () => {
+    mirror(remote.started());
+    mirror(remote.connectionUsed());
+    mirror(remote.requested("act-1"));
+    mirror(remote.decided("act-1"));
+    mirror(remote.completed("act-1", "all green"));
+    expect(getLinkRun(db, remote.runId)!.state).toBe("running");
+    const fin = remote.finished();
+    mirror(fin);
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "act-1", status: "completed", decidedBy: "human", output: "all green" })]);
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "completed", machineId: remote.machineId });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "finished", lastSeq: fin.seq });
+    emit("link.changes_imported", { runId: remote.runId, machineId: remote.machineId, commit: "f".repeat(40) }, link, PROJECT);
+    expect(getLinkRun(db, remote.runId)!.state).toBe("imported");
+  });
+
+  it("mirroredIds lists the origin ids already mirrored for a run, and only that run's", () => {
+    expect(mirroredIds(db, remote.runId)).toEqual(new Set());
+    const a = remote.started();
+    const b = remote.message("hi");
+    mirror(a);
+    mirror(b);
+    expect(mirroredIds(db, remote.runId)).toEqual(new Set([a.id, b.id]));
+    expect(mirroredIds(db, "another-run")).toEqual(new Set());
+  });
+
+  it("rebuild with mirrored entries equals the live tables", () => {
+    mirror(remote.started());
+    mirror(remote.connectionUsed());
+    mirror(remote.requested("act-1"));
+    mirror(remote.decided("act-1", "deny"));
+    mirror(remote.completed("act-1", "denied"));
+    mirror(remote.record("agent.rate_limited", { runId: remote.runId, retryAfterS: 30 }));
+    mirror(remote.requested("act-2"));
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([1, 2, 1, 1]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  /** The commit throws and nothing of it stays: no ledger entry, no projection change. */
+  const refused = (fn: () => unknown) => {
+    const before = ledger.headSeq();
+    const tablesBefore = dump();
+    expect(fn).toThrow();
+    expect(ledger.headSeq()).toBe(before);
+    expect(dump()).toEqual(tablesBefore);
+  };
+
+  it("refuses a mirrored entry for a run that was never requested of that machine", async () => {
+    const stranger = await remoteRun("run-not-requested", PROJECT);
+    refused(() => mirror(stranger.started(), stranger.machineId, stranger));
+    const elsewhere = await remoteRun(remote.runId, PROJECT);
+    refused(() => mirror(elsewhere.started(), elsewhere.machineId, elsewhere));
+  });
+
+  it("refuses a mirrored entry in another project than the run's", async () => {
+    const other = await remoteRun(remote.runId, "p2");
+    // Signed by another key, but the projection does not check signatures: it checks the run and project.
+    refused(() => mirror(other.started(), remote.machineId, other));
+  });
+
+  it("refuses a mirrored decision or completion of an action that belongs to another run", () => {
+    script(); // a local run r1 with actions a1 and a2
+    mirror(remote.started());
+    refused(() => mirror(remote.decided("a1")));
+    refused(() => mirror(remote.completed("a2")));
+    refused(() => mirror(remote.requested("a1")));
+    expect(listActions(db, "r1").map((a) => a.status)).toEqual(["completed", "failed"]);
+  });
+
+  it("refuses a mirrored agent.started whose run id already exists here", () => {
+    mirror(remote.started());
+    refused(() => mirror(remote.started()));
+  });
+
+  it("refuses a duplicate run id for link.run_requested and link.run_accepted, and rolls the commit back", () => {
+    const again = { runId: remote.runId, machineId: remote.machineId, adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    refused(() => emit("link.run_requested", again, human, PROJECT));
+    refused(() => emit("link.run_accepted", { runId: remote.runId, machineId: remote.machineId, projectId: PROJECT }, link, PROJECT));
+    emit("link.run_accepted", { runId: "acc-1", machineId: remote.machineId, projectId: PROJECT }, link, PROJECT);
+    refused(() => emit("link.run_accepted", { runId: "acc-1", machineId: remote.machineId, projectId: PROJECT }, link, PROJECT));
+    refused(() => emit("link.run_requested", { ...again, runId: "acc-1" }, human, PROJECT));
+    expect(listLinkRuns(db).map((r) => [r.runId, r.direction])).toEqual([[remote.runId, "requested"], ["acc-1", "accepted"]]);
+  });
+
+  it("refuses link.run_requested without a project: its project comes from the entry", () => {
+    const req = { runId: "no-project", machineId: remote.machineId, adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    refused(() => emit("link.run_requested", req, human, null));
+    expect(getLinkRun(db, "no-project")).toBeNull();
   });
 });

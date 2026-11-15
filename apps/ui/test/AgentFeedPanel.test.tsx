@@ -15,7 +15,8 @@ vi.mock("@theterminal/shared", async (importOriginal) => {
 });
 
 afterEach(() => vi.useRealTimers());
-import { completed, ev, feedRun, message, overrideCommand, requested } from "./feed-fixtures";
+import { completed, ev, feedRun, message, mirrored, overrideCommand, requested } from "./feed-fixtures";
+import { namesRun } from "../src/shell/model";
 
 const runs: AgentRun[] = [
   feedRun("run1", { status: "running" }),
@@ -81,6 +82,21 @@ describe("AgentFeedPanel", () => {
     expect(m.onFollowRun).toHaveBeenCalledWith("run2");
     fireEvent.change(follow, { target: { value: "" } });
     expect(m.onFollowRun).toHaveBeenCalledWith(null);
+  });
+
+  it("shows a linked machine's mirrored entries as the run's own, and follows them with the run", () => {
+    const entries = [
+      mirrored(1, message(41, "run1", "Working on the other machine")),
+      mirrored(2, ev(42, "card.moved", { runId: "run1", cardId: "c1", from: "plan", to: "build" })),
+      requested(3, "run2", "b1", "npm test"),
+    ];
+    renderFeed({ projectEntries: entries, feedRunId: "run1" });
+    expect(items().map((li) => li.querySelector(".headline")?.textContent)).toEqual([
+      'On a linked machine: The Fake agent said: "Working on the other machine"',
+    ]);
+    expect(namesRun(entries[0]!, "run1")).toBe(true);
+    expect(namesRun(entries[0]!, "run2")).toBe(false);
+    expect(namesRun(entries[1]!, "run1")).toBe(false);
   });
 
   it("shows at most the latest 500 items and says so", () => {

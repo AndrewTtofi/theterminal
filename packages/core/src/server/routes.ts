@@ -16,6 +16,7 @@ import { LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, Re
 import {
   IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
 } from "../link/service.js";
+import { displayEntry } from "../link/mirrored.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
@@ -34,6 +35,8 @@ export type RouteDeps = {
   gates: GateService;
   ledger: Ledger;
   getIntegrity: () => VerifyResult;
+  /** This machine's redaction, for a linked machine's mirrored entries. Default: the built-in patterns. */
+  clean?: (s: string) => string;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -213,11 +216,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.get("/api/ledger", async (req) => {
     const q = ledgerQuery.parse(req.query);
-    return ledger.list({
-      ...(q.projectId !== undefined && { projectId: q.projectId }),
-      ...(q.afterSeq !== undefined && { afterSeq: q.afterSeq }),
-      ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
-      ...(q.limit !== undefined && { limit: q.limit }),
-    });
+    return ledger
+      .list({
+        ...(q.projectId !== undefined && { projectId: q.projectId }),
+        ...(q.afterSeq !== undefined && { afterSeq: q.afterSeq }),
+        ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
+        ...(q.limit !== undefined && { limit: q.limit }),
+      })
+      .map((e) => displayEntry(e, deps.clean));
   });
 }

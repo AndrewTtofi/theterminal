@@ -6,7 +6,12 @@ import type { Ledger } from "../ledger/ledger.js";
 import { NotFoundError } from "../board/board-service.js";
 import { cardStory, ledgerExportLines } from "../story/story.js";
 
-export type StoryRouteDeps = { db: Db; ledger: Ledger };
+export type StoryRouteDeps = {
+  db: Db;
+  ledger: Ledger;
+  /** This machine's redaction, for a linked machine's mirrored entries. Default: the built-in patterns. */
+  clean?: (s: string) => string;
+};
 
 const exportQuery = z.object({ projectId: z.string().max(200).optional() });
 
@@ -17,7 +22,7 @@ const SAFE_ID = /^[A-Za-z0-9-]{1,64}$/;
 export function registerStoryRoutes(app: FastifyInstance, deps: StoryRouteDeps): void {
   const { db, ledger } = deps;
 
-  app.get<{ Params: { id: string } }>("/api/cards/:id/story", async (req) => cardStory(db, ledger, req.params.id));
+  app.get<{ Params: { id: string } }>("/api/cards/:id/story", async (req) => cardStory(db, ledger, req.params.id, deps.clean));
 
   app.get("/api/ledger/export", async (req, reply) => {
     const { projectId } = exportQuery.parse(req.query);
@@ -30,6 +35,6 @@ export function registerStoryRoutes(app: FastifyInstance, deps: StoryRouteDeps):
       .header("content-type", "application/x-ndjson")
       .header("content-disposition", `attachment; filename="theterminal-ledger-${name}.ndjson"`)
       .header("cache-control", "no-store")
-      .send(Readable.from(ledgerExportLines(db, ledger, projectId ?? null), { objectMode: false }));
+      .send(Readable.from(ledgerExportLines(db, ledger, projectId ?? null, new Date(), deps.clean), { objectMode: false }));
   });
 }
