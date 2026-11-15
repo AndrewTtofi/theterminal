@@ -307,6 +307,25 @@ describe("createServer", { timeout: 30_000 }, () => {
     expect(status).toBeTypeOf("object");
   });
 
+  it("answers GET /api/presence with who is on the event stream", async () => {
+    const s = await start({ dataDir: tmp(), port: 0 });
+    expect(await (await fetch(base(s) + "/api/presence", { headers: auth(s) })).json()).toEqual([]);
+    const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });
+    ws.on("error", () => undefined);
+    // Entries (with seq) come first; the presence frame (no seq) follows the backlog.
+    const frame = await new Promise<{ type: string; people: { personId: string }[] }>((resolve) =>
+      ws.on("message", (d) => {
+        const m = JSON.parse(String(d));
+        if (!("seq" in m)) resolve(m);
+      }),
+    );
+    expect(frame.type).toBe("presence");
+    expect(frame.people.map((p) => p.personId)).toEqual(["owner"]);
+    const listed = (await (await fetch(base(s) + "/api/presence", { headers: auth(s) })).json()) as { personId: string; role: string }[];
+    expect(listed).toMatchObject([{ personId: "owner", role: "owner" }]);
+    ws.terminate();
+  });
+
   it("closes promptly with a WebSocket client connected", async () => {
     const s = await start({ dataDir: tmp(), port: 0 });
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });

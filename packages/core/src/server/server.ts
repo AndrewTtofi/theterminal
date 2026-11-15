@@ -660,7 +660,7 @@ export async function createServer(opts: {
         sessions: people.sessions,
         person: (id) => getPerson(db, id),
       });
-      registerLedgerStream(app, ledger, cleanMirrored);
+      registerLedgerStream(app, ledger, cleanMirrored, { sessions: people.sessions });
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
