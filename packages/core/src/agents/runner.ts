@@ -40,6 +40,17 @@ export class McpUnsupportedError extends Error {
   }
 }
 
+/**
+ * A run was given two cloud connections of one provider, or grants that would set the same variable: one would
+ * silently replace the other's credentials.
+ */
+export class DuplicateCloudProviderError extends Error {
+  constructor(message = "a run can be given only one connection per cloud provider") {
+    super(message);
+    this.name = "DuplicateCloudProviderError";
+  }
+}
+
 /** How long all of a run's cloud grants together may take to mint, by default. */
 export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
 /** An MCP env or header value this long or longer is redacted from the run's output. */
@@ -192,6 +203,11 @@ export class AgentRunner {
   /** Scrubs dataDir, the home directory and the username, for strings recorded outside a live run. */
   private readonly scrub: Scrub;
   private readonly scrubUser: Scrub;
+  /**
+   * Every value minted for any run since this process started. Never shrinks: a minted token stays valid after its
+   * run ends, so every later run (and anything else the server records) redacts it too.
+   */
+  private readonly minted = new Set<string>();
   /** Set once shutdown() begins; no run may start after that. */
   private closing = false;
 
@@ -230,7 +246,11 @@ export class AgentRunner {
     // Every selected connection is checked before anything is minted or created; errors propagate as they are.
     const selection = (this.deps.selectConnections ?? defaultSelect)(input.connectionIds ?? []);
     if (input.adapter === "codex" && selection.mcp.length > 0) throw new McpUnsupportedError();
+    const providers = selection.cloud.map((c) => c.provider);
+    if (new Set(providers).size !== providers.length) throw new DuplicateCloudProviderError();
     const grants = await this.mintAll(selection.cloud);
+    const names = grants.flatMap((g) => Object.keys(g.env));
+    if (new Set(names).size !== names.length) throw new DuplicateCloudProviderError("two cloud grants would set the same variable");
     const runSecrets = [...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp)];
 
     const authMode: AuthMode =
@@ -308,7 +328,9 @@ export class AgentRunner {
         const minting = mint(source, deadline.signal);
         minting.catch(() => {}); // a late rejection after the deadline is not unhandled
         try {
-          grants.push(await Promise.race([minting, expired]));
+          const grant = await Promise.race([minting, expired]);
+          for (const v of grant.secrets) this.minted.add(v);
+          grants.push(grant);
         } catch (e) {
           // A minter that rejects because its signal was aborted reports the deadline, not its own reason.
           throw deadline.signal.aborted && !(e instanceof CloudCredentialError) ? timedOut() : e;
@@ -635,11 +657,19 @@ export class AgentRunner {
     return truncate(redact(scrub(redact(s, secrets)), secrets), max);
   }
 
-  /** The extra secrets as of now; anything that is not a list of strings is a failure, never "no secrets". */
+  /** Every value minted for a run so far, for redaction anywhere in the server. */
+  mintedSecrets(): string[] {
+    return [...this.minted];
+  }
+
+  /**
+   * The extra secrets as of now, and every value minted so far; anything that is not a list of strings is a failure,
+   * never "no secrets".
+   */
   private secrets(): string[] {
     const list = this.deps.extraSecrets();
     if (!Array.isArray(list) || list.some((x) => typeof x !== "string")) throw new TypeError("extraSecrets must return strings");
-    return list;
+    return [...list, ...this.minted];
   }
 
   /**

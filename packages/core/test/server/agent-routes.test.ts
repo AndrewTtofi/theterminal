@@ -655,6 +655,18 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
     expect(existsSync(join(dataDir, "projects", projectId, "worktrees")) ? readdirSync(join(dataDir, "projects", projectId, "worktrees")) : []).toEqual([]);
   });
 
+  it("two cloud connections of one provider are 400 duplicate_cloud_provider, before anything is minted", async () => {
+    const sessionToken = vi.fn(fakeSts.sessionToken);
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: { ...fakeSts, sessionToken } });
+    const a = await add(s, AWS);
+    const b = await add(s, { ...AWS, name: "AWS prod" });
+    const res = await startRun(s, projectId, [a, b]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "duplicate_cloud_provider" });
+    expect(sessionToken).not.toHaveBeenCalled();
+    expect(await used(s)).toEqual([]);
+  });
+
   it("a Codex run with an MCP server is 400 mcp_unsupported", async () => {
     const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
     const id = await add(s, { kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" } });

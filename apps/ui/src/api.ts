@@ -162,6 +162,9 @@ export function errorMessage(e: unknown, context?: "run"): string {
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
     if (e.status === 400 && e.code === "mcp_unsupported") return CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "duplicate_cloud_provider") {
+      return "A run can be given only one connection per cloud provider. Untick the extra one.";
+    }
     if (e.status === 502 && e.code === "cloud_credentials_failed") {
       return `Could not get credentials from "${e.detail ?? "a cloud connection"}". The run did not start.`;
     }

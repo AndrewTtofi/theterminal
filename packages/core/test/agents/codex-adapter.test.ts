@@ -717,22 +717,61 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(fakeLog().find((e) => e.start).env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: cliHome });
     });
 
-    it.each(["api_key", "chatgpt"] as const)("%s mode: the run's cloud grant reaches Codex and, through its env policy, its commands", async (authMode) => {
+    const GRANT = { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000", AWS_SESSION_TOKEN: "FQoGZXIvYXdzTESTKEY-session-0000000000" };
+    const policyArgs = (names: string[]) => [
+      "-c", 'shell_environment_policy.inherit="all"',
+      "-c", "shell_environment_policy.ignore_default_excludes=true",
+      "-c", `shell_environment_policy.include_only=${JSON.stringify([
+        ...CHILD_ENV_ALLOWLIST, ...(process.platform === "win32" ? WIN32_ALLOWLIST : []), "LC_*",
+        "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", ...names,
+      ])}`,
+      "-c", `shell_environment_policy.exclude=${JSON.stringify([
+        "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN",
+      ])}`,
+    ];
+
+    it.each(["api_key", "chatgpt"] as const)("%s mode: the run's cloud grant reaches Codex, with a command env policy that lets only it through", async (authMode) => {
       script([]);
       const envs: NodeJS.ProcessEnv[] = [];
       const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
         envs.push(opts.env);
         return nodeSpawn(file, args, opts as never);
       }) as unknown as typeof nodeSpawn;
-      const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
-      const { result } = run(make({ spawn }), undefined, { authMode, credentials });
+      const { result } = run(make({ spawn }), undefined, { authMode, credentials: { env: GRANT, mcpServers: [] } });
       expect(await result).toEqual({ status: "completed" });
-      expect(envs[0]!.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
-      // Codex drops *KEY*, *SECRET* and *TOKEN* names from its commands' env by default: keep them, but never a provider key.
-      const argv: string[] = fakeLog().find((e) => e.start).argv;
-      expect(argv).toContain("shell_environment_policy.ignore_default_excludes=true");
-      expect(argv).toContain(`shell_environment_policy.exclude=${JSON.stringify(CODEX_COMMAND_EXCLUDES)}`);
-      expect(CODEX_COMMAND_EXCLUDES).toEqual(expect.arrayContaining(["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]));
+      expect(envs[0]!.AZURE_CLIENT_SECRET).toBe(GRANT.AZURE_CLIENT_SECRET);
+      const login = authMode === "api_key" ? ["-c", "cli_auth_credentials_store=ephemeral"] : [];
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...login, ...policyArgs(Object.keys(GRANT))]);
+      expect(CODEX_COMMAND_EXCLUDES).toContain("NODE_REPL_AUTH_TOKEN");
+    });
+
+    it("an approved command run through the fake app-server gets the grant, the git pin, and no provider key", async () => {
+      const probe = "process.stdout.write(JSON.stringify(Object.fromEntries(['AZURE_CLIENT_SECRET', 'AWS_SESSION_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_HOME', 'GIT_CONFIG_NOSYSTEM'].map((k) => [k, process.env[k] ?? null]))))";
+      script([{ approve: "command", command: "node probe", itemId: "i1", run: [process.execPath, "-e", probe] }]);
+      const { result, events } = run(make(), undefined, { authMode: "api_key", credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({ status: "completed" });
+      const done = events.find((e) => e.type === "action_result") as { output: string };
+      expect(JSON.parse(done.output)).toEqual({
+        AZURE_CLIENT_SECRET: GRANT.AZURE_CLIENT_SECRET, AWS_SESSION_TOKEN: GRANT.AWS_SESSION_TOKEN,
+        OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: null, GIT_CONFIG_NOSYSTEM: "1",
+      });
+    });
+
+    it("without the policy, Codex's default excludes would drop the grant's secret and token from a command", async () => {
+      const probe = "process.stdout.write(JSON.stringify({ s: process.env.AZURE_CLIENT_SECRET ?? null }))";
+      script([{ approve: "command", command: "node probe", itemId: "i1", run: [process.execPath, "-e", probe] }]);
+      const { result, events } = run(make({ fakeEnv: { ...fakeAgentEnv(), AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" } }), undefined, { authMode: "api_key" });
+      expect(await result).toEqual({ status: "completed" });
+      expect(JSON.parse((events.find((e) => e.type === "action_result") as { output: string }).output)).toEqual({ s: null });
+    });
+
+    it("explains a user shell_environment_policy with filters, which Codex refuses to mix with ours", async () => {
+      script({ userFilters: true, steps: [] });
+      const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({
+        status: "failed",
+        error: "Your Codex configuration's shell_environment_policy conflicts with The Terminal's credential passing; remove `filters` from it",
+      });
     });
 
     it("without a cloud grant leaves Codex's command env policy alone", async () => {

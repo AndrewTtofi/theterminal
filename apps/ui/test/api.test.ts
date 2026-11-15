@@ -84,6 +84,9 @@ describe("errorMessage", () => {
   it("maps the run start refusals; a failed cloud grant names the connection", () => {
     expect(errorMessage(new ApiError(400, "connection_unsupported"), "run")).toBe("That connection cannot be given to a run");
     expect(errorMessage(new ApiError(400, "connection_disabled"), "run")).toBe("That connection is disabled");
+    expect(errorMessage(new ApiError(400, "duplicate_cloud_provider"), "run")).toBe(
+      "A run can be given only one connection per cloud provider. Untick the extra one.",
+    );
     expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
       "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
     );

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,7 +127,18 @@ describe("toolToAction", () => {
 /** A scripted SDK step: a message to yield, or a tool call that runs the registered hooks. */
 type Step =
   | { msg: Record<string, unknown> }
-  | { tool: string; input: Record<string, unknown>; id: string; response?: unknown; error?: string };
+  | { tool: string; input: Record<string, unknown>; id: string; response?: unknown; error?: string; run?: string[] };
+
+/**
+ * The env Claude Code hands a Bash command: its own env, unless subprocess scrubbing is on (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+ * truthy, or GITHUB_ACTIONS truthy without the scrub variable set false), which strips cloud credentials.
+ */
+function claudeCommandEnv(env: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const on = (v: string | undefined) => v !== undefined && /^(1|true|yes|on)$/i.test(v);
+  const off = (v: string | undefined) => v !== undefined && /^(0|false|no|off)$/i.test(v);
+  const scrub = on(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) || (on(env.GITHUB_ACTIONS) && !off(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB));
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !(scrub && /^(AWS_|AZURE_|ARM_|CLOUDSDK_|GOOGLE_)/.test(k))));
+}
 
 type HookOutput = { hookSpecificOutput?: { hookEventName: string; permissionDecision?: string; permissionDecisionReason?: string } };
 
@@ -159,7 +171,11 @@ function fakeQuery(steps: Step[], opts: { hang?: boolean } = {}) {
         preDecisions.push(out!);
         if (out?.hookSpecificOutput?.permissionDecision !== "allow") continue;
         if (step.error !== undefined) await run("PostToolUseFailure", { ...base, error: step.error }, step.id);
-        else await run("PostToolUse", { ...base, tool_response: step.response }, step.id);
+        else if (step.run) {
+          // Runs the command for real, as Claude Code's Bash tool would, with the env it would give it.
+          const stdout = execFileSync(step.run[0]!, step.run.slice(1), { env: claudeCommandEnv(options.env ?? {}), encoding: "utf8" });
+          await run("PostToolUse", { ...base, tool_response: { stdout, stderr: "", interrupted: false } }, step.id);
+        } else await run("PostToolUse", { ...base, tool_response: step.response }, step.id);
       }
       if (opts.hang) {
         await new Promise<void>((resolve) => options.abortController?.signal.addEventListener("abort", () => resolve()));
@@ -338,6 +354,19 @@ describe("ClaudeAdapter", () => {
     expect(env.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
     // Claude Code hands its own env to Bash commands unless subprocess scrubbing is on, which this env never turns on.
     expect(Object.keys(env).filter((k) => /SUBPROCESS_ENV_SCRUB|^GITHUB_ACTIONS$/.test(k))).toEqual([]);
+    expect(env.CLAUDE_CODE_ENTRYPOINT).not.toBe("local-agent");
+  });
+
+  it("an approved Bash command gets the grant in its env, and no API key it was not meant to see", async () => {
+    const probe = "process.stdout.write(JSON.stringify({ s: process.env.AZURE_CLIENT_SECRET ?? null, o: process.env.OPENAI_API_KEY ?? null }))";
+    const q = fakeQuery([{ tool: "Bash", input: { command: "node probe" }, id: "tu-1", run: [process.execPath, "-e", probe] }, success(0)]);
+    vi.stubEnv("OPENAI_API_KEY", "sk-TESTKEY-openai-0000000000000000");
+    vi.stubEnv("GITHUB_ACTIONS", "true"); // dropped by the allowlist, so it never turns scrubbing on
+    const h = harness();
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...h.opts, credentials });
+    const done = h.events.find((e) => e.type === "action_result") as { output: string };
+    expect(JSON.parse((JSON.parse(done.output) as { stdout: string }).stdout)).toEqual({ s: "TESTKEY-azure-secret-0000000000", o: null });
   });
 
   it("subscription mode runs the Claude Code bundled with the Agent SDK and never looks on PATH", async () => {
