@@ -10,11 +10,16 @@ import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 const ACK = GATES.find((g) => g.id === "ready_to_ship")!.acknowledgement;
 
 function setup(evaluations: GateEvaluation[], over: Partial<GatePrompt> = {}) {
-  const gate: GatePrompt = { cardId: "c1", cardTitle: "Login", to: "ship", evaluations, note: null, ...over };
+  const gate: GatePrompt = {
+    cardId: "c1", cardTitle: "Login", to: "ship", evaluations, note: null, revision: 0, refreshing: false, ...over,
+  };
   const onResolve = vi.fn().mockResolvedValue(true);
   const onCancel = vi.fn();
-  const r = render(<GateCards gate={gate} onResolve={onResolve} onCancel={onCancel} />);
-  return { onResolve, onCancel, gate, ...r };
+  const ui = (g: GatePrompt) => <GateCards gate={g} onResolve={onResolve} onCancel={onCancel} />;
+  const r = render(ui(gate));
+  /** Shows the prompt again with changes, as App does after a refresh. */
+  const show = (more: Partial<GatePrompt>) => r.rerender(ui({ ...gate, ...more }));
+  return { onResolve, onCancel, gate, show, ...r };
 }
 
 const card = (title: string) => screen.getByRole("article", { name: `Gate: ${title}` });
@@ -102,5 +107,68 @@ describe("GateCards", () => {
     expect(screen.getByRole("status").textContent).toBe("Something changed: a condition is no longer met. The checklist was refreshed.");
     expect(container.querySelector("img")).toBeNull();
     expect(container.textContent).toContain('Moving "Lo\\u202egin<img src=x>" to Ship');
+  });
+
+  it("keeps an always-present status region for the note", () => {
+    const { show } = setup([shipMet()]);
+    expect(screen.getByRole("status").textContent).toBe("");
+    show({ note: "Something changed: a condition is no longer met. The checklist was refreshed." });
+    expect(screen.getByRole("status").textContent).toContain("Something changed");
+  });
+
+  it("focuses the first gate when it appears, and again when a refresh changes the checklist", async () => {
+    const { show } = setup([shipMet()]);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Ready to ship" }));
+    (document.activeElement as HTMLElement).blur();
+    show({ evaluations: [shipMet()] });
+    expect(document.activeElement).toBe(document.body);
+    show({ evaluations: [shipBlocked()], revision: 1 });
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Ready to ship" }));
+  });
+
+  it("starts a gate over when its checklist changes, even with the same outcome", async () => {
+    const { show } = setup([shipBlocked()]);
+    const c = card("Ready to ship");
+    await userEvent.click(within(c).getByRole("checkbox"));
+    await userEvent.type(within(c).getByLabelText("Why are you proceeding anyway?"), "needed for the demo");
+    await userEvent.click(within(c).getByRole("button", { name: "Waive" }));
+    expect(moveButton().disabled).toBe(false);
+    const changed = shipBlocked();
+    changed.conditions[1] = { ...changed.conditions[1]!, met: false };
+    show({ evaluations: [changed] });
+    const fresh = card("Ready to ship");
+    expect((within(fresh).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect((within(fresh).getByLabelText("Why are you proceeding anyway?") as HTMLTextAreaElement).value).toBe("");
+    expect(moveButton().disabled).toBe(true);
+  });
+
+  it("drops the decisions on a refused move and keeps Move disabled while refreshing and after an outcome change", async () => {
+    const { show } = setup([shipMet()]);
+    await userEvent.click(within(card("Ready to ship")).getByRole("checkbox"));
+    await userEvent.click(within(card("Ready to ship")).getByRole("button", { name: "Sign off" }));
+    expect(moveButton().disabled).toBe(false);
+    show({ refreshing: true, revision: 1 });
+    expect(moveButton().disabled).toBe(true);
+    show({ refreshing: false, revision: 1, evaluations: [shipMet()] });
+    expect(moveButton().disabled).toBe(true);
+    expect((within(card("Ready to ship")).getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    show({ refreshing: false, revision: 1, evaluations: [shipBlocked()] });
+    expect(moveButton().disabled).toBe(true);
+    expect(within(card("Ready to ship")).getByRole("button", { name: "Waive" })).toBeTruthy();
+  });
+
+  it("caps a waiver reason at 500 characters", async () => {
+    const { onResolve } = setup([shipBlocked()]);
+    const c = card("Ready to ship");
+    const reason = within(c).getByLabelText("Why are you proceeding anyway?") as HTMLTextAreaElement;
+    expect(reason.maxLength).toBe(500);
+    await userEvent.click(reason);
+    await userEvent.paste("x".repeat(520));
+    expect(reason.value.length).toBeLessThanOrEqual(500);
+    await userEvent.click(within(c).getByRole("checkbox"));
+    await userEvent.click(within(c).getByRole("button", { name: "Waive" }));
+    await userEvent.click(moveButton());
+    const sent = onResolve.mock.calls[0]![0][0].reason as string;
+    expect(sent.length).toBe(500);
   });
 });

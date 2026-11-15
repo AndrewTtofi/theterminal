@@ -53,13 +53,13 @@ function setup(load: () => Promise<CardStory>) {
       return () => listeners.delete(cb);
     },
   } as unknown as WorkbenchModel;
-  render(
+  const r = render(
     <ShellContext.Provider value={{ model, dock: () => null, selectView: vi.fn() }}>
       <StoryPanel id="story:c1" />
     </ShellContext.Provider>,
   );
   const emit = (e: LedgerEntry) => act(() => listeners.forEach((l) => l(e)));
-  return { model, emit };
+  return { model, emit, listeners, unmount: r.unmount };
 }
 
 describe("StoryPanel", () => {
@@ -135,5 +135,13 @@ describe("StoryPanel", () => {
   it("shows an error when the story cannot be loaded", async () => {
     setup(() => Promise.reject(new Error("down")));
     expect(await screen.findByText("This card's story could not be loaded.")).toBeTruthy();
+  });
+
+  it("stops listening when the tab closes", async () => {
+    const { listeners, unmount } = setup(() => Promise.resolve(story()));
+    await screen.findByRole("region", { name: "Story: Login" });
+    expect(listeners.size).toBe(1);
+    unmount();
+    expect(listeners.size).toBe(0);
   });
 });

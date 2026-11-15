@@ -325,7 +325,7 @@ describe("Workbench", () => {
   });
 
   it("keeps a gate card in the strip in the Connections view with the bottom panel closed, and badges it", async () => {
-    const m = model({ gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [planPassed(), shipBlocked()], note: null } });
+    const m = model({ gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [planPassed(), shipBlocked()], note: null, revision: 0, refreshing: false } });
     const { container } = render(<Workbench model={m} />);
     await userEvent.click(view("Connections"));
     await userEvent.keyboard("{Control>}j{/Control}");

@@ -31,9 +31,18 @@ export type LedgerScope = "project" | "all";
 
 /**
  * A card move the readiness gates stopped, waiting on the Owner in the Needs-you strip. `note` explains a refresh
- * after the server refused the decisions.
+ * after the server refused the decisions; `revision` goes up on every refusal, which drops the decisions made so
+ * far; `refreshing` is true while the checklist is read again after one.
  */
-export type GatePrompt = { cardId: string; cardTitle: string; to: Stage; evaluations: GateEvaluation[]; note: string | null };
+export type GatePrompt = {
+  cardId: string;
+  cardTitle: string;
+  to: Stage;
+  evaluations: GateEvaluation[];
+  note: string | null;
+  revision: number;
+  refreshing: boolean;
+};
 
 /** Every narration topic, in the order the ledger's filter lists them. */
 export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];

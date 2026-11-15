@@ -306,6 +306,21 @@ export function App() {
     };
   }, [ledgerScope, run]);
 
+  // A gate belongs to the project it was raised in: choosing another project closes it.
+  useEffect(() => setGate(null), [selectedId]);
+  // Stable, so a story tab subscribes once.
+  const subscribeEntries = useCallback((onEntry: (e: LedgerEntry) => void) => {
+    entryListeners.current.add(onEntry);
+    return () => {
+      entryListeners.current.delete(onEntry);
+    };
+  }, []);
+  const gatePrompt = useMemo(() => {
+    if (!gate) return null;
+    const { projectId: _projectId, ...prompt } = gate;
+    return prompt;
+  }, [gate]);
+
   const titles = useMemo(
     () => new Map(board ? Object.values(board.columns).flat().map((c) => [c.id, c.title] as const) : []),
     [board],
@@ -317,8 +332,8 @@ export function App() {
   }, [titles, runs]);
 
   /** Applies `change` to the open gate when it is still the move for `cardId` and `to`. */
-  const updateGate = (cardId: string, to: Stage, change: Partial<GatePrompt>) =>
-    setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change } : prev));
+  const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>
+    setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change(prev) } : prev));
 
   const model: WorkbenchModel = {
     projects,
@@ -341,7 +356,9 @@ export function App() {
       const projectId = selectedId;
       if (!projectId) return;
       const open = (evaluations: GateEvaluation[]) =>
-        setGate({ projectId, cardId, cardTitle: titles.get(cardId) ?? "this card", to, evaluations, note: null });
+        setGate({
+          projectId, cardId, cardTitle: titles.get(cardId) ?? "this card", to, evaluations, note: null, revision: 0, refreshing: false,
+        });
       try {
         setError(null);
         const evaluations = await api.getCardGates(cardId, to);
@@ -359,7 +376,7 @@ export function App() {
         setError(errorMessage(e));
       }
     },
-    gate: gate && { cardId: gate.cardId, cardTitle: gate.cardTitle, to: gate.to, evaluations: gate.evaluations, note: gate.note },
+    gate: gatePrompt,
     onResolveGate: async (decisions) => {
       const g = gateRef.current;
       if (!g) return false;
@@ -372,10 +389,17 @@ export function App() {
       } catch (e) {
         const gates = blockedGates(e);
         if (gates !== null) {
-          updateGate(g.cardId, g.to, { evaluations: gates, note: GATE_REFRESHED });
+          updateGate(g.cardId, g.to, (prev) => ({ evaluations: gates, note: GATE_REFRESHED, revision: prev.revision + 1 }));
         } else if (e instanceof ApiError && e.code === "gate_not_met") {
-          updateGate(g.cardId, g.to, { note: GATE_REFRESHED });
-          refreshGate();
+          // The decisions are dropped and the move stays disabled until the checklist has been read again.
+          updateGate(g.cardId, g.to, (prev) => ({ note: GATE_REFRESHED, revision: prev.revision + 1, refreshing: true }));
+          try {
+            const evaluations = await api.getCardGates(g.cardId, g.to);
+            updateGate(g.cardId, g.to, () => ({ evaluations, refreshing: false }));
+          } catch (err) {
+            updateGate(g.cardId, g.to, () => ({ refreshing: false }));
+            setError(errorMessage(err));
+          }
         } else {
           setError(errorMessage(e));
         }
@@ -384,12 +408,7 @@ export function App() {
     },
     onCancelGate: () => setGate(null),
     story: (cardId) => api.getCardStory(cardId),
-    subscribeEntries: (onEntry) => {
-      entryListeners.current.add(onEntry);
-      return () => {
-        entryListeners.current.delete(onEntry);
-      };
-    },
+    subscribeEntries,
     agentsInfo,
     runs,
     selectedRunId,

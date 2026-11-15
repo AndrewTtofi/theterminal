@@ -87,7 +87,7 @@ export function StoryPanel({ id }: { id: string }) {
         const { refs } = narrate(e);
         if (refs.cardId === cardId || (refs.runId !== undefined && runIds.current.has(refs.runId))) load.current();
       }),
-    [cardId],
+    [cardId, subscribe],
   );
 
   const narrated = useMemo(() => {

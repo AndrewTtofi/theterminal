@@ -587,4 +587,47 @@ describe("App readiness gates", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
     expect(m.startRun).toHaveBeenCalledWith("A", { adapter: "claude", prompt: "add sign-in", cardId: "c1" });
   });
+
+  it("keeps the gate and shows the error when a refused move sends no usable gates", async () => {
+    m.getCardGates.mockResolvedValue([shipMet()]);
+    m.moveCard.mockRejectedValue(new ApiError(409, "gate_blocked", { gates: "x" }));
+    await openA();
+    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    const strip = await screen.findByRole("region", { name: "Needs you" });
+    await userEvent.click(within(strip).getByRole("checkbox"));
+    await userEvent.click(within(strip).getByRole("button", { name: "Sign off" }));
+    await userEvent.click(within(strip).getByRole("button", { name: 'Move "Login" to Ship' }));
+    expect(await screen.findByText("err")).toBeTruthy();
+    expect(within(strip).getByRole("article", { name: "Gate: Ready to ship" })).toBeTruthy();
+  });
+
+  it("keeps Move disabled until the refresh after gate_not_met resolves", async () => {
+    let resolveRefresh: (v: unknown) => void = () => {};
+    m.getCardGates
+      .mockResolvedValueOnce([shipMet()])
+      .mockImplementationOnce(() => new Promise((r) => { resolveRefresh = r; }) as never);
+    m.moveCard.mockRejectedValue(new ApiError(409, "gate_not_met", { gateId: "ready_to_ship", unmet: [] }));
+    await openA();
+    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    const strip = await screen.findByRole("region", { name: "Needs you" });
+    await userEvent.click(within(strip).getByRole("checkbox"));
+    await userEvent.click(within(strip).getByRole("button", { name: "Sign off" }));
+    const move = () => within(strip).getByRole("button", { name: 'Move "Login" to Ship' }) as HTMLButtonElement;
+    await userEvent.click(move());
+    await within(strip).findByText(NOTE);
+    expect(move().disabled).toBe(true);
+    await act(async () => resolveRefresh([shipBlocked()]));
+    expect(within(strip).getByRole("button", { name: "Waive" })).toBeTruthy();
+    expect(move().disabled).toBe(true);
+  });
+
+  it("clears an open gate when another project is selected", async () => {
+    m.getCardGates.mockResolvedValue([shipMet()]);
+    await openA();
+    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await screen.findByRole("region", { name: "Needs you" });
+    m.getBoard.mockResolvedValue(mk("B"));
+    await userEvent.click(screen.getByRole("button", { name: "Project B" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+  });
 });

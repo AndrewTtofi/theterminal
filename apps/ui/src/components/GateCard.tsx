@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { visibleControls } from "@theterminal/shared";
 import type { GateDecisionInput, GateEvaluation, Stage } from "@theterminal/shared";
 import type { GatePrompt } from "../shell/model";
@@ -37,13 +37,13 @@ export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }:
     onDecision(
       decision === "sign_off"
         ? { gateId: g.id, decision, acknowledgement: g.acknowledgement }
-        : { gateId: g.id, decision, reason: trimmed, acknowledgement: g.acknowledgement },
+        : { gateId: g.id, decision, reason: trimmed.slice(0, REASON_MAX), acknowledgement: g.acknowledgement },
     );
   };
 
   return (
     <article className="gate-card" aria-label={`Gate: ${visibleControls(g.title)}`}>
-      <h3>{visibleControls(g.title)}</h3>
+      <h3 tabIndex={-1}>{visibleControls(g.title)}</h3>
       <p className="gate-move">
         Moving "{visibleControls(cardTitle)}" to {stageLabel(to)}
       </p>
@@ -130,18 +130,28 @@ type Props = {
 
 /** A gated move in the Needs-you strip: one card per gate waiting on the Owner, the passed ones in a line each, and the move. */
 export function GateCards({ gate, onResolve, onCancel }: Props) {
-  // Keyed by gate and outcome: a gate whose outcome changed on a refresh starts over with no decision.
+  // Keyed by refusal, gate, outcome and which conditions hold: a gate whose checklist changed, or any gate after the
+  // server refused the decisions, starts over with no decision, acknowledgement or reason.
   const [decisions, setDecisions] = useState<Record<string, GateDecisionInput>>({});
   const [busy, setBusy] = useState(false);
-  const keyOf = (g: GateEvaluation) => `${g.id}:${g.outcome}`;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const keyOf = (g: GateEvaluation) =>
+    `${gate.revision}:${g.id}:${g.outcome}:${g.conditions.map((c) => (c.met ? "1" : "0")).join("")}`;
   const passed = gate.evaluations.filter((g) => g.outcome === "pass");
   const waiting = gate.evaluations.filter((g) => g.outcome !== "pass");
   const chosen = waiting.map((g) => decisions[keyOf(g)]);
   const ready = chosen.every((d) => d !== undefined);
   const title = visibleControls(gate.cardTitle);
+  const checklist = waiting.map(keyOf).join("|");
+
+  // When the prompt appears (it is keyed by card and stage) and whenever its checklist changes, move focus to the
+  // first gate, so a keyboard or screen reader user lands on what needs them.
+  useEffect(() => {
+    rootRef.current?.querySelector<HTMLElement>(".gate-card h3")?.focus();
+  }, [checklist]);
 
   return (
-    <div className="gate-prompt">
+    <div className="gate-prompt" ref={rootRef}>
       {passed.map((g) => (
         <p key={g.id} className="gate-passed">
           Passed: {visibleControls(g.title)}
@@ -162,15 +172,14 @@ export function GateCards({ gate, onResolve, onCancel }: Props) {
           }
         />
       ))}
-      {gate.note !== null && (
-        <p className="note" role="status">
-          {gate.note}
-        </p>
-      )}
+      {/* Always mounted, so a note that appears later is announced. */}
+      <p className="note" role="status">
+        {gate.note ?? ""}
+      </p>
       <div className="gate-footer">
         <button
           type="button"
-          disabled={!ready || busy}
+          disabled={!ready || busy || gate.refreshing}
           onClick={() => {
             setBusy(true);
             void onResolve(chosen.filter((d): d is GateDecisionInput => d !== undefined)).finally(() => setBusy(false));
