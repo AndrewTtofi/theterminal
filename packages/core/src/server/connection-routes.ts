@@ -17,8 +17,8 @@ export type ConnectionRouteDeps = {
   /** The CI status for the status bar without waiting on the network; null when GitHub is not connected. */
   ci: () => CiStatus | null;
   intake: IntakeService;
-  /** Paired machines and how many answered their last check; never makes a new check. */
-  machines: () => { linked: number; online: number };
+  /** Paired machines, how many answered their last check and how many met another key; never makes a new check. */
+  machines: () => { linked: number; online: number; keyChanged: number };
   /** The network state inferred from the Owner's own outgoing calls; never makes a call. */
   network: () => NetworkState;
   /** Share links being served right now: the live listeners, never the projection's rows. */

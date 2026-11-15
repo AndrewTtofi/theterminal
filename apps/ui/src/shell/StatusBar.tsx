@@ -48,7 +48,11 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
     ? `Connections: ${conn.enabled} connected${conn.failed > 0 ? `, ${conn.failed} failed` : ""}`
     : "Connections: 0 connected";
   const linked = status?.machines?.linked ?? 0;
-  const machines = `Machines: ${linked} linked${linked > 0 ? `, ${status?.machines?.online ?? 0} online` : ""}`;
+  /** Machines whose address answered with another key: a security signal, said apart from offline and marked. */
+  const keyChanged = status?.machines?.keyChanged ?? 0;
+  const machines = `Machines: ${linked} linked${linked > 0 ? `, ${status?.machines?.online ?? 0} online` : ""}${
+    keyChanged > 0 ? `, ${keyChanged} key changed` : ""
+  }`;
   const network = status?.network?.state ?? null;
   return (
     <footer className="status-bar" aria-label="Status bar">
@@ -89,7 +93,7 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
             {connections}
           </button>
         )}
-        <button type="button" className="status-item" onClick={() => onSelectView("machines")}>
+        <button type="button" className={`status-item${keyChanged > 0 ? " attention" : ""}`} onClick={() => onSelectView("machines")}>
           {machines}
         </button>
         {network === "offline" && (

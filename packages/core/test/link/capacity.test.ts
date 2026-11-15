@@ -310,6 +310,8 @@ describe("LinkCapacity (the requester)", { timeout: 20_000 }, () => {
     recordPaired(a.db, a.ledger, paired, other.port);
     now = new Date(now.getTime() + 31_000);
     await expect(capacity.capacityOf(paired.machineId)).rejects.toBeInstanceOf(MachineKeyMismatchError);
+    // The machine's presence carries the same signal, so no view reads it as offline.
+    expect(a.link.presence().find((m) => m.id === paired.machineId)).toMatchObject({ online: false, problem: "key_mismatch" });
     await expect(capacity.capacityOf(paired.machineId, { fresh: true })).rejects.toBeInstanceOf(MachineKeyMismatchError);
     // Nothing was cached: asked again, it still rejects (no offline row with the old values).
     await expect(capacity.capacityOf(paired.machineId)).rejects.toBeInstanceOf(MachineKeyMismatchError);

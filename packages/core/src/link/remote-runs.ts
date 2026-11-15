@@ -247,6 +247,7 @@ export class RemoteRunService {
               : err instanceof LinkProtocolError ? "machine_bad_reply" : "not_sent";
       this.recordFailed(input.projectId, runId, machine.id, error);
       if (err instanceof MachineUnreachableError) link.observed(machine.id, false);
+      if (err instanceof MachineKeyMismatchError) link.observed(machine.id, false, "key_mismatch");
       if (err instanceof RemoteRefusedError) throw new RemoteRunRefusedError(err.status, err.code, machine.name);
       throw err;
     } finally {
@@ -409,7 +410,8 @@ export class RemoteRunService {
         if (signal.aborted || err instanceof StopFollowing) return;
         if (err instanceof MachineUnreachableError) link.observed(current.machineId, false);
         if (err instanceof MachineKeyMismatchError) {
-          // Another key at the machine's address: a security signal, never a quiet retry.
+          // Another key at the machine's address: a security signal, never a quiet retry, and never "offline".
+          link.observed(current.machineId, false, "key_mismatch");
           this.recordFailed(current.projectId, runId, current.machineId, "machine_key_mismatch");
           return;
         }

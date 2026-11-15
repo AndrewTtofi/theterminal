@@ -20,6 +20,7 @@ export function machine(over: Partial<MachinePresence> = {}): MachinePresence {
     updatedAt: "2026-11-15T10:00:00.000Z",
     online: true,
     checkedAt: "2026-11-15T10:01:00.000Z",
+    problem: null,
     ...over,
   };
 }

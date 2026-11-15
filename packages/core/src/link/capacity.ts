@@ -93,8 +93,12 @@ export class LinkCapacity {
       value = { ...body, machineId, name, online: true, checkedAt: at, lastSeenAt: at, problem: null };
     } catch (err) {
       if (err instanceof NotFoundError) throw err; // unpaired while asking
-      // Another key at the paired address is not "offline": the caller says so, and nothing is cached or kept.
-      if (err instanceof MachineKeyMismatchError) throw err;
+      // Another key at the paired address is not "offline": the caller says so, the machine's presence says so, and
+      // nothing is cached or kept.
+      if (err instanceof MachineKeyMismatchError) {
+        this.link.observed(machineId, false, "key_mismatch");
+        throw err;
+      }
       // Unreachable, refused, an unreadable reply, no identity: all the same to the reader, offline.
       value = this.offline(machineId, name);
     }

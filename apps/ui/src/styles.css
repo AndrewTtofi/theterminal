@@ -275,6 +275,7 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .machine-dot::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .machine-dot.online::before { background: var(--ok); }
 .machine-dot.offline::before { background: var(--danger); }
+.machine-dot.key-changed::before { background: var(--warning, var(--danger)); }
 .machine-confirm { padding: 6px; border: 1px solid var(--danger); border-radius: 2px; display: flex; flex-direction: column; gap: 6px; }
 .link-machine { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
 .link-machine h2 { margin: 0; font-size: 15px; color: var(--fg-strong); }

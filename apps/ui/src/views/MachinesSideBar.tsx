@@ -30,7 +30,9 @@ export function useMachinesRefresh(refresh: () => void, ms = REFRESH_MS): void {
   }, [ms]);
 }
 
-function presence(m: MachinePresence): "online" | "offline" | "not checked" {
+/** The dot's word: another key at the address is said as such, never as a machine that is merely away. */
+function presence(m: MachinePresence): "online" | "offline" | "not checked" | "key changed" {
+  if (m.problem === "key_mismatch") return "key changed";
   return m.online === null ? "not checked" : m.online ? "online" : "offline";
 }
 

@@ -150,6 +150,7 @@ describe("StartRunForm", () => {
   describe("Run on", () => {
     const gpu = machine({ id: "m1", name: "GPU box", online: true });
     const away = machine({ id: "m2", name: "Old laptop", online: false });
+    const changed = machine({ id: "m3", name: "Studio", online: false, problem: "key_mismatch" });
     const caps = (over: Partial<MachineCapacity> = {}): MachineCapacity => ({
       machineId: "m1", name: "GPU box", online: true, checkedAt: "2026-11-15T10:00:00.000Z", lastSeenAt: null, problem: null,
       hardware: null, localModels: [], sources: [], adapters: ["fake", "codex"],
@@ -161,12 +162,14 @@ describe("StartRunForm", () => {
     });
 
     it("lists This computer and every paired machine; an offline one is disabled and says so; none paired, no picker", () => {
-      const { rerender } = render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[gpu, away]} onStart={vi.fn()} />);
+      const { rerender } = render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[gpu, away, changed]} onStart={vi.fn()} />);
       const picker = screen.getByLabelText("Run on") as HTMLSelectElement;
+      // A machine whose address answered with another key is said so, never as offline.
       expect([...picker.options].map((o) => [o.textContent, o.disabled])).toEqual([
         ["This computer", false],
         ["GPU box", false],
         ["Old laptop (offline)", true],
+        ["Studio (key changed)", true],
       ]);
       expect(picker.value).toBe("");
       // A machine not checked yet (online null) can be chosen: only one that failed its last check is offline.

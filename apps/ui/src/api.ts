@@ -134,8 +134,8 @@ export type Status = {
   intakeDecisions: number;
   /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
   intakeProjects: { projectId: string; name: string; decisions: number }[];
-  /** Linked machines, and how many answered the last presence check. */
-  machines: { linked: number; online: number };
+  /** Linked machines, how many answered the last presence check, and how many met another key at their address. */
+  machines: { linked: number; online: number; keyChanged: number };
   /** Inferred from the Owner's own calls to the internet; `lastError` is a fixed system code such as `ENOTFOUND`. */
   network: NetworkState;
   /** Share links being served right now. */

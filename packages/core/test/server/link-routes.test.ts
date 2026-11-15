@@ -69,7 +69,7 @@ type Overview = {
   machines: Array<Machine & { online: boolean | null; checkedAt: string | null }>;
   discovered: Array<{ machineId: string; name: string; address: string; seenAt: string }>;
 };
-type Status = { machines: { linked: number; online: number } };
+type Status = { machines: { linked: number; online: number; keyChanged: number } };
 
 async function enabled(s: RunningServer) {
   const res = await send(s, "POST", "/api/link/enable", { acknowledgement: LINKING_ACK });
@@ -191,13 +191,13 @@ describe("link routes", { timeout: 30_000 }, () => {
     const overview = await json<Overview>(send(enterer, "GET", "/api/link"));
     expect(overview.machines).toEqual([expect.objectContaining({ id: sSelf.machineId, online: true })]);
     expect(overview.machines[0]!.checkedAt).not.toBeNull();
-    expect((await json<Status>(send(enterer, "GET", "/api/status"))).machines).toEqual({ linked: 1, online: 1 });
+    expect((await json<Status>(send(enterer, "GET", "/api/status"))).machines).toEqual({ linked: 1, online: 1, keyChanged: 0 });
     // The showing side has not checked yet: linked, not online.
-    expect((await json<Status>(send(shower, "GET", "/api/status"))).machines).toEqual({ linked: 1, online: 0 });
+    expect((await json<Status>(send(shower, "GET", "/api/status"))).machines).toEqual({ linked: 1, online: 0, keyChanged: 0 });
 
     // Unlink: 204, then the row is gone; an unknown id is 404.
     expect((await send(enterer, "DELETE", `/api/link/machines/${sSelf.machineId}`)).status).toBe(204);
-    expect((await json<Status>(send(enterer, "GET", "/api/status"))).machines).toEqual({ linked: 0, online: 0 });
+    expect((await json<Status>(send(enterer, "GET", "/api/status"))).machines).toEqual({ linked: 0, online: 0, keyChanged: 0 });
     const missing = await send(enterer, "DELETE", `/api/link/machines/${"0".repeat(32)}`);
     expect(missing.status).toBe(404);
     expect(await missing.json()).toEqual({ error: "not_found" });

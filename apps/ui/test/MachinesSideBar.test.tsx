@@ -174,12 +174,14 @@ describe("MachinesSideBar", () => {
           machine(),
           machine({ id: "33".repeat(16), name: "Laptop", online: false }),
           machine({ id: "44".repeat(16), name: "Spare", online: null, checkedAt: null }),
+          machine({ id: "55".repeat(16), name: "Studio", online: false, problem: "key_mismatch" }),
         ],
       }),
     });
     const rows = within(screen.getByRole("list", { name: "Linked machines" })).getAllByRole("listitem");
-    expect(rows.map((r) => within(r).getByRole("heading").textContent)).toEqual(["GPU box", "Laptop", "Spare"]);
-    expect(rows.map((r) => r.querySelector(".machine-dot")?.textContent)).toEqual(["online", "offline", "not checked"]);
+    expect(rows.map((r) => within(r).getByRole("heading").textContent)).toEqual(["GPU box", "Laptop", "Spare", "Studio"]);
+    expect(rows.map((r) => r.querySelector(".machine-dot")?.textContent)).toEqual(["online", "offline", "not checked", "key changed"]);
+    expect(rows[3]!.querySelector(".machine-dot")!.className).toContain("key-changed");
     expect(rows[0]!.textContent).toContain("Fingerprint 0f1e 2d3c 4b5a 6978");
   });
 

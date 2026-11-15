@@ -54,7 +54,7 @@ const entry: LedgerEntry = {
 const STATUS: Status = {
   runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
   connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
-  machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
+  machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
 };
 
 function model(over: Partial<AppModel> = {}): AppModel {
@@ -658,7 +658,7 @@ describe("Workbench", () => {
     const statusWith = (intakeProjects: Status["intakeProjects"]): Status => ({
       runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
       connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
-      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
     });
 
     it("opens the Plan intake tab from the Projects side bar", async () => {

@@ -41,8 +41,13 @@ export type Machine = {
   pairedAt: string;
   updatedAt: string;
 };
-/** `online` and `checkedAt` are what the last check said and when; null when the machine was never checked. */
-export type MachinePresence = Machine & { online: boolean | null; checkedAt: string | null };
+/** What a presence check found wrong, beyond not answering: another key at the machine's address (a security signal). */
+export type MachineProblem = "key_mismatch";
+/**
+ * `online` and `checkedAt` are what the last check said and when; null when the machine was never checked. `problem`
+ * is `key_mismatch` when that check met another key at the paired address: never shown as merely offline.
+ */
+export type MachinePresence = Machine & { online: boolean | null; checkedAt: string | null; problem: MachineProblem | null };
 export type LinkRunState = "requested" | "running" | "finished" | "imported" | "failed";
 export type LinkRun = {
   runId: string;

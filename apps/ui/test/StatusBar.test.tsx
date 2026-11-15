@@ -15,7 +15,7 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   ci: null,
   intakeDecisions: 0,
   intakeProjects: [],
-  machines: { linked: 0, online: 0 },
+  machines: { linked: 0, online: 0, keyChanged: 0 },
   network: { state: "unknown", basis: "inferred", since: null, lastError: null },
   shareLinks: 0,
 });
@@ -144,11 +144,19 @@ describe("StatusBar", () => {
     expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
     rerender(<StatusBar status={status()} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
     expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
-    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1, keyChanged: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
     await userEvent.click(screen.getByRole("button", { name: "Machines: 2 linked, 1 online" }));
     expect(onSelectView).toHaveBeenLastCalledWith("machines");
-    rerender(<StatusBar status={{ ...status(), machines: { linked: 1, online: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 1, online: 0, keyChanged: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
     expect(screen.getByRole("button", { name: "Machines: 1 linked, 0 online" })).toBeTruthy();
+  });
+
+  it("says how many machines' keys changed, apart from offline and marked for attention", () => {
+    const { rerender } = render(<StatusBar status={{ ...status(), machines: { linked: 2, online: 0, keyChanged: 1 } }} running={0} pending={0} {...noop} />);
+    const item = screen.getByRole("button", { name: "Machines: 2 linked, 0 online, 1 key changed" });
+    expect(item.className).toContain("attention");
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1, keyChanged: 0 } }} running={0} pending={0} {...noop} />);
+    expect(screen.getByRole("button", { name: "Machines: 2 linked, 1 online" }).className).not.toContain("attention");
   });
 
   describe("layouts", () => {

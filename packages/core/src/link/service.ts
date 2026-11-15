@@ -6,7 +6,7 @@ import { z } from "zod";
 import {
   LINK_DEFAULT_PORT, LINK_PROTOCOL_VERSION, LINKING_ACK, PAIRING_LABEL, helloResponseSchema, machineAddressSchema,
   machineNameSchema, pairRequestSchema, pairResponseSchema, parsePairingCode,
-  type Actor, type Machine, type MachinePresence,
+  type Actor, type Machine, type MachinePresence, type MachineProblem,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
@@ -18,7 +18,7 @@ import { SecretInTextError } from "../intake/recorded-text.js";
 import { redact } from "../agents/redact.js";
 import { SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { LinkIdentity, fingerprintOf, machineIdOf } from "./identity.js";
-import { ClosedBeforeReplyError, LinkClient, LinkProtocolError, RemoteRefusedError, type Peer } from "./client.js";
+import { ClosedBeforeReplyError, LinkClient, LinkProtocolError, MachineKeyMismatchError, RemoteRefusedError, type Peer } from "./client.js";
 import { PAIR_PATH, type LinkListener, type ListenerDeps, type PeerCheck } from "./listener.js";
 import { PairingWindow, pairingProof } from "./pairing.js";
 import type { Discovered, Discovery } from "./discovery.js";
@@ -157,7 +157,7 @@ export class LinkService {
   private state: "ok" | "unavailable" = "unavailable";
   private listener: LinkListener | null = null;
   private helloClient: LinkClient | null = null;
-  private readonly checked = new Map<string, { online: boolean; checkedAt: Date }>();
+  private readonly checked = new Map<string, { online: boolean; problem: MachineProblem | null; checkedAt: Date }>();
   private readonly checking = new Map<string, Promise<boolean>>();
   private closed = false;
   private window: PairingWindow | null = null;
@@ -515,10 +515,17 @@ export class LinkService {
     return b.list;
   }
 
-  /** How many machines are paired and how many answered their last check (no new check is made). */
-  counts(): { linked: number; online: number } {
+  /**
+   * How many machines are paired, how many answered their last check, and how many met another key at their address
+   * (never counted as online, and never left to read as offline). No new check is made.
+   */
+  counts(): { linked: number; online: number; keyChanged: number } {
     const rows = this.presence();
-    return { linked: rows.length, online: rows.filter((r) => r.online === true).length };
+    return {
+      linked: rows.length,
+      online: rows.filter((r) => r.online === true).length,
+      keyChanged: rows.filter((r) => r.problem === "key_mismatch").length,
+    };
   }
 
   machines(): Machine[] {
@@ -549,7 +556,8 @@ export class LinkService {
 
   /**
    * Whether the machine answers `GET /link/v1/hello` as itself within 3 s (a hard deadline, so one slow machine never
-   * holds the Machines view); the answer is kept for 15 s.
+   * holds the Machines view); the answer is kept for 15 s. Another key at its address is kept as `key_mismatch` (see
+   * presence), so it is never read as a machine that is merely away.
    */
   async hello(machineId: string): Promise<boolean> {
     const cached = this.checked.get(machineId);
@@ -560,18 +568,20 @@ export class LinkService {
     if (!identity || getMachine(this.deps.db, machineId) === null) return false;
     const check = (async () => {
       let online = false;
+      let problem: MachineProblem | null = null;
       const deadline = new AbortController();
       const timer = setTimeout(() => deadline.abort(), HELLO_TIMEOUT_MS);
       try {
         this.helloClient ??= this.deps.client(identity, HELLO_TIMEOUT_MS);
         const body = await this.helloClient.request(this.peerFor(machineId), "GET", "/link/v1/hello", undefined, helloResponseSchema, deadline.signal);
         online = body.machineId === machineId;
-      } catch {
+      } catch (err) {
         online = false;
+        if (err instanceof MachineKeyMismatchError) problem = "key_mismatch";
       } finally {
         clearTimeout(timer);
       }
-      this.checked.set(machineId, { online, checkedAt: this.now() });
+      this.checked.set(machineId, { online, problem, checkedAt: this.now() });
       return online;
     })();
     this.checking.set(machineId, check);
@@ -584,18 +594,19 @@ export class LinkService {
 
   /**
    * What another connection to a paired machine just showed (a remote run's event stream answering, or failing to
-   * connect), kept as its last check, so its presence reads offline while a run waits to reconnect.
+   * connect, or meeting another key), kept as its last check, so its presence reads offline while a run waits to
+   * reconnect, and `key changed` once another key answered at its address.
    */
-  observed(machineId: string, online: boolean): void {
+  observed(machineId: string, online: boolean, problem: MachineProblem | null = null): void {
     if (getMachine(this.deps.db, machineId) === null) return;
-    this.checked.set(machineId, { online, checkedAt: this.now() });
+    this.checked.set(machineId, { online, problem, checkedAt: this.now() });
   }
 
-  /** Each paired machine with what its last hello said and when (null when never checked). */
+  /** Each paired machine with what its last check said and when (null when never checked), and any problem it met. */
   presence(): MachinePresence[] {
     return this.machines().map((m) => {
       const c = this.checked.get(m.id);
-      return { ...m, online: c?.online ?? null, checkedAt: c ? c.checkedAt.toISOString() : null };
+      return { ...m, online: c?.online ?? null, checkedAt: c ? c.checkedAt.toISOString() : null, problem: c?.problem ?? null };
     });
   }
 
@@ -713,7 +724,7 @@ export class LinkService {
       event: { projectId: null, actor, type: "machine.paired", payload },
       result: () => undefined,
     }));
-    if (payload.role === "entered_code") this.checked.set(payload.machineId, { online: true, checkedAt: this.now() });
+    if (payload.role === "entered_code") this.checked.set(payload.machineId, { online: true, problem: null, checkedAt: this.now() });
     else this.checked.delete(payload.machineId);
     const m = getMachine(this.deps.db, payload.machineId);
     if (!m) throw new NotFoundError("machine", payload.machineId);

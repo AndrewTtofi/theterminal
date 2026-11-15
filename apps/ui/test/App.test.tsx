@@ -129,7 +129,7 @@ beforeEach(() => {
   h.subs.clear();
   m.getStatus.mockResolvedValue({
     runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
   });
   m.getIntake.mockResolvedValue(null);
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
@@ -753,7 +753,7 @@ describe("App Machines view", () => {
   it("with a machine paired, names come from the paired list: no machine is asked and the network is not browsed", async () => {
     m.getStatus.mockResolvedValue({
       runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 0 }, shareLinks: 0,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 0, keyChanged: 0 }, shareLinks: 0,
       network: { state: "unknown", basis: "inferred", since: null, lastError: null },
     });
     m.getMachines.mockResolvedValue([]);
@@ -1041,7 +1041,7 @@ describe("App Changes view", () => {
     const remote = { ...run2, machineId: "m1", status: "completed" as const };
     m.getStatus.mockResolvedValue({
       runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 1 }, shareLinks: 0,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 1, keyChanged: 0 }, shareLinks: 0,
       network: { state: "unknown", basis: "inferred", since: null, lastError: null },
     });
     m.getMachines.mockResolvedValue([{ id: "m1", name: "GPU box" } as never]);

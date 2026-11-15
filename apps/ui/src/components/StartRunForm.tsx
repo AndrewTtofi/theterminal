@@ -133,9 +133,9 @@ export function StartRunForm({
           >
             <option value="">This computer</option>
             {machines.map((m) => (
-              <option key={m.id} value={m.id} disabled={m.online === false}>
+              <option key={m.id} value={m.id} disabled={m.online === false || m.problem !== null}>
                 {visibleControls(m.name)}
-                {m.online === false ? " (offline)" : ""}
+                {m.problem === "key_mismatch" ? " (key changed)" : m.online === false ? " (offline)" : ""}
               </option>
             ))}
           </select>

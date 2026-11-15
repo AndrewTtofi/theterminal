@@ -351,12 +351,36 @@ describe("LinkService machines and hello", () => {
       const took = Date.now() - t0;
       expect(took).toBeGreaterThanOrEqual(2500);
       expect(took).toBeLessThan(4500);
-      expect(a.link.presence()[0]).toMatchObject({ online: false });
+      expect(a.link.presence()[0]).toMatchObject({ online: false, problem: null });
       await vi.waitFor(() => expect(server.open()).toBe(0), { timeout: 2000 });
     } finally {
       await server.close();
     }
   }, 15_000);
+
+  it("another key at a paired address is key_mismatch in presence and counts, never merely offline", async () => {
+    const a = makeService({ platform: "darwin" });
+    const b = makeService({ platform: "linux" });
+    await a.link.load();
+    await b.link.load();
+    const bPort = await b.link.enableLinking(owner, LINKING_ACK, 0);
+    // Paired under a third key, at the address where B answers.
+    const stranger = await LinkIdentity.load({ secrets: new MemorySecretStore(), onCreated: () => undefined });
+    recordPaired(a.db, a.ledger, stranger, bPort);
+    expect(await a.link.hello(stranger.machineId)).toBe(false);
+    expect(a.link.presence()[0]).toMatchObject({ id: stranger.machineId, online: false, problem: "key_mismatch" });
+    expect(a.link.counts()).toEqual({ linked: 1, online: 0, keyChanged: 1 });
+    // Observed by another connection (a run's stream): the same signal.
+    a.link.observed(stranger.machineId, false);
+    expect(a.link.presence()[0]).toMatchObject({ online: false, problem: null });
+    a.link.observed(stranger.machineId, false, "key_mismatch");
+    expect(a.link.presence()[0]).toMatchObject({ online: false, problem: "key_mismatch" });
+    expect(a.link.counts()).toEqual({ linked: 1, online: 0, keyChanged: 1 });
+    // The machine really away is plain offline.
+    await b.link.disableLinking(owner);
+    a.link.observed(stranger.machineId, true);
+    expect(a.link.counts()).toEqual({ linked: 1, online: 1, keyChanged: 0 });
+  });
 
   it("answers hello false for a machine that is not listening, or whose key is not the pinned one", async () => {
     const a = makeService();
@@ -366,7 +390,7 @@ describe("LinkService machines and hello", () => {
     await held.release();
     recordPaired(a.db, a.ledger, stranger, held.port);
     expect(await a.link.hello(stranger.machineId)).toBe(false);
-    expect(a.link.presence()[0]!.online).toBe(false);
+    expect(a.link.presence()[0]).toMatchObject({ online: false, problem: null });
     expect(await a.link.hello("f".repeat(32))).toBe(false);
   });
 });
@@ -480,16 +504,16 @@ describe("LinkService pairing", () => {
   it("counts the machine it just paired with as online on the side that entered the code, before any hello", async () => {
     const { s, e, sPort } = await pairOfServices();
     // E reached S over TLS to pair, so E knows S answered; S was only reached, so it says nothing until it checks.
-    const counted: Array<{ linked: number; online: number }> = [];
+    const counted: Array<{ linked: number; online: number; keyChanged: number }> = [];
     const stop = e.ledger.onAppend((x) => {
       if (x.type === "machine.paired") queueMicrotask(() => counted.push(e.link.counts()));
     });
     await e.link.pair(owner, `127.0.0.1:${sPort}`, s.link.showCode().code);
     stop();
-    expect(counted).toEqual([{ linked: 1, online: 1 }]);
-    expect(e.link.counts()).toEqual({ linked: 1, online: 1 });
+    expect(counted).toEqual([{ linked: 1, online: 1, keyChanged: 0 }]);
+    expect(e.link.counts()).toEqual({ linked: 1, online: 1, keyChanged: 0 });
     expect(e.link.presence()[0]!.online).toBe(true);
-    expect(s.link.counts()).toEqual({ linked: 1, online: 0 });
+    expect(s.link.counts()).toEqual({ linked: 1, online: 0, keyChanged: 0 });
   });
 
   it("refuses to pair with itself, and refuses a malformed code or address before connecting", async () => {
