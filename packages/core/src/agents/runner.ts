@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -199,6 +199,15 @@ const promptSchema = z.string().min(1).max(MAX.prompt);
 const INTERNAL_ERROR = "internal error";
 const NOT_ALLOWED_RESULT = "adapter reported a result for an action that was not allowed";
 
+/** Removes a run's own config home once the CLI has exited. Best effort: the folder is under the data folder, and the next run gets its own. */
+function removeRunHome(home: string): void {
+  try {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    // left in place (Windows may hold a handle a moment longer)
+  }
+}
+
 function errorMessage(e: unknown): string {
   try {
     return e instanceof Error ? e.message : String(e);
@@ -365,13 +374,10 @@ export class AgentRunner {
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
-    // A collaborator's run gets an empty config home of its own: the CLI reads none of the Owner's settings and finds
-    // none of the Owner's logins, whatever its default home holds.
-    if (provider !== null && input.forceApiKey) {
-      const home = join(this.deps.dataDir, "projects", input.projectId, "run-homes", runId);
-      mkdirSync(home, { recursive: true });
-      credentials.configHome = home;
-    }
+    // A collaborator's run gets an empty config home of its own (created just before the launch, removed when the run
+    // ends): the CLI reads none of the Owner's settings and finds none of the Owner's logins, whatever its default
+    // home holds, and nothing of another run.
+    if (provider !== null && input.forceApiKey) credentials.configHome = join(this.deps.dataDir, "projects", input.projectId, "run-homes", runId);
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
     // Its key stays in `localModel`, never in `env`: Codex lets every `env` name through to the agent's commands.
     if (localModel !== null) credentials.localModel = localModel;
@@ -413,6 +419,7 @@ export class AgentRunner {
       this.close(runId, "failed", INTERNAL_ERROR, "run finished"); // never leave a run recorded as running
       throw e;
     }
+    if (credentials.configHome !== undefined) mkdirSync(credentials.configHome, { recursive: true });
     this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials, runSecrets);
     return run;
   }
@@ -604,6 +611,7 @@ export class AgentRunner {
         console.error(`agent run ${run.id} could not be finished: ${e instanceof Error ? e.name : "error"}`);
       } finally {
         this.sessions.delete(run.id);
+        if (credentials.configHome !== undefined) removeRunHome(credentials.configHome);
       }
     })().finally(() => this.unsettled.delete(run.id));
   }

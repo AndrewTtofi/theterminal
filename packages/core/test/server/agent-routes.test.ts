@@ -30,7 +30,7 @@ import { asPrincipal, fakeAuth } from "../fixtures/principal.js";
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
   "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
-  "ANTHROPIC_API_KEY", "THETERMINAL_FAKE_LOG", "CODEX_HOME",
+  "ANTHROPIC_API_KEY", "THETERMINAL_FAKE_LOG", "CODEX_HOME", "GEMINI_CLI_HOME",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
@@ -901,7 +901,7 @@ describe("collaborators run agents on API keys and are named on what they do", {
     expect(await (await get(s, "/api/ledger")).text()).not.toContain(FAKE_OPENAI_KEY);
   });
 
-  it("a collaborator's run never sees the Owner's CLI home: its config home is an empty folder under the data folder", async () => {
+  it("a collaborator's Codex run never sees the Owner's CLI home: CODEX_HOME is the run's own empty folder under the data folder, gone when the run ends", async () => {
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
     process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([{ message: "Done." }]);
     process.env.CODEX_HOME = join(tmp(), "owners-codex-home"); // where the Owner's own login would live
@@ -916,9 +916,39 @@ describe("collaborators run agents on API keys and are named on what they do", {
     const started = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { start?: boolean; env?: { CODEX_HOME: string | null } })
       .find((e) => e.start)!;
     const home = started.env!.CODEX_HOME!;
-    expect(home.startsWith(dataDir)).toBe(true);
-    expect(home).not.toBe(process.env.CODEX_HOME);
+    expect(home).toBe(join(dataDir, "projects", projectId, "run-homes", run.id));
     expect(home.startsWith(process.env.CODEX_HOME!)).toBe(false);
+    expect(existsSync(join(dataDir, "projects", projectId, "codex-home"))).toBe(false); // the shared per-project home is the Owner's runs' alone
+    await vi.waitFor(() => expect(existsSync(home)).toBe(false));
+    // The Owner's own api_key run uses the project's shared home, as before.
+    const owners = (await (await send("owner", "POST", `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" })).json()) as AgentRun;
+    await untilFinished(s, owners.id);
+    const starts = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { start?: boolean; env?: { CODEX_HOME: string | null } })
+      .filter((e) => e.start);
+    expect(starts).toHaveLength(2);
+    expect(starts[1]!.env!.CODEX_HOME).toBe(join(dataDir, "projects", projectId, "codex-home"));
+  });
+
+  it("a collaborator's Gemini run never sees the Owner's CLI home: GEMINI_CLI_HOME is the run's own folder under the data folder, gone when the run ends", async () => {
+    process.env.THETERMINAL_GEMINI_BIN = FAKE_GEMINI;
+    process.env.THETERMINAL_FAKE_GEMINI_SCRIPT = JSON.stringify([{ type: "message", text: "Done." }]);
+    process.env.GEMINI_CLI_HOME = join(tmp(), "owners-gemini-home"); // where the Owner's own login would live
+    const log = join(tmp(), "fake.log");
+    process.env.THETERMINAL_FAKE_LOG = log;
+    const { s, projectId, dataDir, send } = await startSeeded(script);
+    await send("owner", "POST", "/api/connections", { kind: "llm", provider: "gemini", name: "Gemini", secrets: { apiKey: FAKE_GEMINI_KEY } });
+    const res = await send("maintainer", "POST", `/api/projects/${projectId}/runs`, { adapter: "gemini", prompt: "go" });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    await untilFinished(s, run.id);
+    expect((await getRun(s, run.id)).run.status).toBe("completed");
+    const snap = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { initialize?: { env: Record<string, string> } })
+      .find((e) => e.initialize)!.initialize!;
+    const home = snap.env.GEMINI_CLI_HOME!;
+    expect(home).toBe(join(dataDir, "projects", projectId, "run-homes", run.id));
+    expect(home.startsWith(process.env.GEMINI_CLI_HOME!)).toBe(false);
+    expect(existsSync(join(dataDir, "projects", projectId, "gemini-home"))).toBe(false);
+    await vi.waitFor(() => expect(existsSync(home)).toBe(false));
   });
 
   it("a reviewer decides an action and is named for it; a viewer may not decide", async () => {

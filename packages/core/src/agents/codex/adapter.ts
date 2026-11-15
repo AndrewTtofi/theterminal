@@ -383,9 +383,11 @@ export class CodexAdapter implements AgentAdapter {
     const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv, configHome: o.credentials.configHome });
     const env = { ...childEnv, ...this.fakeEnv };
     if (o.authMode === "api_key" || localModel !== undefined) {
-      // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
+      // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply. The runner's
+      // per-run home when it gives one (a collaborator's run, which must find nothing of the Owner's or of other runs),
+      // otherwise the project's shared one.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };
-      const home = join(this.dataDir, "projects", o.projectId, CODEX_HOME_DIR);
+      const home = o.credentials.configHome ?? join(this.dataDir, "projects", o.projectId, CODEX_HOME_DIR);
       try {
         mkdirSync(home, { recursive: true });
       } catch {

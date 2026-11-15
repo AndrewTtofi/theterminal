@@ -740,6 +740,18 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
     });
 
+    it("api_key mode points CODEX_HOME at the runner's per-run config home when it gives one, never at the project's shared home", async () => {
+      vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
+      script([]);
+      const configHome = join(dir, "projects", "p1", "run-homes", "run-1");
+      mkdirSync(configHome, { recursive: true });
+      const { result } = run(make(), undefined, { authMode: "api_key", credentials: { env: {}, mcpServers: [], configHome } });
+      expect(await result).toEqual({ status: "completed" });
+      const start = fakeLog().find((e) => e.start);
+      expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY, CODEX_HOME: configHome });
+      expect(existsSync(join(dir, "projects", "p1", "codex-home"))).toBe(false);
+    });
+
     it("api_key mode prefers the key the runner resolved from a connection over its own fallback", async () => {
       script([]);
       const connectionKey = "sk-TESTKEY-connection-0000000000";
