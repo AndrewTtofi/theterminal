@@ -101,6 +101,8 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [presence, setPresence] = useState<PresenceEntry[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
+  // Every person's name by id, removed people included: the ledger names whoever made an entry, long after they left.
+  const [personNames, setPersonNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [invites, setInvites] = useState<Invite[]>([]);
   const [remote, setRemote] = useState<RemoteInfo | null>(null);
   const navigateRef = useRef(navigate);
@@ -232,6 +234,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
       ]);
       if (cancelled) return;
       setPeople(list.filter((p) => p.removedAt === null));
+      setPersonNames(new Map(list.map((p) => [p.id, p.name] as const)));
       setInvites(pending);
       setRemote(r);
     }, () => cancelled);
@@ -732,8 +735,11 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
   // Kept stable while the board and runs are unchanged, so the ledger's narration is not redone every render.
   const narration = useMemo<NarrationContext>(() => {
     const adapters = new Map(runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
-    return { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id), machineName: (id) => machineNames.get(id) };
-  }, [titles, runs, machineNames]);
+    return {
+      cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id), machineName: (id) => machineNames.get(id),
+      personName: (id) => personNames.get(id),
+    };
+  }, [titles, runs, machineNames, personNames]);
 
   /** Applies `change` to the open gate when it is still the move for `cardId` and `to`. */
   const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>

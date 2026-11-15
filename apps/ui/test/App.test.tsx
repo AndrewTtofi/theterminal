@@ -1330,6 +1330,31 @@ describe("App: who is signed in, and who is here", () => {
     expect(m.listInvites).toHaveBeenCalled();
   });
 
+  it("names the person who made each ledger entry, a removed person included, and anyone unknown as Someone", async () => {
+    m.listPeople.mockResolvedValue([
+      { id: "owner", name: "Owner", role: "owner", joinedAt: null, lastSeenAt: null, removedAt: null, credentials: 1 },
+      { id: "r1", name: "Reviewer One", role: "reviewer", joinedAt: null, lastSeenAt: null, removedAt: null, credentials: 1 },
+      { id: "x1", name: "Former Person", role: "viewer", joinedAt: null, lastSeenAt: null, removedAt: "2026-11-15T00:00:00Z", credentials: 0 },
+    ]);
+    const decided = (seq: number, who: string): LedgerEntry => ({
+      seq, id: `e${seq}`, ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "human", id: who },
+      type: "card.created", payload: { cardId: `c${seq}`, title: `Card ${seq}`, stage: "plan" }, prevHash: "", hash: "",
+    });
+    m.listLedger.mockResolvedValue([decided(1, "r1"), decided(2, "x1"), decided(3, "nobody")]);
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(within(await screen.findByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(3));
+    await waitFor(() => expect(within(ledger()).getByText(/^Reviewer One added/)).toBeTruthy());
+    expect(within(ledger()).getByText(/^Former Person added/)).toBeTruthy();
+    expect(within(ledger()).getByText(/^Someone added/)).toBeTruthy();
+    // A removed person is still named in the ledger, but not listed among the people.
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "People" }));
+    expect(screen.queryByText("Former Person")).toBeNull();
+  });
+
   it("reads people again on a person.* entry", async () => {
     render(<App />);
     await screen.findByRole("navigation", { name: "Views" });

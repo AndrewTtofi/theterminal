@@ -99,6 +99,28 @@ describe("StoryPanel", () => {
     await waitFor(() => expect(again.textContent).toContain("asked a linked machine to run a Fake agent"));
   });
 
+  it("names the person who decided, from the workspace's people", async () => {
+    const decidedBy = (): CardStory =>
+      story({
+        entries: [
+          entry("card.created", { cardId: "c1", title: "Login", stage: "plan" }),
+          entry("agent.action.decided", { runId: "r1", actionId: "a1", decision: "allow", by: "human", reason: "" }, { kind: "human", id: "p-r1" }),
+        ],
+      });
+    const model = {
+      story: vi.fn(() => Promise.resolve(decidedBy())),
+      subscribeEntries: () => () => {},
+      narration: { personName: (id: string) => (id === "p-r1" ? "Reviewer One" : undefined) },
+    } as unknown as WorkbenchModel;
+    render(
+      <ShellContext.Provider value={{ model, dock: () => null, ...shellNav() }}>
+        <StoryPanel id="story:c1" />
+      </ShellContext.Provider>,
+    );
+    const panel = await screen.findByRole("region", { name: "Story: Login" });
+    await waitFor(() => expect(panel.textContent).toContain("Reviewer One allowed it"));
+  });
+
   it("tells what happened in plain language with the raw record under each line, and the cost", async () => {
     const { model } = setup(() => Promise.resolve(story()));
     const panel = await screen.findByRole("region", { name: "Story: Login" });
