@@ -23,7 +23,7 @@ function routedFetch(routes: { token?: Response | Error; sub?: Response | Error 
   });
   return { f: f as unknown as typeof fetch, calls };
 }
-const tokenOk = () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" }), { status: 200 });
+const tokenOk = () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3600, token_type: "Bearer" }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
 
 describe("fetchAzureToken", () => {
   it("POSTs a client_credentials grant to the tenant's token URL", async () => {

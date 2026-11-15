@@ -983,7 +983,10 @@ describe("cloud, MCP and hardware connections", () => {
 });
 
 describe("Google Cloud key redaction", () => {
-  const PEM = "-----BEGIN PRIVATE KEY-----\nTESTKEYTESTKEYTESTKEYTESTKEY0000\n-----END PRIVATE KEY-----\n";
+  const LINE1 = "TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEY0";
+  const LINE2 = "TESTKEYTESTKEYTESTKEYTESTKEYTESTKEY00000";
+  const SHORT = "TESTKEY000000000";
+  const PEM = `-----BEGIN PRIVATE KEY-----\n${LINE1}\n${LINE2}\n${SHORT}\n-----END PRIVATE KEY-----\n`;
   const KEY_ID = "0000000000000000000000000000000000testkey";
   const SA_JSON = JSON.stringify({
     type: "service_account", project_id: "tt-test-project", private_key_id: KEY_ID, private_key: PEM,
@@ -992,12 +995,15 @@ describe("Google Cloud key redaction", () => {
   const addGcp = (svc: ConnectionService) =>
     svc.add(owner, { kind: "cloud", provider: "gcp", name: "GCP", config: { project: "tt-test-project" }, secrets: { serviceAccountJson: SA_JSON } });
 
-  it("redacts the parsed private key and its id, not only the whole JSON", async () => {
+  it("redacts the parsed private key, its JSON-escaped form, each long body line and the key id", async () => {
+    const expected = [SA_JSON, PEM, JSON.stringify(PEM).slice(1, -1), LINE1, LINE2, KEY_ID];
     const svc = make();
     await addGcp(svc);
-    expect(svc.secretValues()).toEqual(expect.arrayContaining([SA_JSON, PEM, KEY_ID]));
+    expect(svc.secretValues()).toEqual(expect.arrayContaining(expected));
+    expect(svc.secretValues()).not.toContain(SHORT);
+    expect(svc.secretValues()).not.toContain("-----BEGIN PRIVATE KEY-----");
     const reloaded = make();
     await reloaded.load();
-    expect(reloaded.secretValues()).toEqual(expect.arrayContaining([SA_JSON, PEM, KEY_ID]));
+    expect(reloaded.secretValues()).toEqual(expect.arrayContaining(expected));
   });
 });

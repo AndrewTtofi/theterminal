@@ -36,7 +36,7 @@ function routedFetch(routes: { token?: Response | Error; project?: Response | Er
   });
   return { f: f as unknown as typeof fetch, calls };
 }
-const tokenOk = () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3599, token_type: "Bearer" }), { status: 200 });
+const tokenOk = () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3599, token_type: "Bearer" }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
 
 describe("serviceAccountSchema", () => {
   it("accepts a service account key and keeps unknown fields", () => {

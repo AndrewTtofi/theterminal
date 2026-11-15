@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { fakeSts, type StsCaller } from "../../../src/connections/cloud/aws.js";
 import {
-  AWS_SESSION_SECONDS, CLOUD_ENV_ALLOWLIST, CloudCredentialError, mintCloudGrant, type CloudGrant,
+  AWS_SESSION_SECONDS, CLOUD_ENV_ALLOWLIST, CloudCredentialError, GRANT_TIMEOUT_MS, mintCloudGrant, type CloudGrant,
 } from "../../../src/connections/cloud/grant.js";
 import { CLOUD_ENV_ALLOWLIST as FROM_ENV_MODULE } from "../../../src/connections/cloud/env.js";
 import type { CloudSource } from "../../../src/connections/service.js";
@@ -29,7 +29,7 @@ const AZURE: CloudSource = {
 const NOW = new Date("2026-11-15T12:00:00.000Z");
 const signal = () => new AbortController().signal;
 const tokenFetch = () =>
-  vi.fn(async () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3600 }), { status: 200 }));
+  vi.fn(async () => new Response(JSON.stringify({ access_token: "TESTKEY-access-token-0000000000", expires_in: 3600 }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }));
 const noFetch = () => vi.fn(async () => { throw new Error("no request expected"); });
 const deps = (o: { sts?: StsCaller; fetch?: ReturnType<typeof vi.fn>; signal?: AbortSignal } = {}) => ({
   sts: o.sts ?? fakeSts, fetch: (o.fetch ?? noFetch()) as unknown as typeof fetch, signal: o.signal ?? signal(), now: () => NOW,
@@ -95,6 +95,8 @@ describe("mintCloudGrant: AWS", () => {
     ["a network error", sdkError("Error")],
     ["a timeout", sdkError("TimeoutError")],
     ["a 5xx", sdkError("InternalFailure", 500)],
+    ["Throttling (a 400)", sdkError("Throttling", 400)],
+    ["ThrottlingException (a 400)", sdkError("ThrottlingException", 400)],
   ])("turns %s into a CloudCredentialError", async (_name, err) => {
     await expect(mintCloudGrant(AWS, deps({ sts: stsThrowing(err) }))).rejects.toBeInstanceOf(CloudCredentialError);
   });
@@ -115,7 +117,10 @@ describe("mintCloudGrant: Google Cloud", () => {
       CLOUDSDK_CORE_PROJECT: "tt-test-project", GOOGLE_CLOUD_PROJECT: "tt-test-project",
     });
     expect(g.expiresAt).toBe("2026-11-15T13:00:00.000Z");
-    expect(g.secrets).toEqual(expect.arrayContaining(["TESTKEY-access-token-0000000000", PEM, SA.private_key_id]));
+    expect(g.secrets).toEqual(expect.arrayContaining(["TESTKEY-access-token-0000000000", PEM, SA.private_key_id, JSON.stringify(PEM).slice(1, -1)]));
+    const bodyLines = PEM.split("\n").filter((l) => l.length >= 40 && !l.startsWith("-----"));
+    expect(bodyLines.length).toBeGreaterThan(10);
+    expect(g.secrets).toEqual(expect.arrayContaining(bodyLines));
     expect(g.env).not.toHaveProperty("GOOGLE_APPLICATION_CREDENTIALS");
   });
 
@@ -157,6 +162,19 @@ describe("mintCloudGrant: every provider", () => {
     ];
     for (const g of grants) {
       for (const k of Object.keys(g.env)) expect(CLOUD_ENV_ALLOWLIST).toContain(k);
+    }
+  });
+
+  it("applies a 10 s timeout when the caller passes no signal", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const sts: StsCaller = { ...fakeSts, sessionToken: vi.fn(fakeSts.sessionToken) };
+      await mintCloudGrant(AWS, { sts, fetch: noFetch() as unknown as typeof fetch });
+      expect(timeout).toHaveBeenCalledWith(GRANT_TIMEOUT_MS);
+      expect(GRANT_TIMEOUT_MS).toBe(10_000);
+      expect(vi.mocked(sts.sessionToken).mock.calls[0]![2]).toBe(timeout.mock.results[0]!.value);
+    } finally {
+      timeout.mockRestore();
     }
   });
 

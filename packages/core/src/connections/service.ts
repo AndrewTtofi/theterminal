@@ -23,6 +23,7 @@ import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
+import { privateKeySecrets } from "./cloud/gcp.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -157,13 +158,17 @@ function requestValues(...groups: Record<string, string | null>[]): string[] {
     .filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
 }
 
-/** The private_key and private_key_id strings of a Google Cloud key (those long enough to be secrets), if it parses. */
+/**
+ * The secret strings in a Google Cloud key, if it parses: its private key (whole, JSON-escaped and line by line, see
+ * privateKeySecrets) and private_key_id, those long enough to be secrets.
+ */
 function serviceAccountSecrets(json: string): string[] {
   try {
     const parsed: unknown = JSON.parse(json);
     if (typeof parsed !== "object" || parsed === null) return [];
     const { private_key: key, private_key_id: keyId } = parsed as Record<string, unknown>;
-    return [key, keyId].filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
+    const values = [...(typeof key === "string" ? privateKeySecrets(key) : []), keyId];
+    return values.filter((v): v is string => typeof v === "string" && v.length >= MIN_SECRET_LENGTH);
   } catch {
     return []; // A value that is not JSON stays redacted as a whole.
   }
@@ -569,8 +574,8 @@ export class ConnectionService {
   /**
    * Adds a secret value to the redaction list. The values of a "pairs" field are added one by one too (those long
    * enough to be secrets), so a header or variable is redacted on its own, not only as the whole blob. Likewise a
-   * Google Cloud key's private_key and private_key_id: in the JSON the key's line breaks are escaped, so the parsed
-   * key (as a tool might print it) would not match the stored text.
+   * Google Cloud key's private key (parsed, JSON-escaped and each long body line) and private_key_id: in the JSON the
+   * key's line breaks are escaped, so the key as a tool might print it would not match the stored text.
    */
   private remember(provider: ConnectionProvider, field: string, value: string): void {
     this.seen.add(value);

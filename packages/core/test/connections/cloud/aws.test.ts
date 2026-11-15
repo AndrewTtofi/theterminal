@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { STSClient, type STSClientConfig } from "@aws-sdk/client-sts";
@@ -7,7 +10,8 @@ import { cloudTesters } from "../../../src/connections/testers.js";
 const KEYS: StaticKeys = { accessKeyId: "AKIATESTKEY000000000", secretAccessKey: "TESTKEY-secret-access-key-0000000000", region: "eu-west-1" };
 const signal = new AbortController().signal;
 
-const ENV_KEYS = ["AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"];
+const ENV_KEYS = ["AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_STS", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {
   for (const k of ENV_KEYS) {
@@ -53,6 +57,37 @@ function recordingClient(status: number, body: string, seen: { configs: STSClien
 }
 
 describe("realSts", () => {
+  it.each([
+    ["AWS_ENDPOINT_URL_STS", { AWS_ENDPOINT_URL_STS: "https://env-sts.example.invalid", AWS_ENDPOINT_URL: "https://env-endpoint.example.invalid" }],
+    ["AWS_ENDPOINT_URL", { AWS_ENDPOINT_URL: "https://env-endpoint.example.invalid" }],
+    ["the profile's endpoint_url", {}],
+  ])("pins the regional STS endpoint, ignoring %s", async (_name, env: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "tt-aws-"));
+    try {
+      const config = join(dir, "config");
+      writeFileSync(config, "[profile tt-endpoint]\nregion = ap-southeast-2\nendpoint_url = https://profile-endpoint.example.invalid\n");
+      process.env.AWS_CONFIG_FILE = config;
+      process.env.AWS_SHARED_CREDENTIALS_FILE = join(dir, "credentials");
+      process.env.AWS_PROFILE = "tt-endpoint";
+      delete process.env.AWS_ENDPOINT_URL;
+      delete process.env.AWS_ENDPOINT_URL_STS;
+      Object.assign(process.env, env);
+      const seen = { configs: [] as STSClientConfig[], requests: [] as Captured[] };
+      const sts = createRealSts(recordingClient(200, XML("GetCallerIdentity", "<Arn>arn:aws:iam::000000000000:user/test</Arn>"), seen));
+      await sts.callerIdentity(KEYS, signal);
+      expect(seen.requests[0]!.url.startsWith("https://sts.eu-west-1.amazonaws.com/")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a region that is not a region before building a client", async () => {
+    const seen = { configs: [] as STSClientConfig[], requests: [] as Captured[] };
+    const sts = createRealSts(recordingClient(200, "", seen));
+    await expect(sts.callerIdentity({ ...KEYS, region: "evil.example.invalid/x" }, signal)).rejects.toThrow("not an AWS region");
+    expect(seen.configs).toHaveLength(0);
+  });
+
   it("builds the client with the given region and explicit credentials, and signs with them, never the environment", async () => {
     poisonEnv();
     const seen = { configs: [] as STSClientConfig[], requests: [] as Captured[] };
