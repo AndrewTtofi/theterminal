@@ -44,6 +44,14 @@ function servedFingerprint(port: number): Promise<string> {
   });
 }
 
+async function ipv6LoopbackAvailable(): Promise<boolean> {
+  const s = net.createServer();
+  return new Promise((resolve) => {
+    s.once("error", () => resolve(false));
+    s.listen(0, "::1", () => s.close(() => resolve(true)));
+  });
+}
+
 function connectRefused(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const s = net.connect({ host: "127.0.0.1", port });
@@ -61,41 +69,55 @@ async function enabled(h: Harness, extra: Parameters<Harness["remote"]["enable"]
 }
 
 describe("remoteHostAllowed", () => {
-  const off = { ...DEFAULT_REMOTE, port: 4318 };
+  const own = { port: 4318, domain: null, names: ["127.0.0.1", "192.168.1.10", "::1", "tt-test.local"] };
   it.each([
+    ["192.168.1.10:4318", true],
+    ["127.0.0.1:4318", true],
+    ["[::1]:4318", true],
+    ["[::1]:4318".toUpperCase(), true],
     ["tt-test.local:4318", true],
     ["TT-Test.Local:4318", true],
-    ["192.168.1.10:4318", true],
-    ["[::1]:4318", true],
-    ["[fe80::1]:4318", true],
+    ["192.168.1.11:4318", false],
+    ["10.0.0.1:4318", false],
+    ["[fe80::1]:4318", false],
+    ["other.local:4318", false],
     ["evil.example.org:4318", false],
-    ["tt-test.local:4317", false],
+    ["192.168.1.10:4317", false],
     ["[::1]:4317", false],
     ["::1:4318", false],
-    ["[fe80::1%en0]:4318", false],
-    ["tt-test.local", false],
+    ["[::1%en0]:4318", false],
+    ["192.168.1.10", false],
+    ["192.168.1.10:443", false],
     ["", false],
     ["192.168.1.10:4318:4318", false],
-    ["local:4318", false],
   ])("without a domain, %s → %s", (host, ok) => {
-    expect(remoteHostAllowed(host, off)).toBe(ok);
+    expect(remoteHostAllowed(host, own)).toBe(ok);
   });
 
-  it("with a domain accepts exactly that domain and port", () => {
-    const withDomain = { ...off, domain: "work.example.org" };
-    expect(remoteHostAllowed("work.example.org:4318", withDomain)).toBe(true);
-    expect(remoteHostAllowed("WORK.example.org:4318", withDomain)).toBe(true);
-    expect(remoteHostAllowed("127.0.0.1:4318", withDomain)).toBe(false);
-    expect(remoteHostAllowed("tt-test.local:4318", withDomain)).toBe(false);
-    expect(remoteHostAllowed("work.example.org:4317", withDomain)).toBe(false);
-    expect(remoteHostAllowed("x.work.example.org:4318", withDomain)).toBe(false);
+  it.each([
+    ["example.test", true],
+    ["example.test:443", true],
+    ["example.test:4318", true],
+    ["EXAMPLE.Test:4318", true],
+    ["Example.TEST", true],
+    ["example.test:4317", false],
+    ["example.test:80", false],
+    ["example.test:", false],
+    ["x.example.test", false],
+    ["example.test.evil.org", false],
+    ["evil.example.org", false],
+    ["evil.example.org:443", false],
+    ["127.0.0.1:4318", false],
+    ["tt-test.local:4318", false],
+  ])("with the domain example.test, %s → %s", (host, ok) => {
+    expect(remoteHostAllowed(host, { ...own, domain: "example.test" })).toBe(ok);
   });
 });
 
 describe("RemoteListener", () => {
-  it("is off and loopback-bound before anything is enabled", async () => {
+  it("is off before anything is enabled, with the shared default bind", async () => {
     const h = await harness();
-    expect(h.remote.state()).toEqual({ ...DEFAULT_REMOTE, bind: "127.0.0.1", listening: false, addresses: [] });
+    expect(h.remote.state()).toEqual({ ...DEFAULT_REMOTE, listening: false, addresses: [] });
   });
 
   it("commits certificate_changed then enabled, keeps the key in the secret store, and serves the recorded fingerprint", async () => {
@@ -180,16 +202,41 @@ describe("RemoteListener", () => {
     expect(received).not.toContain("ok");
   });
 
-  it("applies the remote Host check over TLS, accepting a bracketed IPv6 literal and exempting /healthz", async () => {
+  it("applies the remote Host check over TLS: the listener's own address only, and /healthz is exempt", async () => {
     const h = await harness();
     const { port, fp } = await enabled(h);
-    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `[::1]:${port}` })).status).toBe(200);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `127.0.0.1:${port}` })).status).toBe(200);
     expect((await pinnedRequest(port, fp, { path: "/whoami", host: `tt-test.local:${port}` })).status).toBe(200);
     const evil = await pinnedRequest(port, fp, { path: "/whoami", host: `evil.example.org:${port}` });
     expect(evil.status).toBe(403);
     expect(JSON.parse(evil.body)).toEqual({ error: "bad_host" });
-    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `[::1]:${port + 1}` })).status).toBe(403);
+    // bound to 127.0.0.1, so neither another address nor IPv6 loopback is this listener's
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `192.168.1.11:${port}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `[::1]:${port}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `127.0.0.1:${port + 1}` })).status).toBe(403);
     expect((await pinnedRequest(port, fp, { path: "/healthz", host: `evil.example.org:${port}` })).status).toBe(200);
+  });
+
+  it("accepts a bracketed IPv6 Host when the listener is bound to IPv6 loopback", async (ctx) => {
+    if (!(await ipv6LoopbackAvailable())) ctx.skip();
+    const h = await harness();
+    const { port, fp } = await h.remote.enable(OWNER, { port: 0, bind: "::1" }).then((s) => ({ port: s.port, fp: s.fingerprint! }));
+    const ok = await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `[::1]:${port}` });
+    expect(ok.status).toBe(200);
+    expect(JSON.parse(ok.body)).toEqual({ listener: "remote", ip: "::1" });
+    expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `[::1]:${port + 1}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `127.0.0.1:${port}` })).status).toBe(403);
+  });
+
+  it("with a domain set, the domain alone, :443 or the port pass the Host check; an evil host does not", async () => {
+    const h = await harness();
+    const { port, fp } = await enabled(h, { domain: "example.test" });
+    for (const host of ["example.test", "example.test:443", `example.test:${port}`, `EXAMPLE.test:${port}`]) {
+      expect((await pinnedRequest(port, fp, { path: "/whoami", host })).status, host).toBe(200);
+    }
+    for (const host of ["evil.example.org", "evil.example.org:443", `evil.example.org:${port}`, "example.test:80", `127.0.0.1:${port}`]) {
+      expect((await pinnedRequest(port, fp, { path: "/whoami", host })).status, host).toBe(403);
+    }
   });
 
   it("with a domain set, only that domain passes the Host check but /healthz on 127.0.0.1 still answers", async () => {
@@ -288,15 +335,20 @@ describe("RemoteListener", () => {
     }
   });
 
-  it("binds loopback by default and never wider than configured", async () => {
+  it("binds what the state or configuration says, and keeps a configured address on the next enable", async () => {
     const h = await harness();
-    const state = await h.remote.enable(OWNER, { port: 0 });
-    expect(state.bind).toBe("127.0.0.1");
-    const wide = await h.remote.enable(OWNER, { port: 0, bind: "0.0.0.0" });
-    expect(wide.bind).toBe("0.0.0.0");
-    expect(h.remote.state().addresses).toEqual(["192.168.1.10"]);
-    // the configured address is kept on the next enable
-    expect((await h.remote.enable(OWNER, { port: 0 })).bind).toBe("0.0.0.0");
+    expect(h.remote.state().bind).toBe(DEFAULT_REMOTE.bind);
+    // a wildcard bind's Host names are the machine's addresses, loopback and its own names
+    expect(h.remote.hostRule()).toEqual({ port: 4318, domain: null, names: ["192.168.1.10", "127.0.0.1", "tt-test.local"] });
+    const first = await h.remote.enable(OWNER, { port: 0, bind: "127.0.0.1" });
+    expect(first.bind).toBe("127.0.0.1");
+    expect(h.remote.hostRule().names).toEqual(["127.0.0.1", "tt-test.local"]);
+    const second = await h.remote.enable(OWNER, { port: 0 });
+    expect(second.bind).toBe("127.0.0.1");
+    expect(remoteEntries(h).filter((e) => e.type === "remote.enabled").map((e) => (e.payload as { bind: string }).bind)).toEqual([
+      "127.0.0.1",
+      "127.0.0.1",
+    ]);
   });
 
   it.each([

@@ -1,7 +1,7 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Server as HttpServer } from "node:http";
-import net, { isIP, isIPv4, isIPv6, type AddressInfo } from "node:net";
+import net, { isIP, isIPv6, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import tls, { type TLSSocket } from "node:tls";
 import {
@@ -33,8 +33,6 @@ export const REMOTE_MAX_CONNECTIONS = 256;
 /** Milliseconds to bind the port, and to close it. */
 const LISTEN_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
-/** Remote access binds loopback unless an address is configured: never wider than asked. */
-const DEFAULT_BIND = "127.0.0.1";
 /** A self-signed certificate this close to expiry is replaced. */
 const RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 const MAX_CERT_BYTES = 64 * 1024;
@@ -119,8 +117,11 @@ export type EnableInput = {
 
 export type RemoteView = RemoteState & { listening: boolean; addresses: string[] };
 
-/** Remote state before any entry: off, on loopback. */
-export const INITIAL_REMOTE: RemoteState = { ...DEFAULT_REMOTE, bind: DEFAULT_BIND };
+/**
+ * Remote state before any entry: off, with the shared default bind. Remote access is off by default and turning it
+ * on means the Owner wants the network; the listener binds exactly what the state or the configuration says.
+ */
+export const INITIAL_REMOTE: RemoteState = DEFAULT_REMOTE;
 
 /** Applies one `remote.*` entry to the state; any other entry leaves it as it is. */
 export function applyRemoteEntry(s: RemoteState, e: Pick<LedgerEntry, "type" | "payload">): RemoteState {
@@ -171,22 +172,33 @@ export function listenerOf(request: { raw: { socket: unknown } }): Listener {
 }
 
 /**
- * The remote Host rule. With a domain: exactly `<domain>:<port>`. Without: an IPv4 literal, a bracketed IPv6 literal
- * or a `*.local` name, with the remote port. DNS rebinding needs a public name, which none of these is.
+ * What the remote Host check compares against: the listener's port, its domain, and (without a domain) the names
+ * that are this listener's own: its addresses (IPv6 without brackets) and the machine's own hostnames.
  */
-export function remoteHostAllowed(host: string, remote: Pick<RemoteState, "port" | "domain">): boolean {
+export type HostRule = { port: number; domain: string | null; names: string[] };
+
+/**
+ * The remote Host rule, case-insensitive. With a domain: `<domain>`, `<domain>:443` or `<domain>:<port>`. Without:
+ * `<name>:<port>` for one of the listener's own names, an IPv6 address in brackets. Anything else is refused.
+ */
+export function remoteHostAllowed(host: string, rule: HostRule): boolean {
   if (typeof host !== "string" || host.length === 0 || host.length > 300) return false;
   const h = host.toLowerCase();
-  const suffix = `:${remote.port}`;
-  if (!h.endsWith(suffix)) return false;
-  const name = h.slice(0, -suffix.length);
-  if (remote.domain !== null) return name === remote.domain.toLowerCase();
-  if (name.startsWith("[") && name.endsWith("]")) {
-    const inner = name.slice(1, -1);
-    return !inner.includes("%") && isIPv6(inner);
+  if (rule.domain !== null) {
+    const d = rule.domain.toLowerCase();
+    return h === d || h === `${d}:443` || h === `${d}:${rule.port}`;
   }
-  if (isIPv4(name)) return true;
-  return name.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+local$/.test(name);
+  const suffix = `:${rule.port}`;
+  if (!h.endsWith(suffix)) return false;
+  let name = h.slice(0, -suffix.length);
+  if (name.startsWith("[")) {
+    if (!name.endsWith("]")) return false;
+    name = name.slice(1, -1);
+    if (name.includes("%") || !isIPv6(name)) return false;
+  } else if (name.includes(":")) {
+    return false;
+  }
+  return rule.names.some((n) => n.toLowerCase() === name);
 }
 
 /** Whether a request is the health probe, which alone skips the Host check (it answers `{ ok: true }` only). */
@@ -197,9 +209,9 @@ export function isHealthz(request: { method: string; routeOptions: { url?: strin
 /** Step (2) of the auth hook for the remote listener: the health probe passes, anything else needs an allowed Host. */
 export function checkRemoteHost(
   request: { method: string; routeOptions: { url?: string }; headers: { host?: string } },
-  remote: Pick<RemoteState, "port" | "domain">,
+  rule: HostRule,
 ): boolean {
-  return isHealthz(request) || remoteHostAllowed(request.headers.host ?? "", remote);
+  return isHealthz(request) || remoteHostAllowed(request.headers.host ?? "", rule);
 }
 
 type Config = { port: number; bind: string; domain: string | null; tls: TlsMode };
@@ -230,6 +242,14 @@ export class RemoteListener {
   state(): RemoteView {
     const listening = this.server !== null;
     return { ...this.current, listening, addresses: listening ? this.addressesFor(this.current.bind) : [] };
+  }
+
+  /** The Host rule for requests over this listener, from the current state (see `remoteHostAllowed`). */
+  hostRule(): HostRule {
+    const { port, domain, bind } = this.current;
+    const loopback = bind === "0.0.0.0" ? ["127.0.0.1"] : bind === "::" ? ["127.0.0.1", "::1"] : [];
+    const names = unique([...this.addressesFor(bind), ...loopback, ...this.addressesOf().hostnames].map((n) => n.toLowerCase()));
+    return { port, domain, names };
   }
 
   /**

@@ -72,7 +72,7 @@ export async function harness(
   const app = Fastify();
   let remote: RemoteListener | null = null;
   app.addHook("onRequest", async (request, reply) => {
-    if (listenerOf(request) === "remote" && !checkRemoteHost(request, remote!.state())) {
+    if (listenerOf(request) === "remote" && !checkRemoteHost(request, remote!.hostRule())) {
       return reply.code(403).send({ error: "bad_host" });
     }
   });
@@ -141,10 +141,10 @@ export type RawResponse = { status: number; headers: Record<string, string>; bod
 export function pinnedRequest(
   port: number,
   pin: string,
-  req: { method?: string; path: string; host?: string; headers?: Record<string, string>; body?: string },
+  req: { method?: string; path: string; host?: string; connectHost?: string; headers?: Record<string, string>; body?: string },
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
-    const socket = tls.connect({ host: "127.0.0.1", port, rejectUnauthorized: false, ALPNProtocols: ["http/1.1"] });
+    const socket = tls.connect({ host: req.connectHost ?? "127.0.0.1", port, rejectUnauthorized: false, ALPNProtocols: ["http/1.1"] });
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error("timeout"));
