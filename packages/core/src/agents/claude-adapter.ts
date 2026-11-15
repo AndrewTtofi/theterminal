@@ -127,12 +127,22 @@ export function toolToAction(tool: string, input: Record<string, unknown>, cwd: 
 }
 
 /**
+ * The Claude Code version whose `${VAR}` expansion in `--mcp-config` was verified (the one bundled with Agent SDK
+ * 0.3.323). A test fails when the installed SDK bundles another, so a bump forces a recheck.
+ */
+export const VERIFIED_CLAUDE_CODE_VERSION = "2.1.323";
+
+/**
  * The MCP servers for `Options.mcpServers`, and the variables that carry their secrets. Agent SDK 0.3.323 puts
  * `mcpServers` on Claude Code's command line (`--mcp-config <json>`), where any local process can read it, so every
  * env and header value is replaced by `${TT_MCP_<server>_<value>}` and the value goes into Claude Code's own env.
  * Claude Code 2.1.323 (the binary bundled with that SDK) expands `${VAR}` in a `--mcp-config` server's env and
  * headers from its env (config scope "dynamic", expandVars on; TT_MCP_* is outside its withheld-credential names).
  * Tools of these servers are named `mcp__<server>__<tool>` and reach the PreToolUse gate like any other tool.
+ *
+ * A stdio MCP server started by Claude Code inherits Claude Code's env: the API key in api_key mode, the run's cloud
+ * grant variables and every other server's TT_MCP_* values, besides its own. An http server receives only its own
+ * headers, so it is the better choice for a connection that carries secrets.
  */
 export function claudeMcpServers(specs: McpServerSpec[]): { servers: Record<string, McpServerConfig>; env: Record<string, string> } {
   const env: Record<string, string> = {};

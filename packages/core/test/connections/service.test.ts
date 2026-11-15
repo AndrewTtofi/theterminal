@@ -900,6 +900,34 @@ describe("cloud, MCP and hardware connections", () => {
     }]);
   });
 
+  it("refuses ${ in an MCP command, argument, URL, env value or header, at the field's path, without echoing the value", async () => {
+    const svc = makeU();
+    const MARK = "TESTKEY-ref-0000000000";
+    const issue = async (p: Promise<unknown>) => {
+      const err = await p.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      const issues = (err as ZodError).issues;
+      expect(JSON.stringify(issues)).not.toContain(MARK);
+      return { path: issues[0]!.path, message: issues[0]!.message };
+    };
+    const stdio = (priv: Record<string, string>, secrets?: Record<string, string>) =>
+      svc.add(owner, { kind: "mcp", provider: "mcp_stdio", name: "Files", private: { command: "npx", ...priv }, ...(secrets && { secrets }) });
+    const message = 'must not contain "${": the agent program would read it as a reference to one of its variables';
+    expect(await issue(stdio({ command: `npx-\${${MARK}}` }))).toEqual({ path: ["private", "command"], message });
+    expect(await issue(stdio({ args: `-y\n\${${MARK}}` }))).toEqual({ path: ["private", "args"], message });
+    expect(await issue(stdio({}, { env: `TOKEN=\${${MARK}}` }))).toEqual({ path: ["secrets", "env"], message });
+    expect(await issue(addMcpHttp(svc, `Authorization=Bearer \${${MARK}}`))).toEqual({ path: ["secrets", "headers"], message });
+    const http = (url: string) => svc.add(owner, { kind: "mcp", provider: "mcp_http", name: "M", config: { url } });
+    expect((await issue(http(`https://mcp.example.com/\${${MARK}}`))).path).toEqual(["config", "url"]);
+    const ok = await stdio({ args: "--price\n$5" }, { env: "PS1=$HOME" });
+    await svc.update(owner, ok.id, { private: { args: `\${${MARK}}` } }).then(
+      () => expect.unreachable(),
+      (e: unknown) => expect((e as ZodError).issues[0]!.path).toEqual(["private", "args"]),
+    );
+    expect(store.size()).toBeGreaterThan(0);
+    expect(JSON.stringify(ledger.list())).not.toContain(MARK);
+  });
+
   it("selectForRun refuses wrong-kind, disabled, unknown ids and an unavailable keychain", async () => {
     const svc = makeU();
     const claude = await addClaude(svc);

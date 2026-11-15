@@ -99,11 +99,23 @@ To clear them, close The Terminal's running Gemini agents and delete the content
 
 Codex cannot use MCP servers in The Terminal in this version. Codex gives no approval step for MCP tool calls under the strict policy The Terminal runs it with, so an MCP tool call could not be shown to you for approval first. Rather than skip the approval, The Terminal does not offer MCP servers to Codex.
 
+## Gemini and MCP servers
+
+Gemini cannot use MCP servers in The Terminal in this version. Gemini CLI starts MCP servers only in a trusted folder, and The Terminal never trusts an agent's worktree: trusting it would also load settings, a `.env` file and hooks that a repository could plant there. Rather than trust the worktree, The Terminal does not offer MCP servers to Gemini.
+
+## MCP servers with Claude
+
+Claude Code starts the MCP servers you select for a run. The values in an MCP connection's environment variables and headers never appear on Claude Code's command line: they reach Claude Code through its environment, and its MCP configuration refers to them by name.
+
+- **A local (stdio) MCP server sees more than its own values.** Claude Code starts it with Claude Code's own environment: the Anthropic API key in API key mode, the variables of any cloud account given to the run, and the values of every other MCP server in the run. Prefer a remote (http) MCP server for a connection that carries a secret: it receives only its own headers.
+- **No `${` in MCP fields.** Claude Code reads `${NAME}` in an MCP server's command, arguments, URL, environment variables and headers as a reference to one of its own variables, with no way to escape it. The Terminal refuses `${` in those fields.
+- **One server name per run.** Each MCP connection gets a server name made from its id. If two selected connections would get the same name, the run is refused; untick one of them.
+
 ## What comes next
 
 A later release adds:
 
 - Cloud accounts (AWS, Google Cloud, Azure) with credentials given to a run only when you select them.
 - A GitHub view with branches, pull requests and CI status, and a live `CI` item in the status bar.
-- MCP servers through the approval gate, for Claude and Gemini.
+- MCP servers through the approval gate, for Claude.
 - A capacity view that shows what each provider and your own hardware can do, with estimates labelled as estimates.

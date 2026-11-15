@@ -1,4 +1,6 @@
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingHttpHeaders } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -47,6 +49,36 @@ describe.skipIf(process.env.THETERMINAL_LIVE_CLAUDE !== "1")("ClaudeAdapter live
     expect(events.some((e) => e.type === "message" && /pineapple/i.test(e.text))).toBe(true);
     expect(events.some((e) => e.type === "usage")).toBe(true);
   }, 180_000);
+
+  it("the bundled Claude Code expands ${VAR} in --mcp-config: an http MCP server receives the header value from its env", async () => {
+    const SECRET = "Bearer TESTKEY-live-mcp-header-0000";
+    const seen: IncomingHttpHeaders[] = [];
+    const server = createServer((req, res) => {
+      seen.push(req.headers);
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const abort = new AbortController();
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+      const done = new ClaudeAdapter({ dataDir: worktree }).start({
+        cwd: worktree, projectId: "live", prompt: "Reply with the word ok.", authMode: "api_key", signal: abort.signal,
+        gate: async () => ({ decision: "deny", reason: "live test", actionId: "act-1" }),
+        emit: () => {}, recordDenied: async () => {}, clean: (s) => s,
+        credentials: {
+          env: {},
+          mcpServers: [{ serverName: "tt-livetest", connectionId: "livetest-0000", name: "Live", transport: "http", url, headers: { Authorization: SECRET } }],
+        },
+      });
+      await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), { timeout: 60_000, interval: 200 });
+      expect(seen[0]!.authorization).toBe(SECRET);
+      abort.abort();
+      await done;
+    } finally {
+      abort.abort();
+      server.close();
+    }
+  }, 90_000);
 
   it("records a write the human denies as denied, and the file is never created", async () => {
     const owner = { kind: "human", id: "owner" } as const;

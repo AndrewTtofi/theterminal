@@ -672,7 +672,16 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
     const id = await add(s, { kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" } });
     const res = await startRun(s, projectId, [id], "codex");
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "mcp_unsupported" });
+    expect(await res.json()).toEqual({ error: "mcp_unsupported", adapter: "codex" });
+    expect(await used(s)).toEqual([]);
+  });
+
+  it("a Gemini run with an MCP server is 400 mcp_unsupported, and records no connection.used", async () => {
+    const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, { kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" } });
+    const res = await startRun(s, projectId, [id], "gemini");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "mcp_unsupported", adapter: "gemini" });
     expect(await used(s)).toEqual([]);
   });
 

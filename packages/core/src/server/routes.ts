@@ -4,7 +4,7 @@ import { cardStatusSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
-import { AdapterUnavailableError, DuplicateCloudProviderError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
+import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { redact } from "../agents/redact.js";
 import {
@@ -70,7 +70,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
     if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
     if (err instanceof ConnectionDisabledError) return reply.code(400).send({ error: "connection_disabled" });
-    if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported" });
+    if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported", adapter: err.adapter });
+    if (err instanceof DuplicateMcpServerError) return reply.code(400).send({ error: "duplicate_mcp_server" });
     if (err instanceof DuplicateCloudProviderError) return reply.code(400).send({ error: "duplicate_cloud_provider" });
     // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
     if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
