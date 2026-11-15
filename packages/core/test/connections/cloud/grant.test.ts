@@ -69,7 +69,7 @@ describe("mintCloudGrant: AWS", () => {
 
   it.each([
     ["AccessDenied", sdkError("AccessDenied", 403)],
-    ["another 4xx that is not about the keys", sdkError("ValidationError", 400)],
+    ["another permission-shaped 4xx that is not about the keys", sdkError("UnauthorizedOperation", 403)],
   ])("falls back to the static keys on %s from GetSessionToken", async (_name, err) => {
     const g = await mintCloudGrant(AWS, deps({ sts: stsThrowing(err) }));
     expect(g.credential).toBe("aws_static_keys");
@@ -79,6 +79,15 @@ describe("mintCloudGrant: AWS", () => {
       AWS_REGION: "eu-west-1", AWS_DEFAULT_REGION: "eu-west-1",
     });
     expect(g.secrets.sort()).toEqual([AWS.secrets.accessKeyId, AWS.secrets.secretAccessKey].sort());
+  });
+
+  it.each([
+    ["ValidationError", sdkError("ValidationError", 400)],
+    ["InvalidParameterValue", sdkError("InvalidParameterValue", 400)],
+  ])("fails the run start on %s from GetSessionToken instead of handing over the static keys", async (_name, err) => {
+    const e = await mintCloudGrant(AWS, deps({ sts: stsThrowing(err) })).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(CloudCredentialError);
+    expect((e as Error).message).toBe('Could not get credentials for the connection "Prod AWS": AWS could not be reached');
   });
 
   it("refuses bad keys with a CloudCredentialError naming the connection, without the key", async () => {

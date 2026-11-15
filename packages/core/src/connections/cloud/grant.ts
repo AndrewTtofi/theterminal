@@ -37,6 +37,9 @@ type ResolvedDeps = GrantDeps & { signal: AbortSignal };
 /** STS refusals that mean "try again later", not "this principal may not": never a reason to hand over static keys. */
 const THROTTLED = new Set(["Throttling", "ThrottlingException", "RequestLimitExceeded", "TooManyRequestsException"]);
 
+/** STS refusals of a malformed request: a fault on our side, not a permission, so never a reason to hand over static keys. */
+const MALFORMED = new Set(["ValidationError", "InvalidParameterValue"]);
+
 const fail = (source: CloudSource, reason: string) =>
   new CloudCredentialError(source.name, `Could not get credentials for the connection "${source.name}": ${reason}`);
 
@@ -64,10 +67,11 @@ async function mintAws(source: CloudSource, deps: ResolvedDeps): Promise<CloudGr
   } catch (err) {
     const rejected = keyRejection(err);
     if (rejected) throw fail(source, `AWS rejected the access keys (${rejected})`);
-    // Some principals may not call GetSessionToken (AccessDenied, or another refusal that is not about the keys).
-    // The run then gets the static keys, and the grant says so (aws_static_keys) for the ledger.
-    const name = (err as Error | null)?.name;
-    if (!deps.signal.aborted && !THROTTLED.has(name ?? "") && (name === "AccessDenied" || isClientError(err))) {
+    // Some principals may not call GetSessionToken (AccessDenied, or another permission-shaped refusal that is not
+    // about the keys). The run then gets the static keys, and the grant says so (aws_static_keys) for the ledger.
+    // Throttling and malformed-request errors fail the run start instead.
+    const name = (err as Error | null)?.name ?? "";
+    if (!deps.signal.aborted && !THROTTLED.has(name) && !MALFORMED.has(name) && (name === "AccessDenied" || isClientError(err))) {
       return {
         env: { AWS_ACCESS_KEY_ID: accessKeyId, AWS_SECRET_ACCESS_KEY: secretAccessKey, ...regionEnv },
         credential: "aws_static_keys",

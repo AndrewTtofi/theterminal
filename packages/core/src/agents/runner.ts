@@ -3,7 +3,7 @@ import { homedir, userInfo } from "node:os";
 import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
-import type { McpServerSpec } from "../connections/mcp.js";
+import { pairValueSecrets, type McpServerSpec } from "../connections/mcp.js";
 import { UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
@@ -115,10 +115,13 @@ function defaultSelect(ids: string[]): RunSelection {
   return { cloud: [], mcp: [] };
 }
 
-/** The MCP env and header values long enough to be secrets: redacted from everything the run reports. */
+/**
+ * The MCP env and header values long enough to be secrets, and the credential after a scheme word such as `Bearer `:
+ * redacted from everything the run reports.
+ */
 function mcpSecrets(specs: McpServerSpec[]): string[] {
   const values = specs.flatMap((m) => Object.values(m.transport === "stdio" ? m.env : m.headers));
-  return values.filter((v) => v.length >= MIN_MCP_SECRET);
+  return values.flatMap((v) => pairValueSecrets(v, MIN_MCP_SECRET));
 }
 
 function osUsername(): string {

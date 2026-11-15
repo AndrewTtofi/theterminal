@@ -24,6 +24,21 @@ export function mcpServerName(connectionId: string): string {
 }
 
 /**
+ * The parts of one pair value to redact: the value itself when it is at least `min` characters, plus, when it starts
+ * with an auth scheme word (`Bearer `, `Basic ` or `token `, any case), the credential after it when that is at least
+ * `min` characters too, so the bare token is redacted wherever a tool prints it.
+ */
+export function pairValueSecrets(value: string, min: number): string[] {
+  const out = value.length >= min ? [value] : [];
+  const scheme = /^(?:bearer|basic|token) /i.exec(value);
+  if (scheme) {
+    const rest = value.slice(scheme[0].length);
+    if (rest.length >= min) out.push(rest);
+  }
+  return out;
+}
+
+/**
  * Parses NAME=value lines. Blank lines are skipped; the value is everything after the first "=". A bad line throws a
  * ZodError at [kind, lineNumber] (1-based) that never contains the line itself.
  */

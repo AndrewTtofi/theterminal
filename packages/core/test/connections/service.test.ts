@@ -872,6 +872,14 @@ describe("cloud, MCP and hardware connections", () => {
     expect(fresh.secretValues()).toContain(HEADER);
   });
 
+  it("also redacts the credential after a Bearer, Basic or token scheme word, when it is 8 or more characters", async () => {
+    const svc = makeU();
+    await addMcpHttp(svc, "Authorization=Bearer TESTKEY-hdr-0000000000\nX-Basic=basic TESTKEY-basic-000\nX-Gh=TOKEN TESTKEY-gh-0000\nX-Short=Bearer abc1234");
+    for (const v of ["TESTKEY-hdr-0000000000", "TESTKEY-basic-000", "TESTKEY-gh-0000"]) expect(svc.secretValues()).toContain(v);
+    expect(svc.secretValues()).toContain("Bearer abc1234");
+    expect(svc.secretValues()).not.toContain("abc1234");
+  });
+
   it("selectForRun returns cloud sources and MCP specs in order, duplicates collapsed", async () => {
     const svc = makeU();
     const aws = await addAws(svc);

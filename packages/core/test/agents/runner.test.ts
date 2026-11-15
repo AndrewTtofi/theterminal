@@ -773,6 +773,23 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
     for (const v of [SESSION_TOKEN, STATIC_SECRET, HEADER_VALUE, AZURE_SECRET]) expect(all).not.toContain(v);
   });
 
+  it("redacts an MCP credential on its own when the value carries a Bearer, Basic or token scheme word", async () => {
+    const BARE = "TESTKEY-mcp-bare-0000";
+    const schemed: McpServerSpec = { ...mcp, headers: { Authorization: `bearer ${BARE}`, "X-Gh": "Token TESTKEY-gh-00", "X-Short": "Basic short12" } };
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        o.emit({ type: "message", text: `printed ${BARE} and TESTKEY-gh-00 and short12` });
+        return { status: "completed" };
+      },
+    };
+    const runner = cloudRunner({ claude: adapter }, { selectConnections: () => ({ cloud: [], mcp: [schemed] }) });
+    const run = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-mcp-0001"] });
+    await untilFinished(run.id);
+    const message = ledger.list().find((e) => e.type === "agent.message")!;
+    expect((message.payload as { text: string }).text).toBe("printed [REDACTED] and [REDACTED] and short12");
+  });
+
   it("redacts a minted value from every later run for the life of the process, even one given no grant", async () => {
     let echo = "";
     const adapter: AgentAdapter = {

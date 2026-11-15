@@ -6,6 +6,7 @@
 - The connection catalog gains fields for `aws`, `gcp`, `azure`, `mcp_stdio`, `mcp_http` and `local_hardware`, and `plan` / `monthlyBudgetUsd` fields for the three model providers. Nothing changes in how fields are stored: secrets and private values in the keychain, config in the ledger. Two new field shapes: `input: "number"` (validated as a non-negative decimal) and `format: "pairs"` (a multiline secret of `NAME=value` lines whose individual values join the redaction set).
 - `POST /api/projects/:id/runs` gains `connectionIds`. `ConnectionService.selectForRun(ids)` checks each id (exists, enabled, kind `cloud` or `mcp`) and returns the sources. Before the worktree exists, the runner mints a `CloudGrant` per cloud connection (`packages/core/src/connections/cloud/`): AWS `GetSessionToken` (12 h) through `@aws-sdk/client-sts` with the static keys as the recorded fallback, a GCP access token (1 h) from an RS256 JWT signed with `node:crypto`, and the Azure client secret itself. Grants become `RunCredentials.env`, which `buildChildEnv` admits through a fixed `CLOUD_ENV_ALLOWLIST`. Minted values join the run's redaction set. No credentials file is written in this plan.
 - MCP connections become `McpServerSpec`s named `tt-<8 chars of the connection id>`. Claude gets them as `Options.mcpServers` under the existing `strictMcpConfig: true`; its `mcp__*` tools already reach the PreToolUse gate and ask. Gemini gets them in `session/new`'s `mcpServers`, `--allowed-mcp-server-names` lists exactly those names, and the per-run policy adds an `ask_user` rule per server (verified against gemini-cli 0.68.0: MCP tools are named `mcp_<server>_<tool>`, and a rule's `mcpName` matches the server). Codex runs refuse MCP connections.
+  **Ruling during execution:** Gemini refuses MCP connections in this version, because gemini-cli 0.68.0 starts MCP servers only in a trusted folder and The Terminal never trusts agent worktrees. MCP is Claude-only.
 - GitHub: a `GitHubClient` over plain `fetch` with an in-memory ETag cache serves `GET /api/github/overview` and the `ci` field of `/api/status`. Read-only; no octokit.
 - Capacity: `GET /api/capacity` aggregates `agent_runs` cost and token columns per provider for today and this month, joins the Owner's plan and budget from the llm connections, counts rate-limit events the adapters observed (`agent.rate_limited`, a new ledger event with a projection table), and reports the `local_hardware` connection that `POST /api/capacity/detect` writes from `os` plus `execFile` probes (`system_profiler` on Apple Silicon, `nvidia-smi` elsewhere). Every number that is not a provider's own figure carries `basis: "estimate"`.
 - Test doubles stay behind `THETERMINAL_FAKE_AGENT=1`: `THETERMINAL_FAKE_HTTP=1` now also selects a fake STS caller and answers the GCP, Azure and GitHub endpoints.
@@ -315,6 +316,8 @@ UI: `api.getGitHubOverview()`; `WorkbenchModel.github: { overview: GitHubOvervie
 
 ### Task 5: MCP servers through the gate (Claude and Gemini; Codex refuses)
 
+> **Ruling during execution:** Gemini refuses MCP connections in this version, because gemini-cli 0.68.0 starts MCP servers only in a trusted folder and The Terminal never trusts agent worktrees. MCP is Claude-only.
+
 **Files:** Modify `packages/core/src/agents/claude-adapter.ts`, `gemini/adapter.ts`, `apps/ui/src/views/ConnectionEditor.tsx`, `packages/core/test/fixtures/fake-gemini.mjs` (log `session/new` params; a `type: "mcpTool"` step). Tests `packages/core/test/agents/{claude-adapter,gemini-adapter,codex-adapter}.test.ts`, `apps/ui/test/ConnectionEditor.test.tsx`.
 
 **Verified against the installed CLIs (record the versions in the adapter comments):**
@@ -337,6 +340,7 @@ Rules:
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run `pnpm test`. Expected: PASS.
 - [ ] **Step 5: Commit:** `feat(agents): MCP servers reach Claude and Gemini through the gate; Codex refuses them`
+  **Ruling during execution:** Gemini refuses MCP connections in this version, because gemini-cli 0.68.0 starts MCP servers only in a trusted folder and The Terminal never trusts agent worktrees. MCP is Claude-only.
 
 ---
 
@@ -435,4 +439,5 @@ The doc gains, after "Codex and MCP servers" (which is kept and shortened to the
 - The GitHub view shows branches, pull requests and CI runs read-only, with ETag caching and a stale notice under rate limits; the status bar's `CI` item is live and never breaks `/api/status`.
 - The Capacity view shows per-provider usage for today and this month against the Owner's plan and budget, observed rate limits, and this computer's hardware; every computed figure is labelled `estimate` and unreported ones say `not reported`.
 - Codex runs refuse MCP connections with the agreed sentence; Claude and Gemini accept them.
+  **Ruling during execution:** Gemini refuses MCP connections in this version, because gemini-cli 0.68.0 starts MCP servers only in a trusted folder and The Terminal never trusts agent worktrees. MCP is Claude-only.
 - `pnpm test` and `pnpm e2e` are green on macOS and Windows CI without a real keychain, real cloud, real GitHub or a GPU; the work is merged to `main` through a pull request.
