@@ -12,7 +12,16 @@ export { spendLine };
 export function BoardView() {
   const { model, dock } = useShell();
   const { board, selectedId } = model;
-  if (!board || !selectedId) return <p className="empty">Select or create a project.</p>;
+  if (!board || !selectedId) {
+    return (
+      <div className="welcome">
+        <p className="wordmark" role="img" aria-label="The Terminal">
+          THE <span className="accent">TERMINAL</span>
+        </p>
+        <p className="welcome-line">Start by opening a project.</p>
+      </div>
+    );
+  }
   const openStory = (cardId: string) => {
     const card = Object.values(board.columns).flat().find((c) => c.id === cardId);
     dock()?.open(`story:${cardId}`, card ? visibleControls(card.title) : "Story", "main");

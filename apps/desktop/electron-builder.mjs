@@ -74,6 +74,8 @@ export function builderConfig(env) {
     afterPack,
     mac: {
       target: [{ target: "dmg" }],
+      // Generated from assets/brand/mark.svg by scripts/make-icons.mjs.
+      icon: "build/icon.icns",
       // Ad-hoc: Apple Silicon refuses to run unsigned arm64 code. 9B sets a Developer ID and the hardened runtime.
       identity: "-",
       hardenedRuntime: false,
@@ -81,6 +83,7 @@ export function builderConfig(env) {
     win: {
       // Unsigned in 9A. 9B adds signtoolOptions.
       target: [{ target: "nsis", arch: ["x64"] }],
+      icon: "build/icon.ico",
     },
     nsis: { oneClick: true, perMachine: false },
   };

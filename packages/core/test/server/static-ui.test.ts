@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerStaticUi } from "../../src/server/static-ui.js";
@@ -93,5 +94,21 @@ describe("registerStaticUi: the join and sign-in pages", () => {
     const missing = await app.inject({ method: "GET", url: "/join/../token" });
     expect(missing.headers["x-content-type-options"]).toBe("nosniff");
     expect((await app.inject({ method: "GET", url: "/api/join/abc" })).headers["content-security-policy"]).toBeUndefined();
+  });
+});
+
+describe("registerStaticUi: the favicon", () => {
+  it("serves the UI's favicon.svg as SVG, without sign-in, under the CSP that lets the page show it", async () => {
+    const app = await setup();
+    // The real favicon, as the UI build copies it from public/ to the root of the served directory.
+    const favicon = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "apps", "ui", "public", "favicon.svg");
+    copyFileSync(favicon, join(dirs[dirs.length - 1]!, "ui", "favicon.svg"));
+    const res = await app.inject({ method: "GET", url: "/favicon.svg" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toBe("image/svg+xml");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.body).toMatch(/^<svg /);
+    // The page links it from this origin, which img-src 'self' allows.
+    expect(String(res.headers["content-security-policy"])).toContain("img-src 'self'");
   });
 });

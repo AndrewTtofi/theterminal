@@ -14,6 +14,22 @@ const PROMPT_CLIP = 40;
 /** True for what the feed shows: what agents did and said (here or on a linked machine), and the Owner's overrides. */
 const inFeed = (e: LedgerEntry) => innerEntry(e).type.startsWith("agent.") || isOverride(e);
 
+/**
+ * The marker an entry's line starts with, as a class: `prompt` for the ask that started a run, `done` for a step or
+ * run that completed. The marker itself is drawn by the stylesheet, so the recorded text is untouched.
+ */
+function markClass(e: LedgerEntry): string | undefined {
+  const inner = innerEntry(e);
+  const p = typeof inner.payload === "object" && inner.payload !== null ? (inner.payload as Record<string, unknown>) : {};
+  if (inner.type === "agent.started") return "prompt";
+  if (inner.type === "agent.action.completed" && p.ok === true) return "done";
+  if (inner.type === "agent.finished" && p.status === "completed") return "done";
+  return undefined;
+}
+
+const itemClass = (e: LedgerEntry, attention: boolean): string | undefined =>
+  [entryClass(e, attention), markClass(e)].filter(Boolean).join(" ") || undefined;
+
 /** The project's agent.* and override.* entries, oldest first, of one run or of every run. */
 export function feedEntries(entries: LedgerEntry[], runId: string | null): LedgerEntry[] {
   return entries.filter((e) => inFeed(e) && (runId === null || namesRun(e, runId))).sort((a, b) => a.seq - b.seq);
@@ -79,7 +95,7 @@ export function AgentFeedPanel() {
       ) : (
         <ul className="feed-items" aria-label="Agent feed entries" tabIndex={0} ref={follow.ref} onScroll={follow.onScroll}>
           {items.map(({ e, n }) => (
-            <li key={e.seq} data-key={e.seq} className={entryClass(e, n.attention)}>
+            <li key={e.seq} data-key={e.seq} className={itemClass(e, n.attention)}>
               <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <OverrideTag entry={e} headline={n.headline} />
               <span className="headline">{n.headline}</span>
               <RawRecord headline={n.headline} detail={n.detail} payload={e.payload} override={isOverride(e)} />
@@ -88,8 +104,8 @@ export function AgentFeedPanel() {
         </ul>
       )}
       {working && (
-        <p className="live" role="status">
-          Working…
+        <p className="live">
+          <span role="status">Working…</span> <span className="cursor" aria-hidden="true" />
         </p>
       )}
       {follow.away && (

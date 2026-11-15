@@ -11,6 +11,7 @@ import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
 import { ShareSideBar } from "../views/ShareSideBar";
 import { PeopleSideBar } from "../views/PeopleSideBar";
+import { SettingsSideBar } from "../views/SettingsSideBar";
 import { useViewerRole } from "./model";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
@@ -39,6 +40,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   people: PeopleSideBar,
   share: ShareSideBar,
   learn: LearnSideBar,
+  settings: SettingsSideBar,
 };
 
 export const clampWidth = (w: number) => Math.min(SIDE_BAR_MAX, Math.max(SIDE_BAR_MIN, Math.round(w)));

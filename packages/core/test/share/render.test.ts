@@ -360,3 +360,27 @@ describe("contentHashOf", () => {
     expect(contentHashOf("·")).toBe(createHash("sha256").update(Buffer.from([0xc2, 0xb7])).digest("hex"));
   });
 });
+
+describe("share page palette (Ice)", () => {
+  const lum = (hex: string): number => {
+    const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0]! + 0.7152 * c[1]! + 0.0722 * c[2]!;
+  };
+  const ratio = (a: string, b: string): number => {
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  };
+
+  it("uses Ice's colours", () => {
+    const html = render();
+    expect(html).toContain("--bg: #0d1016");
+    expect(html).toContain("--panel: #121620");
+    expect(html).toContain("--accent: #4fc3d9");
+  });
+
+  it("keeps text and muted at least 4.5:1 on the page and panel backgrounds", () => {
+    const html = render();
+    const v = (name: string) => new RegExp(`--${name}: (#[0-9a-f]{6})`).exec(html)![1]!;
+    for (const fg of ["text", "muted"]) for (const bg of ["bg", "panel"]) expect(ratio(v(fg), v(bg))).toBeGreaterThanOrEqual(4.5);
+  });
+});

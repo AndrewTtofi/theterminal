@@ -150,6 +150,32 @@ describe("AgentFeedPanel", () => {
     expect(within(feed()).queryByText("Working…")).toBeNull();
   });
 
+  it("ends a running agent's output with a hidden block cursor, gone when the run ends", () => {
+    const { rerender } = renderFeed({ projectEntries: [message(1, "run1", "hi")], feedRunId: "run1" });
+    const cursor = feed().querySelector(".cursor");
+    expect(cursor?.getAttribute("aria-hidden")).toBe("true");
+    expect(within(feed()).getByRole("status").textContent).toBe("Working…");
+    rerender({ feedRunId: "run2" });
+    expect(feed().querySelector(".cursor")).toBeNull();
+  });
+
+  it("marks prompt lines and completed steps without changing their text", () => {
+    renderFeed({
+      projectEntries: [
+        ev(1, "agent.started", { runId: "run1", adapter: "fake", authMode: "none", prompt: "Detect GPU", cardId: null, worktree: "w/run1" }),
+        message(2, "run1", "Looking"),
+        completed(3, "run1", "a1", "ok"),
+        completed(4, "run1", "a2", "boom", false),
+      ],
+    });
+    const [started, said, done, failed] = items();
+    expect(started!.classList.contains("prompt")).toBe(true);
+    expect(said!.classList.contains("prompt") || said!.classList.contains("done")).toBe(false);
+    expect(done!.classList.contains("done")).toBe(true);
+    expect(failed!.classList.contains("done")).toBe(false);
+    expect(done!.querySelector(".headline")?.textContent).toBe("Done (1 line of output)");
+  });
+
   it("says how to start when there is nothing to show", () => {
     renderFeed();
     expect(feed().textContent).toContain("Nothing to show yet. Start an agent in the Agents view or the Conversation tab.");

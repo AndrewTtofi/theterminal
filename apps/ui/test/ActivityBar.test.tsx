@@ -42,4 +42,16 @@ describe("ActivityBar", () => {
     await userEvent.click(screen.getByRole("button", { name: "Ledger" }));
     expect(onSelect).toHaveBeenCalledWith("ledger");
   });
+
+  it("pins a Settings gear below the views that reports the settings view and shows when it is active", async () => {
+    const onSelect = vi.fn();
+    const { rerender } = render(<ActivityBar active="board" running={0} pending={0} onSelect={onSelect} />);
+    const gear = screen.getByRole("button", { name: "Settings" });
+    expect(screen.getByRole("navigation", { name: "Views" }).contains(gear)).toBe(false);
+    expect(gear.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(gear);
+    expect(onSelect).toHaveBeenCalledWith("settings");
+    rerender(<ActivityBar active="settings" running={0} pending={0} onSelect={onSelect} />);
+    expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-pressed")).toBe("true");
+  });
 });

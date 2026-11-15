@@ -58,6 +58,8 @@ export function StartRunForm({
   const [cardId, setCardId] = useState(defaultCardId ?? "");
   const [starting, setStarting] = useState(false);
   const [announced, setAnnounced] = useState("");
+  /** While the prompt box is focused and empty, a block cursor waits in it. */
+  const [promptFocused, setPromptFocused] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const target = runOn === "" ? null : (machines.find((m) => m.id === runOn) ?? null);
   const targetName = target === null ? "" : visibleControls(target.name);
@@ -180,7 +182,19 @@ export function StartRunForm({
       </label>
       <label>
         Prompt
-        <textarea ref={promptRef} value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} maxLength={20000} />
+        <span className="prompt-box">
+          <textarea
+            ref={promptRef}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onFocus={() => setPromptFocused(true)}
+            onBlur={() => setPromptFocused(false)}
+            rows={3}
+            maxLength={20000}
+            className={promptFocused && prompt === "" ? "awaiting" : undefined}
+          />
+          {promptFocused && prompt === "" && <span className="cursor" aria-hidden="true" />}
+        </span>
       </label>
       {offered.length > 0 && (
         <fieldset className="run-connections">

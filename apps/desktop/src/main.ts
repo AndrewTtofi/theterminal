@@ -20,6 +20,7 @@ import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
+import { createColorRecorder, loadWindowColor, saveWindowColor } from "./window-color.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
 import { writeReadyFile } from "./ready-file.js";
@@ -193,6 +194,7 @@ function run(args: DesktopArgs, dataDir: string): void {
       width: 1400,
       height: 900,
       title: TITLE,
+      backgroundColor: loadWindowColor(windowColorFile()),
       webPreferences: {
         contextIsolation: true,
         sandbox: true,
@@ -208,12 +210,35 @@ function run(args: DesktopArgs, dataDir: string): void {
     });
     w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
     w.once("ready-to-show", () => w.show());
+    // Remember the theme's background so the next window opens in it. The main process reads it itself (no preload
+    // or IPC). On close the renderer is usually gone too soon, so it is also saved on blur and every 30 s.
+    const initialColor = loadWindowColor(windowColorFile());
+    const recorder = createColorRecorder({ read: () => readWindowBg(w), save: (c) => saveWindowColor(windowColorFile(), c), initial: initialColor });
+    const timer = setInterval(() => void recorder.record(), 30_000);
+    w.on("blur", () => void recorder.record());
+    w.on("close", () => void recorder.record());
     w.on("closed", () => {
+      clearInterval(timer);
       if (win === w) win = null;
     });
     void w.loadURL(r.url);
     return w;
   }
+}
+
+function windowColorFile(): string {
+  return join(app.getPath("userData"), "window.json");
+}
+
+/** Reads `--bg` from the page, giving up after 500 ms. */
+async function readWindowBg(w: BrowserWindow): Promise<unknown> {
+  if (w.isDestroyed()) return null;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), 500);
+  });
+  const read = w.webContents.executeJavaScript('getComputedStyle(document.documentElement).getPropertyValue("--bg")') as Promise<unknown>;
+  return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** The allowlisted environment for the server child, with the login-shell PATH on macOS. */

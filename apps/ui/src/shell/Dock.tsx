@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import type { ComponentType, FunctionComponent } from "react";
 import { DockviewReact, themeDark } from "dockview-react";
-import type { DockviewApi, DockviewReadyEvent, IDockviewPanel, IDockviewPanelProps } from "dockview-react";
+import type { DockviewApi, DockviewReadyEvent, DockviewTheme, IDockviewPanel, IDockviewPanelProps } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
 import { BOTTOM_SHARE, PRESET_LABELS, buildDefault, buildPreset, componentOf, restoreOrDefault } from "./dock-layout";
 import type { PresetId } from "./dock-layout";
@@ -196,6 +196,12 @@ type Props = {
   layoutKey: string;
 };
 
+/**
+ * dockview's dark theme for its sizes and spacing, plus `tt-dock-theme`, which styles.css uses to take every colour
+ * from the app's theme tokens. dockview puts these classes on its shell element, an ancestor of `.dock-host`.
+ */
+const DOCK_THEME: DockviewTheme = { ...themeDark, className: `${themeDark.className} tt-dock-theme` };
+
 /** dockview-react wrapper: registers the panels, restores or builds the layout, and saves every change. */
 export function Dock({ panels, onReady, layoutKey }: Props) {
   const onReadyRef = useRef(onReady);
@@ -229,7 +235,7 @@ export function Dock({ panels, onReady, layoutKey }: Props) {
   return (
     <DockviewReact
       className="dock-host"
-      theme={themeDark}
+      theme={DOCK_THEME}
       components={components}
       onReady={handleReady}
       disableFloatingGroups

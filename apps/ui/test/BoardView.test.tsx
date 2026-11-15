@@ -56,3 +56,18 @@ describe("spendLine", () => {
     expect(spendLine([0.07, 0.07, 0.07].map((c, i) => feedRun(`r${i}`, { costUsd: c })))).toBe("Agent spend: $0.21 (estimate) · 3 runs");
   });
 });
+
+describe("BoardView empty state", () => {
+  it("shows the wordmark and one line when no project is open", () => {
+    const model = { selectedId: null, board: null, runs: [] } as unknown as WorkbenchModel;
+    render(
+      <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...shellNav() }}>
+        <BoardView />
+      </ShellContext.Provider>,
+    );
+    const mark = screen.getByRole("img", { name: "The Terminal" });
+    expect(mark.textContent).toBe("THE TERMINAL");
+    expect(mark.querySelector(".accent")?.textContent).toBe("TERMINAL");
+    expect(screen.getByText("Start by opening a project.")).toBeTruthy();
+  });
+});
