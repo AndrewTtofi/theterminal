@@ -11,7 +11,7 @@ import { NotFoundError } from "../board/board-service.js";
 import type { Db } from "../db.js";
 import { getRun } from "../events/projections.js";
 import {
-  GitOutputTooLargeError, GitTimeoutError, HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError,
+  GitOutputTooLargeError, GitScope, GitTimeoutError, HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError,
   type WorktreeManager,
 } from "../agents/worktrees.js";
 
@@ -263,12 +263,14 @@ const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
  * its git directory is exactly the project repository's entry for it (`<repo>/.git/worktrees/<name>`), and its
  * common directory is the project repository's own `.git`. A planted `core.worktree`, or a
  * `.git` file pointing anywhere else, fails with WorktreeMissingError. Every later call passes the verified
- * `--git-dir` and `--work-tree`, so neither can change in between.
+ * `--git-dir` and `--work-tree`, so neither can change in between. The calls share one GitScope: this operation's,
+ * on a run whose agent has returned (stoppedRunWorktree), dropped with the returned function.
  */
 export async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string): Promise<WorktreeGit> {
+  const scope = new GitScope();
   let gitDir: string;
   try {
-    const out = (await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]))
+    const out = (await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"], { scope }))
       .split(/\r?\n/)
       .map((l) => l.trim());
     if (out.length < 3 || !out[0] || !out[1] || !out[2]) throw new WorktreeMissingError();
@@ -284,7 +286,7 @@ export async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string)
     if (isRefusal(e)) throw e;
     throw new WorktreeMissingError();
   }
-  return (args, opts = {}) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs, ...opts });
+  return (args, opts = {}) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs, scope, ...opts });
 }
 
 /**
@@ -315,18 +317,18 @@ export async function withScratchIndex<T>(deps: ChangesDeps, git: WorktreeGit, h
  * The fork point and the run's HEAD. The fork point is the commit recorded with the run when its worktree was created
  * (`run.base`), never recomputed: a `merge-base` against the project repository's branch would follow that branch
  * wherever the agent moved it (`update-ref`, `branch -f` through the shared common dir), and every committed change
- * would vanish from the view. The recorded commit must still be a commit in the repository (checked with
- * `cat-file -e`, replace objects ignored by GIT_COMMON_ARGS). A run recorded before the fork commit was kept has no
- * `base`; it gets NoBaseError, not a guess, since any ref-derived base is state the agent can move. Its directory
- * listing and file views, which need no base, still work.
+ * would vanish from the view. The recorded commit must still be a commit in the repository: one `rev-parse` peels it
+ * and HEAD to commits (`^{commit}`), which fails when either object is missing or not a commit, with replace objects
+ * ignored by GIT_COMMON_ARGS. A run recorded before the fork commit was kept has no `base`; it gets NoBaseError, not a
+ * guess, since any ref-derived base is state the agent can move. Its directory listing and file views, which need no
+ * base, still work.
  */
 async function forkPoint(run: AgentRun, git: WorktreeGit): Promise<{ base: string; head: string }> {
   const base = run.base;
   if (base === null || !COMMIT_ID.test(base)) throw new NoBaseError();
   try {
-    await git(["cat-file", "-e", `${base}^{commit}`]);
-    const head = (await git(["rev-parse", "--verify", "HEAD"])).trim();
-    if (!COMMIT_ID.test(head)) throw new NoBaseError();
+    const [peeled, head] = (await git(["rev-parse", `${base}^{commit}`, "HEAD^{commit}"])).split(/\r?\n/).map((l) => l.trim());
+    if (peeled !== base || head === undefined || !COMMIT_ID.test(head)) throw new NoBaseError();
     return { base, head };
   } catch (e) {
     if (isRefusal(e)) throw e;

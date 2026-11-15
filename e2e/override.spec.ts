@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import {
   allow,
+  decisionCard,
   ledgerItems,
   line,
   lineMatching,
@@ -25,7 +26,8 @@ test("the emergency override waits for the agent to stop, then runs a command an
   // While the run's shell step waits for the Owner, the agent is still working: the override is refused.
   await prepareRun(page, "fake", "Write some notes");
   await startRun(page);
-  await expect(page.getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeVisible();
+  // This project's card: the run exists once it shows, so the newest run read next is this one.
+  await expect(decisionCard(page, "Run: nvidia-smi", name)).toBeVisible();
   const runId = await newestRunId(page, name);
   await openView(page, "Changes");
   const override = page.locator("details.override");

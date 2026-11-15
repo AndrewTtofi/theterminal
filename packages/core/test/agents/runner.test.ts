@@ -27,6 +27,12 @@ const owner = { kind: "human", id: "owner" } as const;
 const EXTRA_SECRET = "extra-secret-value-0001";
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
 
+// A run start creates the project repository and the worktree through runGit, whose hardening checks make five or six
+// git processes of every call: about fifty per start, then the adapter's own process. Seconds on Windows CI, where a
+// process start is slow and the suite shares two cores; the default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 let dataDir: string;
 let db: Db;
 let ledger: Ledger;
@@ -43,7 +49,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await Promise.all(runners.splice(0).map((r) => r.shutdown()));
-  rmSync(dataDir, { recursive: true, force: true });
+  // Retried: on Windows a git or agent process that was just killed can still hold its working directory (EBUSY).
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 function makeRunner(

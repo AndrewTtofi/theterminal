@@ -37,7 +37,9 @@ describe("UnifiedDiff", () => {
     expect(lines(container)).toHaveLength(0);
   });
 
-  it("paints at most 20,000 lines and says how many there are", () => {
+  // Painting 20,000 lines in jsdom takes about a second alone and several when the other packages' suites load the
+  // same machine (CI runs them in parallel); the default 5 s has cut it off. The cap is what is tested, not the speed.
+  it("paints at most 20,000 lines and says how many there are", { timeout: 30_000 }, () => {
     const text = `@@ -0,0 +1,25000 @@\n${Array.from({ length: 25_000 }, (_, i) => `+line ${i + 1}`).join("\n")}\n`;
     const { container } = render(<UnifiedDiff text={text} />);
     expect(lines(container)).toHaveLength(20_000);

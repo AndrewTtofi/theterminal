@@ -131,6 +131,18 @@ export async function prepareRun(page: Page, adapter: "fake" | "codex" | "gemini
 
 export const startRun = (page: Page) => page.getByRole("button", { name: "Start agent" }).click();
 
+/** The Needs-you strip above the dock, where decisions are taken (the Needs-you tab shows read-only copies). */
+export const needsYouStrip = (page: Page) => page.getByRole("region", { name: "Needs you", exact: true });
+
+/**
+ * The strip's card for the decision with this summary in the named project. The strip shows every project's pending
+ * decisions, so a card another spec left pending would otherwise match too.
+ */
+export const decisionCard = (page: Page, summary: string, projectName: string) =>
+  needsYouStrip(page)
+    .getByRole("article", { name: `Decision: ${summary}` })
+    .filter({ has: page.locator(".project-name", { hasText: new RegExp(`^${escape(projectName)}$`) }) });
+
 /** Clicks Allow on the decision card with this summary, once it appears. */
 export async function allow(page: Page, summary: string) {
   const card = page.getByRole("article", { name: `Decision: ${summary}` });
@@ -138,15 +150,6 @@ export async function allow(page: Page, summary: string) {
   await card.getByRole("button", { name: "Allow" }).click();
   await expect(card).toHaveCount(0);
 }
-
-/**
- * The decision card with this summary for one project. Every spec shares the agent server and the strip shows every
- * project's decisions, so a card is told apart by the project name it carries.
- */
-export const decisionCard = (page: Page, summary: string, projectName: string) =>
-  page
-    .getByRole("article", { name: `Decision: ${summary}` })
-    .filter({ has: page.locator(".project-name", { hasText: new RegExp(`^${escape(projectName)}$`) }) });
 
 /** Clicks Allow on the project's decision card with this summary, once it appears. */
 export async function allowIn(page: Page, summary: string, projectName: string) {
