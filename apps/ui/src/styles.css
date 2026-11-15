@@ -396,7 +396,7 @@ details.override [role="status"]:empty { margin: 0; }
 
 /* Needs-you tab: each decision with its context */
 .needs-you-panel { padding: 8px 16px; overflow: auto; height: 100%; box-sizing: border-box; }
-.needs-you-panel h3 { color: var(--attention); }
+.needs-you-panel h2 { color: var(--attention); }
 .decision-card .decision-links { display: flex; gap: 12px; margin: 0 0 6px; font-size: 12px; }
 .decision-context { margin: 0 0 6px; padding: 0 8px 8px; }
 .decision-context h4 { margin: 6px 0 4px; }

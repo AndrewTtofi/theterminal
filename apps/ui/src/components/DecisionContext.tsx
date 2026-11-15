@@ -47,7 +47,7 @@ export function proposedChange(action: Pick<AgentAction, "kind" | "input">): Pro
 
 /** The text's lines (a final line break ends the last line rather than starting an empty one), cleaned for display. */
 function linesOf(text: string): string[] {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   if (lines[lines.length - 1] === "") lines.pop();
   return lines.map((l) => visibleControls(stripAnsi(l)));
 }

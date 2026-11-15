@@ -410,9 +410,13 @@ describe("Workbench", () => {
     expect(tab.getAttribute("data-active")).toBe("true");
     const everything = within(tab).getByRole("region", { name: "Everything that needs you" });
     expect(within(everything).getByRole("article", { name: "Decision: Run: nvidia-smi" })).toBeTruthy();
-    // The tab's own cards need no More context: it is already open.
+    // The tab's own cards need no More context: it is already open. The strip decides, so the tab's copy is read-only.
     expect(within(everything).queryByRole("button", { name: "More context" })).toBeNull();
+    expect(within(everything).queryByRole("button", { name: "Allow" })).toBeNull();
+    expect(within(everything).getByText("Decide in the strip above")).toBeTruthy();
     expect(document.activeElement).toBe(more);
+    const announcer = screen.getByText("Opened Needs you");
+    expect(announcer.getAttribute("aria-live")).toBe("polite");
   });
 
   it("opens Learn on a shell decision's topic from the strip", async () => {

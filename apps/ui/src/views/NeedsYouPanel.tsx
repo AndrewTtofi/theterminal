@@ -42,7 +42,7 @@ function useRunChanges(actions: PendingAgentAction[]): Record<string, Known> {
  * decisions.
  */
 export function NeedsYouPanel() {
-  const { model, showView } = useShell();
+  const { model, showView, stripShown } = useShell();
   const notices = intakeNotices(model);
   const local = (a: PendingAgentAction) => a.projectId === model.selectedId;
   const known = useRunChanges(model.pending.filter(local));
@@ -58,13 +58,13 @@ export function NeedsYouPanel() {
       {empty && <p className="empty">Nothing needs you right now.</p>}
       {model.pending.length > 0 && (
         <>
-          <h3>Decisions</h3>
+          <h2>Decisions</h2>
           <ul className="needs-you-list">
             {model.pending.map((a) => {
               const k = local(a) ? known[a.runId] : undefined;
               return (
                 <li key={a.id}>
-                  <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} />
+                  <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} readOnly={stripShown} />
                   <DecisionContext
                     action={a}
                     entries={local(a) ? model.projectEntries : null}
@@ -88,20 +88,21 @@ export function NeedsYouPanel() {
       )}
       {model.gate !== null && (
         <>
-          <h3>Gates</h3>
-          {/* The strip shows the same prompt and takes focus for it; this copy leaves focus alone. */}
+          <h2>Gates</h2>
+          {/* While the strip shows the same prompt, this copy is read-only so the move is decided once; it never takes focus. */}
           <GateCards
             key={`${model.gate.cardId}:${model.gate.to}`}
             gate={model.gate}
             onResolve={model.onResolveGate}
             onCancel={model.onCancelGate}
+            readOnly={stripShown}
             autoFocus={false}
           />
         </>
       )}
       {notices.length > 0 && (
         <>
-          <h3>Plan</h3>
+          <h2>Plan</h2>
           <IntakeNotices notices={notices} />
         </>
       )}

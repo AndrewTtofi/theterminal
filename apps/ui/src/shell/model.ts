@@ -77,7 +77,10 @@ export type WorkbenchModel = {
    * intake.* or gate.* entry of the card's project while it is set.
    */
   gate: GatePrompt | null;
-  /** Moves with the decisions; true when moved. When the server refuses them, refreshes the evaluations and keeps the card. */
+  /**
+   * Moves with the decisions; true when moved. When the server refuses them, refreshes the evaluations and keeps the
+   * card. False at once, sending nothing, while an earlier call is still in flight.
+   */
   onResolveGate: (decisions: GateDecisionInput[]) => Promise<boolean>;
   onCancelGate: () => void;
   /** A card's story, read from the server each time. */
@@ -95,6 +98,7 @@ export type WorkbenchModel = {
   onStopRun: (runId: string) => void;
 
   pending: PendingAgentAction[];
+  /** Sends the decision; resolves false at once, sending nothing, while a decision on the same action is in flight. */
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown>;
 
   /** The entries the ledger panel shows: the selected project's, or every project's, by `ledgerScope`. */
@@ -198,6 +202,11 @@ export type ShellContextValue = {
   learnTopic: string | null;
   /** The view the Owner is looking at: the active view, or the last one before Learn while Learn is shown. */
   contextView: ViewId;
+  /**
+   * True while the Needs-you strip above the dock is showing (anything pending, a plan waiting or a stopped move):
+   * other copies of its cards are then read-only, so each decision is made in one place.
+   */
+  stripShown: boolean;
 };
 
 /** Dock panels render through portals, so they read the model from context rather than props. */

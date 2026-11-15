@@ -83,11 +83,23 @@ export function Workbench({ model }: Props) {
     }
     showView(v);
   };
-  /** A strip card's "More context": shows the Needs-you tab, leaving focus on the button the Owner pressed. */
+  const stripShown = pending > 0 || notices.length > 0 || model.gate !== null;
+  /** What the polite live region last said. */
+  const [announcement, setAnnouncement] = useState("");
+  const announceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(announceTimer.current), []);
+  /**
+   * A strip card's "More context": shows the Needs-you tab, leaving focus on the button the Owner pressed, and says
+   * so in the live region, since nothing near the button changes.
+   */
   const moreContext = () => {
     const from = document.activeElement;
     dockRef.current?.focus("needs_you");
     if (from instanceof HTMLElement && from.isConnected && document.activeElement !== from) from.focus();
+    setAnnouncement("Opened Needs you");
+    // Cleared after a while, so pressing it again later is announced again.
+    clearTimeout(announceTimer.current);
+    announceTimer.current = setTimeout(() => setAnnouncement(""), 3000);
   };
   const openLearn = (topicId: string) => {
     setLearnTopic(topicId);
@@ -170,6 +182,7 @@ export function Workbench({ model }: Props) {
     openLearn,
     learnTopic,
     contextView: view === "learn" ? lastView : view,
+    stripShown,
   };
 
   return (
@@ -179,7 +192,10 @@ export function Workbench({ model }: Props) {
           <ActivityBar active={sideOpen ? view : null} running={running} pending={waiting} onSelect={selectView} />
           {sideOpen && <SideBar view={view} width={width} onResize={setWidth} />}
           <main className="main-column">
-            {(pending > 0 || notices.length > 0 || model.gate !== null) && (
+            <p className="sr-only" aria-live="polite">
+              {announcement}
+            </p>
+            {stripShown && (
               <section className="needs-you" aria-label="Needs you">
                 <h2>Needs you</h2>
                 {model.gate !== null && (

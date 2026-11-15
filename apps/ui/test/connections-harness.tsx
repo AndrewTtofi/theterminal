@@ -55,7 +55,7 @@ export function fakeDock(): DockApi & { [K in keyof DockApi]: ReturnType<typeof 
 
 /** The ShellContext's navigation members, as spies, for tests that render one panel or side bar. */
 export function shellNav(): Omit<ShellContextValue, "model" | "dock"> {
-  return { selectView: vi.fn(), showView: vi.fn(), openLearn: vi.fn(), learnTopic: null, contextView: "board" as const };
+  return { selectView: vi.fn(), showView: vi.fn(), openLearn: vi.fn(), learnTopic: null, contextView: "board" as const, stripShown: false };
 }
 
 /** Renders `children` inside the shell context, with the live connections model (backed by the mocked api). */

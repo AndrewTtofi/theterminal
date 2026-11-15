@@ -115,6 +115,12 @@ export function App() {
   /** The gated move waiting on the Owner, with the project of its card. */
   const [gate, setGate] = useState<(GatePrompt & { projectId: string }) | null>(null);
   const gateRef = useRef(gate);
+  /**
+   * True while a gated move is being sent, and the ids of actions whose decision is being sent: a second request
+   * meanwhile (a double click, or another copy of the same card) answers false instead of reaching the server.
+   */
+  const resolvingGate = useRef(false);
+  const deciding = useRef(new Set<string>());
   gateRef.current = gate;
   const refreshGateRef = useRef<() => void>(() => {});
   /** Listeners for every new ledger entry (the story tabs), fed by the stream from the ledger head. */
@@ -532,7 +538,8 @@ export function App() {
     gate: gatePrompt,
     onResolveGate: async (decisions) => {
       const g = gateRef.current;
-      if (!g) return false;
+      if (!g || resolvingGate.current) return false;
+      resolvingGate.current = true;
       try {
         setError(null);
         await api.moveCard(g.cardId, g.to, decisions);
@@ -557,6 +564,8 @@ export function App() {
           setError(errorMessage(e));
         }
         return false;
+      } finally {
+        resolvingGate.current = false;
       }
     },
     onCancelGate: () => setGate(null),
@@ -597,9 +606,12 @@ export function App() {
       }),
     pending,
     onDecide: async (id, decision, reason) => {
+      if (deciding.current.has(id)) return false;
+      deciding.current.add(id);
       try {
         await api.decideAction(id, decision, reason);
       } finally {
+        deciding.current.delete(id);
         refreshPending.current();
         refreshAgents.current();
       }

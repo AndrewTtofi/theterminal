@@ -11,6 +11,8 @@ type Props = {
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown> | void;
   /** Shows the "More context" button, which opens the Needs-you tab; absent on cards already there. */
   onMore?: () => void;
+  /** A copy of a card the strip shows: no Allow or Deny here, only a pointer to the strip, so it is decided once. */
+  readOnly?: boolean;
 };
 
 /** For an input the core recorded as truncated, how many characters the card cannot show; else null. */
@@ -34,7 +36,7 @@ function shellCommand(action: AgentAction): string | null {
   return typeof command === "string" ? visibleControls(command) : null;
 }
 
-export function DecisionCard({ action, projectName, onDecide, onMore }: Props) {
+export function DecisionCard({ action, projectName, onDecide, onMore, readOnly = false }: Props) {
   // Outside the shell (a card on its own) there is no Learn view to open, so no link.
   const openLearn = useContext(ShellContext)?.openLearn;
   const headingId = useId();
@@ -68,7 +70,12 @@ export function DecisionCard({ action, projectName, onDecide, onMore }: Props) {
       {(openLearn || onMore) && (
         <p className="decision-links">
           {openLearn && (
-            <button type="button" className="link" onClick={() => openLearn(ACTION_TOPIC[action.kind] ?? ACTION_TOPIC.other)}>
+            <button
+              type="button"
+              className="link"
+              aria-describedby={headingId}
+              onClick={() => openLearn(ACTION_TOPIC[action.kind] ?? ACTION_TOPIC.other)}
+            >
               Learn more
             </button>
           )}
@@ -85,7 +92,9 @@ export function DecisionCard({ action, projectName, onDecide, onMore }: Props) {
         <pre>{visibleControls(JSON.stringify(action.input, null, 2) ?? "")}</pre>
       </details>
       {hidden !== null && <p className="note">{hidden} characters hidden — full input not shown</p>}
-      {denying ? (
+      {readOnly ? (
+        <p className="note">Decide in the strip above</p>
+      ) : denying ? (
         <div className="decision-actions">
           <label>
             Reason (optional)

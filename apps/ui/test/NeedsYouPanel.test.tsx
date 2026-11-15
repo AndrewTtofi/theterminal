@@ -21,9 +21,9 @@ const changes: RunChanges = {
   files: [{ path: "src/a.ts", status: "modified", added: 1, deleted: 1, binary: false }],
 };
 
-function renderPanel(over: Partial<WorkbenchModel> = {}) {
+function renderPanel(over: Partial<WorkbenchModel> = {}, stripShown = false) {
   const dock = fakeDock();
-  const nav = shellNav();
+  const nav = { ...shellNav(), stripShown };
   const model = {
     selectedId: "p1",
     pending: [],
@@ -58,7 +58,7 @@ describe("NeedsYouPanel", () => {
 
   it("shows a selected project's decision with its proposed change, what the agent said and what the run changed", async () => {
     const { model, nav } = renderPanel({ pending: [pending()] });
-    expect(within(panel()).getByRole("heading", { name: "Decisions" })).toBeTruthy();
+    expect(within(panel()).getByRole("heading", { level: 2, name: "Decisions" })).toBeTruthy();
     expect(within(panel()).getByRole("article", { name: "Decision: Edit src/a.ts" })).toBeTruthy();
     expect(within(panel()).getByRole("heading", { name: "Proposed change to src/a.ts" })).toBeTruthy();
     expect(within(panel()).getByText("Fixing the counter")).toBeTruthy();
@@ -97,7 +97,7 @@ describe("NeedsYouPanel", () => {
     const { model } = renderPanel({
       gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false },
     });
-    expect(within(panel()).getByRole("heading", { name: "Gates" })).toBeTruthy();
+    expect(within(panel()).getByRole("heading", { level: 2, name: "Gates" })).toBeTruthy();
     const gate = within(panel()).getByRole("article", { name: "Gate: Ready to ship" });
     expect(document.activeElement).toBe(document.body);
     await userEvent.click(within(gate).getByRole("button", { name: "Cancel" }));
@@ -108,10 +108,33 @@ describe("NeedsYouPanel", () => {
     const { model, dock } = renderPanel({
       status: { intakeProjects: [{ projectId: "p2", name: "Other", decisions: 2 }] } as unknown as WorkbenchModel["status"],
     });
-    expect(within(panel()).getByRole("heading", { name: "Plan" })).toBeTruthy();
+    expect(within(panel()).getByRole("heading", { level: 2, name: "Plan" })).toBeTruthy();
     expect(within(panel()).getByText("The plan for Other needs 2 decisions")).toBeTruthy();
     await userEvent.click(within(panel()).getByRole("button", { name: "Open intake" }));
     expect(model.onSelectProject).toHaveBeenCalledWith("p2");
     await waitFor(() => expect(dock.focus).toHaveBeenCalledWith("intake"));
+  });
+
+  it("shows read-only copies that point to the strip while the strip shows them", () => {
+    renderPanel(
+      {
+        pending: [pending()],
+        gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false },
+      },
+      true,
+    );
+    const decision = within(panel()).getByRole("article", { name: "Decision: Edit src/a.ts" });
+    expect(within(decision).queryByRole("button", { name: "Allow" })).toBeNull();
+    expect(within(decision).getByText("Decide in the strip above")).toBeTruthy();
+    const gate = within(panel()).getByRole("article", { name: "Gate: Ready to ship" });
+    expect(within(gate).queryByRole("checkbox")).toBeNull();
+    expect(within(panel()).queryByRole("button", { name: 'Move "Login" to Ship' })).toBeNull();
+    expect(within(panel()).getAllByText("Decide in the strip above")).toHaveLength(2);
+  });
+
+  it("keeps its copies interactive when the strip is not showing them", () => {
+    renderPanel({ pending: [pending()] }, false);
+    expect(within(panel()).getByRole("button", { name: "Allow" })).toBeTruthy();
+    expect(within(panel()).queryByText("Decide in the strip above")).toBeNull();
   });
 });

@@ -16,17 +16,20 @@ type CardProps = {
   /** The Owner's decision for this gate, or null once it no longer stands (the sentence unticked, the reason edited). */
   onDecision: (decision: GateDecisionInput | null) => void;
   onCancel: () => void;
+  /** A copy of a gate the strip shows: its checklist and sentence without the controls, pointing to the strip. */
+  readOnly?: boolean;
 };
 
 /**
  * One readiness gate a move raised: what it is about, its checklist, and the Owner's sign-off (every condition met)
  * or waiver (a condition unmet; needs a reason). Either needs the gate's acknowledgement sentence ticked.
  */
-export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }: CardProps) {
+export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel, readOnly = false }: CardProps) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [reason, setReason] = useState("");
   const [chosen, setChosen] = useState<"sign_off" | "waive" | null>(null);
   const hintId = useId();
+  const headingId = useId();
   // Outside the shell there is no Learn view to open, so no link.
   const openLearn = useContext(ShellContext)?.openLearn;
   const trimmed = reason.trim();
@@ -46,7 +49,9 @@ export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }:
 
   return (
     <article className="gate-card" aria-label={`Gate: ${visibleControls(g.title)}`}>
-      <h3 tabIndex={-1}>{visibleControls(g.title)}</h3>
+      <h3 id={headingId} tabIndex={-1}>
+        {visibleControls(g.title)}
+      </h3>
       <p className="gate-move">
         Moving "{visibleControls(cardTitle)}" to {stageLabel(to)}
       </p>
@@ -72,61 +77,70 @@ export function GateCard({ evaluation: g, cardTitle, to, onDecision, onCancel }:
       <p>{visibleControls(g.learn)}</p>
       {openLearn && (
         <p>
-          <button type="button" className="link" onClick={() => openLearn(GATE_TOPIC[g.id])}>
+          <button type="button" className="link" aria-describedby={headingId} onClick={() => openLearn(GATE_TOPIC[g.id])}>
             Learn more
           </button>
         </p>
       )}
-      <label className="gate-ack">
-        <input
-          type="checkbox"
-          checked={acknowledged}
-          onChange={(e) => {
-            setAcknowledged(e.target.checked);
-            reset();
-          }}
-        />
-        {g.acknowledgement}
-      </label>
-      {!g.met && (
-        <div className="gate-reason">
-          <label>
-            Why are you proceeding anyway?
-            <textarea
-              value={reason}
-              maxLength={REASON_MAX}
-              rows={2}
-              aria-describedby={hintId}
+      {readOnly ? (
+        <>
+          <p className="gate-ack">{g.acknowledgement}</p>
+          <p className="note">Decide in the strip above</p>
+        </>
+      ) : (
+        <>
+          <label className="gate-ack">
+            <input
+              type="checkbox"
+              checked={acknowledged}
               onChange={(e) => {
-                setReason(e.target.value);
+                setAcknowledged(e.target.checked);
                 reset();
               }}
             />
+            {g.acknowledgement}
           </label>
-          <span id={hintId} className="hint">
-            At least {REASON_MIN} characters
-          </span>
-        </div>
+          {!g.met && (
+            <div className="gate-reason">
+              <label>
+                Why are you proceeding anyway?
+                <textarea
+                  value={reason}
+                  maxLength={REASON_MAX}
+                  rows={2}
+                  aria-describedby={hintId}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    reset();
+                  }}
+                />
+              </label>
+              <span id={hintId} className="hint">
+                At least {REASON_MIN} characters
+              </span>
+            </div>
+          )}
+          <div className="decision-actions">
+            {g.met ? (
+              <button type="button" aria-pressed={chosen === "sign_off"} disabled={!acknowledged} onClick={() => decide("sign_off")}>
+                Sign off
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-pressed={chosen === "waive"}
+                disabled={!acknowledged || trimmed.length < REASON_MIN}
+                onClick={() => decide("waive")}
+              >
+                Waive
+              </button>
+            )}
+            <button type="button" onClick={onCancel}>
+              Cancel
+            </button>
+          </div>
+        </>
       )}
-      <div className="decision-actions">
-        {g.met ? (
-          <button type="button" aria-pressed={chosen === "sign_off"} disabled={!acknowledged} onClick={() => decide("sign_off")}>
-            Sign off
-          </button>
-        ) : (
-          <button
-            type="button"
-            aria-pressed={chosen === "waive"}
-            disabled={!acknowledged || trimmed.length < REASON_MIN}
-            onClick={() => decide("waive")}
-          >
-            Waive
-          </button>
-        )}
-        <button type="button" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
       {chosen !== null && <p className="note">{chosen === "sign_off" ? "Signed off" : "Waived"}: the move below records it.</p>}
     </article>
   );
@@ -136,12 +150,14 @@ type Props = {
   gate: GatePrompt;
   onResolve: (decisions: GateDecisionInput[]) => Promise<boolean>;
   onCancel: () => void;
+  /** Shows the gates without controls or the move, pointing to the strip: for a copy of the strip's prompt. */
+  readOnly?: boolean;
   /** Moves focus to the first waiting gate when the prompt appears or its checklist changes; off for a second copy. */
   autoFocus?: boolean;
 };
 
 /** A gated move in the Needs-you strip: one card per gate waiting on the Owner, the passed ones in a line each, and the move. */
-export function GateCards({ gate, onResolve, onCancel, autoFocus = true }: Props) {
+export function GateCards({ gate, onResolve, onCancel, readOnly = false, autoFocus = !readOnly }: Props) {
   // Keyed by refusal, gate, outcome and which conditions hold: a gate whose checklist changed, or any gate after the
   // server refused the decisions, starts over with no decision, acknowledgement or reason.
   const [decisions, setDecisions] = useState<Record<string, GateDecisionInput>>({});
@@ -176,6 +192,7 @@ export function GateCards({ gate, onResolve, onCancel, autoFocus = true }: Props
           cardTitle={gate.cardTitle}
           to={gate.to}
           onCancel={onCancel}
+          readOnly={readOnly}
           onDecision={(d) =>
             setDecisions((prev) => {
               const { [keyOf(g)]: _dropped, ...rest } = prev;
@@ -184,22 +201,29 @@ export function GateCards({ gate, onResolve, onCancel, autoFocus = true }: Props
           }
         />
       ))}
-      {/* Always mounted, so a note that appears later is announced. */}
-      <p className="note" role="status">
-        {gate.note ?? ""}
-      </p>
-      <div className="gate-footer">
-        <button
-          type="button"
-          disabled={!ready || busy || gate.refreshing}
-          onClick={() => {
-            setBusy(true);
-            void onResolve(chosen.filter((d): d is GateDecisionInput => d !== undefined)).finally(() => setBusy(false));
-          }}
-        >
-          Move "{title}" to {stageLabel(gate.to)}
-        </button>
-      </div>
+      {readOnly ? (
+        // The strip's copy announces the note; this one only shows it.
+        gate.note !== null && <p className="note">{gate.note}</p>
+      ) : (
+        <>
+          {/* Always mounted, so a note that appears later is announced. */}
+          <p className="note" role="status">
+            {gate.note ?? ""}
+          </p>
+          <div className="gate-footer">
+            <button
+              type="button"
+              disabled={!ready || busy || gate.refreshing}
+              onClick={() => {
+                setBusy(true);
+                void onResolve(chosen.filter((d): d is GateDecisionInput => d !== undefined)).finally(() => setBusy(false));
+              }}
+            >
+              Move "{title}" to {stageLabel(gate.to)}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

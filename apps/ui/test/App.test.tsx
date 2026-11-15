@@ -316,6 +316,24 @@ describe("App needs-you strip", () => {
     expect(m.listAllPendingActions).toHaveBeenCalledTimes(1);
   });
 
+  it("sends one decision when the same action is decided twice at once", async () => {
+    let resolve!: () => void;
+    m.decideAction.mockReturnValue(new Promise<never>((r) => (resolve = r as () => void)));
+    render(<App />);
+    await waitFor(() => expect(testDock.shell).not.toBeNull());
+    const { onDecide } = testDock.shell!.model;
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    act(() => {
+      first = onDecide("a1", "allow");
+      second = onDecide("a1", "allow");
+    });
+    expect(await second).toBe(false);
+    expect(m.decideAction).toHaveBeenCalledTimes(1);
+    resolve();
+    await act(async () => void (await first));
+  });
+
   it("refreshes the strip after a decision", async () => {
     m.listAllPendingActions.mockResolvedValueOnce([pendingAction("a1", "A", "run ls")]).mockResolvedValue([]);
     m.decideAction.mockResolvedValue({} as never);
@@ -681,6 +699,27 @@ describe("App readiness gates", () => {
       expect.objectContaining({ gateId: "ready_to_ship", decision: "sign_off" }),
     ]);
     await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+  });
+
+  it("sends one move when the gated move is resolved twice at once", async () => {
+    m.getCardGates.mockResolvedValue([shipMet()]);
+    let resolve!: (v: unknown) => void;
+    m.moveCard.mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    await openA();
+    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await screen.findByRole("article", { name: "Gate: Ready to ship" });
+    const { onResolveGate } = testDock.shell!.model;
+    const decisions = [{ gateId: "ready_to_ship" as const, decision: "sign_off" as const, acknowledgement: "x" }];
+    let first!: Promise<boolean>;
+    let second!: Promise<boolean>;
+    act(() => {
+      first = onResolveGate(decisions);
+      second = onResolveGate(decisions);
+    });
+    expect(await second).toBe(false);
+    expect(m.moveCard).toHaveBeenCalledTimes(1);
+    resolve({ ...login, stage: "ship" });
+    expect(await act(async () => await first)).toBe(true);
   });
 
   it("refreshes the checklist and keeps the card when a condition stopped holding", async () => {

@@ -184,7 +184,9 @@ describe("GateCards", () => {
         <GateCards gate={gate} onResolve={vi.fn()} onCancel={vi.fn()} />
       </ShellContext.Provider>,
     );
-    await userEvent.click(within(card("Ready to ship")).getByRole("button", { name: "Learn more" }));
+    const learn = within(card("Ready to ship")).getByRole("button", { name: "Learn more" });
+    expect(document.getElementById(learn.getAttribute("aria-describedby")!)!.textContent).toBe("Ready to ship");
+    await userEvent.click(learn);
     expect(nav.openLearn).toHaveBeenCalledWith("readiness_gates");
   });
 
@@ -193,6 +195,23 @@ describe("GateCards", () => {
       cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false,
     };
     render(<GateCards gate={gate} onResolve={vi.fn()} onCancel={vi.fn()} autoFocus={false} />);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("shows a read-only copy with its checklist and sentence, pointing to the strip", () => {
+    const gate: GatePrompt = {
+      cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [shipBlocked()], note: null, revision: 0, refreshing: false,
+    };
+    render(<GateCards gate={gate} onResolve={vi.fn()} onCancel={vi.fn()} readOnly />);
+    const c = card("Ready to ship");
+    expect(within(c).getByRole("list", { name: "Checklist" })).toBeTruthy();
+    expect(c.textContent).toContain(ACK);
+    expect(within(c).queryByRole("checkbox")).toBeNull();
+    expect(within(c).queryByRole("textbox")).toBeNull();
+    expect(within(c).queryByRole("button", { name: "Waive" })).toBeNull();
+    expect(within(c).queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(screen.queryByRole("button", { name: 'Move "Login" to Ship' })).toBeNull();
+    expect(screen.getByText("Decide in the strip above")).toBeTruthy();
     expect(document.activeElement).toBe(document.body);
   });
 });

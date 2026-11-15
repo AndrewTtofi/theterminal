@@ -70,6 +70,11 @@ describe("DecisionContext", () => {
     expect(container.querySelector("pre.proposed > span")!.textContent).toBe("+red\\u202eevil");
   });
 
+  it("splits Windows line endings without showing the carriage return", () => {
+    const { container } = renderContext({ action: action({ input: { file_path: "a.txt", content: "one\r\ntwo\r\n" } }) });
+    expect([...container.querySelectorAll("pre.proposed > span")].map((l) => l.textContent)).toEqual(["+one", "+two"]);
+  });
+
   it("shows nothing proposed for an action without old or new text", () => {
     const { container } = renderContext({ action: action({ kind: "file_write", input: { path: "notes.txt" } }) });
     expect(container.querySelector("pre.proposed")).toBeNull();

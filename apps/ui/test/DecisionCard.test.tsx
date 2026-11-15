@@ -182,7 +182,9 @@ describe("DecisionCard", () => {
         <DecisionCard action={action} onDecide={vi.fn()} />
       </ShellContext.Provider>,
     );
-    await userEvent.click(screen.getByRole("button", { name: "Learn more" }));
+    const learn = screen.getByRole("button", { name: "Learn more" });
+    expect(document.getElementById(learn.getAttribute("aria-describedby")!)!.textContent).toBe('Agent wants to run the command "npm test"');
+    await userEvent.click(learn);
     expect(nav.openLearn).toHaveBeenCalledWith("action_kinds");
   });
 
@@ -195,5 +197,13 @@ describe("DecisionCard", () => {
     expect(document.getElementById(more.getAttribute("aria-describedby")!)!.textContent).toBe('Agent wants to run the command "npm test"');
     await userEvent.click(more);
     expect(onMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a read-only copy that points to the strip instead of deciding", () => {
+    render(<DecisionCard action={action} onDecide={vi.fn()} readOnly />);
+    expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByText("Decide in the strip above")).toBeTruthy();
+    expect(screen.getByText("Details")).toBeTruthy();
   });
 });
