@@ -10,7 +10,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && vitest run",
-    "dev": "tsc -p tsconfig.json && electron ."
+    "dev": "tsc -p tsconfig.json && electron .",
+    "deploy:core": "node scripts/stage.mjs --clean && pnpm --dir ../.. --filter @theterminal/core deploy --prod --node-linker hoisted --frozen-lockfile apps/desktop/stage/core",
+    "stage": "node scripts/stage.mjs",
+    "dist": "pnpm run deploy:core && pnpm run stage && electron-builder --config electron-builder.mjs --publish never"
   },
   "devDependencies": {
     "@theterminal/core": "workspace:*",
