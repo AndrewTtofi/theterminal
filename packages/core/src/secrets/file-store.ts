@@ -10,7 +10,7 @@ import {
   rmSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertStorableSecret, SecretStoreUnavailableError } from "./store.js";
 import type { SecretStore } from "./store.js";
 
@@ -47,7 +47,10 @@ function canonical(p: string): string {
 export function assertKeyOutsideDataDir(keyFile: string, dataDir: string, allowKeyInDataDir = false): void {
   if (allowKeyInDataDir) return;
   const rel = relative(canonical(dataDir), canonical(keyFile));
-  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) throw new KeyInsideDataDirError();
+  // Outside means the relative path climbs out ("..", or "../…"), or is on another drive. A name that merely starts
+  // with two dots ("..x", "...") is still inside.
+  const outside = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  if (!outside) throw new KeyInsideDataDirError();
 }
 
 const KEY_BYTES = 32;

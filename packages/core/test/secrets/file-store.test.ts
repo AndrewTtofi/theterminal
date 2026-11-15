@@ -299,3 +299,14 @@ describe("assertKeyOutsideDataDir", () => {
     },
   );
 });
+
+describe("assertKeyOutsideDataDir: names that start with two dots", () => {
+  it("treats a folder named ..x or ... inside the data folder as inside", () => {
+    const data = mkdtempSync(join(tmpdir(), "fs-dots-"));
+    for (const name of ["..x", "...", "..secret"]) {
+      mkdirSync(join(data, name), { recursive: true });
+      expect(() => assertKeyOutsideDataDir(join(data, name, "secret.key"), data)).toThrow(KeyInsideDataDirError);
+    }
+    expect(() => assertKeyOutsideDataDir(join(data, "..", "elsewhere.key"), data)).not.toThrow();
+  });
+});
