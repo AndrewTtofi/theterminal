@@ -258,3 +258,22 @@ A **Local model** connection points an agent at a model server on this computer,
 - **The tester** asks the server for its list of models (with the key, if there is one) and reports what it found. It does not run the model.
 - **`LOCAL_MODEL_API_KEY`.** When a key is set, the Codex agent gets it as this one environment variable, and no other variable can carry it. The key is not in the agent's commands or prompt, is redacted from everything the agent reports, and is never written to the ledger. A run on a local model records that the model was used, never the key.
 - The detected engines also appear in the Capacity view, with the models each one serves.
+
+## On a self-hosted server
+
+A server has no keychain, so [the server image](self-hosting.md) (or any start with `--secret-store file`) keeps secrets in its own encrypted file instead.
+
+- **The file store.** Secrets live in `secrets.enc.json` in the data folder, each one encrypted with AES-256-GCM and tied to the connection field it belongs to, so an entry cannot be moved onto another field. A value is never in the ledger, the API, a log or any other file, as everywhere else.
+- **Where the key lives.** The 32-byte key that opens the file is a separate file, `secret.key`, which must be **outside the data folder**: in the image it is on its own volume, `/key`. The server refuses to start with the key inside the data folder unless you pass `--allow-key-in-data-dir`, which defeats the point. A key file that is unreadable or not the right size stops the start. See [Self-hosting](self-hosting.md#what-the-two-volumes-hold) for backups.
+- **What the screens say.** On a computer with a keychain, a stored secret reads `Stored in your keychain`. On a server the server reports which store it uses, and the editor reads `Stored in this server's encrypted secret store` instead. The status bar's `Keychain unavailable` does not apply there.
+- **API keys only.** A server has no personal sign-in, so connections to provider subscriptions are not usable there. Runs use API keys, from a connection or from the provider's environment variable on the server.
+
+## What collaborators see
+
+When you [invite people](collaboration.md), only the Owner sees and changes connections.
+
+- **Everyone else sees connections by name, kind and whether each works.** Never the settings, secret field names, server addresses, commands, folders or regions, and never a key. The Owner's own view of a connection is the only place those appear.
+- **The ledger shows collaborators the sentence, not the setup.** Entries about connections show a heading, without the configuration or the names of the secret fields.
+- **Maintainers can give a run access to connections by name.** They cannot add, edit, test or remove one.
+- **Collaborators' runs use API keys only.** Their agents never run on a personal sign-in, and are given an empty home folder of their own for the agent program's settings, so the Owner's saved logins are out of reach. If no API key is available, the start is refused and says so.
+- **Redaction still applies.** A stored key is removed from everything an agent reports, whoever started the run.

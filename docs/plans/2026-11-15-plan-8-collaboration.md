@@ -697,6 +697,12 @@ ENTRYPOINT ["node", "/app/core/dist/cli.js", "start", "--data-dir", "/data", "--
 - [ ] **Step 1:** Write the pages. Run `pnpm test`. Expected: PASS.
 - [ ] **Step 2: Commit:** `docs: collaboration (roles, invites, passkeys, gates) and self-hosting (image, certificates, bootstrap)`
 
+**Departures the docs follow (code over plan):**
+- A viewer does not see the list of changed files: `GET /api/runs/:id/changes` is `reviewer`, so the Changes view shows a viewer only the run picker and a note (Task 9).
+- With `--remote-domain` in Docker the example publishes `-p 443:443 -p 80:80` and passes `--remote-port 443` with a matching `--health-cmd`. With `-p 443:4318` the join link and the port-80 redirect would name `:4318`, because both are built from the listener's own port.
+- `--remote` fails the start on any failure to bring remote up (Task 6c fix), not only on a bad flag.
+- The Owner is shown a bootstrap link only in the log and `/data/bootstrap-invite`; there is no `?token=` anywhere in container logs.
+
 ---
 
 ### Task 12: End-to-end: invite, join over TLS, roles, presence, remote on and off
