@@ -12,7 +12,7 @@ export function NeedsYouSideBar() {
       <ul className="needs-you-list">
         {model.pending.map((a) => (
           <li key={a.id}>
-            <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} />
+            <DecisionCard action={a} projectName={a.projectName} {...(a.machineName !== undefined && { machineName: a.machineName })} onDecide={model.onDecide} />
           </li>
         ))}
       </ul>

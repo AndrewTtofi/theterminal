@@ -236,7 +236,7 @@ export function Workbench({ model }: Props) {
                 )}
                 <IntakeNotices notices={notices} />
                 {model.pending.map((a) => (
-                  <DecisionCard key={a.id} action={a} projectName={a.projectName} onDecide={model.onDecide} onMore={moreContext} />
+                  <DecisionCard key={a.id} action={a} projectName={a.projectName} {...(a.machineName !== undefined && { machineName: a.machineName })} onDecide={model.onDecide} onMore={moreContext} />
                 ))}
               </section>
             )}

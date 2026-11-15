@@ -13,6 +13,8 @@ type Props = {
   onMore?: () => void;
   /** A copy of a card the strip shows: no Allow or Deny here, only a pointer to the strip, so it is decided once. */
   readOnly?: boolean;
+  /** The linked machine the agent runs on (this computer's name for it); the decision is sent there. */
+  machineName?: string;
 };
 
 /** For an input the core recorded as truncated, how many characters the card cannot show; else null. */
@@ -36,7 +38,7 @@ function shellCommand(action: AgentAction): string | null {
   return typeof command === "string" ? visibleControls(command) : null;
 }
 
-export function DecisionCard({ action, projectName, onDecide, onMore, readOnly = false }: Props) {
+export function DecisionCard({ action, projectName, onDecide, onMore, readOnly = false, machineName }: Props) {
   // Outside the shell (a card on its own) there is no Learn view to open, so no link.
   const openLearn = useContext(ShellContext)?.openLearn;
   const headingId = useId();
@@ -52,12 +54,18 @@ export function DecisionCard({ action, projectName, onDecide, onMore, readOnly =
     try {
       await (why ? onDecide(action.id, decision, why) : onDecide(action.id, decision));
     } catch (e) {
-      setNote(e instanceof ApiError && e.status === 409 ? "Already decided" : "Something went wrong");
+      // Fixed words only: a linked machine's refusal is never shown as it sent it.
+      setNote(
+        e instanceof ApiError && e.code === "machine_unreachable" && machine !== null
+          ? `Could not reach ${machine}. Your decision was not sent.`
+          : e instanceof ApiError && e.status === 409 ? "Already decided" : "Something went wrong",
+      );
     } finally {
       setBusy(false);
     }
   };
 
+  const machine = machineName === undefined ? null : visibleControls(machineName);
   const hidden = hiddenChars(action.input);
   const command = shellCommand(action);
 
@@ -65,6 +73,7 @@ export function DecisionCard({ action, projectName, onDecide, onMore, readOnly =
     <article className="decision-card" aria-label={`Decision: ${visibleControls(action.summary)}`}>
       {projectName !== undefined && <p className="project-name">{visibleControls(projectName)}</p>}
       <h3 id={headingId}>Agent wants to {actionPhrase(action)}</h3>
+      {machine !== null && <p className="machine-note">This agent runs on {machine}. Your decision is sent there.</p>}
       <h4>What this means</h4>
       <p className="means">{ACTION_KIND_MEANS[action.kind] ?? ACTION_KIND_MEANS.other}</p>
       {(openLearn || onMore) && (

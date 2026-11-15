@@ -37,6 +37,21 @@ describe("error detail", () => {
 
   it("words a run on a local model with an agent other than Codex", () => {
     expect(errorMessage(new ApiError(400, "local_model_unsupported"), "run")).toBe("Only Codex can run on a local model in The Terminal yet.");
+  });
+
+  it("words remote runs' refusals as fixed text: never the machine's message, never an unknown code", () => {
+    expect(errorMessage(new ApiError(502, "machine_unreachable"), "run")).toBe("Could not reach that machine. Nothing was started.");
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU box" }), "run")).toBe(
+      '"GPU box" refused: that connection is disabled there.',
+    );
+    expect(errorMessage(new ApiError(409, "remote_refused", { code: "upload_refused", machine: "GPU box" }), "run")).toBe(
+      '"GPU box" refused: it did not accept the project\'s files.',
+    );
+    expect(errorMessage(new ApiError(502, "remote_refused", { code: "sk_live_TESTKEY", machine: "GPU box", message: "<b>x</b>" }), "run")).toBe(
+      '"GPU box" refused the request.',
+    );
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU\u202Ebox" }), "run")).not.toContain("\u202E");
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "conflict" }), "run")).toBe("A linked machine refused: it already has a project or run with that id.");
     expect(LOCAL_MODEL_NOTE).toBe("Only Codex can run on a local model in The Terminal yet.");
   });
 

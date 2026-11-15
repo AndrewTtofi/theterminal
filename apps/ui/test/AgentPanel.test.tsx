@@ -226,4 +226,14 @@ describe("AgentPanel", () => {
     render(<AgentPanel adapters={["claude"]} runs={[]} selectedRunId={null} offline onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />);
     expect(screen.getByText("You seem to be offline. Cloud models will not answer; a local model will.")).toBeTruthy();
   });
+
+  it("a run on a linked machine says which, after its adapter", () => {
+    const remote = { ...run, id: "run2", machineId: "m1", status: "running" as const };
+    render(
+      <AgentPanel adapters={["fake"]} runs={[run, remote]} selectedRunId={null} machineName={(id) => (id === "m1" ? "GPU box" : undefined)}
+        onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: /^fake on GPU box: do a thing/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^fake: do a thing/ })).toBeTruthy();
+  });
 });

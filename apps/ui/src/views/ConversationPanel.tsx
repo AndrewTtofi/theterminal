@@ -168,6 +168,8 @@ export function ConversationPanel() {
             submitLabel="Ask"
             startedMessage={(name) => `Asked ${name}.`}
             onStart={model.onStartRun}
+            machines={model.machines?.overview?.machines ?? []}
+            {...(model.machines?.capacity !== undefined && { machineCapacity: model.machines?.capacity })}
           />
         ) : (
           <p className="empty">Loading agents…</p>

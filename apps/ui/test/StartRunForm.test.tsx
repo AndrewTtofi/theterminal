@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { Card, Connection } from "@theterminal/shared";
+import type { Card, Connection, MachineCapacity } from "@theterminal/shared";
 import { StartRunForm } from "../src/components/StartRunForm";
+import { LOCAL_MODEL_NOTE } from "../src/api";
+import { machine } from "./machines-fixtures";
 
 const cards: Card[] = [
   { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" },
@@ -142,6 +144,104 @@ describe("StartRunForm", () => {
       unmount();
       render(<StartRunForm adapters={["claude"]} cards={[]} connections={[]} onStart={vi.fn()} />);
       expect(screen.queryByText(NOTE)).toBeNull();
+    });
+  });
+
+  describe("Run on", () => {
+    const gpu = machine({ id: "m1", name: "GPU box", online: true });
+    const away = machine({ id: "m2", name: "Old laptop", online: false });
+    const caps = (over: Partial<MachineCapacity> = {}): MachineCapacity => ({
+      machineId: "m1", name: "GPU box", online: true, checkedAt: "2026-11-15T10:00:00.000Z", lastSeenAt: null, problem: null,
+      hardware: null, localModels: [], sources: [], adapters: ["fake", "codex"],
+      connections: [
+        { id: "r1", kind: "cloud", provider: "aws", name: "Remote AWS" },
+        { id: "lm", kind: "llm", provider: "local_model", name: "Big model" },
+      ],
+      ...over,
+    });
+
+    it("lists This computer and every paired machine; an offline one is disabled and says so; none paired, no picker", () => {
+      const { rerender } = render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[gpu, away]} onStart={vi.fn()} />);
+      const picker = screen.getByLabelText("Run on") as HTMLSelectElement;
+      expect([...picker.options].map((o) => [o.textContent, o.disabled])).toEqual([
+        ["This computer", false],
+        ["GPU box", false],
+        ["Old laptop (offline)", true],
+      ]);
+      expect(picker.value).toBe("");
+      rerender(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[]} onStart={vi.fn()} />);
+      expect(screen.queryByLabelText("Run on")).toBeNull();
+    });
+
+    it("a machine's connections replace this computer's, under a legend naming it, and Start sends the machine", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      const machineCapacity = vi.fn().mockResolvedValue(caps());
+      render(
+        <StartRunForm
+          adapters={["fake", "codex"]} cards={[]} connections={[aws]} machines={[gpu, away]} machineCapacity={machineCapacity} onStart={onStart}
+        />,
+      );
+      expect(screen.getByRole("group", { name: "Give this run access to" })).toBeTruthy();
+      await userEvent.selectOptions(screen.getByLabelText("Run on"), "m1");
+      expect(machineCapacity).toHaveBeenCalledWith("m1");
+      expect(await screen.findByRole("group", { name: "Give this run access to (on GPU box)" })).toBeTruthy();
+      expect(screen.queryByLabelText("AWS prod (cloud account)")).toBeNull();
+      // The local-model rule applies to the machine's local models too: only Codex runs on one.
+      const local = screen.getByLabelText("Big model") as HTMLInputElement;
+      expect(local.disabled).toBe(true);
+      expect(screen.getByText(LOCAL_MODEL_NOTE)).toBeTruthy();
+      await userEvent.click(screen.getByLabelText("Remote AWS (cloud account)"));
+      await userEvent.type(screen.getByLabelText("Prompt"), "Train it");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("fake", "Train it", ["r1"], undefined, "m1");
+    });
+
+    it("back on This computer, its own connections return and nothing names a machine", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <StartRunForm
+          adapters={["fake"]} cards={[]} connections={[aws]} machines={[gpu]} machineCapacity={vi.fn().mockResolvedValue(caps())} onStart={onStart}
+        />,
+      );
+      await userEvent.selectOptions(screen.getByLabelText("Run on"), "m1");
+      await screen.findByLabelText("Remote AWS (cloud account)");
+      await userEvent.click(screen.getByLabelText("Remote AWS (cloud account)"));
+      await userEvent.selectOptions(screen.getByLabelText("Run on"), "");
+      expect(screen.getByLabelText("AWS prod (cloud account)")).toBeTruthy();
+      await userEvent.type(screen.getByLabelText("Prompt"), "Here");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("fake", "Here", []);
+    });
+
+    it("a machine's own words render inert, with invisible characters shown", async () => {
+      const sneaky = machine({ id: "m3", name: "GPU\u202Ebox<b>", online: true });
+      render(
+        <StartRunForm
+          adapters={["fake"]} cards={[]} connections={[]} machines={[sneaky]}
+          machineCapacity={vi.fn().mockResolvedValue(caps({ connections: [{ id: "r9", kind: "mcp", provider: "mcp_http", name: "Docs\u200B<i>x</i>" }] }))}
+          onStart={vi.fn()}
+        />,
+      );
+      const option = [...(screen.getByLabelText("Run on") as HTMLSelectElement).options][1]!;
+      expect(option.textContent).not.toContain("\u202E");
+      expect(option.textContent).toContain("<b>");
+      await userEvent.selectOptions(screen.getByLabelText("Run on"), "m3");
+      const label = await screen.findByText(/Docs/);
+      expect(label.textContent).not.toContain("\u200B");
+      expect(label.textContent).toContain("<i>x</i>");
+      expect(document.querySelector("b, i")).toBeNull();
+    });
+
+    it("a machine that cannot be asked says so, and the form still starts the run there", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <StartRunForm adapters={["fake"]} cards={[]} connections={[]} machines={[gpu]} machineCapacity={vi.fn().mockRejectedValue(new Error("x"))} onStart={onStart} />,
+      );
+      await userEvent.selectOptions(screen.getByLabelText("Run on"), "m1");
+      expect(await screen.findByText("Could not ask GPU box what it offers.")).toBeTruthy();
+      await userEvent.type(screen.getByLabelText("Prompt"), "Go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("fake", "Go", [], undefined, "m1");
     });
   });
 });

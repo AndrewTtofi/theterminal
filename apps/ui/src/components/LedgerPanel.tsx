@@ -30,9 +30,15 @@ export function canonicalPayload(payload: unknown): string {
 /** True for an override.* entry: painted red, with a text label, in every list of ledger entries. */
 export const isOverride = (e: LedgerEntry): boolean => e.type.startsWith("override.");
 
-/** The class of an entry's line: `attention` when it needs the Owner's eye, `override` for an override. */
+/** True for an entry a linked machine sent (`link.mirrored`): it ran there, and is marked so wherever entries are listed. */
+export const isMirrored = (e: LedgerEntry): boolean => e.type === "link.mirrored";
+
+/**
+ * The class of an entry's line: `attention` when it needs the Owner's eye, `override` for an override, `machine` for
+ * an entry from a linked machine.
+ */
 export function entryClass(e: LedgerEntry, attention: boolean): string | undefined {
-  const names = [attention && "attention", isOverride(e) && "override"].filter(Boolean);
+  const names = [attention && "attention", isOverride(e) && "override", isMirrored(e) && "machine"].filter(Boolean);
   return names.length > 0 ? names.join(" ") : undefined;
 }
 

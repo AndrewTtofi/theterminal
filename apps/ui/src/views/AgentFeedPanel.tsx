@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { innerEntry, narrate, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, Narration, NarrationContext } from "@theterminal/shared";
-import { ADAPTER_NAMES } from "../components/AgentPanel";
+import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
 import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
 import { clip, stripAnsiDeep } from "../components/text";
 import { namesRun, useShell } from "../shell/model";
@@ -51,7 +51,7 @@ export function FollowSelect() {
       <option value="">All runs</option>
       {model.runs.map((r) => (
         <option key={r.id} value={r.id}>
-          {`${ADAPTER_NAMES[r.adapter]} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)}`}
+          {`${ADAPTER_NAMES[r.adapter]}${onMachine(r, model.narration?.machineName)} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)}`}
         </option>
       ))}
     </select>

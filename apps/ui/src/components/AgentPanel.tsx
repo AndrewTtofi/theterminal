@@ -1,4 +1,7 @@
-import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
+import { visibleControls } from "@theterminal/shared";
+import type {
+  ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, Connection, MachineCapacity, MachinePresence, Provider,
+} from "@theterminal/shared";
 import { runCost } from "./cost";
 import { StartRunForm } from "./StartRunForm";
 
@@ -30,22 +33,39 @@ type Props = {
   /** True when the server inferred that the internet is unreachable; passed to the start form. */
   offline?: boolean;
   /** Resolve false (or reject) when starting failed, so the prompt is kept. `cardId` is passed only when a card is chosen. */
-  onStart: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string) => Promise<boolean | void> | void;
+  onStart: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string, machineId?: string) => Promise<boolean | void> | void;
   onSelectRun: (runId: string | null) => void;
   onStop: (runId: string) => void;
+  /** The paired machines, for the start form's `Run on`, and what one offers a run when it is chosen. */
+  machines?: MachinePresence[];
+  machineCapacity?: (machineId: string) => Promise<MachineCapacity>;
+  /** This computer's name for a linked machine, shown after the adapter of a run on it. */
+  machineName?: (machineId: string) => string | undefined;
 };
+
+/** ` on GPU box` for a run on a linked machine (`a linked machine` when its name is unknown); nothing otherwise. */
+export function onMachine(r: AgentRun, machineName?: (machineId: string) => string | undefined): string {
+  if (r.machineId === null) return "";
+  return ` on ${visibleControls(machineName?.(r.machineId) ?? "a linked machine")}`;
+}
 
 /** ` · $0.50 (estimate)`, with its basis; nothing for a run that reported no cost. */
 export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · ${runCost(r)}`);
 export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
-export function AgentPanel({ adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, offline, onStart, onSelectRun, onStop }: Props) {
+export function AgentPanel({
+  adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, offline, onStart, onSelectRun, onStop, machines,
+  machineCapacity, machineName,
+}: Props) {
   const selected = runs.find((r) => r.id === selectedRunId);
 
   return (
     <section className="agent-panel" aria-label="Agents">
       <h2>Agents</h2>
-      <StartRunForm adapters={adapters} providers={providers} cards={cards} connections={connections} offline={offline} onStart={onStart} />
+      <StartRunForm
+        adapters={adapters} providers={providers} cards={cards} connections={connections} offline={offline} onStart={onStart}
+        {...(machines !== undefined && { machines })} {...(machineCapacity !== undefined && { machineCapacity })}
+      />
       <ul className="runs">
         {runs.map((r) => (
           <li key={r.id}>
@@ -55,7 +75,8 @@ export function AgentPanel({ adapters, providers, connections = [], cards = [], 
               aria-pressed={r.id === selectedRunId}
               onClick={() => onSelectRun(r.id === selectedRunId ? null : r.id)}
             >
-              {r.adapter}: {r.prompt.slice(0, 40)} ({r.status}
+              {r.adapter}
+              {onMachine(r, machineName)}: {r.prompt.slice(0, 40)} ({r.status}
               {cost(r)})
             </button>
             {r.status === "running" && (

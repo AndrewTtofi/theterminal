@@ -72,7 +72,7 @@ export function NeedsYouPanel() {
               const k = local(a) ? known[a.runId] : undefined;
               return (
                 <li key={a.id}>
-                  <DecisionCard action={a} projectName={a.projectName} onDecide={model.onDecide} readOnly={stripShown} />
+                  <DecisionCard action={a} projectName={a.projectName} {...(a.machineName !== undefined && { machineName: a.machineName })} onDecide={model.onDecide} readOnly={stripShown} />
                   <DecisionContext
                     action={a}
                     entries={local(a) ? model.projectEntries : null}

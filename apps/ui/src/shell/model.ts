@@ -8,6 +8,7 @@ import type {
   CapacityReport,
   CardStory,
   DecisionId,
+  MachineCapacity,
   DirListing,
   FileContent,
   FileDiff,
@@ -104,8 +105,11 @@ export type WorkbenchModel = {
   runs: AgentRun[];
   selectedRunId: string | null;
   runActions: AgentAction[];
-  /** Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card. */
-  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null) => Promise<boolean>;
+  /**
+   * Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card; `machineId` sends the
+   * run to that linked machine.
+   */
+  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null, machineId?: string) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 
@@ -138,7 +142,10 @@ export type WorkbenchModel = {
   /** Which narration topics the ledger shows; every topic by default. */
   ledgerTopics: NarrationTopic[];
   onLedgerTopicsChange: (topics: NarrationTopic[]) => void;
-  /** What narration may know beyond an entry: card titles from the board, adapter names from the runs. */
+  /**
+   * What narration may know beyond an entry: card titles from the board, adapter names from the runs, the names of
+   * linked machines (what the run lists, the feed and the decision cards show for a run on one, too).
+   */
   narration: NarrationContext;
 
   /** Resolves true when the server accepted the change. */
@@ -159,7 +166,13 @@ export type WorkbenchModel = {
    * The Machines view's data: this computer, the linked machines and those found on the network, or the error code of
    * the last failed load. The view and the Link a machine tab ask for it; any machine.* entry reloads it once asked.
    */
-  machines: { overview: LinkOverview | null; error: string | null; refresh: () => void };
+  machines: {
+    overview: LinkOverview | null;
+    error: string | null;
+    refresh: () => void;
+    /** What one linked machine offers a run (its agents and connections), from the server's 30 s cache. */
+    capacity?: (machineId: string) => Promise<MachineCapacity>;
+  };
 
   /**
    * The selected project's guided intake: null when it has none, undefined while loading. Reloaded on any

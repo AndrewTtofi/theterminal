@@ -352,4 +352,19 @@ describe("LedgerPanel paging", () => {
     expect(items()).toHaveLength(150);
     expect(screen.queryByRole("button", { name: "Show older entries" })).toBeNull();
   });
+
+  it("a linked machine's entry has the machine class and says which machine it ran on", () => {
+    const origin = {
+      seq: 3, id: "w3", ts: "2026-01-01T10:00:00Z", projectId: "p1", actor: { kind: "agent", id: "run1" }, type: "agent.message",
+      payload: { runId: "run1", text: "hello" }, prevHash: "0".repeat(64), hash: "1".repeat(64),
+    };
+    const mirrored = entry(9, "link.mirrored", { machineId: "ab".repeat(16), origin, signature: "c".repeat(128) }, { kind: "system", id: "link" });
+    const local = entry(10, "agent.message", { runId: "run2", text: "here" }, { kind: "agent", id: "run2" });
+    render(<LedgerPanel entries={[mirrored, local]} ctx={{ machineName: (id) => (id === "ab".repeat(16) ? "GPU box" : undefined) }} />);
+    const items = screen.getAllByRole("listitem");
+    const remote = items.find((li) => li.textContent?.includes("On GPU box:"))!;
+    expect(remote.className.split(" ")).toContain("machine");
+    const here = items.find((li) => !li.textContent?.includes("On GPU box:"))!;
+    expect(here.className ?? "").not.toContain("machine");
+  });
 });
