@@ -48,8 +48,13 @@ describe("builderConfig", () => {
     expect(() => builderConfig({ THETERMINAL_SIGN: "1" })).toThrow("Signing is configured in Plan 9B");
   });
 
-  it("does not bundle Claude Code by default", () => {
+  it.each(["CSC_LINK", "CSC_NAME", "WIN_CSC_LINK", "CSC_KEY_PASSWORD", "WIN_CSC_KEY_PASSWORD"])("refuses to build while %s is set", (name) => {
+    expect(() => builderConfig({ [name]: "x" })).toThrow("Signing is configured in Plan 9B");
+  });
+
+  it("does not bundle Claude Code by default, and the switch has a module of its own", async () => {
     expect(BUNDLE_CLAUDE).toBe(false);
+    expect((await import("../bundle-claude.mjs")).BUNDLE_CLAUDE).toBe(false);
   });
 
   it("checks the packed app's Resources after packing", async () => {
