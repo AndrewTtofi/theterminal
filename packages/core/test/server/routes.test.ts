@@ -204,6 +204,20 @@ describe("routes", () => {
       for (const stage of ["plan", "design", "build"]) expect((await mkCardRes(p.id, stage)).statusCode).toBe(201);
     });
 
+    it("refuses a secret in a project name or a card title with secret_in_text", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Club sk-ant-TESTKEY-0000000000" } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "secret_in_text" });
+      const p = await mkProject();
+      const head = ledger.headSeq();
+      const card = await app.inject({
+        method: "POST", url: `/api/projects/${p.id}/cards`, payload: { title: "Use sk-ant-TESTKEY-0000000000", stage: "build" },
+      });
+      expect(card.statusCode).toBe(400);
+      expect(card.json()).toEqual({ error: "secret_in_text" });
+      expect(ledger.headSeq()).toBe(head);
+    });
+
     it("an approved plan still creates its Ship and Operate cards: the approval is a recorded human decision", async () => {
       const c = await plannedCard();
       const projectId = (ledger.list().find((e) => e.type === "card.created" && (e.payload as { cardId: string }).cardId === c.id)!).projectId!;

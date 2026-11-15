@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GATES, type LedgerEntry } from "@theterminal/shared";
 import { NotFoundError } from "../../src/board/board-service.js";
 import { cardStory, ledgerExportLines, narrationContext } from "../../src/story/story.js";
@@ -179,6 +179,31 @@ function tamper(seq: number, payload: string): void {
   w.db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
   w.db.prepare("UPDATE ledger SET payload = ? WHERE seq = ?").run(payload, seq);
 }
+
+describe("the integrity check is memoised", () => {
+  /** How many times the whole chain was read since the spy was installed. */
+  function chainWalks(): () => number {
+    const prepare = vi.spyOn(w.db, "prepare");
+    return () => prepare.mock.calls.filter(([sql]) => /SELECT \* FROM ledger ORDER BY seq ASC/.test(String(sql))).length;
+  }
+
+  it("a second story request does not re-walk the chain, but one after an append does", () => {
+    const walks = chainWalks();
+    expect(cardStory(w.db, w.ledger, cardId).integrity).toEqual({ ok: true });
+    expect(walks()).toBe(1);
+    expect(cardStory(w.db, w.ledger, cardId).integrity).toEqual({ ok: true });
+    expect(walks()).toBe(1);
+    w.board.moveCard(human, cardId, "design");
+    expect(cardStory(w.db, w.ledger, cardId).integrity).toEqual({ ok: true });
+    expect(walks()).toBe(2);
+  });
+
+  it("tampering after a check is still caught", () => {
+    expect(cardStory(w.db, w.ledger, cardId).integrity).toEqual({ ok: true });
+    tamper(2, "{not json");
+    expect(cardStory(w.db, w.ledger, cardId).integrity).toEqual({ ok: false, brokenAtSeq: 2 });
+  });
+});
 
 describe("tampering is never hidden", () => {
   it("the story flags a broken chain and lists the card's unreadable entries, keeping those after it", () => {

@@ -58,6 +58,8 @@ export class Ledger {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly listeners = new Set<(e: LedgerEntry) => void>();
+  /** The last verify() result and the database state it was computed for. */
+  private verified: { key: string; result: VerifyResult } | null = null;
 
   constructor(
     private readonly db: Db,
@@ -83,6 +85,7 @@ export class Ledger {
    */
   appendInTransaction(e: NewLedgerEntry): LedgerEntry {
     if (this.readOnly) throw new LedgerReadOnlyError();
+    this.verified = null;
     const schema = eventPayloadSchemas[e.type];
     if (!schema) throw new Error(`unknown ledger event type: ${String(e.type)}`);
     const payload: unknown = schema.parse(e.payload);
@@ -208,7 +211,26 @@ export class Ledger {
     return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS head FROM ledger").get() as { head: number }).head;
   }
 
+  /**
+   * Walk the whole hash chain. The result is memoised by headSeq, so repeated reads (every story request) do not
+   * re-hash the ledger; an append invalidates it. The key also carries this connection's change count and SQLite's
+   * data_version, so a row rewritten out of band (here or by another connection) is still caught on the next call.
+   */
   verify(): VerifyResult {
+    const key = this.verifyKey();
+    if (this.verified?.key === key) return this.verified.result;
+    const result = this.walkChain();
+    this.verified = { key, result };
+    return result;
+  }
+
+  private verifyKey(): string {
+    const changes = (this.db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const dataVersion = this.db.pragma("data_version", { simple: true }) as number;
+    return `${this.headSeq()}:${changes}:${dataVersion}`;
+  }
+
+  private walkChain(): VerifyResult {
     let prevHash = GENESIS_HASH;
     let count = 0;
     for (const row of this.db.prepare("SELECT * FROM ledger ORDER BY seq ASC").iterate() as Iterable<Row>) {

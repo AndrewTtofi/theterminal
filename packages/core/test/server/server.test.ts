@@ -66,6 +66,22 @@ const rawGet = (port: number, path: string, host = `127.0.0.1:${port}`) =>
 // retried, that has taken over 5 s (the default). openReleased shows no lock is left behind to wait on, so this is
 // slowness alone: these get a longer, still bounded, timeout.
 describe("createServer", { timeout: 30_000 }, () => {
+  it("checks project names and card titles with the server's own secrets and data folder", async () => {
+    const dataDir = tmp();
+    const s = await start({ dataDir, port: 0 });
+    const named = await post(s, "/api/projects", { name: `Club ${s.token}` });
+    expect(named.status).toBe(400);
+    expect(await named.json()).toEqual({ error: "secret_in_text" });
+    const p = (await (await post(s, "/api/projects", { name: "Club" })).json()) as { id: string };
+    const titled = await post(s, `/api/projects/${p.id}/cards`, { title: `token ${s.token}`, stage: "plan" });
+    expect(titled.status).toBe(400);
+    expect(await titled.json()).toEqual({ error: "secret_in_text" });
+    const card = await post(s, `/api/projects/${p.id}/cards`, { title: `Read ${join(dataDir, "notes.md")}`, stage: "plan" });
+    const { title } = (await card.json()) as { title: string };
+    expect(title).toMatch(/^Read <data>/);
+    expect(title).not.toContain(dataDir);
+  });
+
   it("persists data and the token across restarts", async () => {
     const dataDir = tmp();
     const a = await start({ dataDir, port: 0 });

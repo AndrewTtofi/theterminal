@@ -287,35 +287,50 @@ describe("redact: leak fixes", () => {
     expect(r("a: 1\r  password: |\r    FAKE1\r  keep: y")).toBe(`a: 1\r  password: ${REDACTED}\r  keep: y`);
     expect(r("password: |\r\n  FAKE1\r\n  FAKE2\r\nnext: x")).toBe(`password: ${REDACTED}\r\nnext: x`);
   });
-  it("is linear on large input", () => {
-    const inputs = [
-      "a".repeat(1_000_000),
-      "some words here key=value and more text sk-notasecret ".repeat(20_000),
-      'k="'.repeat(300_000),
-      " ".repeat(1_000_000) + "a",
-      "a=b=c=".repeat(170_000),
-      '"'.repeat(1_000_000),
-      'password="'.repeat(100_000),
-      '\\"password\\":\\"'.repeat(60_000),
-      "password: |\n".repeat(80_000),
-      "password: |\n  x\n".repeat(60_000),
-      "Cookie: \"a\" ".repeat(100_000),
-      "Cookie: 'a'; ".repeat(80_000) + "\n",
-      "x://token:".repeat(100_000),
-      "https://token:[REDACTED]@".repeat(40_000),
-      '\\"password\\":\\"' + '\\\\\\"'.repeat(150_000),
-      '\\"password\\":\\"\\\\'.repeat(60_000),
-      "password: |2 # c\n".repeat(60_000),
-      "password: | # password: | #".repeat(40_000) + "\r",
-      "password: |\r".repeat(40_000),
-      "password: | #\r".repeat(70_000),
-      "password: |\r  x\r".repeat(60_000),
-      "x\r".repeat(300_000) + "password: |\r  FAKE1\r".repeat(30_000),
+  // Growth, not an absolute bound: a slow or loaded runner (Windows CI) slows both sizes alike, while a quadratic
+  // path takes four times as long on twice the input. Each size is timed after a warm-up, best of three.
+  it("is linear on large input", { timeout: 120_000 }, () => {
+    const time = (input: string): number => {
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now();
+        redact(input);
+        best = Math.min(best, performance.now() - t);
+      }
+      return best;
+    };
+    const inputs: ((k: number) => string)[] = [
+      (k) => "a".repeat(1_000_000 * k),
+      (k) => "some words here key=value and more text sk-notasecret ".repeat(20_000 * k),
+      (k) => 'k="'.repeat(300_000 * k),
+      (k) => " ".repeat(1_000_000 * k) + "a",
+      (k) => "a=b=c=".repeat(170_000 * k),
+      (k) => '"'.repeat(1_000_000 * k),
+      (k) => 'password="'.repeat(100_000 * k),
+      (k) => '\\"password\\":\\"'.repeat(60_000 * k),
+      (k) => "password: |\n".repeat(80_000 * k),
+      (k) => "password: |\n  x\n".repeat(60_000 * k),
+      (k) => "Cookie: \"a\" ".repeat(100_000 * k),
+      (k) => "Cookie: 'a'; ".repeat(80_000 * k) + "\n",
+      (k) => "x://token:".repeat(100_000 * k),
+      (k) => "https://token:[REDACTED]@".repeat(40_000 * k),
+      (k) => '\\"password\\":\\"' + '\\\\\\"'.repeat(150_000 * k),
+      (k) => '\\"password\\":\\"\\\\'.repeat(60_000 * k),
+      (k) => "password: |2 # c\n".repeat(60_000 * k),
+      (k) => "password: | # password: | #".repeat(40_000 * k) + "\r",
+      (k) => "password: |\r".repeat(40_000 * k),
+      (k) => "password: | #\r".repeat(70_000 * k),
+      (k) => "password: |\r  x\r".repeat(60_000 * k),
+      (k) => "x\r".repeat(300_000 * k) + "password: |\r  FAKE1\r".repeat(30_000 * k),
     ];
     for (const input of inputs) {
-      const t = performance.now();
-      redact(input);
-      expect(performance.now() - t).toBeLessThan(200);
+      const once = input(1);
+      const twice = input(2);
+      redact(once); // warm-up: JIT and regex compilation are not part of the growth
+      const t1 = time(once);
+      const t2 = time(twice);
+      // A floor of 2 ms keeps timer resolution from deciding a case that is fast at both sizes.
+      expect(t2, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, twice as long input ${t2.toFixed(1)} ms`).toBeLessThanOrEqual(3 * Math.max(t1, 2));
     }
   });
 });

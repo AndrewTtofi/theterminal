@@ -27,7 +27,7 @@ export class GateNotMetError extends Error {
   }
 }
 
-export type GateServiceDeps = RecordedTextDeps & { db: Db; ledger: Ledger };
+export type GateServiceDeps = RecordedTextDeps & { db: Db; ledger: Ledger; recorded?: RecordedText };
 
 const REASON_MAX = 500;
 
@@ -69,7 +69,7 @@ export class GateService {
   constructor(deps: GateServiceDeps) {
     this.db = deps.db;
     this.ledger = deps.ledger;
-    this.recorded = new RecordedText(deps);
+    this.recorded = deps.recorded ?? new RecordedText(deps);
   }
 
   /** The gates a move of the card to `to` raises, in catalog order. Records nothing. */

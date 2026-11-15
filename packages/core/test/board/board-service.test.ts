@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { STAGES } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
+import { homedir } from "node:os";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
+import { RecordedText, SecretInTextError } from "../../src/intake/service.js";
 import { applyEvent } from "../../src/events/projections.js";
 
 const human = { kind: "human", id: "owner" } as const;
@@ -131,5 +133,39 @@ describe("BoardService", () => {
     expect(seen).toEqual(["project.created"]);
     ledger.readOnly = true;
     expect(() => board.addCard(human, p.id, { title: "t", stage: "plan" })).toThrow(LedgerReadOnlyError);
+  });
+});
+
+describe("names and titles are recorded text", () => {
+  const SECRET = "sk-ant-TESTKEY-0000000000";
+  const bearing = "clubuser!Hunter2Pass";
+  let recorded: RecordedText;
+  beforeEach(() => {
+    recorded = new RecordedText({ username: "clubuser", secrets: () => [bearing] });
+    board = new BoardService(db, ledger, { recorded });
+  });
+
+  it("refuses a secret in a project name or a card title, writing nothing", () => {
+    expect(() => board.createProject(human, { name: `Club ${SECRET}` })).toThrow(SecretInTextError);
+    const p = board.createProject(human, { name: "Club" });
+    const head = ledger.headSeq();
+    expect(() => board.addCard(human, p.id, { title: `Log in with ${SECRET}`, stage: "build" })).toThrow(SecretInTextError);
+    expect(ledger.headSeq()).toBe(head);
+    expect(JSON.stringify(ledger.list())).not.toContain("TESTKEY");
+  });
+
+  it("refuses a secret that contains the username, which the scrubber would otherwise rewrite", () => {
+    expect(() => board.createProject(human, { name: `Club ${bearing}` })).toThrow(SecretInTextError);
+    const p = board.createProject(human, { name: "Club" });
+    expect(() => board.addCard(human, p.id, { title: `password ${bearing}`, stage: "plan" })).toThrow(SecretInTextError);
+    expect(JSON.stringify(ledger.list())).not.toContain("Hunter2Pass");
+  });
+
+  it("scrubs paths and the username from names and titles", () => {
+    const p = board.createProject(human, { name: `  clubuser in ${homedir()}/club  ` });
+    expect(p.name).toBe("<user> in ~/club");
+    const c = board.addCard(human, p.id, { title: `Read ${homedir()}/notes.md`, stage: "plan" });
+    expect(c.title).toBe("Read ~/notes.md");
+    expect(JSON.stringify(ledger.list())).not.toContain(homedir());
   });
 });

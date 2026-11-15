@@ -132,22 +132,15 @@ describe("intake API", { timeout: 15000 }, () => {
     expect(JSON.stringify(ledger)).not.toContain("TESTKEY");
   });
 
-  it("explains a secret-looking project name on completion with a fixed message", async () => {
+  it("refuses a secret-looking project name before it reaches the ledger, so no intake can carry it", async () => {
     const s = await start();
-    const id = await project(s, `Club ${SECRET}`);
-    const path = `/api/projects/${id}/intake`;
-    await send(s, "POST", path, { idea: IDEA });
-    for (const [questionId, answer] of Object.entries(ANSWERS)) await send(s, "POST", `${path}/answers`, { questionId, answer });
-    await send(s, "POST", `${path}/decisions`, { decisionId: "first_version", chosen: "smallest" });
-    await send(s, "POST", `${path}/decisions`, { decisionId: "hosting", chosen: "local" });
-    const res = await send(s, "POST", `${path}/complete`);
+    const res = await send(s, "POST", "/api/projects", { name: `Club ${SECRET}` });
     expect(res.status).toBe(400);
     const text = await res.text();
     expect(text).not.toContain("TESTKEY");
-    expect(JSON.parse(text)).toEqual({
-      error: "secret_in_text",
-      message: "The project name looks like it contains a secret. Rename the project to continue.",
-    });
+    expect(JSON.parse(text)).toEqual({ error: "secret_in_text" });
+    const entries = await json<LedgerEntry[]>(send(s, "GET", "/api/ledger"));
+    expect(JSON.stringify(entries)).not.toContain("TESTKEY");
   });
 
   it("refuses an invalid answer with issues that never echo the input", async () => {

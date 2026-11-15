@@ -29,6 +29,7 @@ import { commitEvent } from "../events/commit.js";
 import { CONNECTION_TESTERS, cloudTesters } from "../connections/testers.js";
 import { fakeSts, realSts, type StsCaller } from "../connections/cloud/aws.js";
 import { mintCloudGrant } from "../connections/cloud/grant.js";
+import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
@@ -405,8 +406,15 @@ export async function createServer(opts: {
     const db = openDatabase(join(opts.dataDir, "ledger.db"));
     openedDb = db;
     const ledger = new Ledger(db);
-    const board = new BoardService(db, ledger);
     const token = loadToken(opts.dataDir, opts.token);
+    // One scrubber and secret check for everything the Owner writes into the ledger: project names, card titles,
+    // intake answers, waiver reasons. Secrets are read on every check (like the runner's), so a value stored later
+    // is refused at once; connections and runner are declared below and only read when a request arrives.
+    const recorded = new RecordedText({
+      dataDir: opts.dataDir,
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+    const board = new BoardService(db, ledger, { recorded });
 
     // Projections are derived state: rebuild them from the verified ledger so out-of-band edits are undone.
     const integrity = ledger.verify();
@@ -460,21 +468,8 @@ export async function createServer(opts: {
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
-    const intake = new IntakeService({
-      db,
-      ledger,
-      dataDir: opts.dataDir,
-      // Read on every check, like the runner's: a value stored later is refused at once.
-      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
-    });
-
-    // The same scrubbing and secret check as the intake, for waiver reasons.
-    const gates = new GateService({
-      db,
-      ledger,
-      dataDir: opts.dataDir,
-      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
-    });
+    const intake = new IntakeService({ db, ledger, recorded });
+    const gates = new GateService({ db, ledger, recorded });
 
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 

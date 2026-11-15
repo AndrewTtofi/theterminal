@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ZodError } from "zod";
-import type { Answers, LedgerEntry } from "@theterminal/shared";
+import { INTAKE_IDEA_MAX, type Answers, type LedgerEntry } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
@@ -249,6 +249,12 @@ describe("IntakeService", () => {
     expect(JSON.stringify(ledger.list())).not.toContain("Hunter2Pass");
   });
 
+  it("limits the idea to the shared INTAKE_IDEA_MAX, the length the UI allows", () => {
+    expect(() => intake.start(human, projectId, "x".repeat(INTAKE_IDEA_MAX + 1))).toThrow(ZodError);
+    intake.start(human, projectId, "x".repeat(INTAKE_IDEA_MAX));
+    expect(intake.get(projectId)!.intake.idea).toHaveLength(INTAKE_IDEA_MAX);
+  });
+
   it("trims a text answer before it is validated and recorded", () => {
     intake.start(human, projectId, IDEA);
     intake.answer(human, projectId, "audience", "   Members of a book club \n");
@@ -259,25 +265,29 @@ describe("IntakeService", () => {
     expect(intake.get(projectId)!.questions[1]!.answer).toBe(full);
   });
 
-  it("explains in the approve view, and on completion, when the project name looks like a secret", () => {
-    const named = board.createProject(human, { name: "Club sk-ant-TESTKEY-0000000000" }).id;
-    intake.start(human, named, IDEA);
-    for (const [q, a] of Object.entries(ANSWERS)) intake.answer(human, named, q as never, a);
-    intake.decide(human, named, "first_version", "smallest");
-    intake.decide(human, named, "hosting", "local");
-    const view = intake.get(named)!;
+  it("explains in the approve view, and on completion, when the project name later matches a secret", () => {
+    // A name is checked when the project is created, so this is a secret stored after it was recorded.
+    const named = board.createProject(human, { name: "Club Moonlight-Key-7734" }).id;
+    let secrets: string[] = [];
+    const svc = new IntakeService({ db, ledger, secrets: () => secrets });
+    svc.start(human, named, IDEA);
+    for (const [q, a] of Object.entries(ANSWERS)) svc.answer(human, named, q as never, a);
+    svc.decide(human, named, "first_version", "smallest");
+    svc.decide(human, named, "hosting", "local");
+    secrets = ["Moonlight-Key-7734"];
+    const view = svc.get(named)!;
     const message = "The project name looks like it contains a secret. Rename the project to continue.";
     expect(view.step).toBe("approve");
     expect(view.plan!.problem).toBe(message);
-    expect(view.plan!.summary).not.toContain("TESTKEY");
+    expect(view.plan!.summary).not.toContain("Moonlight");
     const before = ledger.headSeq();
     try {
-      intake.complete(human, named);
+      svc.complete(human, named);
       expect.unreachable();
     } catch (e) {
       expect(e).toBeInstanceOf(SecretInTextError);
       expect((e as SecretInTextError).explanation).toBe(message);
-      expect((e as Error).message).not.toContain("TESTKEY");
+      expect((e as Error).message).not.toContain("Moonlight");
     }
     expect(ledger.headSeq()).toBe(before);
   });
