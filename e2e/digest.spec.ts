@@ -42,9 +42,15 @@ test("a project's day reads as a daily digest in UTC, without prompts or agent o
   await page.locator(".share-side").getByRole("button", { name: "Open daily digest" }).click();
   const digest = page.locator("section.digest-panel");
   await expect(digest).toBeVisible();
-  const today = new Date().toISOString().slice(0, 10);
-  const day = digest.getByRole("article", { name: `${today} (UTC)` });
-  await expect(day).toHaveCount(1);
+  // The run just happened, so it is in the newest day. That day is named at the server from the entries' UTC
+  // timestamps; a run that crosses 00:00 UTC puts it on the day before this test's own clock says, so either is right.
+  const day = digest.getByRole("article").first();
+  await expect(day).toBeVisible();
+  const now = new Date();
+  const utcDay = (d: Date) => d.toISOString().slice(0, 10);
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const heading = await day.getByRole("heading", { level: 3 }).textContent();
+  expect([`${utcDay(now)} (UTC)`, `${utcDay(yesterday)} (UTC)`]).toContain(heading);
   // Every requested action counts (read and edit were decided by policy); one was allowed by a human.
   await expect(day).toContainText("3 agent actions requested, 1 allowed and 0 denied by a human");
   await expect(day.getByRole("listitem").filter({ hasText: 'Owner started a Fake agent on "Login"' })).toHaveCount(1);

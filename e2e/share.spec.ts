@@ -66,6 +66,14 @@ const shareSide = (page: Page) => page.locator(".share-side");
 const preview = (page: Page) => page.getByRole("region", { name: "Share preview" });
 const frame = (page: Page) => preview(page).locator('iframe[title="Share page preview"]');
 
+/** The status bar's live link count, over every project: 0 when the item is not shown. */
+async function liveLinkCount(page: Page): Promise<number> {
+  const item = statusBar(page).getByRole("button", { name: /^Sharing: \d+ links? live$/ });
+  if ((await item.count()) === 0) return 0;
+  return Number(/^Sharing: (\d+) /.exec((await item.textContent()) ?? "")?.[1] ?? 0);
+}
+const sharingLabel = (n: number) => (n === 1 ? "Sharing: 1 link live" : `Sharing: ${n} links live`);
+
 /** The preview's exact HTML, as the iframe was given it. */
 async function previewHtml(page: Page): Promise<string> {
   await expect(frame(page)).toBeVisible();
@@ -145,7 +153,9 @@ test("a share page is previewed, confirmed, downloaded and shared on this comput
   expect(createHash("sha256").update(bytes).digest("hex")).toBe(listed[0]!.contentHash);
   expect(download.suggestedFilename()).toBe(`theterminal-share-${listed[0]!.id.slice(0, 8)}.html`);
 
-  // A link on this computer, for 24 hours, shown once.
+  // A link on this computer, for 24 hours, shown once. Another spec may have left a link live on another project,
+  // so the status bar is checked against the count before, not against an absolute one.
+  const linksBefore = await liveLinkCount(page);
   await snapshots.getByRole("button", { name: "Share on your network…" }).click();
   const form = page.getByRole("form", { name: "Share on your network" });
   await form.getByRole("combobox", { name: "Address" }).selectOption({ label: "This computer only" });
@@ -154,7 +164,8 @@ test("a share page is previewed, confirmed, downloaded and shared on this comput
   const input = form.getByRole("textbox", { name: "Share link" });
   await expect(input).toHaveValue(/^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{43}$/);
   const url = await input.inputValue();
-  await expect(statusBar(page).getByRole("button", { name: "Sharing: 1 link live" })).toBeVisible();
+  await expect(form.getByRole("button", { name: "Create link" })).toBeDisabled();
+  await expect(statusBar(page).getByRole("button", { name: sharingLabel(linksBefore + 1) })).toBeVisible();
 
   // From the test, with no cookie: the same bytes; anything else is not found or not allowed.
   const served = await fetch(url);
@@ -169,7 +180,9 @@ test("a share page is previewed, confirmed, downloaded and shared on this comput
   const live = side.getByRole("list", { name: "Live links" }).getByRole("listitem");
   await expect(live).toHaveCount(1);
   await live.getByRole("button", { name: "Revoke" }).click();
-  await expect(statusBar(page).getByRole("button", { name: /^Sharing:/ })).toHaveCount(0);
+  await expect(side.getByRole("status")).toHaveText("Link revoked.");
+  if (linksBefore === 0) await expect(statusBar(page).getByRole("button", { name: /^Sharing:/ })).toHaveCount(0);
+  else await expect(statusBar(page).getByRole("button", { name: sharingLabel(linksBefore) })).toBeVisible();
   await expect(live).toHaveCount(0);
   const after = await fetch(url).then(
     (r) => r.status,
