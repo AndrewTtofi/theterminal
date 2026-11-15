@@ -7,7 +7,7 @@ import { arch, cpus, release, totalmem } from "node:os";
 import { promisify } from "node:util";
 import Fastify from "fastify";
 import { openDatabase, type Db } from "../db.js";
-import { Ledger, LedgerReadOnlyError, type VerifyResult } from "../ledger/ledger.js";
+import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
 import { registerAuth, assertRoutesHaveRoles, APP_HOST } from "./auth.js";
@@ -28,10 +28,9 @@ import { registerStoryRoutes } from "./story-routes.js";
 import { registerChangesRoutes } from "./changes-routes.js";
 import { registerOverrideRoutes } from "./override-routes.js";
 import { registerPeopleRoutes } from "./people-routes.js";
-import { RemoteInputError, RemoteListener, RemoteStartError, type EnableInput } from "./remote.js";
+import { RemoteListener, type EnableInput } from "./remote.js";
 import { registerRemoteRoutes } from "./remote-routes.js";
-import { AcmeError, AcmeManager } from "./acme.js";
-import { CertificateError } from "./certs.js";
+import { AcmeManager } from "./acme.js";
 import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
@@ -122,16 +121,6 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const HEADERS_TIMEOUT_MS = 30_000;
 const KEEP_ALIVE_TIMEOUT_MS = 30_000;
 
-/**
- * Why the remote listener could not be turned on from the command line: a fixed name for the console, never input.
- * A bad flag or certificate file is the operator's to fix and fails the start instead (see createServer).
- */
-function remoteFailureName(err: unknown): string {
-  if (err instanceof RemoteStartError) return "remote_start_failed";
-  if (err instanceof AcmeError) return `acme_failed: ${err.type}`;
-  if (err instanceof LedgerReadOnlyError) return "ledger_read_only";
-  return "unknown";
-}
 const PORT_ATTEMPTS = 21; // the requested port plus 20 above it
 
 function loadToken(dataDir: string, given?: string): string {
@@ -832,18 +821,13 @@ export async function createServer(opts: {
       }
 
       // The network listener, once the app answers: `--remote` turns it on as the system actor (the bootstrap invite is
-      // the way in when no Owner credential exists yet); otherwise the recorded state decides. A bad flag or
-      // certificate file is a configuration error and fails the start; a port in use or a refused certificate order
-      // leaves the server up with remote access off, said once on the console in fixed words.
+      // the way in when no Owner credential exists yet); otherwise the recorded state decides. A server asked for
+      // remote access never comes up without it: any failure here (a bad flag or certificate file, a port in use, a
+      // refused certificate order, a read-only ledger) fails the start, and the catch below closes everything.
       if (opts.remote?.enabled) {
         const { enabled: _on, ...flags } = opts.remote;
         const input: EnableInput = Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined));
-        try {
-          await remoteListener.enable(CLI_ACTOR, input);
-        } catch (err) {
-          if (err instanceof RemoteInputError || err instanceof CertificateError) throw err;
-          console.error(`remote access could not start (${remoteFailureName(err)}), so it is now off`);
-        }
+        await remoteListener.enable(CLI_ACTOR, input);
       } else {
         await remoteListener.startIfEnabled();
       }

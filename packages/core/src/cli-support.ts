@@ -9,6 +9,7 @@ import { KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-s
 import { SecretStoreUnavailableError } from "./secrets/store.js";
 import { RemoteStartError } from "./server/remote.js";
 import { CertificateError } from "./server/certs.js";
+import { AcmeError } from "./server/acme.js";
 import { redact, secretEnvValues } from "./agents/redact.js";
 import { pathScrubber, usernameScrubber } from "./agents/scrub-paths.js";
 
@@ -24,7 +25,8 @@ export const SHUTDOWN_TIMEOUT_MS = 10_000;
 /**
  * The one stderr line for a failed start. Console output ends up in bug reports and host logs, so only errors whose
  * messages are fixed text (no path, pid or value) are shown: the data folder in use, the key file inside the data
- * folder, an unusable secret store, the remote listener and its certificate. Every other error gets a fixed line.
+ * folder, an unusable secret store, the remote listener, its certificate and a refused certificate order (ACME's
+ * message is fixed; its problem type stays on the error). Every other error gets a fixed line.
  */
 export function startErrorLine(err: unknown): string {
   if (err instanceof KeyInsideDataDirError) return err.message;
@@ -32,6 +34,7 @@ export function startErrorLine(err: unknown): string {
     err instanceof DataDirInUseError ||
     err instanceof RemoteStartError ||
     err instanceof CertificateError ||
+    err instanceof AcmeError ||
     err instanceof SecretStoreUnavailableError
   ) {
     return `The Terminal could not start: ${err.message}`;

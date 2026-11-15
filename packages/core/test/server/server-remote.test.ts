@@ -367,7 +367,7 @@ describe("the remote listener on the real server", { timeout: 30_000 }, () => {
     expect(onFile.connections).toMatchObject({ secretStore: "file" });
   });
 
-  it("a bad flag fails the start; a busy port leaves the server up with remote off and a fixed line", async () => {
+  it("with the flag, any failure to start the listener fails the start: a bad flag, and a busy port after recording enabled then disabled", async () => {
     const { dataDir } = seed();
     await expect(start(dataDir, { remote: { enabled: true, port: 0, bind: "not-an-address" } })).rejects.toMatchObject({ name: "RemoteInputError" });
 
@@ -376,12 +376,12 @@ describe("the remote listener on the real server", { timeout: 30_000 }, () => {
     const busy = (blocker.address() as net.AddressInfo).port;
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const s = await start(dataDir, { remote: { enabled: true, port: busy, bind: "127.0.0.1" } });
+      await expect(start(dataDir, { remote: { enabled: true, port: busy, bind: "127.0.0.1" } })).rejects.toMatchObject({ name: "RemoteStartError" });
+      expect(log).not.toHaveBeenCalled();
+      // The failed start let go of the data folder: a plain start opens it and shows what the attempt recorded.
+      const s = await start(dataDir);
       expect(s.remoteUrl).toBeNull();
-      expect(s.fingerprint).toBeNull();
-      expect(log).toHaveBeenCalledWith("remote access could not start (remote_start_failed), so it is now off");
       expect((await remoteEntries(s)).map((e) => e.type)).toEqual(["remote.certificate_changed", "remote.enabled", "remote.disabled"]);
-      expect((await (await local(s, "/healthz")).json())).toEqual({ ok: true });
     } finally {
       await new Promise((r) => blocker.close(r));
     }

@@ -7,6 +7,7 @@ import { KeyInsideDataDirError } from "../src/secrets/file-store.js";
 import { SecretStoreUnavailableError } from "../src/secrets/store.js";
 import { RemoteStartError } from "../src/server/remote.js";
 import { CertificateError } from "../src/server/certs.js";
+import { AcmeError } from "../src/server/acme.js";
 import {
   SHUTDOWN_FAILED,
   SHUTDOWN_TIMED_OUT,
@@ -41,6 +42,8 @@ describe("startErrorLine", () => {
     expect(startErrorLine(new RemoteStartError())).toBe("The Terminal could not start: the remote listener could not start");
     const cert = new CertificateError("unreadable");
     expect(startErrorLine(cert)).toBe(`The Terminal could not start: ${cert.message}`);
+    // ACME's message is fixed too; the problem type is kept on the error for the UI, never printed here.
+    expect(startErrorLine(new AcmeError("urn:ietf:params:acme:error:dns"))).toBe("The Terminal could not start: certificate could not be obtained");
   });
 
   it("keeps the secret store's fixed unavailable message", () => {

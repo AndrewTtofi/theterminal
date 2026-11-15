@@ -90,6 +90,8 @@ const bracket = (address: string): string => (address.includes(":") ? `[${addres
 
 /** `https://<domain, else first address, else bind>:<port>/join/<code>#fp=<fingerprint>`, like the invite routes. */
 export function remoteJoinUrl(remote: Omit<RemoteForInvite, "enabled" | "listening">, code: string): string {
+  // The caller passes a listening listener's state, which always has an address (the listener falls back to loopback
+  // for a wildcard bind), so `?? remote.bind` is unreachable and only satisfies the type.
   const host = remote.domain ?? bracket(remote.addresses[0] ?? remote.bind);
   return `https://${host}:${remote.port}/join/${code}#fp=${remote.fingerprint ?? ""}`;
 }

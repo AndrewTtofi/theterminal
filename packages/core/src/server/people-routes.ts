@@ -288,7 +288,9 @@ export function registerPeopleRoutes(app: FastifyInstance, deps: PeopleRoutesDep
       if (role === "owner") throw new OwnerRoleError();
       const { invite, code } = service.invite(actorOf(request), role);
       const remote = deps.remote();
-      // Only a listener that is up names an address: its real addresses, never the wildcard it binds.
+      // Only a listener that is up names an address: its real addresses, never the wildcard it binds. A listening
+      // listener always has at least one address (addressesFor falls back to loopback), so `?? remote.bind` is
+      // unreachable and only satisfies the type.
       const on = remote !== null && remote.enabled && remote.listening && remote.fingerprint !== null;
       const fingerprint = on ? remote.fingerprint : null;
       const url = on

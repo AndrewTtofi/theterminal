@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,6 +182,20 @@ describe("theterminal start as a host's child process", () => {
     expect(stderr()).toBe("Refusing to start: the secret key file is inside the data directory\n");
     expect(stdout()).toBe("");
     expect(existsSync(keyFile)).toBe(false);
+  });
+
+  it("--remote on a port in use exits 1 with the fixed line, so a server asked for remote access never comes up without it", { timeout: TIMEOUT }, async () => {
+    const blocker = net.createServer();
+    await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
+    const busy = (blocker.address() as AddressInfo).port;
+    try {
+      const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--remote", "--remote-bind", "127.0.0.1", "--remote-port", String(busy)]);
+      expect(await exit).toBe(1);
+      expect(stderr()).toBe("The Terminal could not start: the remote listener could not start\n");
+      expect(stdout()).toBe("");
+    } finally {
+      await new Promise((r) => blocker.close(r));
+    }
   });
 
   it("an unusable key file exits 1 with a fixed line", { timeout: TIMEOUT }, async () => {
