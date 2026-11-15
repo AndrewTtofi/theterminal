@@ -21,6 +21,7 @@ import { StoryPanel } from "../views/StoryPanel";
 import { DigestPanel } from "../views/DigestPanel";
 import { SharePanel } from "../views/SharePanel";
 import { PeoplePanel } from "../views/PeoplePanel";
+import { RunTimelinePanel } from "../home/RunTimelinePanel";
 import { ActivityBar } from "./ActivityBar";
 import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
@@ -36,7 +37,7 @@ import type { ViewId } from "./views";
 // Stable registry: dockview keys components by name, so this object must not change between renders.
 const PANELS = {
   home: HomeView, board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
-  intake: IntakePanel, story: StoryPanel,
+  intake: IntakePanel, story: StoryPanel, timeline: RunTimelinePanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
   link_machine: LinkMachinePanel,
   share: SharePanel, digest: DigestPanel, people: PeoplePanel,

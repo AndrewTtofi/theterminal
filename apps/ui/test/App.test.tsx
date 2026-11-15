@@ -348,7 +348,7 @@ describe("App needs-you strip", () => {
     await waitFor(() => expect([...h.subs].map((x) => x.after)).toContain(7));
     expect(screen.queryByText("Needs you")).toBeNull();
     act(() => h.onEntry?.(agentEntry(8, "B")));
-    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    expect(await within(await screen.findByRole("region", { name: "Needs you" })).findByText('Agent wants to run the command "run make"')).toBeTruthy();
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Project B");
   });
 
@@ -367,14 +367,14 @@ describe("App needs-you strip", () => {
         payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
       } as LedgerEntry),
     );
-    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    expect(await within(await screen.findByRole("region", { name: "Needs you" })).findByText('Agent wants to run the command "run make"')).toBeTruthy();
     act(() =>
       h.onEntry?.({
         ...agentEntry(9, "B"), type: "link.run_failed", actor: { kind: "system", id: "link" },
         payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
       } as LedgerEntry),
     );
-    await waitFor(() => expect(screen.queryByText('Agent wants to run the command "run make"')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
     expect(m.listAllPendingActions).toHaveBeenCalledTimes(3);
   });
 

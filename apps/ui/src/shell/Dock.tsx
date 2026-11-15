@@ -15,7 +15,7 @@ export { diffPanelId, filePanelId, parsePanelPath } from "./dock-layout";
 export type DockPanelId =
   | "home" | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | "conversation" | "needs_you" | "terminal" | "link_machine"
   | "share" | "digest" | "people"
-  | `connection:${string}` | `story:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
+  | `connection:${string}` | `story:${string}` | `timeline:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
 export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
   focus(id: DockPanelId): void;
