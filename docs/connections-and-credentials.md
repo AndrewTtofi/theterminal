@@ -108,7 +108,7 @@ Gemini cannot use MCP servers in The Terminal in this version. See [MCP servers]
 
 ## Cloud accounts
 
-You can connect AWS, Google Cloud and Azure accounts. You can have several connections for each provider: in the Connections view, **Add another** next to a provider you have already connected opens an empty editor for a further connection. A run is given a cloud account only when you tick it for that run (see [Giving a run access](#giving-a-run-access)), and at most one connection per cloud provider per run.
+You can connect AWS, Google Cloud and Azure accounts. You can have several connections for each provider: in the Connections view, **Add another** next to a provider you have already connected opens an empty editor for a further connection. A run is given a cloud account only when you tick it for that run (see [Giving a run access](#giving-a-run-access)), and at most one connection per cloud provider per run: if you tick two connections of one cloud provider, the run is refused.
 
 The secret fields are kept in the keychain like every other secret. Each connection has a connection test that only reads: AWS checks who the keys belong to, Google Cloud and Azure read the project or subscription you entered.
 
@@ -166,13 +166,13 @@ An MCP server gives an agent extra tools. You can have as many MCP connections a
 
 | Kind | Field | Where it lives |
 | --- | --- | --- |
-| Local (stdio): a program started on your computer | Command | Keychain (shown in the editor, never in the ledger) |
-| | Arguments, one per line | Keychain (shown in the editor, never in the ledger) |
+| Local (stdio): a program started on your computer | Command | Keychain (shown in the editor, never in the ledger). Appears on Claude Code's command line: no credentials here |
+| | Arguments, one per line | Keychain (shown in the editor, never in the ledger). Appears on Claude Code's command line: no credentials here |
 | | Environment variables, `NAME=value` per line | Keychain only |
-| Remote (http): a server reached over HTTP | URL | Ledger and API |
+| Remote (http): a server reached over HTTP | URL | Ledger and API. Appears on Claude Code's command line: no credentials here |
 | | Headers, `Name=value` per line | Keychain only |
 
-A remote server's URL must use https (or http to this computer only), and a URL with a user name, a password, a query string or a fragment is refused, because the URL is kept in the ledger: put credentials in a header. Environment variable and header values of 8 or more characters are also redacted from agent output.
+A local server's command and arguments, and a remote server's URL, appear on Claude Code's command line when a run uses the server, so never put a credential in them: put it in an environment variable or a header. A remote server's URL must use https (or http to this computer only), and a URL with a user name, a password, a query string or a fragment is refused, because the URL is kept in the ledger: put credentials in a header. Environment variable and header values of 8 or more characters are also redacted from agent output.
 
 The Terminal never starts an MCP server itself. It hands the server's description to the agent program for the run you ticked it for, and the agent program starts or contacts the server. Every tool call to an MCP server goes through the approval gate and asks you first. Agents see each server under a name made from its connection id, `tt-xxxxxxxx` (for example, a tool appears as `mcp__tt-xxxxxxxx__<tool>`), not the name you gave it.
 
@@ -180,7 +180,7 @@ The Terminal never starts an MCP server itself. It hands the server's descriptio
 
 MCP servers work with Claude only in this version.
 
-- **Secrets never go on the command line.** The values in an MCP connection's environment variables and headers reach Claude Code through its environment, and its MCP configuration refers to them by name, as `${TT_MCP_<n>_<m>}`. Any program on your computer can read a command line; it cannot read another program's environment.
+- **Environment variable and header values never go on the command line.** The values in an MCP connection's environment variables and headers reach Claude Code through its environment, and its MCP configuration refers to them by name, as `${TT_MCP_<n>_<m>}`. A program's environment is harder to read than a command line, which any local user can list. The command, arguments and URL do appear on Claude Code's command line, so credentials belong in environment variables or headers.
 - **A local (stdio) MCP server sees more than its own values.** Claude Code starts it with Claude Code's own environment: the Anthropic API key in API key mode, the variables of any cloud account given to the run, and the `TT_MCP_` values of every other MCP server in the run. Prefer a remote (http) MCP server for a connection that carries a secret: it receives only its own headers.
 - **No `${` in MCP fields.** Claude Code reads `${NAME}` in an MCP server's command, arguments, URL, environment variables and headers as a reference to one of its own variables, with no way to escape it. The Terminal refuses `${` in those fields.
 - **One server name per run.** If two selected connections would get the same server name, the run is refused; untick one of them.
