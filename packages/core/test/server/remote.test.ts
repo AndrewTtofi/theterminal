@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CERT_FINGERPRINT, DEFAULT_REMOTE, type Actor, type LedgerEntry } from "@theterminal/shared";
 import { CertificateError, selfSignedTlsCertificate } from "../../src/server/certs.js";
 import {
+  ADDRESS_CACHE_MS,
   OwnerCredentialRequiredError,
   REMOTE_FILES_SECRET,
   REMOTE_KEY_SECRET,
@@ -14,7 +15,8 @@ import {
   RemoteStartError,
   remoteHostAllowed,
 } from "../../src/server/remote.js";
-import { closeAll, harness, pinnedRequest, type Harness } from "../fixtures/remote-harness.js";
+import { OwnerCredentialRequiredError as ServiceOwnerCredentialRequiredError } from "../../src/people/service.js";
+import { TEST_ADDRESSES, closeAll, harness, pinnedRequest, type Harness } from "../fixtures/remote-harness.js";
 
 const OWNER: Actor = { kind: "human", id: "owner" };
 
@@ -440,6 +442,52 @@ describe("RemoteListener", () => {
     } finally {
       await new Promise((r) => blocker.close(r));
     }
+  });
+
+  it("the CLI flag (a system actor) turns remote on with no Owner credential yet, for the bootstrap; the UI switch (a human) may not", async () => {
+    const h = await harness({ owner: { has: false } });
+    await expect(enabled(h)).rejects.toBeInstanceOf(OwnerCredentialRequiredError);
+    const state = await h.remote.enable({ kind: "system", id: "cli" }, { port: 0, bind: "127.0.0.1" });
+    expect(state.enabled).toBe(true);
+    expect(remoteEntries(h).at(-1)).toMatchObject({ type: "remote.enabled", actor: { kind: "system", id: "cli" } });
+    expect((await pinnedRequest(state.port, state.fingerprint!, { path: "/healthz" })).status).toBe(200);
+  });
+
+  it("OwnerCredentialRequiredError is the people service's class: one class for both modules", async () => {
+    expect(OwnerCredentialRequiredError).toBe(ServiceOwnerCredentialRequiredError);
+  });
+
+  it("hostRule reads the machine's names and addresses at most once per ADDRESS_CACHE_MS", async () => {
+    const addresses = vi.fn(() => TEST_ADDRESSES);
+    const h = await harness({ localAddresses: addresses });
+    await enabled(h);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const before = addresses.mock.calls.length;
+      h.remote.hostRule();
+      h.remote.hostRule();
+      h.remote.state();
+      expect(addresses.mock.calls.length - before).toBeLessThanOrEqual(1);
+      vi.setSystemTime(Date.now() + ADDRESS_CACHE_MS + 1);
+      const after = addresses.mock.calls.length;
+      expect(h.remote.hostRule().names).toContain("tt-test.local");
+      expect(addresses.mock.calls.length).toBe(after + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an idle TLS connection is closed after the idle timeout", async () => {
+    const h = await harness({ idleTimeoutMs: 200 });
+    const { port } = await enabled(h);
+    const closedAfter = await new Promise<number>((resolve, reject) => {
+      const started = Date.now();
+      const s = tls.connect({ host: "127.0.0.1", port, rejectUnauthorized: false });
+      s.on("close", () => resolve(Date.now() - started));
+      s.on("error", reject);
+      setTimeout(() => reject(new Error("still open")), 5000).unref();
+    });
+    expect(closedAfter).toBeLessThan(3000);
   });
 
   it("close stops listening without recording anything", async () => {

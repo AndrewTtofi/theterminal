@@ -54,10 +54,7 @@ function requestFor(key: string): { method: string; path: string } {
  * Keys ahead of their routes, by the task that lands them. An entry here must be unmatched: the moment its route
  * exists the stale-key test fails, so the entry is removed and the key is checked like every other.
  */
-const LANDING_LATER: Record<string, string> = {
-  "GET /api/remote": "T6c remote listener wiring",
-  "PUT /api/remote": "T6c remote listener wiring",
-};
+const LANDING_LATER: Record<string, string> = {};
 /** A WebSocket-only route: a plain GET is answered by the websocket plugin, not by a handler of ours. */
 const WEBSOCKET_ONLY = new Set(["GET /api/events"]);
 

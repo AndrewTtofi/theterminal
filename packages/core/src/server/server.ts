@@ -7,7 +7,7 @@ import { arch, cpus, release, totalmem } from "node:os";
 import { promisify } from "node:util";
 import Fastify from "fastify";
 import { openDatabase, type Db } from "../db.js";
-import { Ledger, type VerifyResult } from "../ledger/ledger.js";
+import { Ledger, LedgerReadOnlyError, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
 import { registerAuth, assertRoutesHaveRoles, APP_HOST } from "./auth.js";
@@ -20,7 +20,6 @@ import { getPerson } from "../events/projections.js";
 import { registerStaticUi } from "./static-ui.js";
 import { acquireDataDirLock } from "./data-dir-lock.js";
 import { announceBootstrapInvite, watchBootstrapInvite } from "./bootstrap-invite.js";
-import { RemoteStartError } from "./remote.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
@@ -29,6 +28,10 @@ import { registerStoryRoutes } from "./story-routes.js";
 import { registerChangesRoutes } from "./changes-routes.js";
 import { registerOverrideRoutes } from "./override-routes.js";
 import { registerPeopleRoutes } from "./people-routes.js";
+import { RemoteInputError, RemoteListener, RemoteStartError, type EnableInput } from "./remote.js";
+import { registerRemoteRoutes } from "./remote-routes.js";
+import { AcmeError, AcmeManager } from "./acme.js";
+import { CertificateError } from "./certs.js";
 import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
@@ -58,7 +61,9 @@ import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
 import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
-import { ADAPTERS, PROVIDERS, type TlsMode, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
+import {
+  ADAPTERS, PROVIDERS, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider, type TlsMode,
+} from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
@@ -84,10 +89,49 @@ export type RunningServer = {
   port: number;
   token: string;
   integrity: VerifyResult;
+  /** `https://<domain or first address>:<port>/` while the remote listener is up, else null. Read live. */
+  readonly remoteUrl: string | null;
+  /** The served certificate's SHA-256 fingerprint while the remote listener is up, else null. Read live. */
+  readonly fingerprint: string | null;
   close(): Promise<void>;
 };
 
+/** The CLI's remote flags, as `createServer({ remote })` takes them. */
+export type RemoteOptions = {
+  /** `--remote`: turn remote access on at start, as the system actor `cli`. Without it the recorded state decides. */
+  enabled?: boolean;
+  port?: number;
+  bind?: string;
+  domain?: string;
+  tls?: TlsMode;
+  certFile?: string;
+  keyFile?: string;
+  /** Tests only: the plain ACME challenge listener's port (Let's Encrypt connects to 80). */
+  acmePort?: number;
+};
+
 const DEFAULT_PORT = 4317;
+/** The server itself, turning remote access on because the command line said so. */
+const CLI_ACTOR: Actor = { kind: "system", id: "cli" };
+/**
+ * Timeouts on the shared HTTP server, which the TLS listener's decrypted sockets go through too: the whole request
+ * (headers and body) within a minute, the headers within half of it, and an idle keep-alive connection closed after
+ * thirty seconds. Loopback requests never come near them; a slow or silent network client does.
+ */
+const REQUEST_TIMEOUT_MS = 60_000;
+const HEADERS_TIMEOUT_MS = 30_000;
+const KEEP_ALIVE_TIMEOUT_MS = 30_000;
+
+/**
+ * Why the remote listener could not be turned on from the command line: a fixed name for the console, never input.
+ * A bad flag or certificate file is the operator's to fix and fails the start instead (see createServer).
+ */
+function remoteFailureName(err: unknown): string {
+  if (err instanceof RemoteStartError) return "remote_start_failed";
+  if (err instanceof AcmeError) return `acme_failed: ${err.type}`;
+  if (err instanceof LedgerReadOnlyError) return "ledger_read_only";
+  return "unknown";
+}
 const PORT_ATTEMPTS = 21; // the requested port plus 20 above it
 
 function loadToken(dataDir: string, given?: string): string {
@@ -469,8 +513,6 @@ export async function createServer(opts: {
    * Owner identity (the CLI prints it). The link is also written to `<dataDir>/bootstrap-invite` (mode 0600).
    */
   bootstrapInvite?: (url: string) => void;
-  /** The CLI's `--remote` flags: turn remote access on at startup with this configuration. */
-  remote?: { enabled?: boolean; port?: number; bind?: string; domain?: string; tls?: TlsMode; certFile?: string; keyFile?: string };
   /** Tests only: the fetch connection tests use. Default: the real fetch (see selectFetch). */
   fetch?: typeof fetch;
   /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
@@ -492,10 +534,12 @@ export async function createServer(opts: {
   remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
+  /**
+   * The remote (network, TLS) listener. With `enabled`, it is turned on at start as the system actor `cli`, whatever
+   * the ledger says; otherwise the recorded state decides (startIfEnabled). On a headless server the flag is the switch.
+   */
+  remote?: RemoteOptions;
 }): Promise<RunningServer> {
-  // Fail closed: the remote listener is not started from the flags yet, and a server asked for remote access must not
-  // come up without it.
-  if (opts.remote?.enabled) throw new RemoteStartError();
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
   const coreDir = opts.coreDir;
@@ -695,9 +739,17 @@ export async function createServer(opts: {
     });
     const shareLinks = (): number => links.activeCount();
 
-    const app = Fastify();
+    const app = Fastify({ requestTimeout: REQUEST_TIMEOUT_MS, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
     let boundPort = 0;
     let stopBootstrapWatch = (): void => undefined;
+    // The network listener: off until the ledger or the command line says otherwise. Its decrypted sockets go to this
+    // same app, told apart by request.listener. Certificates from Let's Encrypt come through the ACME manager, whose
+    // client is the fake CA only under the test flags (selectAcmeClient).
+    const acme = new AcmeManager({ secrets, dataDir: opts.dataDir });
+    const remoteListener = new RemoteListener({
+      http: app.server, db, ledger, secrets, people: people.service, dataDir: opts.dataDir, uiDir: opts.uiDir ?? null, acme,
+    });
+    const remoteView = () => remoteListener.state();
     try {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
@@ -705,8 +757,8 @@ export async function createServer(opts: {
       registerAuth(app, {
         token,
         port: () => boundPort,
-        // No remote listener is wired yet: a request that somehow arrives over TLS is refused.
-        hostRule: () => null,
+        // The remote listener's own names and port: anything else over TLS is 403 bad_host.
+        hostRule: () => remoteListener.hostRule(),
         sessions: people.sessions,
         person: (id) => getPerson(db, id),
       });
@@ -729,7 +781,9 @@ export async function createServer(opts: {
       registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
       registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
-      registerPeopleRoutes(app, { db, ledger, ...people, recorded, port: () => boundPort, remote: () => null });
+      // Invite links name the remote listener's real address and fingerprint while it is up.
+      registerPeopleRoutes(app, { db, ledger, ...people, recorded, port: () => boundPort, remote: remoteView });
+      registerRemoteRoutes(app, { remote: remoteListener, principalOf: (req) => req.principal });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
@@ -737,6 +791,7 @@ export async function createServer(opts: {
         machines: () => linkService.counts(),
         network: () => network.state(),
         shareLinks,
+        remote: remoteView,
       });
       registerGitHubRoutes(app, { github });
       registerShareRoutes(app, { db, ledger, share });
@@ -773,17 +828,35 @@ export async function createServer(opts: {
       if (lastError) {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
+
+      // The network listener, once the app answers: `--remote` turns it on as the system actor (the bootstrap invite is
+      // the way in when no Owner credential exists yet); otherwise the recorded state decides. A bad flag or
+      // certificate file is a configuration error and fails the start; a port in use or a refused certificate order
+      // leaves the server up with remote access off, said once on the console in fixed words.
+      if (opts.remote?.enabled) {
+        const { enabled: _on, ...flags } = opts.remote;
+        const input: EnableInput = Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined));
+        try {
+          await remoteListener.enable(CLI_ACTOR, input);
+        } catch (err) {
+          if (err instanceof RemoteInputError || err instanceof CertificateError) throw err;
+          console.error(`remote access could not start (${remoteFailureName(err)}), so it is now off`);
+        }
+      } else {
+        await remoteListener.startIfEnabled();
+      }
       // The Owner bootstrap link: issued once per start while nobody owns the workspace and remote access listens; the
       // file holding it goes as soon as the Owner joins (and at any start after that).
       stopBootstrapWatch = watchBootstrapInvite(ledger, opts.dataDir);
       if (!ledger.readOnly) {
         announceBootstrapInvite({
-          db, people: people.service, dataDir: opts.dataDir, remote: null,
+          db, people: people.service, dataDir: opts.dataDir, remote: remoteListener.state(),
           ...(opts.bootstrapInvite && { bootstrapInvite: opts.bootstrapInvite }),
         });
       }
     } catch (err) {
       stopBootstrapWatch();
+      await remoteListener.close().catch(() => undefined);
       await remote.shutdown();
       await linkService.shutdown();
       await links.shutdown();
@@ -793,15 +866,31 @@ export async function createServer(opts: {
       throw err;
     }
 
+    /** The remote listener's address while it is up: the domain, else its first real address (never the wildcard bind). */
+    const remoteUrl = (): string | null => {
+      const s = remoteListener.state();
+      if (!s.enabled || !s.listening) return null;
+      const address = s.addresses[0] ?? s.bind;
+      return `https://${s.domain ?? (address.includes(":") ? `[${address}]` : address)}:${s.port}/`;
+    };
+
     return {
       url: `http://${APP_HOST}:${boundPort}/?token=${token}`,
       loopbackUrl: `http://127.0.0.1:${boundPort}/`,
       port: boundPort,
       token,
       integrity,
+      get remoteUrl() {
+        return remoteUrl();
+      },
+      get fingerprint() {
+        const s = remoteListener.state();
+        return s.enabled && s.listening ? s.fingerprint : null;
+      },
       async close() {
         try {
           stopBootstrapWatch();
+          await remoteListener.close(); // the network listener goes first: nothing from outside reaches the rest of the shutdown
           await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart
           await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await links.shutdown(); // closes every share link's listener and records it, while the db is open

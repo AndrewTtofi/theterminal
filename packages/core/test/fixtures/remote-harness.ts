@@ -72,6 +72,10 @@ export async function harness(
     /** Gives the listener an AcmeManager over this client (never the real Let's Encrypt in tests). */
     acmeClient?: AcmeClientLike;
     auth?: (app: FastifyInstance, ctx: { hostRule: () => HostRule; db: Db; ledger: Ledger }) => void;
+    /** The machine's names and addresses the listener sees; default TEST_ADDRESSES. */
+    localAddresses?: () => { hostnames: string[]; addresses: string[] };
+    /** Milliseconds an idle TLS connection may stay open; default the listener's own. */
+    idleTimeoutMs?: number;
   } = {},
 ): Promise<Harness> {
   const root = opts.root ?? mkdtempSync(join(tmpdir(), "tt-remote-"));
@@ -117,7 +121,8 @@ export async function harness(
     dataDir,
     uiDir,
     now: opts.now,
-    localAddresses: () => TEST_ADDRESSES,
+    localAddresses: opts.localAddresses ?? (() => TEST_ADDRESSES),
+    ...(opts.idleTimeoutMs !== undefined && { idleTimeoutMs: opts.idleTimeoutMs }),
     ...(acme ? { acme, acmePort: 0 } : {}),
   });
   const h: Harness = {
@@ -135,7 +140,7 @@ export async function harness(
     async restart() {
       await h.close();
       open.splice(open.indexOf(h), 1);
-      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient, auth: opts.auth });
+      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient, auth: opts.auth, localAddresses: opts.localAddresses, idleTimeoutMs: opts.idleTimeoutMs });
     },
     async close() {
       await remote!.close();

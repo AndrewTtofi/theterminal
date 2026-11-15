@@ -208,14 +208,14 @@ function forms(p: string): string[] {
   }
 }
 
-function isDenied(candidates: string[], deny: { uiDir: string; dataDir: string }): boolean {
-  const uiRoots = forms(deny.uiDir).map(fold);
+function isDenied(candidates: string[], deny: { uiDir: string | null; dataDir: string }): boolean {
+  const uiRoots = deny.uiDir === null ? [] : forms(deny.uiDir).map(fold);
   const dataFiles = forms(deny.dataDir).flatMap((d) => DENIED_DATA_FILES.map((f) => fold(join(d, f))));
   return candidates.map(fold).some((c) => dataFiles.includes(c) || uiRoots.some((u) => c === u || c.startsWith(u.endsWith(sep) ? u : u + sep)));
 }
 
 /** Deny-list check on the path as given and as resolved through links, both before anything is read. */
-function readBounded(file: string, deny: { uiDir: string; dataDir: string }): string {
+function readBounded(file: string, deny: { uiDir: string | null; dataDir: string }): string {
   if (typeof file !== "string" || file.length === 0 || file.includes("\0")) throw new CertificateError("unreadable");
   const lexical = resolve(file);
   if (isDenied([lexical], deny)) throw new CertificateError("path_denied");
@@ -326,12 +326,13 @@ function sanList(x: X509Certificate): string[] {
 
 /**
  * Loads an Owner-provided certificate (optionally followed by its intermediates) and private key. Both paths
- * are checked against the deny list before either file is opened; errors carry a fixed message only.
+ * are checked against the deny list before either file is opened; errors carry a fixed message only. `uiDir` is
+ * null when the server serves no UI folder (then only the data folder's files are denied).
  */
 export function loadProvided(
   certFile: string,
   keyFile: string,
-  deny: { uiDir: string; dataDir: string },
+  deny: { uiDir: string | null; dataDir: string },
   opts: { now?: () => Date } = {},
 ): CertMaterial {
   const certText = readBounded(certFile, deny);

@@ -38,6 +38,10 @@ import {
   SnapshotMissingError, SnapshotTamperedError,
 } from "../share/errors.js";
 import { actorOf, needs } from "./auth.js";
+import { OwnerCredentialRequiredError } from "../people/service.js";
+import { RemoteInputError, RemoteStartError } from "./remote.js";
+import { AcmeError } from "./acme.js";
+import { CertificateError } from "./certs.js";
 import { trimmerFor } from "../ledger/trim.js";
 
 export type RouteDeps = {
@@ -130,6 +134,12 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
   if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
   if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
+  // Remote access: fixed codes only. `code` and `type` are the thrower's allowlisted names, never a path or a CA's text.
+  if (err instanceof OwnerCredentialRequiredError) return reply.code(409).send({ error: "owner_credential_required" });
+  if (err instanceof RemoteStartError) return reply.code(502).send({ error: "remote_start_failed" });
+  if (err instanceof RemoteInputError) return reply.code(400).send({ error: "invalid_input", code: err.code });
+  if (err instanceof AcmeError) return reply.code(502).send({ error: "acme_failed", type: err.type });
+  if (err instanceof CertificateError) return reply.code(400).send({ error: "certificate_invalid", code: err.code });
   if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
   if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
   if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });

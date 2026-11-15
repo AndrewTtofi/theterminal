@@ -275,7 +275,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0 };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -515,6 +515,7 @@ describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
     await addClaude(s);
     const owners = await json<Record<string, unknown>>(get(s, "/api/status"));
     expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+    expect(owners.remote).toEqual({ enabled: false, listening: false, label: "off" });
     for (const role of ["viewer", "reviewer", "maintainer"] as const) {
       const res = await theirs(role, "GET", "/api/status");
       expect(res.status).toBe(200);

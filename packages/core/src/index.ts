@@ -23,7 +23,18 @@ export type { GateRouteDeps } from "./server/gates-routes.js";
 export { registerLedgerStream } from "./server/events-ws.js";
 export { createServer } from "./server/server.js";
 export { DataDirInUseError } from "./server/data-dir-lock.js";
-export type { RunningServer } from "./server/server.js";
+export type { RunningServer, RemoteOptions } from "./server/server.js";
+export {
+  RemoteListener, RemoteStartError, RemoteInputError, REMOTE_KEY_SECRET, REMOTE_FILES_SECRET, HEALTHZ_PATH, REMOTE_IDLE_TIMEOUT_MS,
+  ADDRESS_CACHE_MS, readRemoteState, checkRemoteHost,
+} from "./server/remote.js";
+export type { RemoteDeps, EnableInput, RemoteView, RemoteInputCode } from "./server/remote.js";
+export { registerRemoteRoutes, remoteStatus, remoteLabel } from "./server/remote-routes.js";
+export type { RemoteRoutesDeps, RemoteStatus } from "./server/remote-routes.js";
+export { AcmeManager, AcmeError, selectAcmeClient, fakeAcme, ACME_DIRECTORY, ACME_STAGING } from "./server/acme.js";
+export type { AcmeClientLike, AcmeDeps } from "./server/acme.js";
+export { CertificateError, selfSignedTlsCertificate, certFingerprint, loadProvided, localAddresses } from "./server/certs.js";
+export type { CertMaterial } from "./server/certs.js";
 export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
 export {

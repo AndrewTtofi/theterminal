@@ -18,6 +18,7 @@ import type { Db } from "../db.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import { commitEvents } from "../events/commit.js";
 import type { SecretStore } from "../secrets/store.js";
+import { OwnerCredentialRequiredError } from "../people/service.js";
 import { AcmeError, type AcmeManager } from "./acme.js";
 import { localAddresses as machineAddresses, loadProvided, selfSignedTlsCertificate, type CertMaterial } from "./certs.js";
 
@@ -31,6 +32,13 @@ export const HEALTHZ_PATH = "/healthz";
 export const REMOTE_HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Concurrent TCP connections the TLS listener accepts. */
 export const REMOTE_MAX_CONNECTIONS = 256;
+/**
+ * Milliseconds of silence after which a TLS connection is closed. Long enough for a slow request; the event stream's
+ * ping (events-ws.ts) keeps a live WebSocket inside it, and a peer that stops answering pings is cut by that stream.
+ */
+export const REMOTE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+/** How long the machine's names and addresses are kept before os.networkInterfaces() and os.hostname() are read again. */
+export const ADDRESS_CACHE_MS = 5_000;
 /** Milliseconds to bind the port, and to close it. */
 const LISTEN_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
@@ -61,16 +69,10 @@ export class RemoteStartError extends Error {
 }
 
 /**
- * The Owner has no passkey or key, so turning remote access on would lock them out of it. → 409
- * owner_credential_required. Task 1's people/service.ts defines the same error; the wiring task re-exports that one
- * from here so both modules throw one class.
+ * The Owner has no passkey or key, so turning remote access on from the UI would lock them out of it. → 409
+ * owner_credential_required. One class, the people service's, so the remote routes and the people routes agree.
  */
-export class OwnerCredentialRequiredError extends Error {
-  constructor() {
-    super("the Owner needs a passkey or key before remote access can be turned on");
-    this.name = "OwnerCredentialRequiredError";
-  }
-}
+export { OwnerCredentialRequiredError } from "../people/service.js";
 
 export type RemoteInputCode =
   | "invalid_port"
@@ -112,10 +114,13 @@ export type RemoteDeps = {
   /** Not the whole PeopleService: one boolean, so this module is testable against a stub. */
   people: { hasOwnerCredential(): boolean };
   dataDir: string;
-  uiDir: string;
+  /** The UI folder, denied to provided certificate files; null when the server serves none. */
+  uiDir: string | null;
   now?: () => Date;
   /** The machine's names and addresses for the certificate and the wildcard bind; tests inject fixed ones. */
   localAddresses?: () => { hostnames: string[]; addresses: string[] };
+  /** Tests only: a shorter idle timeout for TLS connections. Default REMOTE_IDLE_TIMEOUT_MS. */
+  idleTimeoutMs?: number;
   /** Certificates from Let's Encrypt for `tls: "acme"`; without it that mode is refused (`acme_unavailable`). */
   acme?: AcmeManager;
   /** The plain challenge listener's port when the input names none: 80, except in tests. */
@@ -266,7 +271,14 @@ export class RemoteListener {
 
   constructor(private readonly deps: RemoteDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.addressesOf = deps.localAddresses ?? (() => machineAddresses());
+    // The Host rule runs on every remote request: the interfaces and hostname are read at most once per ADDRESS_CACHE_MS.
+    const read = deps.localAddresses ?? (() => machineAddresses());
+    let cached: { at: number; value: { hostnames: string[]; addresses: string[] } } | null = null;
+    this.addressesOf = () => {
+      const t = Date.now();
+      if (cached === null || t - cached.at >= ADDRESS_CACHE_MS || t < cached.at) cached = { at: t, value: read() };
+      return cached.value;
+    };
     this.current = readRemoteState(deps.db);
     this.unsubscribe = deps.ledger.onAppend((e) => {
       if (REMOTE_TYPES.has(e.type)) this.current = applyRemoteEntry(this.current, e);
@@ -301,10 +313,14 @@ export class RemoteListener {
    * Turns remote access on (or reconfigures it). Order: certificate material → `remote.certificate_changed` when the
    * certificate is new → `remote.enabled` → listen; a listen failure commits `remote.disabled` and throws
    * RemoteStartError. Errors before the commit record nothing.
+   *
+   * A human (the UI switch) needs an Owner credential first, or they would lock themselves out of what they turned on.
+   * A system actor is the server itself acting on the operator's command line (`--remote`), where the way in is the
+   * bootstrap invite printed at start, so that check does not apply, as it does not at a restart (startIfEnabled).
    */
   enable(actor: Actor, i: EnableInput): Promise<RemoteState> {
     return this.serial(async () => {
-      if (!this.deps.people.hasOwnerCredential()) throw new OwnerCredentialRequiredError();
+      if (actor.kind === "human" && !this.deps.people.hasOwnerCredential()) throw new OwnerCredentialRequiredError();
       if (this.deps.ledger.readOnly) throw new LedgerReadOnlyError();
       const cfg = this.resolve(i);
       const material = await this.enableMaterial(cfg, i);
@@ -751,6 +767,9 @@ export class RemoteListener {
           return;
         }
         this.track(socket);
+        // An idle network connection is closed. Reads and writes both count as activity, so a WebSocket kept alive by
+        // the stream's pings stays; the http server's own header, request and keep-alive timeouts apply as well.
+        socket.setTimeout(this.deps.idleTimeoutMs ?? REMOTE_IDLE_TIMEOUT_MS, () => socket.destroy());
         this.deps.http.emit("connection", socket);
       },
     );

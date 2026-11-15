@@ -11,6 +11,10 @@ import { GATES, type GateEvaluation, type GateId, type NewLedgerEntry } from "@t
 import { commitEvents } from "../../src/events/commit.js";
 import { completeIntake, type World } from "../gates/setup.js";
 import { asNobody, asPrincipal, fakeAuth } from "../fixtures/principal.js";
+import { AcmeError } from "../../src/server/acme.js";
+import { CertificateError } from "../../src/server/certs.js";
+import { OwnerCredentialRequiredError } from "../../src/people/service.js";
+import { RemoteInputError, RemoteStartError } from "../../src/server/remote.js";
 
 let app: FastifyInstance;
 let db: ReturnType<typeof openDatabase>;
@@ -310,6 +314,32 @@ describe("routes", () => {
     const res = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "X" } });
     expect(res.statusCode).toBe(423);
     expect(res.json()).toEqual({ error: "ledger_read_only" });
+  });
+
+  it("maps the remote listener's and ACME's errors to their fixed codes, never a path or the CA's text", async () => {
+    const a = Fastify();
+    fakeAuth(a);
+    registerRoutes(a, { board, gates, ledger, getIntegrity: () => integrity });
+    const throws = new Map<string, () => never>([
+      ["start", () => { throw new RemoteStartError(); }],
+      ["input", () => { throw new RemoteInputError("invalid_bind"); }],
+      ["acme", () => { throw new AcmeError("urn:ietf:params:acme:error:dns"); }],
+      ["cert", () => { throw new CertificateError("path_denied"); }],
+      ["owner", () => { throw new OwnerCredentialRequiredError(); }],
+    ]);
+    a.get<{ Params: { which: string } }>("/boom/:which", async (req) => throws.get(req.params.which)!());
+    const expected: Record<string, [number, unknown]> = {
+      start: [502, { error: "remote_start_failed" }],
+      input: [400, { error: "invalid_input", code: "invalid_bind" }],
+      acme: [502, { error: "acme_failed", type: "urn:ietf:params:acme:error:dns" }],
+      cert: [400, { error: "certificate_invalid", code: "path_denied" }],
+      owner: [409, { error: "owner_credential_required" }],
+    };
+    for (const [which, [status, body]] of Object.entries(expected)) {
+      const res = await a.inject({ url: `/boom/${which}` });
+      expect(res.statusCode, which).toBe(status);
+      expect(res.json(), which).toEqual(body);
+    }
   });
 
   it("500 without leaking internals", async () => {

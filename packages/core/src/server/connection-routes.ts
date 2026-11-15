@@ -12,6 +12,8 @@ import { workspaceCounts } from "../events/projections.js";
 import type { IntakeService } from "../intake/service.js";
 import type { NetworkState } from "../network.js";
 import { actorOf, needs } from "./auth.js";
+import { remoteStatus } from "./remote-routes.js";
+import type { RemoteView } from "./remote.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -27,6 +29,8 @@ export type ConnectionRouteDeps = {
   network: () => NetworkState;
   /** Share links being served right now: the live listeners, never the projection's rows. */
   shareLinks: () => number;
+  /** The remote listener's state; the Owner's status carries `remote` from it, nobody else's does. */
+  remote: () => RemoteView;
 };
 
 // Shapes only: the service checks fields, values and config against the catalog.
@@ -53,7 +57,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks, remote } = deps;
 
   app.get("/api/connections/catalog", needs("owner"), async () => CONNECTION_CATALOG);
 
@@ -155,6 +159,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       shareLinks: shareLinks(),
     };
     if (req.principal?.personId !== OWNER_ID) return shared;
-    return { ...shared, connections: { ...shared.connections, keychain: connections.keychainState() } };
+    // The address is the Owner's: `remote` (with its label) is on their copy only, by the fixed list above.
+    return { ...shared, connections: { ...shared.connections, keychain: connections.keychainState() }, remote: remoteStatus(remote(), req.principal) };
   });
 }

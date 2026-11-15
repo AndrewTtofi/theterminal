@@ -31,7 +31,7 @@ import {
 } from "../people/webauthn.js";
 import { NotFoundError } from "../board/board-service.js";
 import { APP_HOST, SESSION_COOKIE, actorOf, clientKey, sessionCookieOptions } from "./auth.js";
-import { OwnerCredentialRequiredError as RemoteOwnerCredentialRequiredError, type RemoteView } from "./remote.js";
+import type { RemoteView } from "./remote.js";
 import { sendError } from "./routes.js";
 import type { Throttle } from "./throttle.js";
 
@@ -64,7 +64,7 @@ function sendPeopleError(err: unknown, reply: FastifyReply): FastifyReply | null
   if (err instanceof LastCredentialError) return reply.code(409).send({ error: "last_credential" });
   if (err instanceof SelfChangeError) return reply.code(409).send({ error: "self_change" });
   if (err instanceof OwnerRoleError) return reply.code(409).send({ error: "owner_role" });
-  if (err instanceof OwnerCredentialRequiredError || err instanceof RemoteOwnerCredentialRequiredError) {
+  if (err instanceof OwnerCredentialRequiredError) {
     return reply.code(409).send({ error: "owner_credential_required" });
   }
   if (err instanceof CredentialExistsError) return reply.code(409).send({ error: "credential_exists" });
@@ -288,7 +288,8 @@ export function registerPeopleRoutes(app: FastifyInstance, deps: PeopleRoutesDep
       if (role === "owner") throw new OwnerRoleError();
       const { invite, code } = service.invite(actorOf(request), role);
       const remote = deps.remote();
-      const on = remote !== null && remote.enabled && remote.fingerprint !== null;
+      // Only a listener that is up names an address: its real addresses, never the wildcard it binds.
+      const on = remote !== null && remote.enabled && remote.listening && remote.fingerprint !== null;
       const fingerprint = on ? remote.fingerprint : null;
       const url = on
         ? `https://${remote.domain ?? bracket(remote.addresses[0] ?? remote.bind)}:${remote.port}/join/${code}#fp=${remote.fingerprint}`
