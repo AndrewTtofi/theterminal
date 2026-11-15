@@ -12,7 +12,7 @@ import { getIntake, getPerson, listPendingActions, listProjectGateDecisions, lis
 import type { GateService } from "../gates/service.js";
 import type { Ledger, VerifyResult } from "../ledger/ledger.js";
 import { narrationContext } from "../story/story.js";
-import { cleanSnapshot, type ShareClean } from "./clean.js";
+import { FORMER_COLLABORATOR, cleanSnapshot, type ShareClean } from "./clean.js";
 import { PROGRAM_LABELS, evidenceOf, techStack } from "./stack.js";
 
 export { evidenceOf };
@@ -144,8 +144,7 @@ function workforce(runs: AgentRun[]): WorkforceRow[] {
   return rows;
 }
 
-/** What the page calls someone no longer on record. */
-export const FORMER_COLLABORATOR = "a former collaborator";
+export { FORMER_COLLABORATOR };
 
 /** Who decided: the gate entry's signer or waiver, else the entry's actor. */
 function deciderOf(e: LedgerEntry): string {

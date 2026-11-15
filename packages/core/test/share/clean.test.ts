@@ -190,12 +190,16 @@ describe("cleanSnapshot", () => {
     s.asks[0]!.prompt = mark("build it");
     s.hardware!.cpu = mark("M1");
     s.hardware!.gpu = mark("GPU");
+    s.owner = mark("Owner");
+    s.waiting[0]!.assignee = mark("a reviewer");
+    s.decisions[0]!.by = mark("Reviewer");
     const out = cleanSnapshot(s, clean);
     const json = JSON.stringify(out);
     expect(json).not.toMatch(/\balice\b/);
     expect(out.project.name).toBe("Book Club by <user>");
     expect(out.hardware!.gpu).toBe("GPU by <user>");
     expect(out.asks[0]!.prompt).toBe("build it by <user>");
+    expect([out.owner, out.waiting[0]!.assignee, out.decisions[0]!.by]).toEqual(["Owner by <user>", "a reviewer by <user>", "Reviewer by <user>"]);
   });
 
   describe.each(WORD_USERNAMES)("with the username %s", (username) => {
@@ -213,6 +217,13 @@ describe("cleanSnapshot", () => {
       expect(out.waiting[0]!.assignee).toBe("Owner");
       expect(out.decisions[0]!.kind).toBe("gate_waiver");
       expect(out.decisions[0]!.by).toBe("Owner");
+      for (const fixed of ["a former collaborator", "a reviewer or above", "a maintainer or above", "the Owner"]) {
+        const f = enumHeavy();
+        f.decisions[0]!.by = fixed;
+        f.waiting[0]!.assignee = fixed;
+        const o = cleanSnapshot(f, c);
+        expect([o.decisions[0]!.by, o.waiting[0]!.assignee]).toEqual([fixed, fixed]);
+      }
       expect(out.readiness[0]!.gateId).toBe("ready_to_ship");
       expect(out.readiness[0]!.state).toBe("open");
       expect(out.readiness[0]!.title).toBe("Ready to ship");

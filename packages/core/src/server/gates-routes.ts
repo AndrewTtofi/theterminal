@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { gatePayloadSchemas } from "@theterminal/shared";
 import { NotFoundError } from "../board/board-service.js";
 import { GateRequirementError, type GateService, type Signer } from "../gates/service.js";
 import { sendError } from "./routes.js";
@@ -10,8 +11,10 @@ export type GateRouteDeps = {
   principal: (request: FastifyRequest) => Signer | null;
 };
 
-// The shape only: the service checks the gate, the requirement and that a named person is current.
+// The body's shape; the gate and the requirement are then parsed as the ledger entry's payload, and the service
+// checks that the project exists and that a named person is current.
 const requirementBody = z.object({ requirement: z.unknown() }).strict();
+const requirementInput = gatePayloadSchemas["gate.requirement_set"];
 
 type Params = { Params: { id: string; gateId: string } };
 
@@ -41,11 +44,11 @@ export function registerGateRoutes(app: FastifyInstance, deps: GateRouteDeps): v
       const who = principal(req);
       if (who === null) return reply.code(401).send({ error: "unauthorized" });
       if (who.role !== "owner") return reply.code(403).send({ error: "forbidden", required: "owner" });
-      const { requirement } = requirementBody.parse(req.body);
-      const gateId = req.params.gateId as never;
-      // undefined (a missing key) is refused by the service's schema, like any other shape it does not know.
-      const inForce = gates.setRequirement({ kind: "human", id: who.personId }, req.params.id, gateId, requirement as never);
-      return { gateId: req.params.gateId, requirement: inForce };
+      const body = requirementBody.parse(req.body);
+      // A missing `requirement` (undefined) is refused here, like any shape the payload does not know.
+      const { gateId, requirement } = requirementInput.parse({ gateId: req.params.gateId, requirement: body.requirement });
+      const inForce = gates.setRequirement({ kind: "human", id: who.personId }, req.params.id, gateId, requirement);
+      return { gateId, requirement: inForce };
     });
   });
 }

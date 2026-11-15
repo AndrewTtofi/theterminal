@@ -154,6 +154,38 @@ describe("ShareService.confirm", () => {
     expect(() => s.confirm(human, projectId, p.previewId, p.contentHash)).toThrow(PreviewNotFoundError);
   });
 
+  it("cleans people's names like any free text: an email, the username and a home path are scrubbed, not refused", async () => {
+    clean = shareCleaner({ dataDir, secrets: () => [SECRET], username: "clubuser", home: "/Users/clubhome" });
+    emit(w, null, "person.renamed", { personId: "owner", name: "alice@example.test" }, human);
+    const people = [["p1", "clubuser"], ["p2", "/Users/clubhome/notes"]] as const;
+    for (const [id, name] of people) {
+      emit(w, null, "person.invited", {
+        inviteId: `i-${id}`, role: "reviewer", codeHash: sha256(id), expiresAt: "2099-01-01T00:00:00.000Z",
+      }, human);
+      emit(w, null, "person.joined", {
+        personId: id, inviteId: `i-${id}`, name, role: "reviewer",
+        credential: { kind: "key", credentialId: `key-${id}`, publicKey: `TESTKEY${id}`, label: "CLI" },
+      }, { kind: "human", id });
+    }
+    startRun(w, projectId, "r2", "fake", null);
+    for (const [i, [id]] of people.entries()) {
+      emit(w, projectId, "agent.action.requested", { runId: "r2", actionId: `b${i}`, kind: "shell", tool: "Bash", summary: "ls", input: null });
+      emit(w, projectId, "agent.action.decided", { runId: "r2", actionId: `b${i}`, decision: "allow", by: "human", reason: "" }, { kind: "human", id });
+    }
+    emit(w, projectId, "agent.action.requested", { runId: "r2", actionId: "b9", kind: "shell", tool: "Bash", summary: "ls", input: null });
+
+    const s = service();
+    const p = await s.preview(projectId, DEFAULT_SHARE_OPTIONS);
+    expect(p.snapshot.owner).toBe("[email]");
+    expect(p.snapshot.decisions.slice(0, 2).map((d) => d.by)).toEqual(["~/notes", "<user>"]);
+    expect(p.snapshot.waiting[0]!.assignee).toBe("a reviewer or above");
+    for (const raw of ["alice@example.test", "clubuser", "/Users/clubhome"]) {
+      expect(p.html).not.toContain(raw);
+      expect(JSON.stringify(p.snapshot)).not.toContain(raw);
+    }
+    expect(() => s.confirm(human, projectId, p.previewId, p.contentHash)).not.toThrow();
+  });
+
   it("refuses an unknown id, a wrong hash, an expired preview, another project and a non-human, writing and recording nothing", async () => {
     const s = service();
     const p = await s.preview(projectId, DEFAULT_SHARE_OPTIONS);
