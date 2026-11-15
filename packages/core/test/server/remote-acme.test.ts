@@ -41,9 +41,9 @@ function served(port: number): Promise<{ fingerprint: string; pem: string }> {
 }
 
 type Plain = { status: number; headers: http.IncomingHttpHeaders; body: string };
-function plain(port: number, path: string, method = "GET"): Promise<Plain> {
+function plain(port: number, path: string, method = "GET", host = DOMAIN): Promise<Plain> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, method, headers: { host: DOMAIN }, agent: false }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path, method, headers: { host }, agent: false }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c: string) => (body += c));
@@ -113,7 +113,9 @@ describe("tls: acme", () => {
     expect(h.remote.state()).toMatchObject({ enabled: true, listening: true, tls: "acme", acme: { lastError: null } });
 
     // After the order the token is gone, though the plain listener stays up for renewals.
-    expect((await plain(h.remote.challengePort()!, `/.well-known/acme-challenge/${token}`)).status).toBe(404);
+    const after = await plain(h.remote.challengePort()!, `/.well-known/acme-challenge/${token}`);
+    expect(after.status).toBe(301);
+    expect(after.body).not.toContain(keyAuth!);
   });
 
   it("keeps the account key and certificate key out of the ledger and every file", async () => {
@@ -132,24 +134,44 @@ describe("tls: acme", () => {
     }
   });
 
-  it("answers 404 to everything on the plain listener but a pending token, with no redirect", async () => {
+  it("redirects GET and HEAD that are not a pending token to the configured domain, and 404s other methods", async () => {
     const h = await harness({ acmeClient: fakeAcme });
-    await h.remote.enable(OWNER, ACME);
+    const { port: tlsPort } = await h.remote.enable(OWNER, ACME);
     const port = h.remote.challengePort()!;
-    for (const [method, path] of [
-      ["GET", "/"],
-      ["GET", "/api/me"],
-      ["GET", "/healthz"],
-      ["GET", "/.well-known/acme-challenge/"],
-      ["GET", "/.well-known/acme-challenge/abc"],
-      ["GET", "/.well-known/acme-challenge/../../token"],
-      ["GET", "/.well-known/acme-challenge/abc?x=1"],
-      ["POST", "/.well-known/acme-challenge/abc"],
-    ] as const) {
-      const r = await plain(port, path, method);
-      expect(r.status, `${method} ${path}`).toBe(404);
+    for (const method of ["GET", "HEAD"] as const) {
+      for (const [path, target] of [
+        ["/", "/"],
+        ["/api/me", "/api/me"],
+        ["/healthz", "/healthz"],
+        ["/.well-known/acme-challenge/", "/.well-known/acme-challenge/"],
+        ["/.well-known/acme-challenge/abc", "/.well-known/acme-challenge/abc"],
+        ["/.well-known/acme-challenge/abc?x=1", "/.well-known/acme-challenge/abc?x=1"],
+        [`/${"a".repeat(2100)}`, "/"],
+      ] as const) {
+        const r = await plain(port, path, method);
+        expect(r.status, `${method} ${path.slice(0, 40)}`).toBe(301);
+        expect(r.headers.location).toBe(`https://${DOMAIN}:${tlsPort}${target}`);
+        expect(r.body).toBe(method === "HEAD" ? "" : r.body);
+      }
+      // The target comes from the configured domain, never the request's Host.
+      const evil = await plain(port, "/x", method, "evil.example");
+      expect(evil.status).toBe(301);
+      expect(evil.headers.location).toBe(`https://${DOMAIN}:${tlsPort}/x`);
+    }
+    for (const method of ["POST", "PUT", "DELETE", "OPTIONS"]) {
+      const r = await plain(port, "/.well-known/acme-challenge/abc", method);
+      expect(r.status, method).toBe(404);
       expect(r.headers.location).toBeUndefined();
     }
+  });
+
+  it("an absolute-form request target redirects to / on the configured domain", async () => {
+    const h = await harness({ acmeClient: fakeAcme });
+    const { port: tlsPort } = await h.remote.enable(OWNER, ACME);
+    const port = h.remote.challengePort()!;
+    const r = await plain(port, "http://evil.example/steal", "GET", "evil.example");
+    expect(r.status).toBe(301);
+    expect(r.headers.location).toBe(`https://${DOMAIN}:${tlsPort}/`);
   });
 
   it("requires a domain, and an AcmeManager", async () => {
@@ -229,7 +251,9 @@ describe("tls: acme", () => {
     expect((await served(first.port)).fingerprint).toBe(first.fingerprint);
     // The harness's deps put the plain listener on an ephemeral port (port 80 outside tests).
     expect(h.remote.challengePort()).not.toBeNull();
-    expect((await plain(h.remote.challengePort()!, "/")).status).toBe(404);
+    const r = await plain(h.remote.challengePort()!, "/");
+    expect(r.status).toBe(301);
+    expect(r.headers.location).toBe(`https://${DOMAIN}:${first.port}/`);
     expect(remoteEntries(h).at(-1)!.type).toBe("remote.enabled");
   });
 });
@@ -298,6 +322,30 @@ describe("renewal", () => {
     expect(h.remote.state().acme).toEqual({ lastError: null });
     expect(remoteEntries(h).at(-1)!.type).toBe("remote.certificate_changed");
     expect(console.error).toHaveBeenCalledWith("the remote certificate could not be renewed; trying again later");
+  });
+
+  it("a renewal the ledger refuses backs off, and the next attempt reuses the stored certificate without a new order", async () => {
+    const { h, s, rec, expires, setNow } = await renewing();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    setNow(new Date(expires - 20 * DAY));
+    h.ledger.readOnly = true;
+    await h.remote.renewalTick();
+    expect(rec.calls()).toBe(2);
+    expect(remoteEntries(h)).toHaveLength(2);
+    expect((await served(s.port)).fingerprint).toBe(s.fingerprint);
+    expect(h.remote.state().acme).toEqual({ lastError: "unknown" });
+    // Backed off: the next tick is skipped.
+    await h.remote.renewalTick();
+    expect(rec.calls()).toBe(2);
+    h.ledger.readOnly = false;
+    await h.remote.renewalTick();
+    expect(rec.calls()).toBe(2);
+    const last = remoteEntries(h).at(-1)!;
+    expect(last.type).toBe("remote.certificate_changed");
+    const fp = (last.payload as { fingerprint: string }).fingerprint;
+    expect(fp).not.toBe(s.fingerprint);
+    expect((await served(s.port)).fingerprint).toBe(fp);
+    expect(h.remote.state().acme).toEqual({ lastError: null });
   });
 
   it("schedules the 12-hour check unref'd and stops it on disable", async () => {

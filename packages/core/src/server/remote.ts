@@ -49,6 +49,7 @@ const CHALLENGE_PATH = /^\/\.well-known\/acme-challenge\/([A-Za-z0-9_-]{1,128})$
 const CHALLENGE_MAX_CONNECTIONS = 64;
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_MAX_BYTES = 1024;
+const MAX_REDIRECT_PATH = 2048;
 const REMOTE_TYPES = new Set(["remote.enabled", "remote.disabled", "remote.certificate_changed"]);
 
 /** The listener could not bind its port. The message is fixed. → 502 remote_start_failed */
@@ -247,7 +248,15 @@ export class RemoteListener {
   private readonly sockets = new Set<net.Socket>();
   /** The material the TLS listener serves right now. */
   private served: CertMaterial | null = null;
-  private challenge: { server: http.Server; bind: string; port: number; sockets: Set<net.Socket> } | null = null;
+  /** `domain` and `tlsPort` are the redirect target, from the configuration, never from a request's Host. */
+  private challenge: {
+    server: http.Server;
+    bind: string;
+    port: number;
+    sockets: Set<net.Socket>;
+    domain: string;
+    tlsPort: number;
+  } | null = null;
   private renewTimer: NodeJS.Timeout | null = null;
   private renewFailures = 0;
   private skipChecks = 0;
@@ -321,6 +330,7 @@ export class RemoteListener {
         payload: { port, bind: cfg.bind, domain: cfg.domain, tls: cfg.tls, fingerprint: material.fingerprint },
       });
       commitEvents(this.deps.db, this.deps.ledger, () => ({ events, result: () => undefined }));
+      if (this.challenge !== null) this.challenge.tlsPort = port;
       try {
         await this.listen(material, port, cfg.bind);
       } catch {
@@ -356,7 +366,7 @@ export class RemoteListener {
       try {
         if (cfg.tls === "acme") {
           try {
-            await this.ensureChallenge(cfg.bind, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
+            await this.ensureChallenge(cfg, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
           } catch {
             console.error("the ACME challenge listener could not start, so the certificate cannot be renewed");
           }
@@ -371,7 +381,10 @@ export class RemoteListener {
         await this.listen(material, cfg.port, cfg.bind);
         if (cfg.tls === "acme") {
           this.startRenewals();
-          if (this.deps.acme!.isDue(material)) setTimeout(() => void this.renewalTick().catch(() => undefined), 0).unref();
+          const acme = this.deps.acme;
+          if (acme !== undefined && acme.isDue(material)) {
+            setTimeout(() => void this.renewalTick().catch(() => undefined), 0).unref();
+          }
         }
       } catch {
         await this.stopAcme();
@@ -439,7 +452,7 @@ export class RemoteListener {
     if (cfg.tls !== "acme") return this.material(cfg, i);
     const keep = () => this.server !== null && this.current.enabled && this.current.tls === "acme";
     try {
-      await this.ensureChallenge(cfg.bind, cfg.acmePort ?? ACME_CHALLENGE_PORT);
+      await this.ensureChallenge(cfg, cfg.acmePort ?? ACME_CHALLENGE_PORT);
       const m = await this.acmeMaterial(cfg, { reuseDue: false });
       this.lastAcmeError = null;
       return m;
@@ -477,27 +490,35 @@ export class RemoteListener {
         this.skipChecks--;
         return;
       }
-      let next: CertMaterial | null;
-      try {
-        if (this.challenge === null) await this.ensureChallenge(s.bind, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
-        next = await acme.renewIfDue(s.domain, current, { probe: (token) => this.probe(token) });
-      } catch (err) {
+      const cfg: Config = { port: s.port, bind: s.bind, domain: s.domain, tls: s.tls };
+      const failed = (type: string): void => {
         this.renewFailures++;
         this.skipChecks = Math.min(2 ** this.renewFailures - 1, ACME_MAX_SKIPPED_CHECKS);
-        this.lastAcmeError = err instanceof AcmeError ? err.type : "unknown";
+        this.lastAcmeError = type;
         console.error("the remote certificate could not be renewed; trying again later");
+      };
+      if (!acme.isDue(current)) return;
+      let next: CertMaterial;
+      try {
+        // A certificate an earlier tick obtained but could not record is reused: no new order for it.
+        const stored = await acme.load(s.domain);
+        if (stored !== null && stored.fingerprint !== current.fingerprint && !acme.isDue(stored)) next = stored;
+        else {
+          if (this.challenge === null) await this.ensureChallenge(cfg, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
+          next = await acme.obtain(s.domain, { probe: (token) => this.probe(token) });
+        }
+      } catch (err) {
+        failed(err instanceof AcmeError ? err.type : "unknown");
         return;
       }
-      if (next === null) return;
-      const cfg: Config = { port: s.port, bind: s.bind, domain: s.domain, tls: s.tls };
       try {
         commitEvents(this.deps.db, this.deps.ledger, () => ({
           events: [this.certificateChanged(SYSTEM, cfg, next)],
           result: () => undefined,
         }));
       } catch {
-        // A read-only ledger: the served certificate stays the one the ledger names.
-        console.error("the remote certificate could not be renewed; trying again later");
+        // A read-only ledger: the served certificate stays the one the ledger names, and the next attempt backs off.
+        failed("unknown");
         return;
       }
       server.setSecureContext({ cert: next.certPem, key: next.keyPem, minVersion: "TLSv1.2" });
@@ -527,12 +548,20 @@ export class RemoteListener {
 
   /**
    * The plain HTTP listener for HTTP-01 on `bind`:`port`. It answers GET/HEAD
-   * `/.well-known/acme-challenge/<token>` with the key authorization while that token's order is open, and 404 to
-   * everything else: no other routes, no redirect, nothing from the app. A port that cannot be bound is an AcmeError.
+   * `/.well-known/acme-challenge/<token>` with the key authorization while that token's order is open; any other GET
+   * or HEAD gets a 301 to `https://<configured domain>[:<TLS port>]<path>` (never the request's Host), and any other
+   * method 404. Nothing from the app is served here. A port that cannot be bound is an AcmeError.
    */
-  private async ensureChallenge(bind: string, port: number): Promise<void> {
+  private async ensureChallenge(cfg: Config, port: number): Promise<void> {
+    const { bind } = cfg;
+    const domain = cfg.domain;
+    if (domain === null) throw new AcmeError("unknown");
     const c = this.challenge;
-    if (c !== null && c.bind === bind && (port === 0 || c.port === port)) return;
+    if (c !== null && c.bind === bind && (port === 0 || c.port === port)) {
+      c.domain = domain;
+      c.tlsPort = cfg.port;
+      return;
+    }
     await this.stopChallenge();
     const sockets = new Set<net.Socket>();
     const server = http.createServer(
@@ -564,13 +593,22 @@ export class RemoteListener {
       throw new AcmeError("unknown");
     }
     server.on("error", () => undefined);
-    this.challenge = { server, bind, port: (server.address() as AddressInfo).port, sockets };
+    this.challenge = { server, bind, port: (server.address() as AddressInfo).port, sockets, domain, tlsPort: cfg.port };
   }
 
   private answerChallenge(req: IncomingMessage, res: ServerResponse): void {
     const m = CHALLENGE_PATH.exec(req.url ?? "");
     const body = m && (req.method === "GET" || req.method === "HEAD") ? (this.deps.acme?.challengeResponse(m[1]!) ?? null) : null;
     const headers = { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" };
+    const c = this.challenge;
+    if (body === null && c !== null && (req.method === "GET" || req.method === "HEAD")) {
+      const url = req.url ?? "";
+      const path = url.startsWith("/") && url.length <= MAX_REDIRECT_PATH ? url : "/";
+      const port = c.tlsPort === 443 ? "" : `:${c.tlsPort}`;
+      res.writeHead(301, { ...headers, location: `https://${c.domain}${port}${path}`, "content-length": "0", connection: "close" });
+      res.end();
+      return;
+    }
     if (body === null) {
       res.writeHead(404, { ...headers, "content-length": "9", connection: "close" });
       res.end(req.method === "HEAD" ? undefined : "not found");

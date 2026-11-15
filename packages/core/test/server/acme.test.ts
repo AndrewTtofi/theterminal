@@ -106,6 +106,37 @@ describe("AcmeManager.obtain with fakeAcme", () => {
     }
   });
 
+  it("writes the certificate file before storing its key, so a failed key write never pairs a new key with an old file", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-acme-"));
+    roots.push(dataDir);
+    const inner = new MemorySecretStore();
+    const certPath = join(dataDir, "remote", ACME_CERT_FILE);
+    let fileAtKeyWrite: string | null = null;
+    let failKey = false;
+    const secrets = {
+      get: (a: string) => inner.get(a),
+      delete: (a: string) => inner.delete(a),
+      async set(a: string, v: string) {
+        if (a === ACME_KEY_SECRET) {
+          try {
+            fileAtKeyWrite = readFileSync(certPath, "utf8");
+          } catch {
+            fileAtKeyWrite = null;
+          }
+          if (failKey) throw new Error("store unavailable");
+        }
+        return inner.set(a, v);
+      },
+    };
+    const mgr = new AcmeManager({ secrets, dataDir, client: fakeAcme });
+    const m = await mgr.obtain(DOMAIN);
+    expect(fileAtKeyWrite).toBe(m.certPem);
+    failKey = true;
+    await expect(mgr.obtain(DOMAIN)).rejects.toBeInstanceOf(AcmeError);
+    // The file moved on but the key did not: load() refuses the mismatched pair instead of serving it.
+    expect(await mgr.load(DOMAIN)).toBeNull();
+  });
+
   it("creates the account key once and reuses it", async () => {
     const { mgr, secrets } = setup();
     await mgr.obtain(DOMAIN);

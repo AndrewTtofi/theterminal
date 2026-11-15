@@ -252,8 +252,9 @@ export class AcmeManager {
       );
       const m = this.validate(issued.certPem, issued.keyPem, d, 0);
       if (m === null) throw new AcmeError("unknown");
-      await this.deps.secrets.set(ACME_KEY_SECRET, m.keyPem);
+      // The chain first, then its key: if the key write fails, load() sees a mismatched pair and refuses it.
       this.writeCert(m.certPem);
+      await this.deps.secrets.set(ACME_KEY_SECRET, m.keyPem);
       return m;
     } catch (err) {
       throw err instanceof AcmeError ? err : new AcmeError("unknown");
