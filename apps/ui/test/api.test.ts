@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl, subscribeLedger, type PresenceEntry } from "../src/api";
+import type { LedgerEntry } from "@theterminal/shared";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -469,5 +470,115 @@ describe("share api", () => {
     expect(errorMessage(new ApiError(409, "snapshot_tampered"))).toBe("This snapshot's file no longer matches the ledger. It will not be shared.");
     expect(errorMessage(new ApiError(404, "snapshot_missing"))).toBe("This snapshot's file is missing.");
     expect(errorMessage(new ApiError(409, "link_not_active"))).toBe("That link is no longer live.");
+  });
+});
+
+describe("subscribeLedger", () => {
+  class FakeWS {
+    static all: FakeWS[] = [];
+    sent: string[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((m: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    readyState = 0;
+    constructor(readonly url: string) {
+      FakeWS.all.push(this);
+    }
+    send(d: string) {
+      this.sent.push(d);
+    }
+    close() {
+      this.readyState = 3;
+    }
+    open() {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    emit(m: unknown) {
+      this.onmessage?.({ data: JSON.stringify(m) });
+    }
+  }
+  const WS = FakeWS as unknown as typeof WebSocket;
+  const entry = (seq: number) => ({ seq, type: "project.created" }) as unknown as LedgerEntry;
+  const people: PresenceEntry[] = [{ personId: "p1", name: "Rae", role: "reviewer", projectId: null, view: "board", since: "2026-11-15T00:00:00.000Z" }];
+
+  afterEach(() => {
+    FakeWS.all = [];
+    vi.useRealTimers();
+  });
+
+  it("sends entries to onEntry and presence frames to onPresence", () => {
+    const entries: number[] = [];
+    const frames: PresenceEntry[][] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS, onPresence: (p) => frames.push(p) });
+    const ws = FakeWS.all[0]!;
+    ws.emit(entry(1));
+    ws.emit({ type: "presence", people });
+    ws.emit(entry(2));
+    expect(entries).toEqual([1, 2]);
+    expect(frames).toEqual([people]);
+    stop();
+  });
+
+  it("a presence frame never touches last: the entry after it is delivered, and seq <= last is still dropped", () => {
+    const entries: number[] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS });
+    const ws = FakeWS.all[0]!;
+    ws.emit({ type: "presence", people });
+    ws.emit(entry(1));
+    ws.emit(entry(1));
+    ws.emit({ type: "presence", people: [] });
+    ws.emit(entry(2));
+    expect(entries).toEqual([1, 2]);
+    stop();
+    // The reconnect URL resumes from the last entry, untouched by the presence frames.
+    const again = subscribeLedger(5, (e) => entries.push(e.seq), { WS });
+    FakeWS.all[1]!.emit(entry(4));
+    expect(entries).toEqual([1, 2]);
+    expect(FakeWS.all[1]!.url).toContain("afterSeq=5");
+    again();
+  });
+
+  it("still accepts the WebSocket constructor through opts and delivers entries without onPresence", () => {
+    const entries: number[] = [];
+    const stop = subscribeLedger(0, (e) => entries.push(e.seq), { WS });
+    FakeWS.all[0]!.emit({ type: "presence", people });
+    FakeWS.all[0]!.emit(entry(3));
+    expect(entries).toEqual([3]);
+    stop();
+  });
+
+  it("sends presence on connect, when presence() changes, and as a heartbeat before the server's five-minute expiry", () => {
+    vi.useFakeTimers();
+    let where: { projectId: string | null; view: string | null } = { projectId: "p1", view: "board" };
+    const stop = subscribeLedger(0, () => {}, { WS, presence: () => where });
+    const ws = FakeWS.all[0]!;
+    expect(ws.sent).toEqual([]);
+    ws.open();
+    expect(ws.sent.map((d) => JSON.parse(d))).toEqual([{ type: "presence", projectId: "p1", view: "board" }]);
+    vi.advanceTimersByTime(5_000);
+    expect(ws.sent).toHaveLength(1); // unchanged and not yet due: nothing sent
+    where = { projectId: "p1", view: "ledger" };
+    vi.advanceTimersByTime(1_000);
+    expect(JSON.parse(ws.sent.at(-1)!)).toEqual({ type: "presence", projectId: "p1", view: "ledger" });
+    const n = ws.sent.length;
+    vi.advanceTimersByTime(60_000);
+    expect(ws.sent.length).toBeGreaterThan(n); // heartbeat, well under five minutes
+    expect(ws.sent.length).toBeLessThanOrEqual(n + 2);
+    stop();
+    const after = ws.sent.length;
+    vi.advanceTimersByTime(120_000);
+    expect(ws.sent).toHaveLength(after); // stopped: no more sends
+  });
+
+  it("heartbeats with no location when no presence() is given, so a connected person does not expire", () => {
+    vi.useFakeTimers();
+    const stop = subscribeLedger(0, () => {}, { WS });
+    const ws = FakeWS.all[0]!;
+    ws.open();
+    expect(JSON.parse(ws.sent[0]!)).toEqual({ type: "presence", projectId: null, view: null });
+    vi.advanceTimersByTime(61_000);
+    expect(ws.sent.length).toBe(2);
+    stop();
   });
 });

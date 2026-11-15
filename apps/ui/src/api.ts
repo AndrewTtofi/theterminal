@@ -534,29 +534,61 @@ function requiredWho(e: ApiError): string {
   return "the person it names";
 }
 
-/** Streams ledger entries with seq > afterSeq; reconnects with backoff 1s→10s, resuming from the last seq. */
+/** Who is here and what they look at, as the server's presence frames carry it. */
+export type PresenceEntry = { personId: string; name: string; role: Role; projectId: string | null; view: string | null; since: string };
+export type PresenceWhere = { projectId: string | null; view: string | null };
+
+/** How often presence() is read for a change, and the heartbeat that keeps a connected person inside the server's 5-minute expiry. */
+const PRESENCE_POLL_MS = 1000;
+const PRESENCE_HEARTBEAT_MS = 60_000;
+
+/**
+ * Streams ledger entries with seq > afterSeq; reconnects with backoff 1s→10s, resuming from the last seq. The same
+ * socket carries presence: a message without "seq" is a presence frame, routed to onPresence before the seq check so it
+ * never moves `last`. The client sends { type: "presence", …presence() } on connect, on each change, and every minute.
+ */
 export function subscribeLedger(
   afterSeq: number,
   onEntry: (e: LedgerEntry) => void,
-  WS: typeof WebSocket = WebSocket,
+  opts: { onPresence?: (people: PresenceEntry[]) => void; WS?: typeof WebSocket; presence?: () => PresenceWhere } = {},
 ): () => void {
+  const WS = opts.WS ?? WebSocket;
+  const where = opts.presence ?? (() => ({ projectId: null, view: null }));
   let last = afterSeq;
   let delay = 1000;
   let closed = false;
   let socket: WebSocket | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let sentKey: string | null = null;
+  let sentAt = 0;
+
+  const sendPresence = (force: boolean) => {
+    if (!socket || socket.readyState !== 1) return;
+    const w = where();
+    const msg = JSON.stringify({ type: "presence", projectId: w.projectId, view: w.view });
+    if (!force && msg === sentKey && Date.now() - sentAt < PRESENCE_HEARTBEAT_MS) return;
+    sentKey = msg;
+    sentAt = Date.now();
+    socket.send(msg);
+  };
+  const poll = setInterval(() => sendPresence(false), PRESENCE_POLL_MS);
 
   const connect = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     socket = new WS(`${proto}://${location.host}/api/events?afterSeq=${last}`);
     socket.onopen = () => {
       delay = 1000;
+      sendPresence(true);
     };
     socket.onmessage = (m) => {
-      const entry = JSON.parse(String(m.data)) as LedgerEntry;
-      if (entry.seq <= last) return;
-      last = entry.seq;
-      onEntry(entry);
+      const msg = JSON.parse(String(m.data)) as LedgerEntry | { type: "presence"; people: PresenceEntry[] };
+      if (!("seq" in msg)) {
+        if (msg.type === "presence") opts.onPresence?.(msg.people);
+        return;
+      }
+      if (msg.seq <= last) return;
+      last = msg.seq;
+      onEntry(msg);
     };
     socket.onclose = () => {
       if (closed) return;
@@ -568,6 +600,7 @@ export function subscribeLedger(
 
   return () => {
     closed = true;
+    clearInterval(poll);
     if (timer) clearTimeout(timer);
     socket?.close();
   };
