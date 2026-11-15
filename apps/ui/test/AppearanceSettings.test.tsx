@@ -179,7 +179,7 @@ describe("AppearanceSettings", () => {
     expect(alert.textContent).toContain("That theme is not valid. colors.bg: a colour must be #rgb or #rrggbb");
     expect(loadUserThemes()).toEqual([]);
     expect(localStorage.getItem(THEMES_KEY)).toBeNull();
-    expect(prop("bg")).not.toBe("red");
+    expect(prop("bg")).toBe(ice.colors.bg);
   });
 
   it("refuses a file over 64 KB without reading it", async () => {
