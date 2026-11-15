@@ -328,11 +328,16 @@ export function registerPeopleRoutes(app: FastifyInstance, deps: PeopleRoutesDep
     scope.get<Code>("/api/join/:code", async (request) => {
       const invite = service.inviteByCode(request.params.code);
       const remote = request.listener === "remote" ? deps.remote() : null;
+      // The address the person is told they are joining is the configured one (the remote domain or first address
+      // and port on the remote listener, the app host and port on the local one), never the request's Host header.
+      const host = remote !== null
+        ? `${remote.domain ?? bracket(remote.addresses[0] ?? remote.bind)}:${remote.port}`
+        : `${APP_HOST}:${deps.port()}`;
       return {
         role: invite.role,
         expiresAt: invite.expiresAt,
         passkeys: rpFor(request) !== null,
-        host: host(request),
+        host,
         fingerprint: remote?.fingerprint ?? null,
       };
     });

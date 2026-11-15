@@ -395,8 +395,13 @@ describe("people routes", () => {
   it("joins over the remote listener with an https origin and a Secure cookie; an IP literal has no passkeys but takes a key", async () => {
     const { code } = await invite();
     listener = "remote";
+    remoteView = {
+      enabled: true, listening: true, port: REMOTE_PORT, bind: "0.0.0.0", domain: null, tls: "self_signed", fingerprint: FP,
+      expiresAt: "2027-11-15T00:00:00.000Z", addresses: ["192.168.1.10"], acme: { lastError: null },
+    };
     const info = (await call("GET", `/api/join/${code}`)).json();
-    expect(info).toMatchObject({ passkeys: true, host: REMOTE_HOST });
+    // The host named is the listener's configured address, not the name the request came in by.
+    expect(info).toMatchObject({ passkeys: true, host: `192.168.1.10:${REMOTE_PORT}`, fingerprint: FP });
     const { res, cookie } = await joinPasskey(code);
     expect(res.statusCode).toBe(201);
     expect(res.json()).toMatchObject({ listener: "remote" });
@@ -450,6 +455,23 @@ describe("people routes", () => {
     listener = "remote";
     remoteView = { ...remoteView, domain: null };
     expect((await call("GET", `/api/join/${code}`)).json().fingerprint).toBe(FP);
+  });
+
+  it("GET /api/join/:code names the configured address as its host, never the request's Host header", async () => {
+    const { code } = await invite();
+    // Local: the app host and port, whatever name the request came in by.
+    expect((await call("GET", `/api/join/${code}`, undefined, { host: `127.0.0.1:${PORT}` })).json()).toMatchObject({ host: LOCAL_HOST });
+    expect((await call("GET", `/api/join/${code}`, undefined, { host: `localhost:${PORT}` })).json()).toMatchObject({ host: LOCAL_HOST });
+    // Remote: the configured domain, or the listener's first address, with the remote port; both accepted names give the same.
+    listener = "remote";
+    remoteView = {
+      enabled: true, listening: true, port: REMOTE_PORT, bind: "0.0.0.0", domain: null, tls: "self_signed", fingerprint: FP,
+      expiresAt: "2027-11-15T00:00:00.000Z", addresses: ["192.168.1.10"], acme: { lastError: null },
+    };
+    expect((await call("GET", `/api/join/${code}`)).json()).toMatchObject({ host: `192.168.1.10:${REMOTE_PORT}`, fingerprint: FP });
+    expect((await call("GET", `/api/join/${code}`, undefined, { host: `192.168.1.10:${REMOTE_PORT}` })).json()).toMatchObject({ host: `192.168.1.10:${REMOTE_PORT}` });
+    remoteView = { ...remoteView, domain: "tt.example.com" };
+    expect((await call("GET", `/api/join/${code}`)).json()).toMatchObject({ host: `tt.example.com:${REMOTE_PORT}` });
   });
 
   it("manages people: lists, changes roles, refuses owner and self changes, removes, signs out everywhere", async () => {
