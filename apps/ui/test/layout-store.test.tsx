@@ -85,6 +85,21 @@ describe("named layouts", () => {
     expect(listSavedLayouts()).toEqual(["ok"]);
   });
 
+  it("refuses a layout over 200 KB, and skips one already stored", () => {
+    const big = { blob: "x".repeat(200_001) };
+    expect(() => saveNamedLayout("Big", big)).toThrow(new RangeError("That layout is too large to save"));
+    expect(listSavedLayouts()).toEqual([]);
+    localStorage.setItem(LAYOUTS_KEY, JSON.stringify([{ name: "Big", layout: big }, { name: "ok", layout: { a: 1 } }]));
+    expect(listSavedLayouts()).toEqual(["ok"]);
+    expect(loadNamedLayout("Big")).toBeNull();
+  });
+
+  it("skips stored names that a save would refuse", () => {
+    const entries = ["", "   ", "x".repeat(41), "Guided", "custom", " padded ", "ok"].map((name) => ({ name, layout: {} }));
+    localStorage.setItem(LAYOUTS_KEY, JSON.stringify(entries));
+    expect(listSavedLayouts()).toEqual(["ok"]);
+  });
+
   it("is Guided on a fresh store and remembers the name it is given", () => {
     expect(currentLayoutName()).toBe("Guided");
     setCurrentLayoutName("Mine");
@@ -102,7 +117,7 @@ describe("named layouts", () => {
     expect(listSavedLayouts()).toEqual([]);
     expect(loadNamedLayout("Mine")).toBeNull();
     expect(currentLayoutName()).toBe("Guided");
-    expect(() => saveNamedLayout("Mine", {})).not.toThrow();
+    expect(() => saveNamedLayout("Mine", {})).toThrow(new RangeError("The layout could not be saved: browser storage is full or blocked"));
     expect(() => removeNamedLayout("Mine")).not.toThrow();
     expect(() => setCurrentLayoutName("Mine")).not.toThrow();
   });

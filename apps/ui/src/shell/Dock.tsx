@@ -19,6 +19,8 @@ export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
   focus(id: DockPanelId): void;
   close(id: DockPanelId): void;
+  /** Closes a panel without making the layout Custom: for tabs pruned on load, which the Owner did not close. */
+  closeQuietly(id: DockPanelId): void;
   /** Applies Guided and forgets the saved working layout. */
   reset(): void;
   toggleBottom(): void;
@@ -138,6 +140,10 @@ function makeDockApi(api: DockviewApi, layoutKey: string, components: readonly s
     close(id) {
       const panel = api.getPanel(id);
       if (panel) api.removePanel(panel);
+    },
+    closeQuietly(id) {
+      const panel = api.getPanel(id);
+      if (panel) names.apply(names.get(), () => api.removePanel(panel));
     },
     reset() {
       names.apply(PRESET_LABELS.guided, () => {

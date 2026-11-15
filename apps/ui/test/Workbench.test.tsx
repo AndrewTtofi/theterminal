@@ -229,8 +229,16 @@ describe("Workbench", () => {
       testDock.api!.open("connection:c1", "Claude (Anthropic)", "main");
     });
     expect(container.querySelector('[data-panel="connection:gone"]')).toBeTruthy();
+    act(() => testDock.api!.applyPreset("operator"));
+    act(() => {
+      testDock.api!.open("connection:gone", "Claude (Anthropic)", "main");
+      testDock.api!.open("connection:c1", "Claude (Anthropic)", "main");
+    });
+    act(() => testDock.api!.saveAs("Mine"));
     rerender(<Workbench model={model({ connections: connectionsModel({ loaded: true, list: [conn] }) })} />);
     expect(container.querySelector('[data-panel="connection:gone"]')).toBeNull();
+    // Closing a stale tab on load is not the Owner changing the layout: the name stays.
+    expect(testDock.api!.currentName()).toBe("Mine");
     expect(container.querySelector('[data-panel="connection:c1"]')).toBeTruthy();
 
     // Only the first load prunes: a later list without c1 leaves its tab to say it no longer exists.
@@ -430,6 +438,23 @@ describe("Workbench", () => {
       expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed"]);
     });
 
+    it("keeps the selected name and says so when browser storage refuses the save", async () => {
+      render(<Workbench model={model()} />);
+      await userEvent.selectOptions(layoutSelect(), "Operator");
+      const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("full", "QuotaExceededError");
+      });
+      try {
+        await userEvent.click(screen.getByRole("button", { name: "Save layout" }));
+        await userEvent.type(screen.getByLabelText("Layout name"), "Mine{Enter}");
+        expect(screen.getByRole("alert").textContent).toBe("The layout could not be saved: browser storage is full or blocked");
+        expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Operator");
+        expect([...layoutSelect().options].map((o) => o.textContent)).toEqual(["Guided", "Operator"]);
+      } finally {
+        setItem.mockRestore();
+      }
+    });
+
     it("lists the Changes and Learn views, with a side bar for each", async () => {
       render(<Workbench model={model()} />);
       await userEvent.click(view("Changes"));
@@ -474,6 +499,8 @@ describe("Workbench", () => {
       const runExists = vi.fn(async (id: string) => id === "run1");
       const { container } = render(<Workbench model={model({ runExists })} />);
       await waitFor(() => expect(panels(container)).toEqual(["board", "diff:run1:src%2Fa.ts"]));
+      // The prune is not the Owner changing the layout: it keeps its name.
+      expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
       expect(runExists.mock.calls.map(([id]) => id).sort()).toEqual(["gone", "run1"]);
     });
   });

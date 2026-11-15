@@ -3,6 +3,7 @@ import type { ComponentType } from "react";
 import type { DockApi, DockPanelId } from "../src/shell/Dock";
 import { PRESET_LABELS } from "../src/shell/dock-layout";
 import type { PresetId } from "../src/shell/dock-layout";
+import { saveNamedLayout } from "../src/shell/layout-store";
 import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue } from "../src/shell/model";
 
@@ -95,6 +96,10 @@ export function Dock(props: { panels: Record<string, ComponentType<{ id: string 
         setOpen(openRef.current);
         setName("Custom");
       },
+      closeQuietly: (id) => {
+        openRef.current = openRef.current.filter((p) => p.id !== id);
+        setOpen(openRef.current);
+      },
       reset: () => replace(PRESETS.guided, "Guided"),
       toggleBottom: () => setBottomShown((v) => !v),
       panelIds: () => openRef.current.map((p) => p.id),
@@ -103,7 +108,9 @@ export function Dock(props: { panels: Record<string, ComponentType<{ id: string 
         const panels = saved.get(n);
         if (panels) replace(panels, n);
       },
+      // Like the real dock, the store validates and writes first: a refusal throws before the name changes.
       saveAs: (n) => {
+        saveNamedLayout(n, openRef.current);
         saved.set(n, openRef.current);
         setName(n);
       },

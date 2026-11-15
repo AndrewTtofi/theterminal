@@ -17,6 +17,13 @@ describe("stripAnsi", () => {
     expect(stripAnsi(`before${ESC}]8;;https://example.invalid/${ESC}\\link${ESC}]8;;${ESC}\\`)).toBe("beforelink");
   });
 
+  it("handles an unterminated CSI with 100,000 parameter digits in linear time", () => {
+    const input = `${ESC}[${"1".repeat(100_000)}`;
+    const started = performance.now();
+    expect(stripAnsi(input)).toBe(input);
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
   it("leaves plain text alone", () => {
     expect(stripAnsi("plain [31m text")).toBe("plain [31m text");
   });

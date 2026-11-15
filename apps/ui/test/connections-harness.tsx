@@ -40,6 +40,7 @@ export function fakeDock(): DockApi & { [K in keyof DockApi]: ReturnType<typeof 
     open: vi.fn(),
     focus: vi.fn(),
     close: vi.fn(),
+    closeQuietly: vi.fn(),
     reset: vi.fn(),
     toggleBottom: vi.fn(),
     panelIds: vi.fn(() => []),

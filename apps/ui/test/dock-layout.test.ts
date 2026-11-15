@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDockview } from "dockview-react";
 import type { DockviewApi, SerializedDockview } from "dockview-react";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
+import { loadNamedLayout, saveNamedLayout } from "../src/shell/layout-store";
 import {
   PRESET_LABELS, buildDefault, buildPreset, diffPanelId, filePanelId, parsePanelPath, restoreOrDefault, staleConnectionPanels,
   staleRunPanels,
@@ -62,6 +63,15 @@ describe("restoreOrDefault", () => {
       expect(restoreOrDefault(api, bad, KNOWN)).toBe("default");
       expect(ids(api)).toEqual(["board", "conversation"]);
     }
+  });
+
+  it("falls back to Guided for a corrupt saved layout", () => {
+    localStorage.clear();
+    saveNamedLayout("Broken", { grid: { root: "nope" }, panels: { board: { id: "elsewhere" } } });
+    const api = dock();
+    expect(restoreOrDefault(api, loadNamedLayout("Broken"), KNOWN)).toBe("default");
+    expect(ids(api)).toEqual(["board", "conversation"]);
+    expect(api.getPanel("board")!.group.activePanel?.id).toBe("board");
   });
 
   it("falls back when a panel uses a component that is not registered", () => {

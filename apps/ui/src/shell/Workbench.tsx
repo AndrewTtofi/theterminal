@@ -118,7 +118,7 @@ export function Workbench({ model }: Props) {
     runsPruned.current = true;
     const runIds = runsOfPanels(dock.panelIds());
     void Promise.all(runIds.map(async (id) => ((await runExists(id).catch(() => true)) ? [id] : []))).then((found) => {
-      for (const id of staleRunPanels(dock.panelIds(), found.flat())) dock.close(id as DockPanelId);
+      for (const id of staleRunPanels(dock.panelIds(), found.flat())) dock.closeQuietly(id as DockPanelId);
     });
   }, [dockReady, runExists]);
 
@@ -130,7 +130,7 @@ export function Workbench({ model }: Props) {
     const dock = dockRef.current;
     if (pruned.current || !dockReady || !loaded || !dock) return;
     pruned.current = true;
-    for (const id of staleConnectionPanels(dock.panelIds(), list, catalog)) dock.close(id as DockPanelId);
+    for (const id of staleConnectionPanels(dock.panelIds(), list, catalog)) dock.closeQuietly(id as DockPanelId);
   }, [dockReady, loaded, list, catalog]);
 
   // Ctrl/Cmd+J toggles the bottom panel, as in VS Code, except while the Owner is typing.

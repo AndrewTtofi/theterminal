@@ -91,6 +91,8 @@ test("a saved layout is kept across a reload, and a restored diff tab of an unkn
   await expect(page.getByRole("tab", { name: "Terminal" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "x", exact: true })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+  // Closing the stale tab on load is not the Owner changing the layout: it keeps its name.
+  await expect(layout.locator("option:checked")).toHaveText("Mine");
 
   await bar.getByRole("button", { name: "Reset layout" }).click();
   await expect(layout).toHaveValue("preset:guided");
