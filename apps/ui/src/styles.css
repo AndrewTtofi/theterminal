@@ -210,6 +210,9 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .conversation .jump { align-self: center; font-size: 12px; }
 .conversation .ask { border-top: 1px solid var(--line-strong); padding-top: 8px; }
 .conversation .ask > .note { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.conversation .older { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.conversation .older p { margin: 0; color: var(--muted); }
+.start-run .started { margin: 4px 0 0; min-height: 1em; font-size: 12px; color: var(--muted); }
 .board-head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
 .board-head .spend { margin: 0; color: var(--muted); font-size: 12px; }
 .terminal-lines { background: var(--panel); padding: 6px 8px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }

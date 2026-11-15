@@ -380,12 +380,11 @@ export function App() {
   }, [ledgerScope, run]);
 
   /**
-   * Puts the page before the oldest loaded entry of the ledger scope in front, one request per scope at a time. A
-   * failure is kept on the scope for the panel to show; a request overtaken by a reload or a newer request changes
-   * nothing when it ends.
+   * Puts the page before the oldest loaded entry of a scope (every project's, or the selected project's) in front,
+   * one request per scope at a time. A failure is kept on the scope for its panel to show; a request overtaken by a
+   * reload or a newer request changes nothing when it ends.
    */
-  const loadOlderLedger = async (): Promise<void> => {
-    const all = ledgerScope === "all";
+  const loadOlder = async (all: boolean): Promise<void> => {
     const projectId = all ? null : selectedId;
     const scope = all ? allLedger : projectLedger;
     const set = all ? setAllLedger : setProjectLedger;
@@ -614,7 +613,9 @@ export function App() {
       loading: (ledgerScope === "all" ? allLedger : projectLedger).loading,
       error: (ledgerScope === "all" ? allLedger : projectLedger).error,
     },
-    onLoadOlderLedger: loadOlderLedger,
+    onLoadOlderLedger: () => loadOlder(ledgerScope === "all"),
+    projectOlder: { hasOlder: projectLedger.hasOlder, loading: projectLedger.loading, error: projectLedger.error },
+    onLoadOlderProject: () => loadOlder(false),
     ledgerScope,
     onLedgerScopeChange: setLedgerScope,
     ledgerTopics,

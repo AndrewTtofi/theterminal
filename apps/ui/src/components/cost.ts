@@ -21,15 +21,17 @@ export function runCost(r: AgentRun): string {
 
 /**
  * What a project's agents have cost: the sum of the costs runs reported, labelled `estimate` unless every one of
- * them was the provider's own figure, and how many runs reported none (never counted as $0).
+ * them was the provider's own figure, and how many runs reported none (never counted as $0, and the reason the
+ * real spend may be higher).
  */
 export function spendLine(runs: AgentRun[]): string {
   if (runs.length === 0) return "No agent spend recorded yet";
   const costed = runs.filter((r) => r.costUsd !== null);
   const count = plural(runs.length, "run");
-  if (costed.length === 0) return `Agent spend: not reported · ${count}`;
+  const higher = " (actual spend may be higher)";
+  if (costed.length === 0) return `Agent spend: not reported · ${count}${higher}`;
   const sum = costed.reduce((a, r) => a + (r.costUsd ?? 0), 0);
   const basis: CostBasis = costed.every((r) => costBasis(r) === "reported") ? "reported" : "estimate";
   const missing = runs.length - costed.length;
-  return `Agent spend: ${formatUsd(sum)} (${basis}) · ${count}${missing > 0 ? `, ${missing} did not report a cost` : ""}`;
+  return `Agent spend: ${formatUsd(sum)} (${basis}) · ${count}${missing > 0 ? `, ${missing} did not report a cost${higher}` : ""}`;
 }

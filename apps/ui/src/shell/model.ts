@@ -110,6 +110,13 @@ export type WorkbenchModel = {
   onLoadOlderLedger: () => Promise<void>;
   /** The ledger scope's older-page request: in flight, and why the last one failed (null when it did not). */
   ledgerOlder: { loading: boolean; error: string | null };
+  /**
+   * The same for the selected project's stream (`projectEntries`), whatever the ledger scope: whether older entries
+   * may exist, the older-page request in flight, and why the last one failed.
+   */
+  projectOlder: { hasOlder: boolean; loading: boolean; error: string | null };
+  /** Fetches the 500 entries before the oldest loaded of the selected project's stream and puts them in front. */
+  onLoadOlderProject: () => Promise<void>;
   ledgerScope: LedgerScope;
   onLedgerScopeChange: (scope: LedgerScope) => void;
   /** Which narration topics the ledger shows; every topic by default. */

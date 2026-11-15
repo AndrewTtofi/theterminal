@@ -265,7 +265,7 @@ describe("App initial load", () => {
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     expect(await screen.findByRole("heading", { name: "Project A" })).toBeTruthy();
-    expect(await screen.findByRole("status")).toBeTruthy();
+    expect((await screen.findAllByRole("status")).some((s) => s.classList.contains("error"))).toBe(true);
   });
 });
 
@@ -449,6 +449,24 @@ describe("App ledger scope", () => {
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(600));
     // A short page means the start of the ledger: nothing older to ask for.
     expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull();
+  });
+
+  it("loads the project's older entries from the Conversation, even under the All-projects ledger scope", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const page = (from: number, n: number, projectId: string | null) =>
+      Array.from({ length: n }, (_, i) => entry(from + i, projectId ?? "A", `P${from + i}`));
+    m.listLedger.mockImplementation(async (projectId, q) => (q.beforeSeq === 1101 ? page(601, 500, projectId) : page(501, 100, projectId)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 1100 });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const conversation = () => screen.getByRole("region", { name: "Conversation" });
+    await within(conversation()).findByRole("button", { name: "Load older" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await waitFor(() => expect(m.listLedger).toHaveBeenCalledWith(null, { beforeSeq: 1101, limit: 500 }));
+    await userEvent.click(within(conversation()).getByRole("button", { name: "Load older" }));
+    expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 });
+    await waitFor(() => expect(within(conversation()).queryByRole("button", { name: "Load older" })).toBeNull());
   });
 
   const page = (from: number, n: number, projectId = "A") => Array.from({ length: n }, (_, i) => entry(from + i, projectId, `P${from + i}`));

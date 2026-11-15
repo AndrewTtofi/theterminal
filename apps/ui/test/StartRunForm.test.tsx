@@ -46,4 +46,26 @@ describe("StartRunForm", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hello");
   });
+
+  it("puts focus back in the prompt after starting, and announces only when asked to", async () => {
+    const onStart = vi.fn().mockResolvedValue(true);
+    const { rerender } = render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} onStart={onStart} />);
+    const box = screen.getByLabelText("Prompt");
+    await userEvent.type(box, "hello");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(document.activeElement).toBe(box);
+    expect(screen.getByRole("status").textContent).toBe("");
+    rerender(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} onStart={onStart} startedMessage={(n) => `Asked ${n}.`} />);
+    await userEvent.type(box, "again");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(screen.getByRole("status").textContent).toBe("Asked Fake.");
+  });
+
+  it("announces nothing and keeps the prompt when starting failed", async () => {
+    const onStart = vi.fn().mockResolvedValue(false);
+    render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} onStart={onStart} startedMessage={(n) => `Asked ${n}.`} />);
+    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
 });

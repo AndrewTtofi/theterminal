@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { KIND_LABELS, visibleControls } from "@theterminal/shared";
 import type { AdapterId, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE } from "../api";
@@ -17,17 +17,23 @@ type Props = {
   defaultCardId?: string | null;
   /** The submit button's label; `Start agent` by default. */
   submitLabel?: string;
+  /** What a polite status announces once a run started (`Asked Claude.`), given the adapter's name; nothing when absent. */
+  startedMessage?: (adapterName: string) => string;
   /** Resolve false (or reject) when starting failed, so the prompt is kept. `cardId` is passed only when a card is chosen. */
   onStart: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string) => Promise<boolean | void> | void;
 };
 
 /** Starts an agent run: the agent, an optional card, the prompt and the connections the run may use. */
-export function StartRunForm({ adapters, providers, cards, connections, defaultCardId, submitLabel = "Start agent", onStart }: Props) {
+export function StartRunForm({
+  adapters, providers, cards, connections, defaultCardId, submitLabel = "Start agent", startedMessage, onStart,
+}: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [cardId, setCardId] = useState(defaultCardId ?? "");
   const [starting, setStarting] = useState(false);
+  const [announced, setAnnounced] = useState("");
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   // Every provider's program ships with The Terminal, so an unavailable one means a broken install.
   const available = (a: AdapterId) => {
     const info = a === "fake" ? undefined : providers?.[a];
@@ -47,12 +53,18 @@ export function StartRunForm({ adapters, providers, cards, connections, defaultC
         e.preventDefault();
         if (!chosen || !prompt.trim() || starting) return;
         setStarting(true);
+        setAnnounced("");
+        const name = ADAPTER_NAMES[chosen];
         // A card that left the project since it was chosen is not sent.
         const card = cards.some((c) => c.id === cardId) ? cardId : "";
         const started = card ? onStart(chosen, prompt.trim(), connectionIds, card) : onStart(chosen, prompt.trim(), connectionIds);
         void Promise.resolve(started)
           .then((ok) => {
-            if (ok !== false) setPrompt("");
+            if (ok === false) return;
+            setPrompt("");
+            if (startedMessage) setAnnounced(startedMessage(name));
+            // Ready for the next one: the button the Owner pressed is disabled until a new prompt is typed.
+            promptRef.current?.focus();
           })
           .catch(() => {})
           .finally(() => setStarting(false));
@@ -82,7 +94,7 @@ export function StartRunForm({ adapters, providers, cards, connections, defaultC
       </label>
       <label>
         Prompt
-        <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} maxLength={20000} />
+        <textarea ref={promptRef} value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} maxLength={20000} />
       </label>
       {offered.length > 0 && (
         <fieldset className="run-connections">
@@ -107,6 +119,9 @@ export function StartRunForm({ adapters, providers, cards, connections, defaultC
       <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
         {submitLabel}
       </button>
+      <p className="started" role="status" aria-live="polite">
+        {announced}
+      </p>
     </form>
   );
 }

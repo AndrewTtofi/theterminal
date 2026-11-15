@@ -42,6 +42,8 @@ function renderPanel(over: Partial<WorkbenchModel> = {}) {
     connections: { list: [] },
     onStartRun: vi.fn().mockResolvedValue(true),
     onSelectChangesRun: vi.fn(),
+    projectOlder: { hasOlder: false, loading: false, error: null },
+    onLoadOlderProject: vi.fn().mockResolvedValue(undefined),
     ...over,
   } as unknown as WorkbenchModel;
   const wrap = (m: WorkbenchModel) => (
@@ -66,6 +68,13 @@ describe("conversationThread", () => {
       actions: { total: 2, allowed: 1, denied: 1 },
     });
     expect(thread[1]).toMatchObject({ cardTitle: null, messages: ["Reading the README"], actions: { total: 0, allowed: 0, denied: 0 } });
+  });
+
+  it("marks a run partial while older entries are not loaded and its start is not among the loaded ones", () => {
+    const started = ev(0, "agent.started", { runId: "run2", adapter: "fake", authMode: "none", prompt: "Write the docs", cardId: null, worktree: "w/run2" });
+    const thread = conversationThread(runs, [started, ...entries], [{ ...login }], true);
+    expect(thread.map((t) => [t.run.id, t.partial])).toEqual([["run1", true], ["run2", false]]);
+    expect(conversationThread(runs, entries, [{ ...login }]).every((t) => !t.partial)).toBe(true);
   });
 
   it("gives a run whose card left the project no card title", () => {
@@ -156,5 +165,54 @@ describe("ConversationPanel", () => {
     expect(list.scrollTop).toBe(500);
     fireEvent.click(within(panel()).getByRole("button", { name: /Jump to latest/ }));
     expect(list.scrollTop).toBe(1200);
+  });
+
+  describe("with older entries not loaded", () => {
+    const older = { hasOlder: true, loading: false, error: null };
+
+    it("says earlier asks may be incomplete and loads older entries", async () => {
+      const { model } = renderPanel({ projectOlder: older });
+      expect(panel().textContent).toContain("Older entries are not loaded, so earlier asks may be missing answers or action counts.");
+      await userEvent.click(within(panel()).getByRole("button", { name: "Load older" }));
+      expect(model.onLoadOlderProject).toHaveBeenCalledTimes(1);
+    });
+
+    it("never shows 0 actions for a run whose start is not loaded", () => {
+      renderPanel({ projectOlder: older, projectEntries: [], runs: [feedRun("run1", { costUsd: 0.1 })] });
+      expect(articles()[0]!.querySelector(".result")?.textContent).toBe("completed · action counts unavailable · $0.10 (estimate)");
+    });
+
+    it("disables Load older while it loads and shows why it failed", () => {
+      renderPanel({ projectOlder: { hasOlder: true, loading: true, error: "offline" } });
+      expect((within(panel()).getByRole("button", { name: "Load older" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(within(panel()).getByRole("alert").textContent).toBe("Older entries could not be loaded: offline");
+    });
+
+    it("shows no note once everything is loaded", () => {
+      renderPanel();
+      expect(within(panel()).queryByRole("button", { name: "Load older" })).toBeNull();
+    });
+  });
+
+  it("labels each ask by its heading", () => {
+    renderPanel();
+    for (const a of articles()) {
+      const id = a.getAttribute("aria-labelledby");
+      expect(id).toBeTruthy();
+      expect(document.getElementById(id!)).toBe(within(a).getByRole("heading"));
+    }
+    expect(screen.getByRole("article", { name: 'You asked Fake on "Login"' })).toBeTruthy();
+  });
+
+  it("puts focus back in the prompt after an ask and announces it", async () => {
+    renderPanel();
+    const ask = within(panel()).getByRole("region", { name: "Ask an agent" });
+    const box = within(ask).getByLabelText("Prompt");
+    await userEvent.type(box, "Add a logout button");
+    await userEvent.click(within(ask).getByRole("button", { name: "Ask" }));
+    expect(document.activeElement).toBe(box);
+    const status = within(ask).getByRole("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe("Asked Fake.");
   });
 });

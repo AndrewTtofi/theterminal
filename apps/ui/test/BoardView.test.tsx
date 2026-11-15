@@ -36,12 +36,12 @@ describe("BoardView spend line", () => {
 describe("spendLine", () => {
   it("counts runs that reported no cost without adding them as $0", () => {
     expect(spendLine([feedRun("r1", { costUsd: 0.25 }), feedRun("r2", { costUsd: null })])).toBe(
-      "Agent spend: $0.25 (estimate) · 2 runs, 1 did not report a cost",
+      "Agent spend: $0.25 (estimate) · 2 runs, 1 did not report a cost (actual spend may be higher)",
     );
   });
 
   it("never shows $0.00 when no run reported a cost", () => {
-    expect(spendLine([feedRun("r1", { costUsd: null })])).toBe("Agent spend: not reported · 1 run");
+    expect(spendLine([feedRun("r1", { costUsd: null })])).toBe("Agent spend: not reported · 1 run (actual spend may be higher)");
   });
 
   it("is labelled reported only when every run that cost something reported its own cost", () => {
@@ -50,5 +50,9 @@ describe("spendLine", () => {
     expect(spendLine([gemini("r1", 1), feedRun("r2", { adapter: "claude", costUsd: 0.5 })])).toBe(
       "Agent spend: $1.50 (estimate) · 2 runs",
     );
+  });
+
+  it("adds cents without floating-point drift", () => {
+    expect(spendLine([0.07, 0.07, 0.07].map((c, i) => feedRun(`r${i}`, { costUsd: c })))).toBe("Agent spend: $0.21 (estimate) · 3 runs");
   });
 });
