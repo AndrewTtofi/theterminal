@@ -9,6 +9,7 @@ import {
   currentTheme,
   loadChosenThemeId,
   loadUserThemes,
+  saveChosenThemeId,
   saveUserThemes,
   useTheme,
 } from "../src/theme/theme-store";
@@ -17,6 +18,9 @@ const light = BUILTIN_THEMES.find((t) => t.id === "light")!;
 const user = (id: string, extra: Partial<Theme> = {}): Theme => ({ version: 1, id, name: id, base: "dark", colors: { accent: "#ff00aa" }, ...extra });
 
 beforeEach(() => {
+  // A successful save clears any in-memory fallback left by an earlier test.
+  saveChosenThemeId("ice");
+  saveUserThemes([]);
   localStorage.clear();
   document.documentElement.removeAttribute("style");
 });
@@ -81,6 +85,22 @@ describe("useTheme", () => {
     });
     act(() => result.current.choose("light"));
     expect(document.documentElement.style.getPropertyValue("--bg")).toBe(resolveColors(light).bg);
+  });
+  it("prefers the in-memory choice when storage reads but refuses writes", () => {
+    localStorage.setItem(THEME_KEY, "light");
+    localStorage.setItem(THEMES_KEY, JSON.stringify([user("old")]));
+    const { result } = renderHook(() => useTheme());
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError");
+    });
+    act(() => result.current.saveUserTheme(user("new")));
+    act(() => result.current.choose("new"));
+    expect(loadChosenThemeId()).toBe("new");
+    expect(loadUserThemes().map((t) => t.id)).toEqual(["old", "new"]);
+    expect(result.current.theme.id).toBe("new");
+    act(() => result.current.choose("amber"));
+    expect(loadChosenThemeId()).toBe("amber");
+    expect(document.documentElement.style.getPropertyValue("--bg")).toBe(resolveColors(BUILTIN_THEMES.find((t) => t.id === "amber")!).bg);
   });
   it("saves and deletes user themes", () => {
     const { result } = renderHook(() => useTheme());

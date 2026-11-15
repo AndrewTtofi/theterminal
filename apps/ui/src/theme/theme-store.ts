@@ -18,14 +18,16 @@ const changed = () => {
   listeners.forEach((l) => l());
 };
 
+/** The in-memory choice wins when set: it is newer than whatever storage holds, since its write was refused. */
 export function loadChosenThemeId(): string {
+  if (memId !== null) return memId;
   try {
     const v = localStorage.getItem(THEME_KEY);
     if (v) return v;
   } catch {
-    // fall through to the in-memory choice
+    // storage unavailable: use the default
   }
-  return memId ?? DEFAULT_THEME_ID;
+  return DEFAULT_THEME_ID;
 }
 
 export function saveChosenThemeId(id: string): void {
@@ -38,15 +40,16 @@ export function saveChosenThemeId(id: string): void {
   changed();
 }
 
-/** The stored user themes that still pass the schema; invalid ones are dropped. */
+/** The stored user themes that still pass the schema; invalid ones are dropped. The in-memory list wins when set. */
 export function loadUserThemes(): Theme[] {
+  if (memUsers !== null) return [...memUsers];
   let parsed: unknown;
   try {
     const raw = localStorage.getItem(THEMES_KEY);
-    if (raw === null) return memUsers ?? [];
+    if (raw === null) return [];
     parsed = JSON.parse(raw);
   } catch {
-    return memUsers ?? [];
+    return [];
   }
   if (!Array.isArray(parsed)) return [];
   const out: Theme[] = [];
