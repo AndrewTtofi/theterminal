@@ -1,5 +1,5 @@
 import { X509Certificate, createPrivateKey, generateKeyPair, randomBytes, sign, type KeyObject } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, type BigIntStats } from "node:fs";
 import { isIP } from "node:net";
 import * as nodeOs from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -143,7 +143,7 @@ export async function selfSignedTlsCertificate(i: {
   if (!Array.isArray(i.hostnames) || !Array.isArray(i.addresses)) throw new CertificateError("invalid_input");
   const hostnames = [...new Set(i.hostnames.map((h) => String(h).toLowerCase()))];
   const addresses = [...new Set(i.addresses.map(String))];
-  if (!hostnames.every(validHostname) || !addresses.every((a) => isIP(a) !== 0)) throw new CertificateError("invalid_input");
+  if (!hostnames.every(validHostname) || !addresses.every((a) => !a.includes("%") && isIP(a) !== 0)) throw new CertificateError("invalid_input");
   if (hostnames.length + addresses.length === 0) throw new CertificateError("invalid_input");
 
   const start = new Date(Math.floor((i.now ?? (() => new Date()))().getTime() / 1000) * 1000);
@@ -227,21 +227,34 @@ function readBounded(file: string, deny: { uiDir: string; dataDir: string }): st
   }
   if (isDenied([real], deny)) throw new CertificateError("path_denied");
 
+  // Stat before opening: opening a FIFO or a device can block forever, so only a regular file is opened.
+  let before: BigIntStats;
+  try {
+    before = lstatSync(real, { bigint: true });
+  } catch {
+    throw new CertificateError("unreadable");
+  }
+  if (!before.isFile()) throw new CertificateError("unreadable");
+  if (before.size > BigInt(MAX_FILE_BYTES)) throw new CertificateError("too_large");
+
   let fd: number;
   try {
-    fd = openSync(real, "r");
+    // O_NONBLOCK and O_NOFOLLOW are POSIX-only (undefined on Windows): a swap to a FIFO or a link after the
+    // stat must neither block the open nor be followed. The identity check below refuses any swap.
+    fd = openSync(real, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
   } catch {
     throw new CertificateError("unreadable");
   }
   try {
-    let st;
+    let st: BigIntStats;
     try {
-      st = fstatSync(fd);
+      st = fstatSync(fd, { bigint: true });
     } catch {
       throw new CertificateError("unreadable");
     }
-    if (!st.isFile()) throw new CertificateError("unreadable");
-    if (st.size > MAX_FILE_BYTES) throw new CertificateError("too_large");
+    // The file opened must be the file checked: a swap between the check and the open is refused.
+    if (!st.isFile() || st.dev !== before.dev || st.ino !== before.ino) throw new CertificateError("unreadable");
+    if (st.size > BigInt(MAX_FILE_BYTES)) throw new CertificateError("too_large");
     const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
     let total = 0;
     try {
@@ -334,8 +347,9 @@ export function loadProvided(
   }
   if (!matches) throw new CertificateError("mismatch");
   const now = (opts.now ?? (() => new Date()))().getTime();
-  if (now < leaf.validFromDate.getTime()) throw new CertificateError("not_yet_valid");
-  if (now > leaf.validToDate.getTime()) throw new CertificateError("expired");
+  // Every certificate in the chain, not only the leaf: an expired intermediate breaks the chain for clients.
+  if (chain.some((c) => now < c.validFromDate.getTime())) throw new CertificateError("not_yet_valid");
+  if (chain.some((c) => now > c.validToDate.getTime())) throw new CertificateError("expired");
   return {
     certPem: chain.map((c) => c.toString()).join(""),
     keyPem: key.export({ type: "pkcs8", format: "pem" }) as string,

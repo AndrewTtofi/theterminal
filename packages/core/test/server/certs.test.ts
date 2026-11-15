@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { X509Certificate, createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import {
   localAddresses,
   selfSignedTlsCertificate,
 } from "../../src/server/certs.js";
+import { issueCertificate } from "../fixtures/x509.js";
 
 /** Plan 8's CERT_FINGERPRINT (shared/people.ts), repeated here so this leaf module's test has no cross-task import. */
 const CERT_FINGERPRINT = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/;
@@ -141,6 +143,8 @@ describe("selfSignedTlsCertificate", () => {
       { hostnames: ["a".repeat(64) + ".local"], addresses: [] },
       { hostnames: [], addresses: ["999.1.1.1"] },
       { hostnames: [], addresses: ["tt-test.local"] },
+      { hostnames: [], addresses: ["fe80::1%en0"] },
+      { hostnames: [], addresses: ["fe80::1%25eth0"] },
       { hostnames: ["tt-test.local"], addresses: [], days: 0 },
       { hostnames: ["tt-test.local"], addresses: [], days: 1.5 },
       { hostnames: ["tt-test.local"], addresses: [], days: 3651 },
@@ -265,6 +269,91 @@ describe("loadProvided", () => {
     writeFileSync(rsa, generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs8", format: "pem" }));
     expect(refusal(() => loadProvided(certFile, rsa, w.deny)).code).toBe("invalid_key");
   });
+
+  describe("chains and key types", () => {
+    const year = 365 * DAY;
+    /** A CA key and a leaf key, the leaf issued by the CA; dates per certificate. */
+    function chain(o: { caFrom?: number; caTo?: number } = {}) {
+      const ca = generateKeyPairSync("ec", { namedCurve: "P-256" });
+      const leaf = generateKeyPairSync("ec", { namedCurve: "P-256" });
+      const now = Date.now();
+      const caPem = issueCertificate({
+        subject: "Test CA",
+        issuer: "Test CA",
+        publicKey: ca.publicKey,
+        issuerKey: ca.privateKey,
+        ca: true,
+        notBefore: new Date(o.caFrom ?? now - DAY),
+        notAfter: new Date(o.caTo ?? now + year),
+      });
+      const leafPem = issueCertificate({
+        subject: "tt-test.local",
+        issuer: "Test CA",
+        publicKey: leaf.publicKey,
+        issuerKey: ca.privateKey,
+        ca: false,
+        notBefore: new Date(now - DAY),
+        notAfter: new Date(now + year),
+        dnsNames: ["tt-test.local"],
+      });
+      return { caPem, leafPem, leafKey: leaf.privateKey.export({ type: "pkcs8", format: "pem" }) as string };
+    }
+    function write(dir: string, certPem: string, keyPem: string) {
+      const certFile = join(dir, "chain.pem");
+      const keyFile = join(dir, "chain-key.pem");
+      writeFileSync(certFile, certPem);
+      writeFileSync(keyFile, keyPem);
+      return { certFile, keyFile };
+    }
+
+    it("accepts a leaf followed by its intermediate, and keeps both in certPem", () => {
+      const w = workspace();
+      const c = chain();
+      const f = write(w.certs, c.leafPem + c.caPem, c.leafKey);
+      const got = loadProvided(f.certFile, f.keyFile, w.deny);
+      expect(got.fingerprint).toBe(new X509Certificate(c.leafPem).fingerprint256);
+      expect(got.certPem).toBe(c.leafPem + c.caPem);
+      expect(got.subjectAltNames).toEqual(["tt-test.local"]);
+    });
+
+    it("refuses a chain whose intermediate has expired or is not valid yet, though the leaf is fine", () => {
+      const w = workspace();
+      const old = chain({ caFrom: Date.now() - 3 * DAY, caTo: Date.now() - DAY });
+      let f = write(w.certs, old.leafPem + old.caPem, old.leafKey);
+      expect(refusal(() => loadProvided(f.certFile, f.keyFile, w.deny)).code).toBe("expired");
+      const early = chain({ caFrom: Date.now() + DAY, caTo: Date.now() + year });
+      f = write(w.certs, early.leafPem + early.caPem, early.leafKey);
+      expect(refusal(() => loadProvided(f.certFile, f.keyFile, w.deny)).code).toBe("not_yet_valid");
+    });
+
+    it("accepts an RSA-2048 key", () => {
+      const w = workspace();
+      const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const pem = issueCertificate({
+        subject: "tt-test.local",
+        issuer: "tt-test.local",
+        publicKey: rsa.publicKey,
+        issuerKey: rsa.privateKey,
+        ca: false,
+        notBefore: new Date(Date.now() - DAY),
+        notAfter: new Date(Date.now() + 30 * DAY),
+        dnsNames: ["tt-test.local"],
+      });
+      const f = write(w.certs, pem, rsa.privateKey.export({ type: "pkcs1", format: "pem" }) as string);
+      const got = loadProvided(f.certFile, f.keyFile, w.deny);
+      expect(got.fingerprint).toBe(new X509Certificate(pem).fingerprint256);
+      expect(createPrivateKey(got.keyPem).asymmetricKeyType).toBe("rsa");
+    });
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a FIFO as unreadable without blocking on it", async () => {
+    const w = workspace();
+    const { certFile } = await writePair(w.certs);
+    const fifo = join(w.certs, "fifo.pem");
+    execFileSync("mkfifo", [fifo]);
+    expect(refusal(() => loadProvided(certFile, fifo, w.deny)).code).toBe("unreadable");
+    expect(refusal(() => loadProvided(fifo, certFile, w.deny)).code).toBe("unreadable");
+  }, 5_000);
 
   describe("deny list", () => {
     it("refuses a certificate inside uiDir even though it is a valid pair", async () => {
