@@ -5,7 +5,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_SHARE_OPTIONS, SHARE_SECTIONS, type DailyDigest, type ShareSnapshot, type ShareSnapshotRecord } from "@theterminal/shared";
-import { SHARE_CSP } from "../../src/share/render.js";
+import { SHARE_HEADER_CSP } from "../../src/share/render.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
@@ -85,8 +85,9 @@ describe("share API", { timeout: 30_000 }, () => {
     res = await send(s, "GET", `/api/share/snapshots/${record.id}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
-    expect(res.headers.get("content-security-policy")).toBe(SHARE_CSP);
+    expect(res.headers.get("content-security-policy")).toBe(SHARE_HEADER_CSP);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("content-disposition")).toBeNull();
     expect(await res.text()).toBe(p.html);
@@ -94,8 +95,9 @@ describe("share API", { timeout: 30_000 }, () => {
     res = await send(s, "GET", `/api/share/snapshots/${record.id}/download`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-disposition")).toBe(`attachment; filename="theterminal-share-${record.id.slice(0, 8)}.html"`);
-    expect(res.headers.get("content-security-policy")).toBe(SHARE_CSP);
+    expect(res.headers.get("content-security-policy")).toBe(SHARE_HEADER_CSP);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.text()).toBe(p.html);
 

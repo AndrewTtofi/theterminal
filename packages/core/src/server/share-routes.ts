@@ -4,7 +4,7 @@ import { DEFAULT_SHARE_OPTIONS, shareOptionsSchema } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { projectDigests } from "../share/digests.js";
-import { SHARE_CSP } from "../share/render.js";
+import { SHARE_HEADER_CSP } from "../share/render.js";
 import type { ShareService } from "../share/service.js";
 
 export type ShareRouteDeps = { db: Db; ledger: Ledger; share: ShareService };
@@ -22,12 +22,13 @@ const digestsQuery = z
 
 type Params = { Params: { id: string } };
 
-/** A saved page, with headers that keep it inert even if it were opened on the app's own origin. */
+/** A saved page, with the link server's headers, which keep it inert even if it were opened on the app's own origin. */
 function sendPage(reply: FastifyReply, html: string): FastifyReply {
   return reply
     .header("content-type", "text/html; charset=utf-8")
-    .header("content-security-policy", SHARE_CSP)
+    .header("content-security-policy", SHARE_HEADER_CSP)
     .header("x-content-type-options", "nosniff")
+    .header("referrer-policy", "no-referrer")
     .header("cache-control", "no-store")
     .send(html);
 }

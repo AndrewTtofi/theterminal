@@ -20,8 +20,10 @@ import {
  * gives the same bytes, and every time on the page comes from the snapshot.
  */
 
-/** The page's Content-Security-Policy, also sent as a header wherever the page is served. */
+/** The page's Content-Security-Policy, in its meta tag. */
 export const SHARE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'";
+/** The policy sent as a header wherever the page is served, plus the one directive a meta tag cannot carry: no one may frame the page. */
+export const SHARE_HEADER_CSP = `${SHARE_CSP}; frame-ancestors 'none'`;
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
