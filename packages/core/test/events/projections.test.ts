@@ -874,6 +874,9 @@ describe("people, invites, remote access and gate requirements", () => {
     expect(getRemoteState(db).expiresAt).toBe("2027-02-01T00:00:00.000Z");
     emit("remote.enabled", { port: 4400, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp }, cli, null);
     expect(getRemoteState(db).expiresAt).toBeNull();
+    // An entry that carries the expiry (every new one does) sets it whatever came before.
+    emit("remote.enabled", { port: 4400, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp, expiresAt: "2036-11-15T00:00:00.000Z" }, cli, null);
+    expect(getRemoteState(db).expiresAt).toBe("2036-11-15T00:00:00.000Z");
   });
 
   it("a gate requirement is the default until set, and null restores it", () => {

@@ -171,6 +171,9 @@ export function applyRemoteEntry(s: RemoteState, e: Pick<LedgerEntry, "type" | "
         domain: (p.domain as string | null) ?? null,
         tls: p.tls as TlsMode,
         fingerprint: p.fingerprint as string,
+        // Every new entry carries the served certificate's expiry; one without it (an earlier ledger) keeps the
+        // expiry only while the certificate is the same one.
+        expiresAt: typeof p.expiresAt === "string" ? p.expiresAt : p.fingerprint === s.fingerprint ? s.expiresAt : null,
       };
     case "remote.disabled":
       return { ...s, enabled: false };
@@ -365,7 +368,7 @@ export class RemoteListener {
         projectId: null,
         actor,
         type: "remote.enabled",
-        payload: { port, bind: cfg.bind, domain: cfg.domain, tls: cfg.tls, fingerprint: material.fingerprint },
+        payload: { port, bind: cfg.bind, domain: cfg.domain, tls: cfg.tls, fingerprint: material.fingerprint, expiresAt: material.expiresAt },
       });
       commitEvents(this.deps.db, this.deps.ledger, () => ({ events, result: () => undefined }));
       if (this.challenge !== null) this.challenge.tlsPort = port;
@@ -716,20 +719,24 @@ export class RemoteListener {
     return m;
   }
 
-  /** Reuses `<dataDir>/remote/cert.pem` with its key from the secret store while they match, last and cover the domain. */
+  /**
+   * Reuses `<dataDir>/remote/cert.pem` with its key from the secret store while they match, last, cover the domain and
+   * still name every address the listener has now (a machine that moved network gets a new certificate, since a
+   * browser would otherwise see a name mismatch; pinned invites are unaffected).
+   */
   private async selfSignedMaterial(cfg: Config): Promise<CertMaterial> {
     const dir = join(this.deps.dataDir, "remote");
     const certPath = join(dir, "cert.pem");
-    const certPem = readBoundedText(certPath);
-    const keyPem = await this.deps.secrets.get(REMOTE_KEY_SECRET);
-    if (certPem !== null && keyPem !== null) {
-      const reused = this.reusable(certPem, keyPem, cfg.domain);
-      if (reused) return reused;
-    }
     const local = this.addressesOf();
     const hostnames = unique([...(cfg.domain ? [cfg.domain] : []), ...local.hostnames, "localhost"]);
     const specific = cfg.bind !== "0.0.0.0" && cfg.bind !== "::" ? [cfg.bind] : [];
     const addresses = unique(["127.0.0.1", "::1", ...local.addresses, ...specific]);
+    const certPem = readBoundedText(certPath);
+    const keyPem = await this.deps.secrets.get(REMOTE_KEY_SECRET);
+    if (certPem !== null && keyPem !== null) {
+      const reused = this.reusable(certPem, keyPem, cfg.domain, addresses);
+      if (reused) return reused;
+    }
     const m = await selfSignedTlsCertificate({ hostnames, addresses, now: this.now });
     await this.deps.secrets.set(REMOTE_KEY_SECRET, m.keyPem);
     mkdirSync(dir, { recursive: true });
@@ -744,7 +751,7 @@ export class RemoteListener {
     return m;
   }
 
-  private reusable(certPem: string, keyPem: string, domain: string | null): CertMaterial | null {
+  private reusable(certPem: string, keyPem: string, domain: string | null, addresses: string[]): CertMaterial | null {
     try {
       const x = new X509Certificate(certPem);
       if (!x.checkPrivateKey(createPrivateKey(keyPem))) return null;
@@ -753,6 +760,7 @@ export class RemoteListener {
       const to = new Date(x.validTo).getTime();
       if (!(from <= now && now < to - RENEW_MARGIN_MS)) return null;
       if (domain !== null && x.checkHost(domain) === undefined) return null;
+      if (!addresses.every((a) => x.checkIP(a) !== undefined)) return null;
       const sans = (x.subjectAltName ?? "").split(", ").filter((s) => s.length > 0);
       return { certPem, keyPem, fingerprint: x.fingerprint256, expiresAt: new Date(to).toISOString(), subjectAltNames: sans };
     } catch {

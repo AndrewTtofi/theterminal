@@ -144,7 +144,9 @@ describe("RemoteListener", () => {
     const entries = remoteEntries(h);
     expect(entries.map((e) => e.type)).toEqual(["remote.certificate_changed", "remote.enabled"]);
     expect(entries[1]!.seq).toBe(entries[0]!.seq + 1);
-    expect(entries[1]!.payload).toEqual({ port, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp });
+    const expiresAt = (entries[0]!.payload as { expiresAt: string }).expiresAt;
+    expect(expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(entries[1]!.payload).toEqual({ port, bind: "127.0.0.1", domain: null, tls: "self_signed", fingerprint: fp, expiresAt });
     expect(entries[0]!.actor).toEqual(OWNER);
     expect(port).toBeGreaterThan(0);
     expect(fp).toMatch(CERT_FINGERPRINT);
@@ -308,6 +310,31 @@ describe("RemoteListener", () => {
       "remote.enabled",
     ]);
     expect(await servedFingerprint(second.port)).toBe(first.fp);
+  });
+
+  it("reissues the self-signed certificate when its names no longer cover the machine's addresses", async () => {
+    const addresses = { hostnames: ["tt-test.local"], addresses: ["192.168.1.10"] };
+    const h = await harness({ localAddresses: () => addresses });
+    const first = await enabled(h);
+    await h.remote.disable(OWNER);
+    // The machine moved network: the certificate on disk names 192.168.1.10, not the new address.
+    addresses.addresses = ["192.168.1.10", "10.0.0.7"];
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + ADDRESS_CACHE_MS + 1);
+      const second = await enabled(h);
+      expect(second.fp).not.toBe(first.fp);
+      const cert = new X509Certificate(readFileSync(join(h.dataDir, "remote", "cert.pem"), "utf8"));
+      expect(cert.checkIP("10.0.0.7")).toBe("10.0.0.7");
+      expect(cert.checkIP("192.168.1.10")).toBe("192.168.1.10");
+      expect(remoteEntries(h).filter((e) => e.type === "remote.certificate_changed")).toHaveLength(2);
+      // Unchanged addresses: reused again.
+      await h.remote.disable(OWNER);
+      vi.setSystemTime(Date.now() + ADDRESS_CACHE_MS + 1);
+      expect((await enabled(h)).fp).toBe(second.fp);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("re-enabling while listening restarts on the new port without a disabled entry", async () => {

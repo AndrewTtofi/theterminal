@@ -146,6 +146,8 @@ describe("people and remote payloads", () => {
     expect(enabled.safeParse({ ...FIXTURES["remote.enabled"], fingerprint: "ab".repeat(32) }).success).toBe(false);
     expect(enabled.safeParse({ ...FIXTURES["remote.enabled"], domain: "192.168.1.10" }).success).toBe(false);
     expect(enabled.safeParse({ ...FIXTURES["remote.enabled"], port: 0 }).success).toBe(false);
+    expect(enabled.safeParse({ ...FIXTURES["remote.enabled"], expiresAt: AT }).success).toBe(true);
+    expect(enabled.safeParse({ ...FIXTURES["remote.enabled"], expiresAt: "soon" }).success).toBe(false);
     expect(peoplePayloadSchemas["person.locked"].safeParse({ personId: "p1", until: AT, failures: 0 }).success).toBe(false);
     expect(peoplePayloadSchemas["person.signed_in"].safeParse({ personId: "p1", listener: "lan", method: "key" }).success).toBe(false);
   });

@@ -250,14 +250,18 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       db.prepare("UPDATE people SET last_seen_at = ? WHERE id = ?").run(e.ts, p.personId);
       break;
     case "remote.enabled":
-      // The expiry stays only while the certificate does: a new fingerprint's expiry comes with certificate_changed.
+      // The entry carries the served certificate's expiry. An earlier entry without it keeps the expiry only while
+      // the certificate does: a new fingerprint's expiry then comes with certificate_changed.
       db.prepare(
-        `INSERT INTO remote_state (id, enabled, port, bind, domain, tls, fingerprint, expires_at) VALUES (1, 1, ?, ?, ?, ?, ?, NULL)
+        `INSERT INTO remote_state (id, enabled, port, bind, domain, tls, fingerprint, expires_at) VALUES (1, 1, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET enabled = 1, port = excluded.port, bind = excluded.bind, domain = excluded.domain,
            tls = excluded.tls,
-           expires_at = CASE WHEN fingerprint IS excluded.fingerprint THEN expires_at ELSE NULL END,
+           expires_at = CASE
+             WHEN excluded.expires_at IS NOT NULL THEN excluded.expires_at
+             WHEN fingerprint IS excluded.fingerprint THEN expires_at
+             ELSE NULL END,
            fingerprint = excluded.fingerprint`,
-      ).run(p.port, p.bind, p.domain, p.tls, p.fingerprint);
+      ).run(p.port, p.bind, p.domain, p.tls, p.fingerprint, (p.expiresAt as string | undefined) ?? null);
       break;
     case "remote.disabled":
       db.prepare("UPDATE remote_state SET enabled = 0 WHERE id = 1").run();

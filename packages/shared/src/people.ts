@@ -165,6 +165,8 @@ export const peoplePayloadSchemas = {
       domain: domainSchema.nullable(),
       tls,
       fingerprint,
+      /** The served certificate's expiry; optional only for entries recorded before it was carried. */
+      expiresAt: z.iso.datetime().optional(),
     })
     .strict(),
   "remote.disabled": z.object({}).strict(),
