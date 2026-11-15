@@ -87,8 +87,11 @@ export type LinkServiceDeps = {
   platform?: NodeJS.Platform;
 };
 
+/** A hello is answered at once or not at all: a hard deadline, not reset by a machine sending a byte at a time. */
 const HELLO_TIMEOUT_MS = 3_000;
 const HELLO_CACHE_MS = 15_000;
+/** The onUnpairing hooks (the stops sent to the machine) get this long together; then the unpair is recorded anyway. */
+const UNPAIR_HOOK_DEADLINE_MS = 3_000;
 const PAIR_TIMEOUT_MS = 10_000;
 /** Discovery keeps browsing this long after the last look, then stops until the next one. */
 const BROWSE_LINGER_MS = 60_000;
@@ -162,7 +165,7 @@ export class LinkService {
   /** Enabling and disabling run one at a time, so two requests can never start two listeners. */
   private serial: Promise<unknown> = Promise.resolve();
   /** What runs before a machine is unpaired, while its key is still trusted (see onUnpairing). */
-  private readonly unpairing = new Set<(machineId: string) => Promise<void>>();
+  private readonly unpairing = new Set<(machineId: string, signal: AbortSignal) => Promise<void>>();
 
   constructor(deps: LinkServiceDeps) {
     this.deps = deps;
@@ -446,23 +449,34 @@ export class LinkService {
 
   /**
    * Runs `fn` as a machine is about to be unpaired, before the trust is removed, so a last word (a stop for the runs
-   * this computer has on it) can still be sent to it and checked against its key. Best effort: the hooks run together,
-   * and one that rejects or throws never blocks the unpair. Answers the function that removes the hook.
+   * this computer has on it) can still be sent to it and checked against its key. Best effort: the hooks run together
+   * against a hard deadline (UNPAIR_HOOK_DEADLINE_MS), after which `signal` aborts and the unpair goes ahead; one that
+   * rejects or throws never blocks it. Answers the function that removes the hook.
    */
-  onUnpairing(fn: (machineId: string) => Promise<void>): () => void {
+  onUnpairing(fn: (machineId: string, signal: AbortSignal) => Promise<void>): () => void {
     this.unpairing.add(fn);
     return () => void this.unpairing.delete(fn);
   }
 
   /**
    * Human only: forgets a paired machine (`machine.unpaired`); its key opens nothing from then on. First every
-   * onUnpairing hook runs with the machine still trusted; the unpair is recorded whatever they did.
+   * onUnpairing hook runs with the machine still trusted, for at most UNPAIR_HOOK_DEADLINE_MS together (a machine that
+   * answers a byte at a time cannot hold the unlink); the unpair is recorded whatever they did, and anything they still
+   * have in flight is aborted.
    */
   async unpair(actor: Actor, machineId: string): Promise<void> {
     if (actor.kind !== "human") throw new HumanRequiredError();
     const m = getMachine(this.deps.db, machineId);
     if (!m) throw new NotFoundError("machine", machineId);
-    await Promise.all([...this.unpairing].map((fn) => fn(m.id).catch(() => undefined)));
+    const abort = new AbortController();
+    const hooks = Promise.all([...this.unpairing].map((fn) => fn(m.id, abort.signal).catch(() => undefined)));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([hooks, new Promise<void>((resolve) => (timer = setTimeout(resolve, UNPAIR_HOOK_DEADLINE_MS)))]);
+    } finally {
+      clearTimeout(timer);
+      abort.abort();
+    }
     // Unpaired meanwhile (a second request): as it was found gone at the start.
     if (!getMachine(this.deps.db, m.id)) throw new NotFoundError("machine", machineId);
     commitEvent(this.deps.db, this.deps.ledger, () => ({
@@ -533,7 +547,10 @@ export class LinkService {
     return { machineId: m.id };
   };
 
-  /** Whether the machine answers `GET /link/v1/hello` as itself within 3 s; the answer is kept for 15 s. */
+  /**
+   * Whether the machine answers `GET /link/v1/hello` as itself within 3 s (a hard deadline, so one slow machine never
+   * holds the Machines view); the answer is kept for 15 s.
+   */
   async hello(machineId: string): Promise<boolean> {
     const cached = this.checked.get(machineId);
     if (cached && this.now().getTime() - cached.checkedAt.getTime() < HELLO_CACHE_MS) return cached.online;
@@ -543,12 +560,16 @@ export class LinkService {
     if (!identity || getMachine(this.deps.db, machineId) === null) return false;
     const check = (async () => {
       let online = false;
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), HELLO_TIMEOUT_MS);
       try {
         this.helloClient ??= this.deps.client(identity, HELLO_TIMEOUT_MS);
-        const body = await this.helloClient.request(this.peerFor(machineId), "GET", "/link/v1/hello", undefined, helloResponseSchema);
+        const body = await this.helloClient.request(this.peerFor(machineId), "GET", "/link/v1/hello", undefined, helloResponseSchema, deadline.signal);
         online = body.machineId === machineId;
       } catch {
         online = false;
+      } finally {
+        clearTimeout(timer);
       }
       this.checked.set(machineId, { online, checkedAt: this.now() });
       return online;

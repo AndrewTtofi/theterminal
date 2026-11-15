@@ -92,3 +92,37 @@ export function tlsServer(identity: LinkIdentity, onSecure: (socket: tls.TLSSock
     });
   });
 }
+
+/**
+ * A TLS server under `identity` that strings every request along: after the request arrives it writes a status line,
+ * then one header byte every `everyMs`, for as long as the connection lasts (a socket inactivity timeout never fires).
+ * `open()` counts the connections still open.
+ */
+export async function dribblingServer(identity: LinkIdentity, everyMs = 400): Promise<{ port: number; close: () => Promise<void>; open: () => number }> {
+  const timers = new Set<ReturnType<typeof setInterval>>();
+  let open = 0;
+  const server = await tlsServer(identity, (socket) => {
+    open++;
+    let started = false;
+    socket.on("data", () => {
+      if (started) return;
+      started = true;
+      socket.write("HTTP/1.1 200 OK\r\nx-slow: ");
+      const timer = setInterval(() => socket.write("a"), everyMs);
+      timers.add(timer);
+      socket.once("close", () => {
+        clearInterval(timer);
+        timers.delete(timer);
+        open--;
+      });
+    });
+  });
+  return {
+    port: server.port,
+    open: () => open,
+    close: async () => {
+      for (const t of timers) clearInterval(t);
+      await server.close();
+    },
+  };
+}

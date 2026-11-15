@@ -440,6 +440,44 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(fixture.requests.filter((r) => r.endsWith("/stop"))).toEqual([]);
   });
 
+  it("a stop the machine strings along (a header byte at a time) never holds the unlink past 3 s, and the request is cut", async () => {
+    const started = remote.started();
+    let beat: ReturnType<typeof setInterval> | undefined;
+    let dribble: ReturnType<typeof setInterval> | undefined;
+    cleanups.push(() => {
+      clearInterval(beat);
+      clearInterval(dribble);
+    });
+    let stopClosed = false;
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/events")) {
+        ndjson(res);
+        res.write(`${remote.line(started)}\n`);
+        beat = setInterval(() => res.write("\n"), 40);
+        return;
+      }
+      // The stop: a status line, then one header byte every 400 ms, for ever. Written raw, so the reply never ends.
+      const socket = res.socket!;
+      socket.write("HTTP/1.1 200 OK\r\nx-slow: ");
+      dribble = setInterval(() => socket.write("a"), 400);
+      socket.once("close", () => {
+        clearInterval(dribble);
+        stopClosed = true;
+      });
+    });
+    await vi.waitFor(() => expect(originIds()).toEqual([started.id]), { timeout: 5000 });
+    const t0 = Date.now();
+    await link.unpair(owner, remote.machineId);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(2500);
+    expect(took).toBeLessThan(4500);
+    expect(ledger.list().filter((e) => e.type === "machine.unpaired")).toHaveLength(1);
+    expect(fixture.requests.filter((r) => r.endsWith("/stop"))).toHaveLength(1);
+    // The stop request is not left running after the unlink: its connection is destroyed at the deadline.
+    await vi.waitFor(() => expect(stopClosed).toBe(true), { timeout: 2000 });
+    await vi.waitFor(() => expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" }), { timeout: 2000 });
+  }, 15_000);
+
   it("unlinking another machine leaves this one's runs alone", async () => {
     const started = remote.started();
     let beat: ReturnType<typeof setInterval> | undefined;

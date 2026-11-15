@@ -137,21 +137,24 @@ export class RemoteRunService {
       if (typeof machineId === "string") queueMicrotask(() => this.unpaired(machineId));
     });
     // Before the trust goes, while the machine's key still checks its reply: a stop for each run still going there.
-    this.stopUnpairing = deps.link.onUnpairing((machineId) => this.stopRunsOn(machineId));
+    this.stopUnpairing = deps.link.onUnpairing((machineId, signal) => this.stopRunsOn(machineId, signal));
   }
 
   /**
    * The machine is about to be unlinked: each run this computer asked of it that may still be going there is asked
    * to stop, all at once and with a short timeout, so the agent does not go on working for a machine that will not
    * take its results. Best effort: a machine that is unreachable, refuses or does not answer in time is left to the
-   * unlink, which goes on regardless (`unpaired` then ends the runs here). Nothing is recorded by this.
+   * unlink, which goes on regardless (`unpaired` then ends the runs here); `signal` is the unlink's deadline, which
+   * cuts a stop still in flight. Nothing is recorded by this.
    */
-  private async stopRunsOn(machineId: string): Promise<void> {
+  private async stopRunsOn(machineId: string, signal: AbortSignal): Promise<void> {
     const runs = listLinkRuns(this.deps.db).filter(
       (r) => r.direction === "requested" && r.machineId === machineId && (r.state === "requested" || r.state === "running"),
     );
     await Promise.all(
-      runs.map((r) => this.send(machineId, `/link/v1/runs/${encodeURIComponent(r.runId)}/stop`, {}, UNPAIR_STOP_TIMEOUT_MS).catch(() => undefined)),
+      runs.map((r) =>
+        this.send(machineId, `/link/v1/runs/${encodeURIComponent(r.runId)}/stop`, {}, UNPAIR_STOP_TIMEOUT_MS, signal).catch(() => undefined),
+      ),
     );
   }
 
@@ -311,10 +314,10 @@ export class RemoteRunService {
     return run.machineId;
   }
 
-  private async send(machineId: string, path: string, body: unknown, timeoutMs = QUICK_TIMEOUT_MS): Promise<void> {
+  private async send(machineId: string, path: string, body: unknown, timeoutMs = QUICK_TIMEOUT_MS, signal?: AbortSignal): Promise<void> {
     const peer = this.deps.link.peerFor(machineId);
     try {
-      await this.client(timeoutMs).request(peer, "POST", path, body);
+      await this.client(timeoutMs).request(peer, "POST", path, body, undefined, signal);
       this.deps.link.observed(machineId, true);
     } catch (err) {
       if (err instanceof MachineUnreachableError) this.deps.link.observed(machineId, false);

@@ -166,17 +166,30 @@ export class LinkClient {
     this.streamIdleMs = deps.streamIdleMs ?? DEFAULT_STREAM_IDLE_MS;
   }
 
-  /** A JSON request; the reply is parsed with `schema` when given. */
-  async request<T>(peer: Peer, method: "GET" | "POST", path: string, body?: unknown, schema?: z.ZodType<T>): Promise<T> {
+  /**
+   * A JSON request; the reply is parsed with `schema` when given. An abort through `signal`, before or after the
+   * headers arrived, destroys the connection and ends the request as MachineUnreachableError: the socket timeout is
+   * reset by every byte, so a caller with a deadline brings its own.
+   */
+  async request<T>(peer: Peer, method: "GET" | "POST", path: string, body?: unknown, schema?: z.ZodType<T>, signal?: AbortSignal): Promise<T> {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
     const headers: OutgoingHttpHeaders = { accept: "application/json" };
     if (payload) {
       headers["content-type"] = "application/json";
       headers["content-length"] = payload.length;
     }
-    const { res } = await this.open(peer, method, path, headers, (req) => req.end(payload));
-    if (!ok(res)) throw await refusal(res, peer.machineId);
-    return this.json(res, peer, schema);
+    const { req, res } = await this.open(peer, method, path, headers, (req) => req.end(payload), signal);
+    const abort = () => {
+      res.destroy();
+      req.destroy();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (!ok(res)) throw await refusal(res, peer.machineId);
+      return await this.json(res, peer, schema);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   /**
@@ -411,6 +424,7 @@ export class LinkClient {
     signal?: AbortSignal,
   ): Promise<{ req: ClientRequest; res: IncomingMessage }> {
     const { host, port } = parseAddress(peer.address);
+    if (signal?.aborted) return Promise.reject(new MachineUnreachableError(peer.machineId));
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (err: Error) => {

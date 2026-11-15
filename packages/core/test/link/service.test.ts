@@ -17,7 +17,7 @@ import {
 } from "../../src/link/service.js";
 import { fakeDiscovery, type Discovered, type Discovery } from "../../src/link/discovery.js";
 import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
-import { holdPort, rawTlsGet, tcpAccepts, tlsServer } from "./helpers.js";
+import { dribblingServer, holdPort, rawTlsGet, tcpAccepts, tlsServer } from "./helpers.js";
 import { pairingProof } from "../../src/link/pairing.js";
 import { IDENTITY_ACCOUNT, LinkIdentity } from "../../src/link/identity.js";
 
@@ -338,6 +338,25 @@ describe("LinkService machines and hello", () => {
     await b.link.disableLinking(owner);
     expect(await a.link.hello(bId.machineId)).toBe(true);
   });
+
+  it("a hello the machine strings along (a header byte at a time) is offline at the 3 s deadline, and the connection is cut", async () => {
+    const a = makeService();
+    await a.link.load();
+    const slow = await LinkIdentity.load({ secrets: new MemorySecretStore(), onCreated: () => undefined });
+    const server = await dribblingServer(slow);
+    try {
+      recordPaired(a.db, a.ledger, slow, server.port);
+      const t0 = Date.now();
+      expect(await a.link.hello(slow.machineId)).toBe(false);
+      const took = Date.now() - t0;
+      expect(took).toBeGreaterThanOrEqual(2500);
+      expect(took).toBeLessThan(4500);
+      expect(a.link.presence()[0]).toMatchObject({ online: false });
+      await vi.waitFor(() => expect(server.open()).toBe(0), { timeout: 2000 });
+    } finally {
+      await server.close();
+    }
+  }, 15_000);
 
   it("answers hello false for a machine that is not listening, or whose key is not the pinned one", async () => {
     const a = makeService();
