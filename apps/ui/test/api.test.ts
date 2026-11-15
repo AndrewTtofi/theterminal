@@ -53,6 +53,17 @@ describe("connections api", () => {
     expect(call(f, 0)[0]).toBe("/api/status");
   });
 
+  it("starts a run with the selected connections and reads the failed connection's name", async () => {
+    const f = respond(201, {});
+    await api.startRun("p1", { adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
+    expect(call(f, 0)[0]).toBe("/api/projects/p1/runs");
+    expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
+    respond(502, { error: "cloud_credentials_failed", name: "AWS dev" });
+    await expect(api.startRun("p1", { adapter: "claude", prompt: "go" })).rejects.toMatchObject({
+      status: 502, code: "cloud_credentials_failed", detail: "AWS dev",
+    });
+  });
+
   it("surfaces the error code", async () => {
     respond(503, { error: "keychain_unavailable" });
     await expect(api.addConnection({ kind: "llm", provider: "claude", name: "Claude" })).rejects.toMatchObject({
@@ -69,6 +80,16 @@ describe("errorMessage", () => {
     expect(errorMessage(new ApiError(400, "connection_unsupported"))).toBe("This connection cannot be used that way");
     expect(errorMessage(new ApiError(503, "keychain_unavailable"))).toBe("Your keychain is unavailable. Nothing was saved.");
     expect(errorMessage(new ApiError(400, "invalid_input"))).toBe("That input was not accepted");
+  });
+  it("maps the run start refusals; a failed cloud grant names the connection", () => {
+    expect(errorMessage(new ApiError(400, "connection_unsupported"), "run")).toBe("That connection cannot be given to a run");
+    expect(errorMessage(new ApiError(400, "connection_disabled"), "run")).toBe("That connection is disabled");
+    expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
+      "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
+    );
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", "AWS dev"), "run")).toBe(
+      'Could not get credentials from "AWS dev". The run did not start.',
+    );
   });
   it("maps the sign-in refusals", () => {
     expect(errorMessage(new ApiError(422, "terminal_required"))).toBe(

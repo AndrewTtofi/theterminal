@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,8 @@ import { openDatabase } from "../../src/db.js";
 import { listPendingActions } from "../../src/events/projections.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { createServer, repairSharedGitconfig, type RunningServer } from "../../src/server/server.js";
+import { AwsRejectedError, fakeSts, type StsCaller } from "../../src/connections/cloud/aws.js";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
@@ -53,7 +55,10 @@ const tmp = () => {
 /** Starts a server with the fake adapter enabled (when `script` is given) and one project. */
 async function start(
   script?: FakeStep[] | null,
-  opts: { shutdownTimeoutMs?: number; which?: (cmd: string) => string | null; bundled?: Parameters<typeof createServer>[0]["bundled"] } = {},
+  opts: {
+    shutdownTimeoutMs?: number; which?: (cmd: string) => string | null; bundled?: Parameters<typeof createServer>[0]["bundled"];
+    secrets?: MemorySecretStore; sts?: StsCaller;
+  } = {},
 ) {
   if (script !== null) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
@@ -576,5 +581,97 @@ describe("agent API", { timeout: 15000 }, () => {
       ["completed", "read-only inside worktree"],
       ["denied", "workspace restarted"],
     ]);
+  });
+});
+
+describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, () => {
+  const AWS = {
+    kind: "cloud", provider: "aws", name: "AWS dev", config: { region: "eu-west-1" },
+    secrets: { accessKeyId: "AKIATESTKEY000000000", secretAccessKey: "TESTKEY-static-secret-0000000000" },
+  };
+  const AZURE = {
+    kind: "cloud", provider: "azure", name: "Azure dev",
+    config: {
+      tenantId: "00000000-0000-0000-0000-00000000aaaa", clientId: "00000000-0000-0000-0000-00000000bbbb",
+      subscriptionId: "00000000-0000-0000-0000-00000000cccc",
+    },
+    secrets: { clientSecret: "TESTKEY-azure-secret-0000000000" },
+  };
+  const add = async (s: RunningServer, body: unknown) => (await json<{ id: string }>(post(s, "/api/connections", body))).id;
+  const startRun = (s: RunningServer, projectId: string, connectionIds: unknown, adapter = "fake") =>
+    post(s, `/api/projects/${projectId}/runs`, { adapter, prompt: "go", connectionIds });
+  const used = async (s: RunningServer) =>
+    (await json<{ type: string; payload: Record<string, unknown> }[]>(get(s, "/api/ledger"))).filter((e) => e.type === "connection.used");
+
+  it("gives the run the selected cloud credentials and records connection.used without any value", async () => {
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, AZURE);
+    const res = await startRun(s, projectId, [id]);
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect((await used(s)).map((e) => e.payload)).toEqual([
+      { connectionId: id, name: "Azure dev", runId: run.id, purpose: "cloud_credentials", credential: "azure_client_secret", expiresAt: null },
+    ]);
+    expect(await (await get(s, "/api/ledger")).text()).not.toContain("TESTKEY-azure-secret");
+  });
+
+  it("a disabled connection is 400 connection_disabled and nothing is recorded", async () => {
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, AWS);
+    const patched = await fetch(`${base(s)}/api/connections/${id}`, { method: "PATCH", headers: headers(s), body: JSON.stringify({ enabled: false }) });
+    expect(patched.status).toBe(200);
+    const res = await startRun(s, projectId, [id]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "connection_disabled" });
+    expect(await used(s)).toEqual([]);
+    expect(await json(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
+  });
+
+  it("a model connection is 400 connection_unsupported; an unknown id is 404", async () => {
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const llm = await add(s, { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: "sk-ant-TESTKEY-0000000000" } });
+    const res = await startRun(s, projectId, [llm]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "connection_unsupported" });
+    const unknown = await startRun(s, projectId, ["no-such-connection"]);
+    expect(unknown.status).toBe(404);
+    expect(await used(s)).toEqual([]);
+  });
+
+  it("a cloud provider that refuses is 502 cloud_credentials_failed with the connection name, and no run exists", async () => {
+    const rejecting: StsCaller = {
+      ...fakeSts,
+      sessionToken: async () => {
+        throw new AwsRejectedError("InvalidClientTokenId");
+      },
+    };
+    const { s, projectId, dataDir } = await start(script, { secrets: new MemorySecretStore(), sts: rejecting });
+    const id = await add(s, AWS);
+    const res = await startRun(s, projectId, [id]);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "cloud_credentials_failed", name: "AWS dev" });
+    expect(await json(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
+    expect(await used(s)).toEqual([]);
+    expect(existsSync(join(dataDir, "projects", projectId, "worktrees")) ? readdirSync(join(dataDir, "projects", projectId, "worktrees")) : []).toEqual([]);
+  });
+
+  it("a Codex run with an MCP server is 400 mcp_unsupported", async () => {
+    const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, { kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" } });
+    const res = await startRun(s, projectId, [id], "codex");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "mcp_unsupported" });
+    expect(await used(s)).toEqual([]);
+  });
+
+  it("more than 10 ids is 400 invalid_input; without the token it is 401", async () => {
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const res = await startRun(s, projectId, Array.from({ length: 11 }, (_, i) => `id-${i}`));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_input");
+    const anonymous = await fetch(`${base(s)}/api/projects/${projectId}/runs`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ adapter: "fake", prompt: "go", connectionIds: [] }),
+    });
+    expect(anonymous.status).toBe(401);
   });
 });

@@ -1,4 +1,5 @@
 import type { ActionKind, AdapterId, AuthMode } from "@theterminal/shared";
+import type { McpServerSpec } from "../connections/mcp.js";
 
 /** An action an agent wants to take. `paths` are the filesystem paths it touches (checked by policy). */
 export type ProposedAction = { tool: string; kind: ActionKind; summary: string; input: unknown; paths: string[] };
@@ -38,8 +39,18 @@ export interface AdapterStartOptions {
   credentials: RunCredentials;
 }
 
-/** Values from a connection: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini. */
-export type RunCredentials = { apiKey?: string; cliHome?: string; googleCloudProject?: string };
+/**
+ * Values from connections: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini (all
+ * from the provider's own connection); `env`, the merged variables of the cloud grants the Owner selected for this run
+ * (names from CLOUD_ENV_ALLOWLIST, passed to buildChildEnv as `extraEnv`); `mcpServers`, the MCP servers selected.
+ */
+export type RunCredentials = {
+  apiKey?: string;
+  cliHome?: string;
+  googleCloudProject?: string;
+  env: Record<string, string>;
+  mcpServers: McpServerSpec[];
+};
 
 export interface AgentAdapter {
   id: AdapterId;

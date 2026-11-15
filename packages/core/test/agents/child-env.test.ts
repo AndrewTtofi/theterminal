@@ -153,6 +153,44 @@ describe("buildChildEnv allowlist", () => {
   });
 });
 
+describe("buildChildEnv extraEnv", () => {
+  const grant = { AWS_ACCESS_KEY_ID: "AKIATESTKEY000000000", AWS_SESSION_TOKEN: "t" };
+  const modes = [
+    ["claude", "api_key"], ["claude", "subscription"], ["codex", "api_key"], ["codex", "chatgpt"], ["gemini", "api_key"], ["gemini", "google"],
+  ] as const;
+
+  it.each(modes)("%s %s: adds the allowlisted cloud variables", (p, mode) => {
+    const env = buildChildEnv(p, mode, { apiKey: "k", dataDir: DATA_DIR, base, extraEnv: grant });
+    expect(env.AWS_ACCESS_KEY_ID).toBe("AKIATESTKEY000000000");
+    expect(env.AWS_SESSION_TOKEN).toBe("t");
+  });
+
+  it("throws for a variable outside CLOUD_ENV_ALLOWLIST, before anything is returned", () => {
+    expect(() => buildChildEnv("claude", "api_key", { apiKey: "k", dataDir: DATA_DIR, base, extraEnv: { NPM_TOKEN: "x" } })).toThrow(
+      new TypeError("variable not allowed for a child: NPM_TOKEN"),
+    );
+  });
+
+  it("never copies cloud variables from the base environment", () => {
+    const env = buildChildEnv("claude", "api_key", {
+      apiKey: "k", dataDir: DATA_DIR, base: { ...base, AWS_SECRET_ACCESS_KEY: "base-secret", AWS_PROFILE: "x" },
+    });
+    expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.AWS_PROFILE).toBeUndefined();
+  });
+
+  it("never overwrites a variable already set: the Gemini connection's project wins over a grant's", () => {
+    const env = buildChildEnv("gemini", "google", {
+      dataDir: DATA_DIR, base, googleCloudProject: "gemini-project",
+      extraEnv: { GOOGLE_CLOUD_PROJECT: "grant-project", CLOUDSDK_CORE_PROJECT: "grant-project" },
+    });
+    expect(env.GOOGLE_CLOUD_PROJECT).toBe("gemini-project");
+    expect(env.CLOUDSDK_CORE_PROJECT).toBe("grant-project");
+    const plain = buildChildEnv("gemini", "google", { dataDir: DATA_DIR, base, extraEnv: { GOOGLE_CLOUD_PROJECT: "grant-project" } });
+    expect(plain.GOOGLE_CLOUD_PROJECT).toBe("grant-project");
+  });
+});
+
 describe("assertEmptyGitconfig", () => {
   const withDir = (fn: (dir: string) => void) => {
     const dir = mkdtempSync(join(tmpdir(), "gitcfg-"));

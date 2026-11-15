@@ -322,11 +322,11 @@ export class GeminiAdapter implements AgentAdapter {
   /** The child-process environment for an auth mode, or an error message. A copy: process.env is never changed. */
   private env(mode: AuthMode, credentials: RunCredentials): NodeJS.ProcessEnv | string {
     if (mode !== "api_key" && mode !== "google") return `Unsupported auth mode for Gemini: ${mode}`;
-    const { cliHome, googleCloudProject } = credentials;
-    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject }), ...this.fakeEnv }; // the user's own login, untouched
+    const { cliHome, googleCloudProject, env: extraEnv } = credentials;
+    if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject, extraEnv }), ...this.fakeEnv }; // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject }), ...this.fakeEnv };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv }), ...this.fakeEnv };
   }
 }
 
@@ -339,7 +339,12 @@ class GeminiRun {
   private readonly terminals: Terminals;
   /** Terminal id -> the allowed action it runs for. */
   private readonly terminalActions = new Map<string, string>();
-  /** The agent's env without provider keys: terminal commands never see them. */
+  /**
+   * The agent's env without provider variables: terminal commands never see them. The run's cloud grant is the
+   * exception: its own variables (GOOGLE_CLOUD_PROJECT, GOOGLE_OAUTH_ACCESS_TOKEN among them) reach the command with
+   * the grant's values, so an approved `gcloud` or `terraform` command can authenticate, and the Gemini connection's
+   * own project (which Gemini itself keeps) never does.
+   */
   private readonly terminalEnv: NodeJS.ProcessEnv;
   private sessionId: string | null = null;
   private inTurn = false;
@@ -365,6 +370,7 @@ class GeminiRun {
     for (const [k, v] of Object.entries(env)) {
       if (!PROVIDER_ENV.test(k)) this.terminalEnv[k] = v;
     }
+    Object.assign(this.terminalEnv, o.credentials.env);
   }
 
   async run(file: string, args: string[]): Promise<StartResult> {

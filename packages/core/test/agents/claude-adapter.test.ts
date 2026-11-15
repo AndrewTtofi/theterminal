@@ -189,7 +189,7 @@ function harness(decide: (a: ProposedAction) => GateResult | Promise<GateResult>
     emit: (e) => events.push(e),
     recordDenied: async () => {},
     clean: (t) => t,
-    credentials: {},
+    credentials: { env: {}, mcpServers: [] },
   };
   return { opts, proposed, events, abort };
 }
@@ -316,7 +316,7 @@ describe("ClaudeAdapter", () => {
     const q = fakeQuery([success(0)]);
     const fallback = vi.fn(() => FAKE_KEY);
     const h = harness();
-    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY } });
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: fallback }).start({ ...h.opts, credentials: { apiKey: CONNECTION_KEY, env: {}, mcpServers: [] } });
     expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe(CONNECTION_KEY);
     expect(fallback).not.toHaveBeenCalled();
   });
@@ -327,6 +327,17 @@ describe("ClaudeAdapter", () => {
     await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, findClaude }).start(harness().opts);
     expect(q.calls[0]!.options).not.toHaveProperty("pathToClaudeCodeExecutable");
     expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it.each(["api_key", "subscription"] as const)("%s mode: the run's cloud grant reaches Claude Code and its Bash commands", async (authMode) => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    const credentials = { env: { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }, mcpServers: [] };
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => CLAUDE_BIN }).start({ ...h.opts, authMode, credentials });
+    const env = q.calls[0]!.options.env!;
+    expect(env.AZURE_CLIENT_SECRET).toBe("TESTKEY-azure-secret-0000000000");
+    // Claude Code hands its own env to Bash commands unless subprocess scrubbing is on, which this env never turns on.
+    expect(Object.keys(env).filter((k) => /SUBPROCESS_ENV_SCRUB|^GITHUB_ACTIONS$/.test(k))).toEqual([]);
   });
 
   it("subscription mode runs the Claude Code bundled with the Agent SDK and never looks on PATH", async () => {

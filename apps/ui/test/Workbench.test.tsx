@@ -139,7 +139,7 @@ describe("Workbench", () => {
     await userEvent.click(view("Agents"));
     await userEvent.type(screen.getByLabelText("Prompt"), "hello");
     await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
-    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello");
+    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", []);
   });
 
   it("shows the selected run's actions in the Agent feed panel", () => {

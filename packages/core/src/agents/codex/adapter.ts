@@ -211,6 +211,12 @@ export function codexApprovalToAction(
 type CommandSpec = { file: string; args: string[] };
 
 /** Drives `codex app-server` (the bundled Codex CLI by default). Every command and file change waits for our gate. */
+/**
+ * The provider keys a Codex command never sees once a cloud grant turns off Codex's default KEY/SECRET/TOKEN filter
+ * (`shell_environment_policy.exclude`, matched case-insensitively). The run's env holds at most the first two.
+ */
+export const CODEX_COMMAND_EXCLUDES: readonly string[] = ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex" as const;
   private readonly dataDir: string;
@@ -279,7 +285,16 @@ export class CodexAdapter implements AgentAdapter {
     }
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
-    const env = { ...buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome }), ...this.fakeEnv };
+    // Codex drops every *KEY*, *SECRET* and *TOKEN* variable from the env of the commands it runs by default, which
+    // would drop a cloud grant's secret and token. With a grant, keep them, and exclude every provider key by name.
+    if (Object.keys(o.credentials.env).length > 0) {
+      args.push(
+        "-c", "shell_environment_policy.ignore_default_excludes=true",
+        "-c", `shell_environment_policy.exclude=${JSON.stringify(CODEX_COMMAND_EXCLUDES)}`,
+      );
+    }
+    const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv: o.credentials.env });
+    const env = { ...childEnv, ...this.fakeEnv };
     if (o.authMode === "api_key") {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };

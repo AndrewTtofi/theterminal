@@ -35,6 +35,8 @@ const startBody = z.object({
   adapter: z.enum(ADAPTERS),
   prompt: agentPayloadSchemas["agent.started"].shape.prompt, // same bounds as the recorded event
   cardId: z.string().min(1).max(200).nullable().optional(),
+  /** Cloud and MCP connections the Owner gives this run. */
+  connectionIds: z.array(z.string().min(1).max(200)).max(10).optional(),
 });
 const decisionBody = z.object({ decision: z.enum(["allow", "deny"]), reason: z.string().optional() });
 const authBody = z.object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().optional() });
@@ -80,6 +82,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
       adapter: body.adapter,
       prompt: body.prompt,
       ...(body.cardId !== undefined && { cardId: body.cardId }),
+      ...(body.connectionIds !== undefined && { connectionIds: body.connectionIds }),
     });
     return reply.code(201).send(run);
   });

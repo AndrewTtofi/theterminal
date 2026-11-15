@@ -29,6 +29,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** What the error names, when the server sends it: the connection whose cloud credentials could not be had. */
+    readonly detail?: string,
   ) {
     super(`${status} ${code}`);
     this.name = "ApiError";
@@ -49,12 +51,15 @@ async function request<T>(
   });
   if (!res.ok) {
     let code = "internal";
+    let detail: string | undefined;
     try {
-      code = ((await res.json()) as { error?: string }).error ?? code;
+      const body = (await res.json()) as { error?: string; name?: unknown };
+      code = body.error ?? code;
+      if (code === "cloud_credentials_failed" && typeof body.name === "string") detail = body.name;
     } catch {
       // non-JSON error body: keep the default code
     }
-    throw new ApiError(res.status, code);
+    throw new ApiError(res.status, code, detail);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -111,7 +116,7 @@ export const api = {
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
-  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string }) =>
+  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[] }) =>
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
@@ -146,9 +151,20 @@ export const api = {
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
 };
 
-export function errorMessage(e: unknown): string {
+/** Why a Codex run cannot be given an MCP server; the picker shows it too. */
+export const CODEX_MCP_NOTE =
+  "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.";
+
+/** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
+export function errorMessage(e: unknown, context?: "run"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
+    if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
+    if (e.status === 400 && e.code === "mcp_unsupported") return CODEX_MCP_NOTE;
+    if (e.status === 502 && e.code === "cloud_credentials_failed") {
+      return `Could not get credentials from "${e.detail ?? "a cloud connection"}". The run did not start.`;
+    }
     if (e.status === 409 && e.code === "conflict") return "Already connected";
     if (e.code === "secret_in_config") return "That field must not contain a key or token";
     if (e.status === 400 && e.code === "connection_unsupported") return "This connection cannot be used that way";

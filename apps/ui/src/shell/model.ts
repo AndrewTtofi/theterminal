@@ -33,7 +33,7 @@ export type WorkbenchModel = {
   selectedRunId: string | null;
   runActions: AgentAction[];
   /** Resolves false when starting failed, so the prompt is kept. */
-  onStartRun: (adapter: AdapterId, prompt: string) => Promise<boolean>;
+  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[]) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 
