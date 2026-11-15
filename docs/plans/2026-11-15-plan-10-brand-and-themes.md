@@ -1,6 +1,5 @@
 # Plan 10: Brand and themes, implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give The Terminal its brand (the `>_` mark, wordmark, app icons, Ice as the default look) and let each person choose, make, import and export colour themes.
 
