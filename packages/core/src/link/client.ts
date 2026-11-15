@@ -209,16 +209,11 @@ export class LinkClient {
     const abort = () => req.destroy();
     signal.addEventListener("abort", abort, { once: true });
     // Lines past the cap or not UTF-8 are refused as they arrive, named for the caller (a correct worker never sends
-    // them); blank lines (the worker's heartbeat) are skipped.
+    // them); blank lines (the worker's heartbeat) are skipped. The splitter hands each line over before it looks at
+    // the next, so the good lines of a chunk reach `onFrame` before a refusal later in the same chunk.
     const splitter = new NdjsonLines();
-    const split = (fn: () => string[] | void): string[] => {
-      try {
-        return fn() ?? [];
-      } catch (err) {
-        if (err instanceof MirrorFrameError) throw new LinkProtocolError(err.reason === "too_large" ? "too_large" : "invalid_frame");
-        throw err;
-      }
-    };
+    const named = (err: unknown): unknown =>
+      err instanceof MirrorFrameError ? new LinkProtocolError(err.reason === "too_large" ? "too_large" : "invalid_frame") : err;
     const deliver = async (line: string) => {
       try {
         await onFrame(line);
@@ -229,12 +224,13 @@ export class LinkClient {
     try {
       try {
         for await (const chunk of res as AsyncIterable<Buffer>) {
-          for (const line of split(() => splitter.push(chunk))) {
+          for (const line of splitter.push(chunk)) {
             await deliver(line);
             if (signal.aborted) return;
           }
         }
-      } catch (err) {
+      } catch (raw) {
+        const err = named(raw);
         if (signal.aborted) return;
         if (err instanceof CallerError || err instanceof LinkProtocolError) req.destroy();
         if (err instanceof CallerError) throw err.cause;
@@ -244,7 +240,11 @@ export class LinkClient {
       if (signal.aborted) return;
       if (!res.complete) throw new MachineUnreachableError(peer.machineId);
       // A clean end must not leave half a line behind.
-      split(() => splitter.end());
+      try {
+        splitter.end();
+      } catch (err) {
+        throw named(err);
+      }
     } finally {
       signal.removeEventListener("abort", abort);
     }

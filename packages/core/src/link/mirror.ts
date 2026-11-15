@@ -219,8 +219,12 @@ export class NdjsonLines {
   #pendingBytes = 0;
   readonly #decoder = new TextDecoder("utf-8", { fatal: true });
 
-  push(chunk: Buffer): string[] {
-    const lines: string[] = [];
+  /**
+   * The lines completed by `chunk`, one at a time: each is handed over before the next is decoded, so when a later
+   * line of the same chunk is refused, the good lines before it have already reached the caller. One chunk may carry
+   * several of the sender's writes; a refusal must lose nothing that came before it.
+   */
+  *push(chunk: Buffer): Generator<string, void, undefined> {
     let rest = chunk;
     for (let nl = rest.indexOf(0x0a); nl !== -1; nl = rest.indexOf(0x0a)) {
       const bytes = Buffer.concat([...this.#pending, rest.subarray(0, nl)]);
@@ -228,14 +232,13 @@ export class NdjsonLines {
       this.#pendingBytes = 0;
       rest = rest.subarray(nl + 1);
       const line = this.#decode(bytes);
-      if (line.trim() !== "") lines.push(line);
+      if (line.trim() !== "") yield line;
     }
     if (rest.length > 0) {
       this.#pending.push(Buffer.from(rest));
       this.#pendingBytes += rest.length;
       if (this.#pendingBytes > MAX_FRAME_BYTES) throw new MirrorFrameError("too_large");
     }
-    return lines;
   }
 
   /** The stream ended; a partial line is refused. */

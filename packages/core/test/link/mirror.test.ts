@@ -315,29 +315,40 @@ describe("NdjsonLines", () => {
     const lines = new NdjsonLines();
     const text = Buffer.from('{"a":"é"}\n{"b":2}\n{"c"');
     const cut = text.indexOf(0xc3) + 1; // inside the two bytes of é
-    expect(lines.push(text.subarray(0, cut))).toEqual([]);
-    expect(lines.push(text.subarray(cut))).toEqual(['{"a":"é"}', '{"b":2}']);
-    expect(lines.push(Buffer.from(':3}\r\n\n'))).toEqual(['{"c":3}']);
+    expect([...lines.push(text.subarray(0, cut))]).toEqual([]);
+    expect([...lines.push(text.subarray(cut))]).toEqual(['{"a":"é"}', '{"b":2}']);
+    expect([...lines.push(Buffer.from(':3}\r\n\n'))]).toEqual(['{"c":3}']);
     expect(() => lines.end()).not.toThrow();
   });
 
   it("throws too_large as soon as a pending line passes the cap, without waiting for its newline", () => {
     const lines = new NdjsonLines();
-    expect(lines.push(Buffer.alloc(MAX_FRAME_BYTES, 0x20))).toEqual([]);
-    expect(() => lines.push(Buffer.from(" "))).toThrow(expect.objectContaining({ reason: "too_large" }));
+    expect([...lines.push(Buffer.alloc(MAX_FRAME_BYTES, 0x20))]).toEqual([]);
+    expect(() => [...lines.push(Buffer.from(" "))]).toThrow(expect.objectContaining({ reason: "too_large" }));
   });
 
   it("throws too_large for a complete line over the cap inside one chunk", () => {
     const lines = new NdjsonLines();
     const chunk = Buffer.concat([Buffer.alloc(MAX_FRAME_BYTES + 1, 0x20), Buffer.from("\n")]);
-    expect(() => lines.push(chunk)).toThrow(expect.objectContaining({ reason: "too_large" }));
+    expect(() => [...lines.push(chunk)]).toThrow(expect.objectContaining({ reason: "too_large" }));
   });
 
   it("throws invalid_frame for bytes that are not UTF-8, and for a stream cut mid-line", () => {
-    expect(() => new NdjsonLines().push(Buffer.from([0xff, 0x0a]))).toThrow(expect.objectContaining({ reason: "invalid_frame" }));
+    expect(() => [...new NdjsonLines().push(Buffer.from([0xff, 0x0a]))]).toThrow(expect.objectContaining({ reason: "invalid_frame" }));
     const lines = new NdjsonLines();
-    lines.push(Buffer.from('{"a":1'));
+    expect([...lines.push(Buffer.from('{"a":1'))]).toEqual([]);
     expect(() => lines.end()).toThrow(expect.objectContaining({ reason: "invalid_frame" }));
+  });
+
+  it("hands over the lines before a refused one in the same chunk, and refuses only when it reaches it", () => {
+    // One TCP chunk may carry several of the worker's writes: the good lines before the bad one are not lost.
+    const bad = new NdjsonLines().push(Buffer.concat([Buffer.from('{"a":1}\n'), Buffer.from([0xff, 0xfe, 0x0a]), Buffer.from('{"b":2}\n')]));
+    expect(bad.next()).toEqual({ value: '{"a":1}', done: false });
+    expect(() => bad.next()).toThrow(expect.objectContaining({ reason: "invalid_frame" }));
+
+    const long = new NdjsonLines().push(Buffer.concat([Buffer.from('{"a":1}\n'), Buffer.alloc(MAX_FRAME_BYTES + 1, 0x20)]));
+    expect(long.next()).toEqual({ value: '{"a":1}', done: false });
+    expect(() => long.next()).toThrow(expect.objectContaining({ reason: "too_large" }));
   });
 });
 
