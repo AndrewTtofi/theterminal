@@ -38,6 +38,13 @@ const toCard = (r: CardRow): Card => ({
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
+/** The card as the board projects it; NotFoundError when there is none. */
+export function requireCard(db: Db, id: string): Card {
+  const r = db.prepare("SELECT * FROM cards WHERE id = ?").get(id) as CardRow | undefined;
+  if (!r) throw new NotFoundError("card", id);
+  return toCard(r);
+}
+
 export type BoardServiceOptions = {
   newId?: () => string;
   /** Test seam: replaces the projection reducer. */
@@ -139,8 +146,6 @@ export class BoardService {
   }
 
   private requireCard(id: string): Card {
-    const r = this.db.prepare("SELECT * FROM cards WHERE id = ?").get(id) as CardRow | undefined;
-    if (!r) throw new NotFoundError("card", id);
-    return toCard(r);
+    return requireCard(this.db, id);
   }
 }

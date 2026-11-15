@@ -5,18 +5,26 @@ import { openDatabase } from "../../src/db.js";
 import { Ledger, type VerifyResult } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { registerRoutes } from "../../src/server/routes.js";
+import { GateService } from "../../src/gates/service.js";
+import { IntakeService } from "../../src/intake/service.js";
+import { GATES, type GateEvaluation, type GateId } from "@theterminal/shared";
+import { completeIntake, type World } from "../gates/setup.js";
 
 let app: FastifyInstance;
+let db: ReturnType<typeof openDatabase>;
 let ledger: Ledger;
+let board: BoardService;
+let gates: GateService;
 let integrity: VerifyResult;
 
 beforeEach(() => {
-  const db = openDatabase(":memory:");
+  db = openDatabase(":memory:");
   ledger = new Ledger(db);
-  const board = new BoardService(db, ledger);
+  board = new BoardService(db, ledger);
+  gates = new GateService({ db, ledger });
   integrity = { ok: true, count: 0 };
   app = Fastify();
-  registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+  registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
 });
 
 async function mkProject(name = "Acme") {
@@ -24,11 +32,11 @@ async function mkProject(name = "Acme") {
   return res.json() as { id: string };
 }
 
-async function mkCard(projectId: string) {
+async function mkCard(projectId: string, stage = "plan") {
   const res = await app.inject({
     method: "POST",
     url: `/api/projects/${projectId}/cards`,
-    payload: { title: "T", stage: "plan" },
+    payload: { title: "T", stage },
   });
   return res.json() as { id: string };
 }
@@ -109,7 +117,7 @@ describe("routes", () => {
 
   it("POST move and status", async () => {
     const p = await mkProject();
-    const c = await mkCard(p.id);
+    const c = await mkCard(p.id, "design");
     const mv = await app.inject({ method: "POST", url: `/api/cards/${c.id}/move`, payload: { to: "build" } });
     expect(mv.statusCode).toBe(200);
     expect(mv.json()).toMatchObject({ id: c.id, stage: "build" });
@@ -121,6 +129,74 @@ describe("routes", () => {
   it("404 for moving an unknown card", async () => {
     const res = await app.inject({ method: "POST", url: "/api/cards/nope/move", payload: { to: "build" } });
     expect(res.statusCode).toBe(404);
+  });
+
+  describe("gates", () => {
+    const SHIP_GATES: GateId[] = ["ready_to_ship", "network_exposure", "payments", "personal_data"];
+    const signOff = (gateId: GateId) => ({
+      gateId, decision: "sign_off", acknowledgement: GATES.find((g) => g.id === gateId)!.acknowledgement,
+    });
+    async function plannedCard() {
+      const p = await mkProject("Book Club");
+      const intake = new IntakeService({ db, ledger, username: "clubuser" });
+      completeIntake({ db, ledger, board, intake } as World, p.id);
+      return mkCard(p.id, "build");
+    }
+
+    it("a move a gate stops is 409 gate_blocked with every evaluation and its conditions", async () => {
+      const c = await plannedCard();
+      const res = await app.inject({ method: "POST", url: `/api/cards/${c.id}/move`, payload: { to: "ship" } });
+      expect(res.statusCode).toBe(409);
+      const body = res.json() as { error: string; gates: GateEvaluation[] };
+      expect(body.error).toBe("gate_blocked");
+      expect(body.gates.map((g) => g.id)).toEqual(SHIP_GATES);
+      for (const g of body.gates) expect(g.conditions.length).toBeGreaterThan(0);
+      expect(ledger.list().at(-1)!.type).toBe("gate.blocked");
+    });
+
+    it("with the decisions it is 200 and the card is in Ship", async () => {
+      const c = await plannedCard();
+      const res = await app.inject({
+        method: "POST", url: `/api/cards/${c.id}/move`, payload: { to: "ship", gates: SHIP_GATES.map(signOff) },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ id: c.id, stage: "ship" });
+    });
+
+    it("a sign-off whose conditions do not hold is 409 gate_not_met naming the gate and the unmet conditions", async () => {
+      const p = await mkProject();
+      const c = await mkCard(p.id, "build");
+      const res = await app.inject({
+        method: "POST", url: `/api/cards/${c.id}/move`, payload: { to: "ship", gates: [signOff("ready_to_ship")] },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "gate_not_met", gateId: "ready_to_ship", unmet: ["intake_completed"] });
+    });
+
+    it("refuses more than ten decisions, unknown keys, and a secret in a waiver reason", async () => {
+      const c = await plannedCard();
+      const url = `/api/cards/${c.id}/move`;
+      const many = await app.inject({ method: "POST", url, payload: { to: "ship", gates: Array.from({ length: 11 }, () => signOff("payments")) } });
+      expect(many.statusCode).toBe(400);
+      const extra = await app.inject({ method: "POST", url, payload: { to: "ship", other: 1 } });
+      expect(extra.statusCode).toBe(400);
+      const waiver = { gateId: "ready_to_ship", decision: "waive", reason: "demo sk-ant-TESTKEY-0000000000", acknowledgement: GATES[1]!.acknowledgement };
+      const secret = await app.inject({ method: "POST", url, payload: { to: "ship", gates: [waiver] } });
+      expect(secret.statusCode).toBe(400);
+      expect(secret.json()).toEqual({ error: "secret_in_text" });
+    });
+
+    it("GET /api/cards/:id/gates?to= returns the evaluations without recording anything", async () => {
+      const c = await plannedCard();
+      const head = ledger.headSeq();
+      const res = await app.inject({ url: `/api/cards/${c.id}/gates?to=ship` });
+      expect(res.statusCode).toBe(200);
+      expect((res.json() as GateEvaluation[]).map((g) => [g.id, g.outcome])).toEqual(SHIP_GATES.map((g) => [g, "needs_sign_off"]));
+      expect(ledger.headSeq()).toBe(head);
+      expect((await app.inject({ url: `/api/cards/${c.id}/gates?to=nowhere` })).statusCode).toBe(400);
+      expect((await app.inject({ url: `/api/cards/${c.id}/gates` })).statusCode).toBe(400);
+      expect((await app.inject({ url: "/api/cards/nope/gates?to=ship" })).statusCode).toBe(404);
+    });
   });
 
   it("400 for invalid move target", async () => {
@@ -160,7 +236,7 @@ describe("routes", () => {
       throw new Error("secret detail");
     };
     const a = Fastify();
-    registerRoutes(a, { board: boom, ledger, getIntegrity: () => integrity });
+    registerRoutes(a, { board: boom, gates, ledger, getIntegrity: () => integrity });
     const res = await a.inject({ url: "/api/projects" });
     expect(res.statusCode).toBe(500);
     expect(res.json()).toEqual({ error: "internal" });

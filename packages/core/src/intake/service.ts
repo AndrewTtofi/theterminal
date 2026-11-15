@@ -66,16 +66,20 @@ export class NoIntakeError extends Error {
   }
 }
 
-export type IntakeServiceDeps = {
-  db: Db;
-  ledger: Ledger;
-  newId?: () => string;
+/** How free text the Owner writes is made fit for the permanent ledger. */
+export type RecordedTextDeps = {
   /** Scrubbed to `<data>` in recorded text when given. */
   dataDir?: string;
   /** The OS username scrubbed to `<user>`; defaults to the current user's. */
   username?: string;
   /** Extra values refused as secrets (the session token, stored connection secrets), read on every check. */
   secrets?: () => string[];
+};
+
+export type IntakeServiceDeps = RecordedTextDeps & {
+  db: Db;
+  ledger: Ledger;
+  newId?: () => string;
 };
 
 export type IntakeProjectDecisions = { projectId: string; name: string; decisions: number };
@@ -93,6 +97,53 @@ function osUsername(): string {
   }
 }
 
+/**
+ * Free text bound for the ledger: scrubbed of local paths and the username, and refused when it holds a secret.
+ * Shared by every service that records what the Owner writes (the intake, gate waivers).
+ */
+export class RecordedText {
+  readonly scrub: Scrub;
+  private readonly secrets: () => string[];
+
+  constructor(deps: RecordedTextDeps = {}) {
+    const dirs: [string, string][] = [[homedir(), "~"]];
+    if (deps.dataDir !== undefined) dirs.unshift([deps.dataDir, "<data>"]);
+    const paths = pathScrubber(dirs);
+    const user = usernameScrubber(deps.username ?? osUsername());
+    // Paths first, so a home directory becomes `~` rather than a path ending in `<user>`.
+    this.scrub = (s) => user(paths(s));
+    this.secrets = deps.secrets ?? (() => []);
+  }
+
+  /** Scrubbed, then refused when redaction would change it. The error never carries the text. */
+  clean(text: string): string {
+    if (!this.passes(text)) throw new SecretInTextError();
+    return this.scrub(text);
+  }
+
+  /**
+   * True when neither the text as given nor its scrubbed form holds a secret. Both are checked, as the runner does:
+   * a secret containing the username or a home path would be rewritten by the scrubber and then miss the exact match.
+   */
+  passes(text: string): boolean {
+    const secrets = this.secrets();
+    const scrubbed = this.scrub(text);
+    return redact(text, secrets) === text && redact(scrubbed, secrets) === scrubbed;
+  }
+
+  /** The text with every secret replaced, for showing what could not be recorded. */
+  redacted(text: string): string {
+    return redact(text, this.secrets());
+  }
+
+  /** A free text trimmed, length-checked as given, then cleaned and checked again (a placeholder may lengthen it). */
+  text(field: string, value: string, limits: { min: number; max: number }): string {
+    const schema = z.object({ [field]: z.string().trim().min(limits.min).max(limits.max) });
+    const trimmed = schema.parse({ [field]: value })[field] as string;
+    return schema.parse({ [field]: this.clean(trimmed) })[field] as string;
+  }
+}
+
 const answersOf = (s: IntakeState): Answers =>
   Object.fromEntries(Object.entries(s.answers).map(([k, v]) => [k, v!.answer])) as Answers;
 const decisionsOf = (s: IntakeState): Decisions =>
@@ -106,20 +157,13 @@ export class IntakeService {
   private readonly db: Db;
   private readonly ledger: Ledger;
   private readonly newId: () => string;
-  private readonly scrub: Scrub;
-  private readonly secrets: () => string[];
+  private readonly recorded: RecordedText;
 
   constructor(deps: IntakeServiceDeps) {
     this.db = deps.db;
     this.ledger = deps.ledger;
     this.newId = deps.newId ?? (() => randomUUID());
-    const dirs: [string, string][] = [[homedir(), "~"]];
-    if (deps.dataDir !== undefined) dirs.unshift([deps.dataDir, "<data>"]);
-    const paths = pathScrubber(dirs);
-    const user = usernameScrubber(deps.username ?? osUsername());
-    // Paths first, so a home directory becomes `~` rather than a path ending in `<user>`.
-    this.scrub = (s) => user(paths(s));
-    this.secrets = deps.secrets ?? (() => []);
+    this.recorded = new RecordedText(deps);
   }
 
   get(projectId: string): IntakeView | null {
@@ -244,24 +288,16 @@ export class IntakeService {
     }));
   }
 
-  /** Scrubbed, then refused when redaction would change it. The error never carries the text. */
   private clean(text: string): string {
-    if (!this.passes(text)) throw new SecretInTextError();
-    return this.scrub(text);
+    return this.recorded.clean(text);
   }
 
-  /**
-   * True when neither the text as given nor its scrubbed form holds a secret. Both are checked, as the runner does:
-   * a secret containing the username or a home path would be rewritten by the scrubber and then miss the exact match.
-   */
   private passes(text: string): boolean {
-    const secrets = this.secrets();
-    const scrubbed = this.scrub(text);
-    return redact(text, secrets) === text && redact(scrubbed, secrets) === scrubbed;
+    return this.recorded.passes(text);
   }
 
   private summaryOf(name: string, answers: Answers, decisions: Decisions): string {
-    return truncate(this.scrub(planSummary(name, answers, decisions)), SUMMARY_MAX);
+    return truncate(this.recorded.scrub(planSummary(name, answers, decisions)), SUMMARY_MAX);
   }
 
   /** Why the plan summary cannot be recorded, naming the field to change; null when it can. */
@@ -274,11 +310,8 @@ export class IntakeService {
     return this.passes(planSummary(name, answers, decisions)) ? null : SUMMARY_SECRET;
   }
 
-  /** A free text trimmed, length-checked as given, then cleaned and checked again (a placeholder may lengthen it). */
   private text(field: string, value: string, limits: { min: number; max: number }): string {
-    const schema = z.object({ [field]: z.string().trim().min(limits.min).max(limits.max) });
-    const trimmed = schema.parse({ [field]: value })[field] as string;
-    return schema.parse({ [field]: this.clean(trimmed) })[field] as string;
+    return this.recorded.text(field, value, limits);
   }
 
   private projectName(projectId: string): string {
@@ -331,7 +364,7 @@ export class IntakeService {
       // As complete() will record it; when it cannot be, the reason, and the summary with the secret removed.
       const problem = this.planProblem(projectName, answers, decisions);
       const summary = this.summaryOf(projectName, answers, decisions);
-      plan = { summary: problem === null ? summary : redact(summary, this.secrets()), cards: proposedCards(answers, decisions), problem };
+      plan = { summary: problem === null ? summary : this.recorded.redacted(summary), cards: proposedCards(answers, decisions), problem };
     } else if (step === "completed") {
       plan = { summary: state.intake.summary ?? "", cards: proposedCards(answers, decisions), problem: null };
     }

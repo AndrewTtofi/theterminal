@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z, ZodError } from "zod";
-import { cardStatusSchema, stageSchema } from "@theterminal/shared";
+import { cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
@@ -15,19 +15,22 @@ import {
   DecisionNotApplicableError, HumanRequiredError, IntakeCompletedError, IntakeIncompleteError, NoIntakeError,
   SecretInTextError,
 } from "../intake/service.js";
+import { GateBlockedError, GateNotMetError, type GateService } from "../gates/service.js";
 import {
   GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
 } from "../github/client.js";
 
 export type RouteDeps = {
   board: BoardService;
+  gates: GateService;
   ledger: Ledger;
   getIntegrity: () => VerifyResult;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
 
-const moveBody = z.object({ to: stageSchema });
+const moveBody = z.object({ to: stageSchema, gates: z.array(gateDecisionInputSchema).max(10).optional() }).strict();
+const gatesQuery = z.object({ to: stageSchema });
 const statusBody = z.object({ to: cardStatusSchema });
 const ledgerQuery = z.object({
   projectId: z.string().optional(),
@@ -62,7 +65,7 @@ function publicIssue(issue: z.core.$ZodIssue): { path: (string | number)[]; code
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
-  const { board, ledger, getIntegrity } = deps;
+  const { board, gates, ledger, getIntegrity } = deps;
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {
@@ -89,6 +92,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
     if (err instanceof IntakeCompletedError) return reply.code(409).send({ error: "intake_completed" });
     if (err instanceof IntakeIncompleteError) return reply.code(409).send({ error: "intake_incomplete", missing: err.missing });
+    // Every string in an evaluation comes from the gate catalog, a count or an amount, never from what was typed.
+    if (err instanceof GateBlockedError) return reply.code(409).send({ error: "gate_blocked", gates: err.gates });
+    if (err instanceof GateNotMetError) return reply.code(409).send({ error: "gate_not_met", gateId: err.gateId, unmet: err.unmet });
     if (err instanceof DecisionNotApplicableError) return reply.code(409).send({ error: "decision_not_applicable" });
     if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
     if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
@@ -137,8 +143,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return reply.code(201).send(card);
   });
 
-  app.post<{ Params: { id: string } }>("/api/cards/:id/move", async (req) =>
-    board.moveCard(actor, req.params.id, moveBody.parse(req.body).to),
+  // Through the gates only: BoardService.moveCard is for tests and internal use.
+  app.post<{ Params: { id: string } }>("/api/cards/:id/move", async (req) => {
+    const body = moveBody.parse(req.body);
+    return gates.move(actor, req.params.id, body.to, body.gates);
+  });
+
+  app.get<{ Params: { id: string } }>("/api/cards/:id/gates", async (req) =>
+    gates.evaluate(req.params.id, gatesQuery.parse(req.query).to),
   );
 
   app.post<{ Params: { id: string } }>("/api/cards/:id/status", async (req) =>

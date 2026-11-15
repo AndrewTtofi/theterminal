@@ -163,6 +163,13 @@ describe("gateDecisionInputSchema", () => {
     expect(gateDecisionInputSchema.safeParse({ ...ok, gateId: "nope" }).success).toBe(false);
     expect(gateDecisionInputSchema.safeParse({ ...ok, decision: "skip" }).success).toBe(false);
   });
+
+  it("refuses a reason on a sign-off and any sentence but the gate's own", () => {
+    const ok = { gateId: "ready_to_ship", decision: "sign_off", acknowledgement: gate("ready_to_ship").acknowledgement };
+    expect(gateDecisionInputSchema.safeParse({ ...ok, reason: "a reason that is long enough" }).success).toBe(false);
+    expect(gateDecisionInputSchema.safeParse({ ...ok, acknowledgement: gate("payments").acknowledgement }).success).toBe(false);
+    expect(gateDecisionInputSchema.safeParse({ ...ok, acknowledgement: "I agree" }).success).toBe(false);
+  });
 });
 
 describe("gate event payloads", () => {

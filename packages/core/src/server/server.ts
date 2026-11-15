@@ -18,6 +18,7 @@ import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerIntakeRoutes } from "./intake-routes.js";
 import { IntakeService } from "../intake/service.js";
+import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { GitHubClient } from "../github/client.js";
@@ -466,6 +467,14 @@ export async function createServer(opts: {
       secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
     });
 
+    // The same scrubbing and secret check as the intake, for waiver reasons.
+    const gates = new GateService({
+      db,
+      ledger,
+      dataDir: opts.dataDir,
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
     const app = Fastify();
@@ -474,7 +483,7 @@ export async function createServer(opts: {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       registerAuth(app, { token, port: () => boundPort });
       registerLedgerStream(app, ledger);
-      registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,

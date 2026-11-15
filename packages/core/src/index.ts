@@ -23,10 +23,13 @@ export { redact, truncate, REDACTED } from "./agents/redact.js";
 export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
 export {
-  IntakeService, HumanRequiredError, SecretInTextError, IntakeCompletedError, IntakeIncompleteError,
+  IntakeService, RecordedText, HumanRequiredError, SecretInTextError, IntakeCompletedError, IntakeIncompleteError,
   DecisionNotApplicableError, NoIntakeError,
 } from "./intake/service.js";
-export type { IntakeServiceDeps, IntakeProjectDecisions } from "./intake/service.js";
+export type { IntakeServiceDeps, IntakeProjectDecisions, RecordedTextDeps } from "./intake/service.js";
+export { GateService, GateBlockedError, GateNotMetError } from "./gates/service.js";
+export type { GateServiceDeps } from "./gates/service.js";
+export { gateFacts, evaluateConditions } from "./gates/conditions.js";
 export { registerIntakeRoutes } from "./server/intake-routes.js";
 export type { IntakeRouteDeps } from "./server/intake-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";

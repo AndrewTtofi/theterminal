@@ -13,19 +13,19 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "Local Model Hub" })).toHaveClass(/selected/);
 
-  // 3. add a card to Plan and move it to Build
-  await page.getByLabel("Add card to Plan").fill("Detect GPU");
-  await page.getByLabel("Add card to Plan").press("Enter");
-  const plan = page.getByRole("region", { name: "Plan" });
-  await expect(plan.getByText("Detect GPU")).toBeVisible();
+  // 3. add a card to Design and move it to Build (no gate stands between them; a move out of Plan needs a plan)
+  await page.getByLabel("Add card to Design").fill("Detect GPU");
+  await page.getByLabel("Add card to Design").press("Enter");
+  const design = page.getByRole("region", { name: "Design" });
+  await expect(design.getByText("Detect GPU")).toBeVisible();
   await page.getByLabel("Move Detect GPU to").selectOption("build");
   await expect(page.getByRole("region", { name: "Build" }).getByText("Detect GPU")).toBeVisible();
 
   // 4. the ledger, newest first
   const items = page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
   const expected = [
-    "Owner moved a card from Plan to Build",
-    'Owner added "Detect GPU" to Plan',
+    "Owner moved a card from Design to Build",
+    'Owner added "Detect GPU" to Design',
     'Owner created project "Local Model Hub"',
   ];
   await expect(items).toHaveCount(3);

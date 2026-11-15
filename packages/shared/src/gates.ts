@@ -175,6 +175,12 @@ export const gateDecisionInputSchema = z
     if (p.decision === "waive" && p.reason === undefined) {
       ctx.addIssue({ code: "custom", message: "a reason of 10 to 500 characters is required to waive", path: ["reason"] });
     }
+    if (p.decision === "sign_off" && p.reason !== undefined) {
+      ctx.addIssue({ code: "custom", message: "a sign-off takes no reason", path: ["reason"] });
+    }
+    if (p.acknowledgement !== GATES.find((g) => g.id === p.gateId)?.acknowledgement) {
+      ctx.addIssue({ code: "custom", message: "must be the gate's exact acknowledgement sentence", path: ["acknowledgement"] });
+    }
   });
 
 /** The gates a move raises, in catalog order. */
