@@ -25,6 +25,9 @@ import type {
   IntakeAnswer,
   IntakeView,
   LedgerEntry,
+  MachineCapacity,
+  Machine,
+  MachinePresence,
   PendingAgentAction,
   Project,
   Provider,
@@ -37,6 +40,7 @@ import type {
   ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
+import { CHANGES_REFUSED_PHRASES, visibleControls } from "@theterminal/shared";
 
 export type Health = {
   ok: true;
@@ -130,9 +134,35 @@ export type Status = {
   intakeDecisions: number;
   /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
   intakeProjects: { projectId: string; name: string; decisions: number }[];
+  /** Linked machines, how many answered the last presence check, and how many met another key at their address. */
+  machines: { linked: number; online: number; keyChanged: number };
+  /** Inferred from the Owner's own calls to the internet; `lastError` is a fixed system code such as `ENOTFOUND`. */
+  network: NetworkState;
   /** Share links being served right now. */
   shareLinks: number;
 };
+
+/** `/api/status.network`: never a probe, only what the last outgoing call showed. */
+export type NetworkState = {
+  state: "online" | "offline" | "unknown";
+  basis: "inferred";
+  since: string | null;
+  lastError: string | null;
+};
+
+/** This computer as linking sees it; `linking.port` is the listener's port while linking is on. */
+export type LinkSelf = { machineId: string; fingerprint: string; name: string; linking: { enabled: boolean; port: number | null } };
+/** A machine another computer announced on the local network; `name` and `address` are its own words, untrusted. */
+export type DiscoveredMachine = { machineId: string; name: string; address: string; seenAt: string };
+/** `GET /api/link`: `self` is null when the keychain is unavailable (`identity: "unavailable"`). */
+export type LinkOverview = {
+  identity: "ok" | "unavailable";
+  self: LinkSelf | null;
+  machines: MachinePresence[];
+  discovered: DiscoveredMachine[];
+};
+/** A one-time pairing code this computer shows, until `expiresAt`, and the addresses it can be reached at. */
+export type PairingCode = { code: string; expiresAt: string; addresses: string[] };
 
 /**
  * A share page generated for the Owner to read before confirming: the exact HTML, its sha256 and size, the
@@ -173,7 +203,8 @@ export const api = {
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
-  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[] }) =>
+  /** With `machineId`, the run goes to that linked machine (its connections are the ones given). */
+  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[]; machineId?: string }) =>
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
@@ -238,6 +269,25 @@ export const api = {
   getGitHubOverview: () => request<GitHubOverview>("/api/github/overview"),
   getCapacity: () => request<CapacityReport>("/api/capacity"),
   detectHardware: () => request<HardwareInfo>("/api/capacity/detect", { method: "POST" }),
+  getLink: () => request<LinkOverview>("/api/link"),
+  /** The paired machines as last seen: no machine is asked and the network is not browsed (names, the Run on picker). */
+  getMachines: () => request<MachinePresence[]>("/api/link/machines"),
+  renameMachine: (name: string) => request<LinkSelf>("/api/link/name", { method: "POST", body: { name } }),
+  /** `acknowledgement` must be LINKING_ACK verbatim; 409 `linking_disabled` never applies here, 503 `identity_unavailable` does. */
+  enableLinking: (acknowledgement: string) => request<LinkSelf>("/api/link/enable", { method: "POST", body: { acknowledgement } }),
+  disableLinking: () => request<LinkSelf>("/api/link/disable", { method: "POST" }),
+  /** Opens a pairing window (replacing any earlier one); 409 `linking_disabled` while linking is off. */
+  showPairingCode: () => request<PairingCode>("/api/link/code", { method: "POST" }),
+  cancelPairingCode: () => request<void>("/api/link/code", { method: "DELETE" }),
+  /** Pairs with the machine showing `code` at `address`; see errorMessage(e, "pair") for its refusals. */
+  pairMachine: (address: string, code: string) => request<Machine>("/api/link/pair", { method: "POST", body: { address, code } }),
+  unpairMachine: (machineId: string) => request<void>(`/api/link/machines/${enc(machineId)}`, { method: "DELETE" }),
+  /**
+   * Asks the machine again now, or (`cached`) answers from the server's 30 s cache. One that does not answer is
+   * `online: false` with the values it last sent; 409 `machine_key_mismatch` when its address presented another key.
+   */
+  getMachineCapacity: (machineId: string, cached = false) =>
+    request<MachineCapacity>(`/api/link/machines/${enc(machineId)}/capacity${cached ? "?cached=1" : ""}`),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
@@ -303,6 +353,9 @@ export const CODEX_MCP_NOTE =
 export const GEMINI_MCP_NOTE =
   "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
 
+/** Why a run on a local model needs Codex; the run picker shows it too. */
+export const LOCAL_MODEL_NOTE = "Only Codex can run on a local model in The Terminal yet.";
+
 /** A string field of an error's detail, or undefined. */
 function detailString(e: ApiError, key: string): string | undefined {
   const d = e.detail;
@@ -331,14 +384,74 @@ export function exportLedgerUrl(projectId: string | null): string {
  */
 export const LIVE_RUN_CHANGES = "Changes show when the run is stopped or finished.";
 
+/** What the Changes view says of a run on a linked machine before its changes have arrived. */
+export const remoteChangesNote = (machine: string): string => `The changes arrive when the run finishes on ${visibleControls(machine)}.`;
+
+/** What the Changes view says when this computer refused a linked machine's changes (`link.changes_refused`). */
+export function refusedChangesNote(machine: string, reason: string): string {
+  const why = Object.prototype.hasOwnProperty.call(CHANGES_REFUSED_PHRASES, reason)
+    ? CHANGES_REFUSED_PHRASES[reason as keyof typeof CHANGES_REFUSED_PHRASES]
+    : null;
+  return `The changes from ${visibleControls(machine)} were refused${why === null ? "" : `: ${why}`}.`;
+}
+
+/**
+ * What a linked machine's refusal codes mean, in fixed words: the code is the machine's say, so only a code listed here
+ * is worded; anything else reads as a plain refusal. The machine's own message is never shown.
+ */
+const REMOTE_REFUSALS: Record<string, string> = {
+  connection_disabled: "that connection is disabled there",
+  connection_unsupported: "that connection cannot be given to a run there",
+  not_found: "it does not have something the run needs (a connection, or the run itself)",
+  conflict: "it already has a project or run with that id",
+  upload_refused: "it did not accept the project's files",
+  upload_limit: "too many projects are waiting to start there",
+  repo_too_large: "the project is too large to send",
+  too_large: "the project is too large to send",
+  bundle_invalid: "the project's files could not be read there",
+  bundle_git_limit: "it could not read the project's files in time",
+  no_repo: "the project's files did not arrive",
+  invalid_input: "the request was not accepted",
+  mcp_unsupported: "that agent cannot use MCP servers there",
+  local_model_unsupported: "only Codex can run on a local model",
+  duplicate_mcp_server: "two of the selected MCP servers would get the same name",
+  duplicate_cloud_provider: "a run can be given only one connection per cloud provider",
+  cloud_credentials_failed: "it could not get credentials from a cloud connection",
+  keychain_unavailable: "its keychain is unavailable",
+  already_decided: "that action was already decided",
+  run_active: "the run is still working",
+  shutting_down: "it is shutting down",
+  identity_unavailable: "its keychain is unavailable",
+};
+
+/** A linked machine's refusal (`remote_refused`), in fixed words with the name this computer gave it. */
+function remoteRefusal(e: ApiError): string {
+  const name = detailString(e, "machine");
+  const who = name === undefined ? "A linked machine" : `"${visibleControls(name)}"`;
+  const code = detailString(e, "code");
+  const why = code !== undefined && Object.prototype.hasOwnProperty.call(REMOTE_REFUSALS, code) ? REMOTE_REFUSALS[code] : undefined;
+  return why === undefined ? `${who} refused the request.` : `${who} refused: ${why}.`;
+}
+
 /**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
- * cannot be read yet.
+ * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair"): string {
   if (e instanceof ApiError) {
+    if (e.code === "remote_refused") return remoteRefusal(e);
+    // The machine a run is on refused a decision or a stop (502): fixed words, nothing of its reply.
+    if (e.code === "machine_refused") return "The linked machine refused the request. Nothing was changed.";
+    if (context === "run" && e.code === "machine_unreachable") return "Could not reach that machine. Nothing was started.";
+    if (e.code === "identity_unavailable") return "Your keychain is unavailable, so this computer has no identity for linking.";
+    if (e.code === "linking_disabled") return "Turn on linking first (Machines view)";
+    if (e.code === "pairing_code_mismatch") return "That code was not shown by the machine at this address";
+    if (e.code === "pairing_rejected") return "The other machine rejected the code";
+    if (e.code === "no_pairing") return "That machine is not showing a code right now";
+    if (e.code === "self_pairing") return "That address is this computer";
+    if (context === "pair" && e.code === "machine_unreachable") return "Could not reach that address";
     if (e.status === 423) return "Workspace is read-only";
     // The share view's refusals, before the generic 400, 404 and 409 wordings below.
     if (e.code === "preview_stale" || e.code === "preview_not_found") {
@@ -363,6 +476,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
     if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "local_model_unsupported") return LOCAL_MODEL_NOTE;
     if (e.status === 400 && e.code === "duplicate_mcp_server") {
       return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
     }

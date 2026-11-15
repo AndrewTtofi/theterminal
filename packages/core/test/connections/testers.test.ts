@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CONNECTION_TESTERS, cloudTesters } from "../../src/connections/testers.js";
 import { fakeSts } from "../../src/connections/cloud/aws.js";
+import { localModelTester } from "../../src/capacity/local-models.js";
 
 const KEY = "sk-ant-TESTKEY-0000000000";
 const signal = new AbortController().signal;
@@ -80,8 +81,9 @@ describe("success messages", () => {
     expect(await run("github", fakeFetch() as unknown as typeof fetch, { token: KEY })).toEqual({ ok: true, message: "Connected (scopes: fine-grained)" });
   });
 
-  it("only covers the 5A providers", () => {
-    expect(Object.keys(CONNECTION_TESTERS).sort()).toEqual(["claude", "codex", "gemini", "github"]);
+  it("covers the 5A providers and the local model server", () => {
+    expect(Object.keys(CONNECTION_TESTERS).sort()).toEqual(["claude", "codex", "gemini", "github", "local_model"]);
+    expect(CONNECTION_TESTERS.local_model).toBe(localModelTester);
   });
 
   it("offers the cloud testers separately, bound to an STS caller", () => {

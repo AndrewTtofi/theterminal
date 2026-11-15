@@ -9,6 +9,7 @@ import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { commitEvent } from "../../src/events/commit.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -24,7 +25,7 @@ async function start(dataDir?: string) {
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), "tt-share-links-"));
   if (!dataDir) dirs.push(dir);
   const s = await createServer({
-    dataDir: dir, port: 0, sharePort: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(),
+    dataDir: dir, port: 0, sharePort: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(),
   });
   running.push(s);
   return { s, dataDir: dir };

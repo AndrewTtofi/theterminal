@@ -2,11 +2,15 @@ import websocket from "@fastify/websocket";
 import type { FastifyInstance } from "fastify";
 import type { LedgerEntry } from "@theterminal/shared";
 import type { Ledger } from "../ledger/ledger.js";
+import { builtInClean, displayEntry } from "../link/mirrored.js";
 
 const PAGE = 500;
 
-/** WS /api/events?afterSeq=N: every entry with seq > N in order, then each new append live. */
-export function registerLedgerStream(app: FastifyInstance, ledger: Ledger): void {
+/**
+ * WS /api/events?afterSeq=N: every entry with seq > N in order, then each new append live. A linked machine's mirrored
+ * entries are sent through `clean`, this machine's own redaction.
+ */
+export function registerLedgerStream(app: FastifyInstance, ledger: Ledger, clean: (s: string) => string = builtInClean): void {
   app.register(websocket);
   app.register(async (scope) => {
     scope.get("/api/events", { websocket: true }, (socket, request) => {
@@ -16,7 +20,7 @@ export function registerLedgerStream(app: FastifyInstance, ledger: Ledger): void
         return;
       }
 
-      const send = (e: LedgerEntry) => socket.send(JSON.stringify(e));
+      const send = (e: LedgerEntry) => socket.send(JSON.stringify(displayEntry(e, clean)));
 
       // Subscribe first and buffer, so nothing appended during the backlog read is lost.
       let live = false;

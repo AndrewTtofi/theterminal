@@ -1,7 +1,10 @@
 import { useEffect, useRef } from "react";
-import type { CapacitySource, Figure } from "@theterminal/shared";
+import type { CapacitySource, Figure, HardwareInfo, LocalEngine, MachineCapacity } from "@theterminal/shared";
 import { OWN_LABEL, PROVIDER_NAMES } from "../components/ProviderAuthSettings";
 import { useShell } from "../shell/model";
+import { gb, hardwareSummary, machineState, shownName } from "./machine-text";
+
+export { hardwareSummary } from "./machine-text";
 
 const REFRESH_MS = 60_000;
 const ESTIMATE_TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -19,6 +22,100 @@ const count = (n: number) => n.toLocaleString("en-US");
 export const providerName = (s: CapacitySource) => PROVIDER_NAMES[s.provider];
 export const planText = (s: CapacitySource) => s.plan ?? "no plan set";
 const modeText = (s: CapacitySource) => (s.mode === "api_key" ? "API key" : (OWN_LABEL[s.mode] ?? s.mode));
+
+/** An engine as the Owner knows it, with its version when it reports one. */
+export const engineText = (e: LocalEngine) => `${e.engine === "ollama" ? "Ollama" : "llama.cpp"}${e.version === null ? "" : ` ${e.version}`}`;
+/** Decimal gigabytes, as Ollama lists model sizes. */
+const sizeText = (bytes: number | null) => (bytes === null ? "not reported" : `${(bytes / 1e9).toFixed(1)} GB`);
+
+/** The CPU with its core count when known. */
+export const cpuText = (hw: HardwareInfo) => (hw.cpu === null ? "not detected" : hw.cores === null ? hw.cpu : `${hw.cpu} (${hw.cores} cores)`);
+export const memoryText = (hw: HardwareInfo) => (hw.memoryGb === null ? "not detected" : gb(hw.memoryGb));
+/** The GPU with its memory; on a Mac the detected GPU memory is the unified memory it shares with the CPU. */
+export function gpuText(hw: HardwareInfo): string {
+  if (hw.gpu === null) return "not detected";
+  if (hw.gpuMemoryGb === null) return hw.gpu;
+  return hw.platform === "darwin" ? `${hw.gpu}, ${gb(hw.gpuMemoryGb)} shared with the CPU` : `${hw.gpu}, ${gb(hw.gpuMemoryGb)}`;
+}
+/** How many models a machine's servers list in all. */
+export const modelCount = (m: MachineCapacity) => m.localModels.reduce((n, e) => n + e.models.length, 0);
+
+const at = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleString()}</time>;
+
+/**
+ * When a machine was checked. An offline machine's figures are the last it sent, so it says when it last answered
+ * (`lastSeenAt`), or that it never has.
+ */
+export function CheckedAt({ machine }: { machine: MachineCapacity }) {
+  // Another key at its address: nothing it sent is shown, so there is no "last seen" either.
+  if (machine.online || machine.problem !== null) return at(machine.checkedAt);
+  return machine.lastSeenAt === null ? <>never seen</> : <>last seen {at(machine.lastSeenAt)}</>;
+}
+
+/**
+ * One row per linked machine as it last answered; an offline row keeps the last known values, greyed. Everything a
+ * machine sent is shown as text with hidden characters made visible.
+ */
+function MachinesTable({ machines }: { machines: MachineCapacity[] }) {
+  return (
+    <table className="capacity-machines-table" aria-label="Machines">
+      <thead>
+        <tr>
+          {["Machine", "State", "CPU", "Memory", "GPU", "Local models", "Checked"].map((h) => (
+            <th key={h} scope="col">
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {machines.map((m) => (
+          <tr key={m.machineId} className={m.problem === "key_mismatch" ? "offline key-changed" : m.online ? undefined : "offline"}>
+            <td>{shownName(m.name)}</td>
+            <td>{machineState(m)}</td>
+            <td>{m.hardware === null ? "not reported" : shownName(cpuText(m.hardware))}</td>
+            <td>{m.hardware === null ? "not reported" : memoryText(m.hardware)}</td>
+            <td>{m.hardware === null ? "not reported" : shownName(gpuText(m.hardware))}</td>
+            <td>{modelCount(m)}</td>
+            <td>
+              <CheckedAt machine={m} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** Every model of every detected server, one row each. */
+function LocalModelsTable({ engines }: { engines: LocalEngine[] }) {
+  return (
+    <table className="local-models-table" aria-label="Local models">
+      <thead>
+        <tr>
+          {["Engine", "Model", "Size", "Parameters", "Quantization"].map((h) => (
+            <th key={h} scope="col">
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {engines.flatMap((e) =>
+          e.models.map((m) => (
+            <tr key={`${e.engine}/${m.id}`}>
+              <td>{engineText(e)}</td>
+              <td>{m.id}</td>
+              <td>{sizeText(m.sizeBytes)}</td>
+              <td>{m.parameters ?? "not reported"}</td>
+              <td>{m.quantization ?? "not reported"}</td>
+            </tr>
+          )),
+        )}
+      </tbody>
+    </table>
+  );
+}
 
 /** Loads the report while mounted: on open, then every 60 s. */
 export function useCapacityRefresh(refresh: () => void): void {
@@ -65,7 +162,10 @@ function RateLimits({ s }: { s: CapacitySource }) {
   return <FigureText figure={{ value: s.rateLimits.last24h, basis: s.rateLimits.basis }} format={count} />;
 }
 
-/** The Capacity tab: each provider's mode, plan, spend, budget, tokens and observed rate limits. */
+/**
+ * The Capacity tab: each provider's mode, plan, spend, budget, tokens and observed rate limits, the local models and the
+ * linked machines.
+ */
 export function CapacityPanel(_props: { id: string }) {
   const { model } = useShell();
   const { report, error, refresh } = model.capacity;
@@ -109,6 +209,18 @@ export function CapacityPanel(_props: { id: string }) {
           ))}
         </tbody>
       </table>
+      {report.localModels.some((e) => e.models.length > 0) && (
+        <>
+          <h3>Local models</h3>
+          <LocalModelsTable engines={report.localModels} />
+        </>
+      )}
+      {report.machines.length > 0 && (
+        <>
+          <h3>Machines</h3>
+          <MachinesTable machines={report.machines} />
+        </>
+      )}
       <p className="capacity-footer">{FOOTER}</p>
     </div>
   );

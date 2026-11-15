@@ -5,6 +5,7 @@ import { connectionPayloadSchemas, type ConnectionEventType } from "./connection
 import { intakePayloadSchemas, type IntakeEventType } from "./intake.js";
 import { gatePayloadSchemas, type GateEventType } from "./gates.js";
 import { overridePayloadSchemas, type OverrideEventType } from "./override.js";
+import { linkPayloadSchemas, type LinkEventType } from "./link.js";
 import { sharePayloadSchemas, type ShareEventType } from "./share.js";
 
 export const stageSchema = z.enum(STAGES);
@@ -38,6 +39,7 @@ export type EventType =
   | IntakeEventType
   | GateEventType
   | OverrideEventType
+  | LinkEventType
   | ShareEventType;
 
 const nonEmptyId = z.string().min(1);
@@ -54,5 +56,6 @@ export const eventPayloadSchemas: Record<EventType, z.ZodType> = {
   ...intakePayloadSchemas,
   ...gatePayloadSchemas,
   ...overridePayloadSchemas,
+  ...linkPayloadSchemas,
   ...sharePayloadSchemas,
 };

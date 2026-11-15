@@ -15,6 +15,8 @@ const status = (over: Partial<Status["connections"]> = {}): Status => ({
   ci: null,
   intakeDecisions: 0,
   intakeProjects: [],
+  machines: { linked: 0, online: 0, keyChanged: 0 },
+  network: { state: "unknown", basis: "inferred", since: null, lastError: null },
   shareLinks: 0,
 });
 const layout = (over: Partial<LayoutControls> = {}): LayoutControls => ({
@@ -136,6 +138,27 @@ describe("StatusBar", () => {
     expect(onSelectView).toHaveBeenLastCalledWith("connections");
   });
 
+  it("counts linked machines, adding how many are online once any is linked, and selects Machines", async () => {
+    const onSelectView = vi.fn();
+    const { rerender } = render(<StatusBar status={null} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
+    rerender(<StatusBar status={status()} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 0 linked" })).toBeTruthy();
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1, keyChanged: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    await userEvent.click(screen.getByRole("button", { name: "Machines: 2 linked, 1 online" }));
+    expect(onSelectView).toHaveBeenLastCalledWith("machines");
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 1, online: 0, keyChanged: 0 } }} running={0} pending={0} {...noop} onSelectView={onSelectView} />);
+    expect(screen.getByRole("button", { name: "Machines: 1 linked, 0 online" })).toBeTruthy();
+  });
+
+  it("says how many machines' keys changed, apart from offline and marked for attention", () => {
+    const { rerender } = render(<StatusBar status={{ ...status(), machines: { linked: 2, online: 0, keyChanged: 1 } }} running={0} pending={0} {...noop} />);
+    const item = screen.getByRole("button", { name: "Machines: 2 linked, 0 online, 1 key changed" });
+    expect(item.className).toContain("attention");
+    rerender(<StatusBar status={{ ...status(), machines: { linked: 2, online: 1, keyChanged: 0 } }} running={0} pending={0} {...noop} />);
+    expect(screen.getByRole("button", { name: "Machines: 2 linked, 1 online" }).className).not.toContain("attention");
+  });
+
   describe("layouts", () => {
     const select = () => screen.getByRole("combobox", { name: "Layout" }) as HTMLSelectElement;
     const options = () => within(select()).getAllByRole("option") as HTMLOptionElement[];
@@ -204,6 +227,65 @@ describe("StatusBar", () => {
       expect(saveAs).toHaveBeenCalledWith("Eleventh");
       expect(screen.getByText("You can keep up to 10 layouts")).toBeTruthy();
       expect(screen.getByLabelText("Layout name")).toBeTruthy();
+    });
+  });
+  describe("offline", () => {
+    const OFFLINE_TITLE =
+      "No internet connection was reachable the last time The Terminal tried (inferred). Local work, local models and linked machines keep working.";
+    const net = (state: Status["network"]["state"]): Status => ({
+      ...status(),
+      network: {
+        state,
+        basis: "inferred",
+        since: state === "unknown" ? null : "2026-11-15T12:00:00.000Z",
+        lastError: state === "offline" ? "ENOTFOUND" : null,
+      },
+    });
+
+    it("shows Offline (inferred), marked for attention and with its basis in the title, when the inferred state is offline", () => {
+      render(<StatusBar status={net("offline")} running={0} pending={0} {...noop} />);
+      const bar = screen.getByRole("contentinfo", { name: "Status bar" });
+      const item = within(bar).getByText("Offline (inferred)");
+      expect(item.classList.contains("status-item")).toBe(true);
+      expect(item.classList.contains("attention")).toBe(true);
+      expect(item.getAttribute("title")).toBe(OFFLINE_TITLE);
+      // Reachable by keyboard, with the same explanation for a screen reader, not only in the title.
+      expect(item.getAttribute("tabindex")).toBe("0");
+      const basis = document.getElementById(item.getAttribute("aria-describedby")!);
+      expect(basis?.textContent).toBe(OFFLINE_TITLE);
+    });
+
+    it("shows nothing about the network when the state is unknown or online, or before the first answer", () => {
+      for (const s of [net("unknown"), net("online"), null]) {
+        const { unmount } = render(<StatusBar status={s} running={0} pending={0} {...noop} />);
+        expect(screen.queryByText(/Offline/)).toBeNull();
+        expect(screen.getByRole("contentinfo").textContent).not.toMatch(/online/i);
+        unmount();
+      }
+    });
+
+    it("announces a change of the inferred state in a polite live region, and says nothing at first when unknown", () => {
+      const { rerender } = render(<StatusBar status={net("unknown")} running={0} pending={0} {...noop} />);
+      const live = screen.getByTestId("network-announcement");
+      expect(live.getAttribute("role")).toBe("status");
+      expect(live.getAttribute("aria-live")).toBe("polite");
+      expect(live.textContent).toBe("");
+
+      rerender(<StatusBar status={net("offline")} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("You seem to be offline (inferred). Local work, local models and linked machines keep working.");
+
+      // A later status with the same state is not a change: the announcement stays as it was.
+      rerender(<StatusBar status={{ ...net("offline"), runningAgents: 5 }} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("You seem to be offline (inferred). Local work, local models and linked machines keep working.");
+
+      rerender(<StatusBar status={net("online")} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("The internet answered again (inferred).");
+    });
+
+    it("does not announce being online when it was never offline", () => {
+      const { rerender } = render(<StatusBar status={net("unknown")} running={0} pending={0} {...noop} />);
+      rerender(<StatusBar status={net("online")} running={0} pending={0} {...noop} />);
+      expect(screen.getByTestId("network-announcement").textContent).toBe("");
     });
   });
 });

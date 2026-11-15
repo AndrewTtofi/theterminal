@@ -4,6 +4,7 @@ import { keyRejection, type StsCaller } from "./cloud/aws.js";
 import { fetchAzureToken } from "./cloud/azure.js";
 import { GCP_SCOPE_READ, fetchGcpToken, parseServiceAccount } from "./cloud/gcp.js";
 import { TokenEndpointError, type AccessToken } from "./cloud/token.js";
+import { localModelTester } from "../capacity/local-models.js";
 
 type Check = {
   url: string;
@@ -63,6 +64,8 @@ export const CONNECTION_TESTERS: Partial<Record<ConnectionProvider, ConnectionTe
     // Classic tokens list their scopes; fine-grained tokens send no such header. The login name is not recorded.
     connected: (res) => `Connected (scopes: ${res.headers.get("x-oauth-scopes")?.trim() || "fine-grained"})`,
   }),
+  // A model server on this computer: lists its models, never leaves the loopback address.
+  local_model: localModelTester,
 };
 
 const NO_CREDENTIALS = "No credentials stored";

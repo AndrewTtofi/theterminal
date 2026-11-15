@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CiStatus, GitHubOverview } from "@theterminal/shared";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_HTTP"] as const;
@@ -27,7 +28,7 @@ async function start() {
   process.env.THETERMINAL_FAKE_HTTP = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "tt-gh-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   return s;
 }

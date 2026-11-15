@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../packages/core/dist/index.js";
+import { MemorySecretStore, createServer, fakeDiscovery } from "../packages/core/dist/index.js";
 
 const fixture = (name: string) => join(import.meta.dirname, "..", "packages", "core", "test", "fixtures", name);
 
@@ -74,13 +74,35 @@ function setEnv(vars: Record<string, string>): () => void {
   };
 }
 
-// Starts two core servers (serving the built UI) for the whole run and exposes their urls to the tests:
-// TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled).
+/** Whether a URL's host is this computer, which needs no internet. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+const isLocalHost = (host: string) => LOOPBACK_HOSTS.has(host) || host.endsWith(".localhost");
+
+/**
+ * The peer's fetch: a computer with no internet. A loopback URL answers like a model server holding fake-coder:7b (and
+ * 404 for anything else); every other URL fails the way undici does when the name does not resolve. Nothing leaves.
+ */
+const offlineFetch: typeof fetch = async (input) => {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  if (!isLocalHost(url.hostname)) {
+    throw Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error(`getaddrinfo ENOTFOUND ${url.hostname}`), { code: "ENOTFOUND", hostname: url.hostname }),
+    });
+  }
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (url.pathname.replace(/\/+$/, "").endsWith("/v1/models")) return json(200, { object: "list", data: [{ id: "fake-coder:7b", object: "model" }] });
+  return json(404, {});
+};
+
+// Starts three core servers (serving the built UI) for the whole run and exposes their urls to the tests:
+// TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled), and
+// TT_E2E_PEER_URL for a second agent computer with no internet, which link.spec.ts pairs with the agent server and
+// offline.spec.ts uses offline.
 type Server = Awaited<ReturnType<typeof createServer>>;
 
 export default async function globalSetup() {
   const uiDir = join(import.meta.dirname, "..", "apps", "ui", "dist");
-  const dirs = [mkdtempSync(join(tmpdir(), "tt-e2e-")), mkdtempSync(join(tmpdir(), "tt-e2e-agent-"))];
+  const dirs = [mkdtempSync(join(tmpdir(), "tt-e2e-")), mkdtempSync(join(tmpdir(), "tt-e2e-agent-")), mkdtempSync(join(tmpdir(), "tt-e2e-peer-"))];
   const servers: Server[] = [];
   let restoreRunEnv = () => {};
   const teardown = async () => {
@@ -91,7 +113,11 @@ export default async function globalSetup() {
   };
 
   try {
-    const board = await createServer({ dataDir: dirs[0]!, port: 47000, uiDir });
+    // Every server: secrets in memory (the link identity is never written to the real keychain), the in-process
+    // discovery (no multicast), a loopback link listener on a free port should a test enable linking, and share
+    // links on an ephemeral port, so a run never needs (or holds) the default one.
+    const linkOpts = () => ({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), linkBind: "127.0.0.1", linkPort: 0, sharePort: 0 });
+    const board = await createServer({ dataDir: dirs[0]!, port: 47000, uiDir, ...linkOpts() });
     servers.push(board);
     process.env.TT_E2E_URL = board.url;
 
@@ -101,10 +127,13 @@ export default async function globalSetup() {
     process.env.TT_E2E_FAKE_LOG = fakeLog;
     const restoreCreateEnv = setEnv(AT_CREATE);
     try {
-      // Share links listen on an ephemeral port, so a run never needs (or holds) the default one.
-      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir, sharePort: 0 });
+      const agent = await createServer({ dataDir: dirs[1]!, port: 47100, uiDir, ...linkOpts() });
       servers.push(agent);
       process.env.TT_E2E_AGENT_URL = agent.url;
+      // The peer: the same fake agent and CLIs, its own data, any free port, and no internet (offlineFetch).
+      const peer = await createServer({ dataDir: dirs[2]!, port: 0, uiDir, ...linkOpts(), fetch: offlineFetch });
+      servers.push(peer);
+      process.env.TT_E2E_PEER_URL = peer.url;
     } finally {
       restoreCreateEnv();
     }

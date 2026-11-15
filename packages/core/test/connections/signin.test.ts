@@ -7,6 +7,7 @@ import type { LedgerEntry, Provider } from "@theterminal/shared";
 import { InvalidCliHomeError, SignInManager, signInLines, type SignInManagerDeps } from "../../src/connections/signin.js";
 import { ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const FIXTURE = fileURLToPath(new URL("../fixtures/fake-login.mjs", import.meta.url));
@@ -303,7 +304,7 @@ describe("sign-in API", { timeout: 15000 }, () => {
   async function start(script: Record<string, unknown>, bundled = { claude: () => null, codex: () => fake, gemini: () => null }) {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_LOGIN = JSON.stringify(script);
-    const s = await createServer({ dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore() });
+    const s = await createServer({ dataDir: tempDir(), port: 0, which: () => null, bundled, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     return s;
   }
@@ -324,8 +325,9 @@ describe("sign-in API", { timeout: 15000 }, () => {
     expect(body).toEqual({ state: "succeeded", lines: ["https://auth.openai.com/codex/device", "ABCD-12345"] });
 
     const entries = (await (await call(s, "GET", "/api/ledger")).json()) as LedgerEntry[];
-    expect(entries.map((e) => e.type)).toEqual(["connection.signin"]);
-    expect(entries[0]!.payload).toEqual({ provider: "codex", ok: true });
+    // Besides this computer's link identity, recorded at the server's first start.
+    expect(entries.map((e) => e.type)).toEqual(["machine.identity_created", "connection.signin"]);
+    expect(entries[1]!.payload).toEqual({ provider: "codex", ok: true });
   });
 
   it("answers 409 while a sign-in for the provider runs, and 404 for an unknown id", async () => {

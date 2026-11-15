@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { IntakeView, LedgerEntry } from "@theterminal/shared";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -31,7 +32,7 @@ afterEach(async () => {
 async function start() {
   const dataDir = mkdtempSync(join(tmpdir(), "tt-intake-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   return s;
 }

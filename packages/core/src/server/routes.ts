@@ -1,15 +1,24 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import { z, ZodError } from "zod";
 import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema } from "@theterminal/shared";
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
-import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
+import {
+  AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
+} from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/changes.js";
 import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError } from "../agents/worktrees.js";
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
+import { LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError } from "../link/client.js";
+import { BundleGitLimitError, BundleInvalidError, NoRepoError, RepoTooLargeError, UploadLimitError } from "../link/bundles.js";
+import {
+  IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
+} from "../link/service.js";
+import { displayEntry } from "../link/mirrored.js";
+import { RemoteRunRefusedError } from "../link/remote-runs.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
@@ -33,6 +42,8 @@ export type RouteDeps = {
   gates: GateService;
   ledger: Ledger;
   getIntegrity: () => VerifyResult;
+  /** This machine's redaction, for a linked machine's mirrored entries. Default: the built-in patterns. */
+  clean?: (s: string) => string;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -74,84 +85,112 @@ function publicIssue(issue: z.core.$ZodIssue): { path: (string | number)[]; code
   return { path, code: issue.code, message };
 }
 
+/**
+ * The error reply for every route: a fixed code per known error, and nothing the request sent. Shared by the
+ * workspace server and the link listener, so both answer the same way.
+ */
+export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLogger): FastifyReply {
+  if (err instanceof ZodError) {
+    return reply.code(400).send({ error: "invalid_input", issues: err.issues.map(publicIssue) });
+  }
+  if (err instanceof AdapterUnavailableError) return reply.code(400).send({ error: "invalid_input" });
+  if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
+  if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
+  if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
+  if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
+  if (err instanceof ConnectionDisabledError) return reply.code(400).send({ error: "connection_disabled" });
+  if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported", adapter: err.adapter });
+  if (err instanceof LocalModelUnsupportedError) return reply.code(400).send({ error: "local_model_unsupported" });
+  if (err instanceof DuplicateMcpServerError) return reply.code(400).send({ error: "duplicate_mcp_server" });
+  if (err instanceof DuplicateCloudProviderError) return reply.code(400).send({ error: "duplicate_cloud_provider" });
+  // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
+  if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
+  if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
+  if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+  if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
+  if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
+  // A fixed sentence chosen by the code that threw, never request text.
+  if (err instanceof RunActiveError) return reply.code(409).send({ error: "run_active", message: err.message });
+  if (err instanceof RemoteRunError) return reply.code(409).send({ error: "remote_run", message: err.message });
+  // A fixed sentence: the repository's configuration includes other files, or the like. Never a path.
+  if (err instanceof OverrideBusyError) return reply.code(409).send({ error: "override_busy" });
+  if (err instanceof ProgramNotFoundError) return reply.code(400).send({ error: "program_not_found" });
+  if (err instanceof ProgramNotAllowedError) return reply.code(400).send({ error: "program_not_allowed" });
+  if (err instanceof OverridesShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
+  if (err instanceof UnsafeGitConfigError) return reply.code(409).send({ error: "unsafe_repository", message: err.message });
+  // The workspace's own git pins were tampered with, so git was not run: fixed text, never a path or fs error.
+  if (err instanceof SharedGitconfigModifiedError) {
+    return reply.code(409).send({ error: "gitconfig_modified", message: "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it." });
+  }
+  if (err instanceof HooksDirModifiedError) {
+    return reply.code(409).send({ error: "hooks_modified", message: "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again." });
+  }
+  if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
+  if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
+  // The explanation is a fixed sentence naming a field, never the text.
+  if (err instanceof SecretInTextError) {
+    return reply.code(400).send({ error: "secret_in_text", ...(err.explanation !== undefined && { message: err.explanation }) });
+  }
+  if (err instanceof IntakeCompletedError) return reply.code(409).send({ error: "intake_completed" });
+  if (err instanceof IntakeIncompleteError) return reply.code(409).send({ error: "intake_incomplete", missing: err.missing });
+  // Every string in an evaluation comes from the gate catalog, a count or an amount, never from what was typed.
+  if (err instanceof GateBlockedError) return reply.code(409).send({ error: "gate_blocked", gates: err.gates });
+  if (err instanceof GateNotMetError) return reply.code(409).send({ error: "gate_not_met", gateId: err.gateId, unmet: err.unmet });
+  if (err instanceof DecisionNotApplicableError) return reply.code(409).send({ error: "decision_not_applicable" });
+  if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
+  if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
+  if (err instanceof GitHubRejectedError) return reply.code(502).send({ error: "github_rejected" });
+  if (err instanceof GitHubUnavailableError) return reply.code(503).send({ error: "github_unavailable" });
+  if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
+  if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
+  // A linked machine's reply could not be read: fixed code, never the reply.
+  if (err instanceof LinkProtocolError) return reply.code(502).send({ error: "machine_bad_reply" });
+  // Linked machines: fixed codes. An address or a machine's reply is never echoed.
+  if (err instanceof LinkingDisabledError) return reply.code(409).send({ error: "linking_disabled" });
+  if (err instanceof IdentityUnavailableError) return reply.code(503).send({ error: "identity_unavailable" });
+  if (err instanceof PairingCodeMismatchError) return reply.code(400).send({ error: "pairing_code_mismatch" });
+  if (err instanceof PairingRejectedError) return reply.code(403).send({ error: "pairing_rejected" });
+  if (err instanceof NoPairingError) return reply.code(404).send({ error: "no_pairing" });
+  if (err instanceof SelfPairingError) return reply.code(400).send({ error: "self_pairing" });
+  if (err instanceof MachineUnreachableError) return reply.code(502).send({ error: "machine_unreachable" });
+  if (err instanceof MachineKeyMismatchError) return reply.code(409).send({ error: "machine_key_mismatch" });
+  // Remote runs, requester side: the worker's code and this computer's name for it, never the worker's message.
+  if (err instanceof RemoteRunRefusedError) return reply.code(err.status).send({ error: "remote_refused", code: err.code, machine: err.machine });
+  if (err instanceof RemoteRefusedError) return reply.code(502).send({ error: "machine_refused" });
+  // Remote runs, worker side: a repository sent by a paired machine.
+  if (err instanceof RepoTooLargeError) return reply.code(413).send({ error: "repo_too_large" });
+  if (err instanceof BundleInvalidError) return reply.code(400).send({ error: "bundle_invalid" });
+  if (err instanceof BundleGitLimitError) return reply.code(503).send({ error: "bundle_git_limit" });
+  if (err instanceof NoRepoError) return reply.code(409).send({ error: "no_repo" });
+  if (err instanceof UploadLimitError) return reply.code(409).send({ error: "upload_limit" });
+  // The share view. Fixed codes only: never a path, an id, or the page.
+  if (err instanceof PreviewNotFoundError) return reply.code(404).send({ error: "preview_not_found" });
+  if (err instanceof PreviewStaleError) return reply.code(409).send({ error: "preview_stale" });
+  if (err instanceof SnapshotMissingError) return reply.code(404).send({ error: "snapshot_missing" });
+  if (err instanceof SnapshotTamperedError) return reply.code(409).send({ error: "snapshot_tampered" });
+  if (err instanceof ShareTooLargeError) return reply.code(409).send({ error: "share_too_large" });
+  if (err instanceof ShareNotCleanError) {
+    log.warn("a share page was refused: it could not be proven clean"); // the page itself is never logged
+    return reply.code(409).send({ error: "share_not_clean" });
+  }
+  if (err instanceof ShareLinkActiveError) return reply.code(409).send({ error: "share_link_active" });
+  if (err instanceof AddressNotAllowedError) return reply.code(400).send({ error: "invalid_input" });
+  if (err instanceof LinkNotActiveError) return reply.code(409).send({ error: "link_not_active" });
+  if (err instanceof LedgerReadOnlyError) {
+    return reply.code(423).send({ error: "ledger_read_only" });
+  }
+  const status = (err as { statusCode?: number }).statusCode;
+  if (typeof status === "number" && status >= 400 && status < 500) {
+    return reply.code(status).send({ error: "invalid_input" });
+  }
+  log.error(err);
+  return reply.code(500).send({ error: "internal" });
+}
+
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const { board, gates, ledger, getIntegrity } = deps;
 
-  app.setErrorHandler((err, _req, reply) => {
-    if (err instanceof ZodError) {
-      return reply.code(400).send({ error: "invalid_input", issues: err.issues.map(publicIssue) });
-    }
-    if (err instanceof AdapterUnavailableError) return reply.code(400).send({ error: "invalid_input" });
-    if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
-    if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
-    if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });
-    if (err instanceof UnsupportedConnectionError) return reply.code(400).send({ error: "connection_unsupported" });
-    if (err instanceof ConnectionDisabledError) return reply.code(400).send({ error: "connection_disabled" });
-    if (err instanceof McpUnsupportedError) return reply.code(400).send({ error: "mcp_unsupported", adapter: err.adapter });
-    if (err instanceof DuplicateMcpServerError) return reply.code(400).send({ error: "duplicate_mcp_server" });
-    if (err instanceof DuplicateCloudProviderError) return reply.code(400).send({ error: "duplicate_cloud_provider" });
-    // The name passed the connection name check when it was stored, so it is safe to show; the reason is not sent.
-    if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
-    if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
-    if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
-    if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
-    if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
-    // A fixed sentence chosen by the code that threw, never request text.
-    if (err instanceof RunActiveError) return reply.code(409).send({ error: "run_active", message: err.message });
-    // A fixed sentence: the repository's configuration includes other files, or the like. Never a path.
-    if (err instanceof OverrideBusyError) return reply.code(409).send({ error: "override_busy" });
-    if (err instanceof ProgramNotFoundError) return reply.code(400).send({ error: "program_not_found" });
-    if (err instanceof ProgramNotAllowedError) return reply.code(400).send({ error: "program_not_allowed" });
-    if (err instanceof OverridesShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
-    if (err instanceof UnsafeGitConfigError) return reply.code(409).send({ error: "unsafe_repository", message: err.message });
-    // The workspace's own git pins were tampered with, so git was not run: fixed text, never a path or fs error.
-    if (err instanceof SharedGitconfigModifiedError) {
-      return reply.code(409).send({ error: "gitconfig_modified", message: "The Terminal's shared git configuration was modified, so git was not run. Restart The Terminal to repair it." });
-    }
-    if (err instanceof HooksDirModifiedError) {
-      return reply.code(409).send({ error: "hooks_modified", message: "The Terminal's empty hooks folder was modified, so git was not run. Empty it and try again." });
-    }
-    if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
-    if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
-    // The explanation is a fixed sentence naming a field, never the text.
-    if (err instanceof SecretInTextError) {
-      return reply.code(400).send({ error: "secret_in_text", ...(err.explanation !== undefined && { message: err.explanation }) });
-    }
-    if (err instanceof IntakeCompletedError) return reply.code(409).send({ error: "intake_completed" });
-    if (err instanceof IntakeIncompleteError) return reply.code(409).send({ error: "intake_incomplete", missing: err.missing });
-    // Every string in an evaluation comes from the gate catalog, a count or an amount, never from what was typed.
-    if (err instanceof GateBlockedError) return reply.code(409).send({ error: "gate_blocked", gates: err.gates });
-    if (err instanceof GateNotMetError) return reply.code(409).send({ error: "gate_not_met", gateId: err.gateId, unmet: err.unmet });
-    if (err instanceof DecisionNotApplicableError) return reply.code(409).send({ error: "decision_not_applicable" });
-    if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
-    if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
-    if (err instanceof GitHubRejectedError) return reply.code(502).send({ error: "github_rejected" });
-    if (err instanceof GitHubUnavailableError) return reply.code(503).send({ error: "github_unavailable" });
-    if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
-    if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
-    // The share view. Fixed codes only: never a path, an id, or the page.
-    if (err instanceof PreviewNotFoundError) return reply.code(404).send({ error: "preview_not_found" });
-    if (err instanceof PreviewStaleError) return reply.code(409).send({ error: "preview_stale" });
-    if (err instanceof SnapshotMissingError) return reply.code(404).send({ error: "snapshot_missing" });
-    if (err instanceof SnapshotTamperedError) return reply.code(409).send({ error: "snapshot_tampered" });
-    if (err instanceof ShareTooLargeError) return reply.code(409).send({ error: "share_too_large" });
-    if (err instanceof ShareNotCleanError) {
-      app.log.warn("a share page was refused: it could not be proven clean"); // the page itself is never logged
-      return reply.code(409).send({ error: "share_not_clean" });
-    }
-    if (err instanceof ShareLinkActiveError) return reply.code(409).send({ error: "share_link_active" });
-    if (err instanceof AddressNotAllowedError) return reply.code(400).send({ error: "invalid_input" });
-    if (err instanceof LinkNotActiveError) return reply.code(409).send({ error: "link_not_active" });
-    if (err instanceof LedgerReadOnlyError) {
-      return reply.code(423).send({ error: "ledger_read_only" });
-    }
-    const status = (err as { statusCode?: number }).statusCode;
-    if (typeof status === "number" && status >= 400 && status < 500) {
-      return reply.code(status).send({ error: "invalid_input" });
-    }
-    app.log.error(err);
-    return reply.code(500).send({ error: "internal" });
-  });
+  app.setErrorHandler((err, _req, reply) => sendError(err, reply, app.log));
 
   app.get("/api/health", async () => {
     const integrity = getIntegrity();
@@ -206,11 +245,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.get("/api/ledger", async (req) => {
     const q = ledgerQuery.parse(req.query);
-    return ledger.list({
-      ...(q.projectId !== undefined && { projectId: q.projectId }),
-      ...(q.afterSeq !== undefined && { afterSeq: q.afterSeq }),
-      ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
-      ...(q.limit !== undefined && { limit: q.limit }),
-    });
+    return ledger
+      .list({
+        ...(q.projectId !== undefined && { projectId: q.projectId }),
+        ...(q.afterSeq !== undefined && { afterSeq: q.afterSeq }),
+        ...(q.beforeSeq !== undefined && { beforeSeq: q.beforeSeq }),
+        ...(q.limit !== undefined && { limit: q.limit }),
+      })
+      .map((e) => displayEntry(e, deps.clean));
   });
 }

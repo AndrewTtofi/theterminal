@@ -1,5 +1,6 @@
 import type { ActionKind, AdapterId, AuthMode } from "@theterminal/shared";
 import type { McpServerSpec } from "../connections/mcp.js";
+import type { LocalModelSource } from "../connections/service.js";
 
 /** An action an agent wants to take. `paths` are the filesystem paths it touches (checked by policy). */
 export type ProposedAction = { tool: string; kind: ActionKind; summary: string; input: unknown; paths: string[] };
@@ -56,7 +57,10 @@ export interface AdapterStartOptions {
 /**
  * Values from connections: `apiKey` for api_key mode, `cliHome` for a login mode, `googleCloudProject` for Gemini (all
  * from the provider's own connection); `env`, the merged variables of the cloud grants the Owner selected for this run
- * (names from CLOUD_ENV_ALLOWLIST, passed to buildChildEnv as `extraEnv`); `mcpServers`, the MCP servers selected.
+ * (names from CLOUD_ENV_ALLOWLIST, passed to buildChildEnv as `extraEnv`); `mcpServers`, the MCP servers selected;
+ * `localModel`, the model server on this computer the run uses instead of the provider (Codex only, authMode "none").
+ * The local model's key stays in `localModel.apiKey`, never in `env`: Codex lets every `env` name through to the
+ * commands the agent runs.
  */
 export type RunCredentials = {
   apiKey?: string;
@@ -64,6 +68,7 @@ export type RunCredentials = {
   googleCloudProject?: string;
   env: Record<string, string>;
   mcpServers: McpServerSpec[];
+  localModel?: LocalModelSource;
 };
 
 export interface AgentAdapter {

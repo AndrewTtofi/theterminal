@@ -3,7 +3,7 @@ import type { AgentRun, LedgerEntry } from "@theterminal/shared";
 export const feedRun = (id: string, over: Partial<AgentRun> = {}): AgentRun => ({
   id, projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU", status: "completed",
   worktree: `w/${id}`, base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null,
-  startedAt: "2026-11-15T10:00:00.000Z", finishedAt: null, ...over,
+  startedAt: "2026-11-15T10:00:00.000Z", finishedAt: null, machineId: null, ...over,
 });
 
 const at = (seq: number) => new Date(Date.UTC(2026, 10, 15, 10, 0, seq % 60)).toISOString();
@@ -36,3 +36,9 @@ export const overrideCompleted = (seq: number, runId: string, output: string, ok
   });
 
 export const message = (seq: number, runId: string, text: string): LedgerEntry => ev(seq, "agent.message", { runId, text });
+
+/** A `link.mirrored` entry of this project carrying `inner`, the worker's own entry, as a linked machine sent it. */
+export const mirrored = (seq: number, inner: LedgerEntry, machineId = "b".repeat(32)): LedgerEntry => ({
+  seq, id: `m${seq}`, ts: at(seq), projectId: inner.projectId, actor: { kind: "system", id: "link" }, type: "link.mirrored",
+  payload: { machineId, origin: inner, signature: "c".repeat(128) }, prevHash: "", hash: "",
+});

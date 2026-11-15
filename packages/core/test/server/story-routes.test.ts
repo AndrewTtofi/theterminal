@@ -8,6 +8,7 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { registerStoryRoutes } from "../../src/server/story-routes.js";
 import type { CardStory, LedgerEntry } from "@theterminal/shared";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { TOKEN_COOKIE } from "../../src/server/auth.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
@@ -23,7 +24,7 @@ afterEach(async () => {
 async function start() {
   const dataDir = mkdtempSync(join(tmpdir(), "tt-story-"));
   dirs.push(dataDir);
-  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   return s;
 }
@@ -76,9 +77,10 @@ describe("story and export routes", { timeout: 15000 }, () => {
 
     const [header, ...body] = lines(await res.text());
     const rest = body.slice(0, -1);
-    expect(body.at(-1)).toEqual({ kind: "end", lastSeq: 3, gaps: 0 });
+    // Seq 1 is this computer's link identity, recorded at the server's first start (projectId null).
+    expect(body.at(-1)).toEqual({ kind: "end", lastSeq: 4, gaps: 0 });
     const stored = await json<LedgerEntry[]>(send(s, "GET", `/api/ledger?projectId=${club}`));
-    expect(header).toMatchObject({ kind: "header", projectId: club, headSeq: 3, integrity: { ok: true, count: 3 } });
+    expect(header).toMatchObject({ kind: "header", projectId: club, headSeq: 4, integrity: { ok: true, count: 4 } });
     expect(new Date(header!.exportedAt as string).toISOString()).toBe(header!.exportedAt);
     expect(rest).toHaveLength(stored.length);
     expect(rest.map((l) => l.seq)).toEqual(stored.map((e) => e.seq));
@@ -101,9 +103,10 @@ describe("story and export routes", { timeout: 15000 }, () => {
     expect(res.headers.get("content-disposition")).toBe('attachment; filename="theterminal-ledger-all.ndjson"');
     const [header, ...body] = lines(await res.text());
     const rest = body.slice(0, -1);
-    expect(body.at(-1)).toEqual({ kind: "end", lastSeq: 3, gaps: 0 });
-    expect(header).toMatchObject({ kind: "header", projectId: null, headSeq: 3, integrity: { ok: true, count: 3 } });
+    expect(body.at(-1)).toEqual({ kind: "end", lastSeq: 4, gaps: 0 });
+    expect(header).toMatchObject({ kind: "header", projectId: null, headSeq: 4, integrity: { ok: true, count: 4 } });
     expect(rest.map((l) => l.headline)).toEqual([
+      expect.stringContaining("This computer got its identity"),
       'Owner created the project "Book Club"',
       'Owner created the project "Garden Log"',
       expect.stringContaining("Reading list"),

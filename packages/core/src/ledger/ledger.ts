@@ -133,7 +133,8 @@ export class Ledger {
 
   /**
    * Entries in seq order. `cardId` and `runIds` keep the entries whose payload names that card or one of those
-   * runs (their union when both are given); an empty `runIds` names no run. At most MAX_RUN_IDS run ids.
+   * runs (their union when both are given), a `link.mirrored` entry by the worker entry it carries; an empty `runIds`
+   * names no run. At most MAX_RUN_IDS run ids.
    * With `beforeSeq`, only entries with a smaller seq, and the newest `limit` of them (still returned in ascending
    * order); it combines with `afterSeq`.
    */
@@ -155,13 +156,16 @@ export class Ledger {
         throw new RangeError(`at most ${MAX_RUN_IDS} run ids`);
       }
       const about: string[] = [];
+      // A linked machine's mirrored entry names its card and run inside the worker entry it carries.
+      const mirrored = (path: string) => `(type = 'link.mirrored' AND json_extract(payload, '$.origin.payload.${path}')`;
       if (q.cardId !== undefined) {
-        about.push("json_extract(payload, '$.cardId') = ?");
-        params.push(q.cardId);
+        about.push(`json_extract(payload, '$.cardId') = ?`, `${mirrored("cardId")} = ?)`);
+        params.push(q.cardId, q.cardId);
       }
       if (q.runIds !== undefined && q.runIds.length > 0) {
-        about.push(`json_extract(payload, '$.runId') IN (${q.runIds.map(() => "?").join(", ")})`);
-        params.push(...q.runIds);
+        const marks = q.runIds.map(() => "?").join(", ");
+        about.push(`json_extract(payload, '$.runId') IN (${marks})`, `${mirrored("runId")} IN (${marks}))`);
+        params.push(...q.runIds, ...q.runIds);
       }
       // CASE guarantees json_valid runs first: json_extract throws on a tampered, unparseable payload.
       where.push(about.length > 0 ? `CASE WHEN json_valid(payload) THEN (${about.join(" OR ")}) ELSE 0 END` : "0");

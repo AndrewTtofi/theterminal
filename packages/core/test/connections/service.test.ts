@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
@@ -15,8 +15,10 @@ import {
   UnsupportedConnectionError,
   SecretInConfigError,
   UnknownFieldError,
+  PUBLIC_NAME_MAX,
   type ConnectionTester,
 } from "../../src/connections/service.js";
+import { pathScrubber, usernameScrubber } from "../../src/agents/scrub-paths.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const KEY = "sk-ant-TESTKEY-0000000000";
@@ -893,7 +895,7 @@ describe("cloud, MCP and hardware connections", () => {
       serverName: "tt-00000002", connectionId: mcp.id, name: "Docs", transport: "http",
       url: "https://mcp.example.com/mcp", headers: { Authorization: HEADER },
     }]);
-    expect(svc.selectForRun([])).toEqual({ cloud: [], mcp: [] });
+    expect(svc.selectForRun([])).toEqual({ cloud: [], mcp: [], localModel: null });
   });
 
   it("selectForRun includes a local MCP server with its private command and args", async () => {
@@ -1018,6 +1020,82 @@ describe("cloud, MCP and hardware connections", () => {
   });
 });
 
+describe("local model connections", () => {
+  const LOCAL_KEY = "TESTKEY-local-000000";
+  const addLocal = (svc: ConnectionService, config: Record<string, string> = {}, secrets: Record<string, string> = {}) =>
+    svc.add(owner, {
+      kind: "llm", provider: "local_model", name: "Qwen on Ollama",
+      config: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b", ...config }, secrets,
+    });
+
+  it("refuses a server URL that is not this computer, at config.baseUrl, without writing anything", async () => {
+    const svc = make();
+    for (const baseUrl of ["http://192.168.1.5:11434/v1", "https://models.example.com/v1", "https://localhost:11434/v1"]) {
+      const err = await addLocal(svc, { baseUrl }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      expect((err as ZodError).issues[0]!.path).toEqual(["config", "baseUrl"]);
+      expect((err as ZodError).issues[0]!.message).toBe("Only this computer's own address is allowed");
+    }
+    expect(ledger.list()).toEqual([]);
+  });
+
+  it("accepts the three loopback forms, [::1] included", async () => {
+    const svc = make();
+    for (const baseUrl of ["http://127.0.0.1:11434/v1", "http://localhost:8080/v1", "http://[::1]:11434/v1"]) {
+      await expect(addLocal(svc, { baseUrl })).resolves.toMatchObject({ provider: "local_model", config: { baseUrl } });
+    }
+  });
+
+  // Codex 0.169.0 refuses `wire_api = "chat"` ("no longer supported"), so the default is the Responses API.
+  it("selectForRun gives the local model, the responses API style by default and the key from the cache", async () => {
+    const svc = make();
+    const plain = await addLocal(svc);
+    expect(svc.selectForRun([plain.id])).toEqual({
+      cloud: [], mcp: [],
+      localModel: { connectionId: plain.id, name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b", wireApi: "responses" },
+    });
+    const keyed = await addLocal(svc, { wireApi: "chat" }, { apiKey: LOCAL_KEY });
+    expect(svc.selectForRun([keyed.id]).localModel).toEqual({
+      connectionId: keyed.id, name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b",
+      wireApi: "chat", apiKey: LOCAL_KEY,
+    });
+    expect(svc.secretValues()).toContain(LOCAL_KEY);
+    expect(JSON.stringify(ledger.list())).not.toContain(LOCAL_KEY);
+  });
+
+  it("selectForRun refuses two local models, a disabled one and a missing key", async () => {
+    const svc = make();
+    const a = await addLocal(svc);
+    const b = await addLocal(svc, { model: "llama3.2:3b" });
+    const err = (() => {
+      try {
+        svc.selectForRun([a.id, b.id]);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(ZodError);
+    expect((err as ZodError).issues[0]!.path).toEqual(["connectionIds"]);
+    expect(svc.selectForRun([a.id, a.id]).localModel?.connectionId).toBe(a.id);
+    await svc.update(owner, b.id, { enabled: false });
+    expect(() => svc.selectForRun([b.id])).toThrow(ConnectionDisabledError);
+
+    const keyed = await addLocal(svc, {}, { apiKey: LOCAL_KEY });
+    const fresh = make();
+    await store.delete(`connection/${keyed.id}/apiKey`);
+    await fresh.load();
+    expect(() => fresh.selectForRun([keyed.id])).toThrow(SecretStoreUnavailableError);
+  });
+
+  it("other model connections are still refused, and credentialsFor never returns a local model", async () => {
+    const svc = make();
+    const claude = await addClaude(svc);
+    await addLocal(svc);
+    expect(() => svc.selectForRun([claude.id])).toThrow(UnsupportedConnectionError);
+    expect(svc.credentialsFor("codex")).toBeNull();
+  });
+});
+
 describe("Google Cloud key redaction", () => {
   const LINE1 = "TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTESTKEY0";
   const LINE2 = "TESTKEYTESTKEYTESTKEYTESTKEYTESTKEY00000";
@@ -1041,5 +1119,126 @@ describe("Google Cloud key redaction", () => {
     const reloaded = make();
     await reloaded.load();
     expect(reloaded.secretValues()).toEqual(expect.arrayContaining(expected));
+  });
+});
+
+describe("publicConnections", () => {
+  const SECRETS = {
+    claude: "sk-ant-TESTKEY-pub-0000000000",
+    awsAccess: "AKIATESTKEYPUB00000",
+    awsSecret: "TESTKEY-aws-pub-secret-0000000000",
+    header: "Bearer TESTKEY-hdr-0000000000",
+    env: "TESTKEY-env-pub-0000000000",
+    local: "TESTKEY-local-pub-000000",
+    github: "ghp_TESTKEYpub000000000000000",
+  };
+  const uuidId = () => `${String(++ids).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  const COMMAND = join(tmpdir(), "bin", "files-mcp");
+
+  async function seedAll(svc: ConnectionService) {
+    const claude = await svc.add(owner, { kind: "llm", provider: "claude", name: "Claude", config: { plan: "Max 5x" }, secrets: { apiKey: SECRETS.claude } });
+    const codex = await svc.add(owner, { kind: "llm", provider: "codex", name: "Codex", private: { cliHome: CODEX_HOME } });
+    const aws = await svc.add(owner, {
+      kind: "cloud", provider: "aws", name: "Work AWS", config: { region: "us-east-1" },
+      secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret },
+    });
+    const mcp = await svc.add(owner, {
+      kind: "mcp", provider: "mcp_http", name: "Docs", config: { url: "https://mcp.example.com/mcp" }, secrets: { headers: `Authorization=${SECRETS.header}` },
+    });
+    const stdio = await svc.add(owner, {
+      kind: "mcp", provider: "mcp_stdio", name: "Files", private: { command: COMMAND, args: "--verbose" }, secrets: { env: `FILES_TOKEN=${SECRETS.env}` },
+    });
+    const local = await svc.add(owner, {
+      kind: "llm", provider: "local_model", name: "Qwen on Ollama",
+      config: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b" }, secrets: { apiKey: SECRETS.local },
+    });
+    const github = await svc.add(owner, { kind: "github", provider: "github", name: "GitHub", config: { repo: "acme/widgets" }, secrets: { token: SECRETS.github } });
+    const off = await svc.add(owner, { kind: "cloud", provider: "aws", name: "Old AWS", config: { region: "eu-west-2" }, secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret } });
+    await svc.update(owner, off.id, { enabled: false });
+    await svc.writeHardware(owner, {
+      cpu: "Apple M2 Max", cores: 12, memoryGb: 32, gpu: "Apple M2 Max", gpuMemoryGb: 32, platform: "darwin", wsl: false,
+      detectedAt: "2026-11-15T12:00:00.000Z",
+    });
+    return { claude, codex, aws, mcp, stdio, local, github, off };
+  }
+
+  it("names the enabled cloud, MCP and local model connections: id, kind, provider and name only", async () => {
+    const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    const c = await seedAll(svc);
+    expect(svc.publicConnections()).toEqual([
+      { id: c.aws.id, kind: "cloud", provider: "aws", name: "Work AWS" },
+      { id: c.mcp.id, kind: "mcp", provider: "mcp_http", name: "Docs" },
+      { id: c.stdio.id, kind: "mcp", provider: "mcp_stdio", name: "Files" },
+      { id: c.local.id, kind: "llm", provider: "local_model", name: "Qwen on Ollama" },
+    ]);
+    for (const entry of svc.publicConnections()) expect(Object.keys(entry).sort()).toEqual(["id", "kind", "name", "provider"]);
+  });
+
+  it("carries no secret, config, private field, path, URL, plan or status, even after a reload from the keychain", async () => {
+    const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    await seedAll(svc);
+    const reloaded = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+    await reloaded.load();
+    for (const s of [svc, reloaded]) {
+      const text = JSON.stringify(s.publicConnections());
+      expect(text).not.toContain("TESTKEY");
+      for (const value of [...Object.values(SECRETS), ...s.secretValues()]) expect(text).not.toContain(value);
+      for (const leak of [COMMAND, CODEX_HOME, "mcp.example.com", "127.0.0.1", "qwen2.5-coder", "us-east-1", "acme/widgets", "Max 5x", "Apple M2", "--verbose"]) {
+        expect(text).not.toContain(leak);
+      }
+      for (const key of ["apiKey", "secret", "token", "cliHome", "headers", "env", "config", "private", "status", "enabled", "secretFields"]) {
+        expect(text).not.toContain(`"${key}"`);
+      }
+    }
+  });
+
+  it("is empty when nothing public is enabled", async () => {
+    const svc = make();
+    await addClaude(svc);
+    expect(svc.publicConnections()).toEqual([]);
+  });
+
+  describe("names", () => {
+    const HOME = join(tmpdir(), "home-of-alice");
+    const USER = "alicetester";
+    const MINTED = "TESTKEY-minted-name-0000000000";
+    const LATER = "TESTKEY-later-name-0000000000";
+    const scrub = (t: string) => usernameScrubber(USER)(pathScrubber([[HOME, "~"]])(t));
+    const makeClean = () =>
+      new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId, scrub, extraSecrets: () => [MINTED] });
+    const aws = (svc: ConnectionService, name: string) =>
+      svc.add(owner, { kind: "cloud", provider: "aws", name, config: { region: "us-east-1" }, secrets: { accessKeyId: SECRETS.awsAccess, secretAccessKey: SECRETS.awsSecret } });
+    const nameOf = (svc: ConnectionService, id: string) => svc.publicConnections().find((c) => c.id === id)!.name;
+
+    it("redacts stored and minted secrets in a name, also one stored after the name was given", async () => {
+      const svc = makeClean();
+      const minted = await aws(svc, `Prod ${MINTED}`);
+      const later = await aws(svc, `Old ${LATER}`);
+      await svc.add(owner, { kind: "llm", provider: "local_model", name: "Local", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "m" }, secrets: { apiKey: LATER } });
+      const text = JSON.stringify(svc.publicConnections());
+      expect(text).not.toContain("TESTKEY");
+      expect(nameOf(svc, minted.id).startsWith("Prod ")).toBe(true);
+      expect(nameOf(svc, later.id).startsWith("Old ")).toBe(true);
+    });
+
+    it("scrubs paths and the username, strips email addresses and caps the length", async () => {
+      const svc = makeClean();
+      const path = await aws(svc, `Keys in ${join(HOME, "aws")}`);
+      const user = await aws(svc, `${USER} work account`);
+      const email = await aws(svc, "AWS for alice.tester+aws@example.co.uk billing");
+      const long = await aws(svc, "A".repeat(120));
+      expect(nameOf(svc, path.id)).toBe(`Keys in ${join("~", "aws")}`);
+      expect(nameOf(svc, user.id)).toBe("<user> work account");
+      expect(nameOf(svc, email.id)).toBe("AWS for <email> billing");
+      expect(nameOf(svc, long.id).length).toBeLessThanOrEqual(PUBLIC_NAME_MAX);
+      const text = JSON.stringify(svc.publicConnections());
+      for (const leak of [HOME, USER, "example.co.uk", "alice.tester"]) expect(text).not.toContain(leak);
+    });
+
+    it("scrubs this computer's home folder and username by default", async () => {
+      const svc = new ConnectionService({ db, ledger, secrets: store, testers: {}, newId: uuidId });
+      const c = await aws(svc, `Keys in ${join(homedir(), "aws")}`);
+      expect(nameOf(svc, c.id)).toBe(`Keys in ${join("~", "aws")}`);
+    });
   });
 });

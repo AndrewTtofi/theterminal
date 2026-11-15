@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MAX_CHANGED_FILES, MAX_DIR_ENTRIES, plural, visibleControls } from "@theterminal/shared";
 import type { AgentRun, ChangeStatus, ChangedFile, DirEntry, DirListing } from "@theterminal/shared";
-import { ADAPTER_NAMES } from "../components/AgentPanel";
+import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
 import { OverrideSection } from "../components/OverrideSection";
 import { clip } from "../components/text";
 import { errorMessage } from "../api";
@@ -15,8 +15,8 @@ const PROMPT_CLIP = 40;
 /** The title of a file or directory whose name cleaning changed: the name shown is not the real one. */
 const HIDDEN_NAME = "Name hidden because it looked like a secret or a private path";
 
-function runLabel(r: AgentRun): string {
-  return `${ADAPTER_NAMES[r.adapter]} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)} · ${r.status}`;
+function runLabel(r: AgentRun, machineName?: (machineId: string) => string | undefined): string {
+  return `${ADAPTER_NAMES[r.adapter]}${onMachine(r, machineName)} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)} · ${r.status}`;
 }
 
 /** `+a −d` for a file with line counts, `binary` for a binary one, nothing for an untracked one. */
@@ -158,7 +158,7 @@ export function ChangesSideBar() {
         {runs.length === 0 && <option value="">(no runs yet)</option>}
         {runs.map((r) => (
           <option key={r.id} value={r.id}>
-            {runLabel(r)}
+            {runLabel(r, model.narration?.machineName)}
           </option>
         ))}
       </select>

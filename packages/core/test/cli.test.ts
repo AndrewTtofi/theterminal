@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, type RunningServer } from "../src/server/server.js";
 import { MemorySecretStore } from "../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../src/link/discovery.js";
 import type { ReadyMessage } from "../src/host.js";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cli.js");
@@ -33,7 +34,7 @@ const USAGE = "Usage: theterminal start [--port N] [--data-dir PATH] [--ui-dir P
 function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}): Spawned {
   const child = spawn(process.execPath, [CLI, ...args], {
     stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
-    env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory", ...extraEnv },
+    env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory", THETERMINAL_FAKE_DISCOVERY: "1", ...extraEnv },
   });
   let out = "";
   let err = "";
@@ -123,7 +124,7 @@ describe("theterminal start as a host's child process", () => {
 
   it("a data folder in use exits 1 with the fixed message", { timeout: TIMEOUT }, async () => {
     const dir = tmp();
-    servers.push(await createServer({ dataDir: dir, port: 0, secrets: new MemorySecretStore() }));
+    servers.push(await createServer({ dataDir: dir, port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() }));
     const { exit, stderr, stdout } = startCli(["start", "--data-dir", dir, "--port", "0"]);
     expect(await exit).toBe(1);
     expect(stderr()).toContain("The Terminal could not start: Another The Terminal server is already using this data folder.");
@@ -174,7 +175,7 @@ describe("theterminal start as a host's child process", () => {
     `;
     const parent = spawn(process.execPath, ["-e", host, CLI, "start", "--data-dir", dir, "--port", "0"], {
       stdio: ["ignore", "pipe", "inherit"],
-      env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory" },
+      env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory", THETERMINAL_FAKE_DISCOVERY: "1" },
     });
     children.push({ child: parent, exit: new Promise((resolve) => parent.once("exit", resolve)) });
     const pid = await new Promise<number>((resolve, reject) => {

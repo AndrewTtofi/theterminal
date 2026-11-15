@@ -7,6 +7,7 @@ import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
 import type { IntakeService } from "../intake/service.js";
+import type { NetworkState } from "../network.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -16,6 +17,10 @@ export type ConnectionRouteDeps = {
   /** The CI status for the status bar without waiting on the network; null when GitHub is not connected. */
   ci: () => CiStatus | null;
   intake: IntakeService;
+  /** Paired machines, how many answered their last check and how many met another key; never makes a new check. */
+  machines: () => { linked: number; online: number; keyChanged: number };
+  /** The network state inferred from the Owner's own outgoing calls; never makes a call. */
+  network: () => NetworkState;
   /** Share links being served right now: the live listeners, never the projection's rows. */
   shareLinks: () => number;
 };
@@ -46,7 +51,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, shareLinks } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -129,6 +134,9 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       // Undecided plan decisions over every open intake, and the projects they belong to.
       intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0),
       intakeProjects,
+      machines: machines(),
+      // Only the fixed fields: the state, when it began and the system code that made it offline. No URL or message.
+      network: network(),
       shareLinks: shareLinks(),
     };
   });

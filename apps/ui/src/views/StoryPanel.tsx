@@ -93,15 +93,18 @@ export function StoryPanel({ id }: { id: string }) {
     [cardId, subscribe],
   );
 
+  // The names of linked machines come from the workspace model, as the ledger panel and the feed have them.
+  const machineName = model.narration?.machineName;
   const narrated = useMemo(() => {
     if (!story) return [];
     const adapters = new Map(story.runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
     const ctx: NarrationContext = {
       cardTitle: (c) => (c === story.card.id ? story.card.title : undefined),
       adapterName: (r) => adapters.get(r),
+      ...(machineName !== undefined && { machineName }),
     };
     return [...story.entries].sort((a, b) => a.seq - b.seq).map((e) => ({ e, n: narrate(e, ctx) }));
-  }, [story]);
+  }, [story, machineName]);
 
   if (!story) {
     return <p className="empty">{failed ? "This card's story could not be loaded." : "Loading the story…"}</p>;

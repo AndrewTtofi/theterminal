@@ -1,12 +1,16 @@
+import { MIRRORABLE_TYPES } from "@theterminal/shared";
 import type {
-  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, PendingAgentAction, QuestionId,
-  ShareLink, ShareLinkState, ShareSnapshotRecord,
+  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, LinkRun, LinkRunState, Machine,
+  PendingAgentAction, QuestionId, ShareLink, ShareLinkState, ShareSnapshotRecord,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
 import type { Ledger } from "../ledger/ledger.js";
 
 type Payload = Record<string, any>;
+
+/** The reason on a pending action of a remote run that ended here before anyone decided it. */
+const RUN_ENDED_REASON = "The run ended before a decision was made.";
 
 /** Projection reducer: applies one ledger entry to the read tables. Unknown types are ignored. */
 export function applyEvent(db: Db, e: LedgerEntry): void {
@@ -135,6 +139,59 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       );
       break;
     }
+    case "machine.identity_created":
+      setSetting(db, "link.machineId", p.machineId);
+      setSetting(db, "link.publicKey", p.publicKey);
+      setSetting(db, "link.fingerprint", p.fingerprint);
+      break;
+    case "machine.named":
+      setSetting(db, "link.name", p.name);
+      break;
+    case "machine.linking_enabled":
+      setSetting(db, "link.enabled", "1");
+      setSetting(db, "link.port", String(p.port));
+      break;
+    case "machine.linking_disabled":
+      setSetting(db, "link.enabled", "0");
+      break;
+    case "machine.paired":
+      db.prepare(
+        `INSERT OR REPLACE INTO machines (id, name, public_key, fingerprint, address, role, paired_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(p.machineId, p.name, p.publicKey, p.fingerprint, p.address, p.role, e.ts, e.ts);
+      break;
+    case "machine.unpaired":
+      db.prepare("DELETE FROM machines WHERE id = ?").run(p.machineId);
+      break;
+    case "link.run_requested":
+      // The payload carries no projectId: the entry's is the run's project (a NULL one fails the NOT NULL column).
+      insertLinkRun(db, p.runId, p.machineId, "requested", e.projectId, "requested", e.ts);
+      break;
+    case "link.run_accepted":
+      insertLinkRun(db, p.runId, p.machineId, "accepted", p.projectId, "running", e.ts);
+      break;
+    case "link.run_failed":
+      db.prepare("UPDATE link_runs SET state = 'failed', error = ?, updated_at = ? WHERE run_id = ?").run(p.error, e.ts, p.runId);
+      // The mirrored run of that machine ends with it while still running; this machine's own runs are never touched.
+      db.prepare(
+        "UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'running' AND machine_id = ?",
+      ).run(p.error, e.ts, p.runId, p.machineId);
+      // Nothing can settle its pending actions any more: closed as denied by nobody, so no view lists them as waiting.
+      db.prepare(
+        `UPDATE agent_actions SET status = 'denied', decided_by = NULL, reason = ?, decided_at = ? WHERE status = 'pending'
+         AND run_id IN (SELECT id FROM agent_runs WHERE id = ? AND machine_id = ?)`,
+      ).run(RUN_ENDED_REASON, e.ts, p.runId, p.machineId);
+      break;
+    case "link.changes_imported":
+      db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);
+      break;
+    case "link.changes_refused":
+      // The link run ends here; the run itself stays as the worker reported it.
+      db.prepare("UPDATE link_runs SET state = 'failed', error = ?, updated_at = ? WHERE run_id = ?").run(p.reason, e.ts, p.runId);
+      break;
+    case "link.mirrored":
+      applyMirrored(db, e);
+      break;
     case "share.confirmed":
       db.prepare(
         `INSERT INTO share_snapshots (id, project_id, content_hash, bytes, sections, options, head_seq, confirmed_at)
@@ -154,11 +211,91 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         SHARE_END_STATES[e.type], e.ts, p.linkId,
       );
       break;
-    default: // gate.blocked and conversation entries project nothing
+    default: // gate.blocked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
 }
 
+const MIRRORED: ReadonlySet<string> = new Set(MIRRORABLE_TYPES);
+
+/** A mirrored entry the projection refuses; the commit rolls back. */
+export class MirroredEntryRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MirroredEntryRefusedError";
+  }
+}
+
+/**
+ * A linked machine's entry, committed here as `link.mirrored`: the worker's own entry (`payload.origin`, with its own
+ * seq, ts and actor) is applied as if local, the run is marked as running on that machine, and the link run's cursor
+ * moves to the worker's seq.
+ *
+ * The frame was checked before it was committed (`acceptMirroredLine`); this reducer still refuses, rolling the commit
+ * back, anything that would let a worker touch state outside the run it was asked to run: a run never requested of
+ * that machine, another project, an existing run id, an action of another run (actions are settled by id alone), and a
+ * start naming a working copy other than the run's own or a card other than the one requested (the files views read
+ * `agent_runs.worktree` under the data folder; the story selects by `card_id`).
+ */
+export function applyMirrored(db: Db, e: LedgerEntry): void {
+  const p = e.payload as Payload;
+  const inner = p.origin as LedgerEntry;
+  if (!MIRRORED.has(inner.type)) throw new MirroredEntryRefusedError("mirrored entry of a type that is not mirrored");
+  const ip = inner.payload as Payload;
+  const runId = ip.runId as string;
+  const link = db
+    .prepare("SELECT project_id, state FROM link_runs WHERE run_id = ? AND machine_id = ? AND direction = 'requested'")
+    .get(runId, p.machineId) as { project_id: string; state: LinkRunState } | undefined;
+  if (!link) throw new MirroredEntryRefusedError("mirrored entry for a run not requested of that machine");
+  const projectOk = inner.projectId === link.project_id || (inner.type === "connection.used" && inner.projectId === null);
+  if (!projectOk || e.projectId !== inner.projectId) throw new MirroredEntryRefusedError("mirrored entry outside the run's project");
+  if (inner.type === "agent.started") {
+    if (ip.worktree !== `projects/${link.project_id}/worktrees/${runId}`) throw new MirroredEntryRefusedError("mirrored start naming another working copy");
+    if ((ip.cardId ?? null) !== requestedCardId(db, runId)) throw new MirroredEntryRefusedError("mirrored start naming another card");
+  }
+  if (inner.type === "agent.action.requested" || inner.type === "agent.action.decided" || inner.type === "agent.action.completed") {
+    const owner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?").get(ip.actionId) as { run_id: string } | undefined;
+    const ok = inner.type === "agent.action.requested" ? owner === undefined : owner?.run_id === runId;
+    if (!ok) throw new MirroredEntryRefusedError("mirrored entry about an action of another run");
+  }
+  if (inner.type !== "agent.started" && inner.type !== "connection.used") {
+    const run = db.prepare("SELECT machine_id FROM agent_runs WHERE id = ?").get(runId) as { machine_id: string | null } | undefined;
+    if (run && run.machine_id !== p.machineId) throw new MirroredEntryRefusedError("mirrored entry about a run of another machine");
+  }
+
+  applyEvent(db, inner); // an existing run id fails agent.started's INSERT and rolls the commit back
+  if (inner.type === "agent.started") db.prepare("UPDATE agent_runs SET machine_id = ? WHERE id = ?").run(p.machineId, runId);
+  // requested → running → finished; a run already imported or failed keeps its state.
+  const state = inner.type === "agent.finished" && (link.state === "requested" || link.state === "running")
+    ? "finished"
+    : link.state === "requested" ? "running" : link.state;
+  db.prepare("UPDATE link_runs SET last_seq = ?, state = ?, updated_at = ? WHERE run_id = ?").run(inner.seq, state, e.ts, runId);
+}
+
+/**
+ * The card this computer asked a remote run for, as its own `link.run_requested` recorded it (null for none, and for
+ * a run it never requested). Read from the ledger, so a rebuild sees the same answer.
+ */
+export function requestedCardId(db: Db, runId: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT json_extract(payload, '$.cardId') AS card_id FROM ledger WHERE type = 'link.run_requested'
+       AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.runId') = ? ELSE 0 END LIMIT 1`,
+    )
+    .get(runId) as { card_id: string | null } | undefined;
+  return typeof row?.card_id === "string" ? row.card_id : null;
+}
+
+/** The worker entry ids already mirrored for a run, read from the ledger. */
+export function mirroredIds(db: Db, runId: string): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT json_extract(payload, '$.origin.id') AS id FROM ledger
+       WHERE type = 'link.mirrored' AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.origin.payload.runId') = ? ELSE 0 END`,
+    )
+    .all(runId) as { id: string }[];
+  return new Set(rows.map((r) => r.id));
+}
 const SHARE_END_STATES = { "share.revoked": "revoked", "share.expired": "expired", "share.stopped": "stopped" } as const;
 
 /** An intake event must name an intake of its own project; otherwise the append rolls back instead of writing orphan rows. */
@@ -196,13 +333,22 @@ function updateConnection(db: Db, p: Payload, ts: string): void {
   );
 }
 
+function insertLinkRun(
+  db: Db, runId: string, machineId: string, direction: LinkRun["direction"], projectId: string | null, state: LinkRunState, ts: string,
+): void {
+  db.prepare(
+    `INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, last_seq, error, updated_at)
+     VALUES (?, ?, ?, ?, ?, 0, NULL, ?)`,
+  ).run(runId, machineId, direction, projectId, state, ts);
+}
+
 function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
 const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
-  "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links",
+  "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -229,7 +375,7 @@ type RunRow = {
   id: string; project_id: string; card_id: string | null; adapter: AgentRun["adapter"];
   auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
-  started_at: string; finished_at: string | null;
+  started_at: string; finished_at: string | null; machine_id: string | null;
 };
 type ActionRow = {
   id: string; run_id: string; kind: AgentAction["kind"]; tool: string; summary: string; input: string;
@@ -241,7 +387,7 @@ const toRun = (r: RunRow): AgentRun => ({
   id: r.id, projectId: r.project_id, cardId: r.card_id, adapter: r.adapter, authMode: r.auth_mode,
   prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
-  startedAt: r.started_at, finishedAt: r.finished_at,
+  startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id,
 });
 const toAction = (r: ActionRow): AgentAction => ({
   id: r.id, runId: r.run_id, kind: r.kind, tool: r.tool, summary: r.summary, input: JSON.parse(r.input),
@@ -268,23 +414,29 @@ export function listActions(db: Db, runId: string): AgentAction[] {
   return rows.map(toAction);
 }
 
-/** Pending actions across every project, oldest first, each with its project's id and name. */
+/**
+ * Pending actions across every project, oldest first, each with its project's id and name. Only a running run's
+ * actions wait for a decision: a run on a linked machine that ended here (link.run_failed) keeps its last record.
+ */
 export function listAllPendingActions(db: Db): PendingAgentAction[] {
   const rows = db
     .prepare(
-      `SELECT a.*, r.project_id AS p_id, p.name AS p_name FROM agent_actions a
+      `SELECT a.*, r.project_id AS p_id, p.name AS p_name, m.name AS m_name FROM agent_actions a
        JOIN agent_runs r ON r.id = a.run_id JOIN projects p ON p.id = r.project_id
-       WHERE a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+       LEFT JOIN machines m ON m.id = r.machine_id
+       WHERE a.status = 'pending' AND r.status = 'running' ORDER BY a.requested_at, a.rowid`,
     )
-    .all() as (ActionRow & { p_id: string; p_name: string })[];
-  return rows.map((r) => ({ ...toAction(r), projectId: r.p_id, projectName: r.p_name }));
+    .all() as (ActionRow & { p_id: string; p_name: string; m_name: string | null })[];
+  return rows.map((r) => ({
+    ...toAction(r), projectId: r.p_id, projectName: r.p_name, ...(r.m_name !== null && { machineName: r.m_name }),
+  }));
 }
 
 export function listPendingActions(db: Db, projectId: string): AgentAction[] {
   const rows = db
     .prepare(
       `SELECT a.* FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-       WHERE r.project_id = ? AND a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+       WHERE r.project_id = ? AND a.status = 'pending' AND r.status = 'running' ORDER BY a.requested_at, a.rowid`,
     )
     .all(projectId) as ActionRow[];
   return rows.map(toAction);
@@ -314,7 +466,9 @@ export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts
       .get(from.toISOString(), to.toISOString()) as { total: number }).total;
   return {
     runningAgents: count("SELECT COUNT(*) AS n FROM agent_runs WHERE status = 'running'"),
-    pendingDecisions: count("SELECT COUNT(*) AS n FROM agent_actions WHERE status = 'pending'"),
+    pendingDecisions: count(
+      "SELECT COUNT(*) AS n FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id WHERE a.status = 'pending' AND r.status = 'running'",
+    ),
     todayCostUsd: cost(dayStart, nextDay),
     monthCostUsd: cost(monthStart, nextMonth),
     connections: {
@@ -405,7 +559,7 @@ export function countPendingActions(db: Db, projectId: string): number {
   return (db
     .prepare(
       `SELECT COUNT(*) AS n FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-       WHERE r.project_id = ? AND a.status = 'pending'`,
+       WHERE r.project_id = ? AND a.status = 'pending' AND r.status = 'running'`,
     )
     .get(projectId) as { n: number }).n;
 }
@@ -413,6 +567,47 @@ export function countPendingActions(db: Db, projectId: string): number {
 /** Runs on the card that are still running. */
 export function countRunningRuns(db: Db, cardId: string): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE card_id = ? AND status = 'running'").get(cardId) as { n: number }).n;
+}
+
+type MachineRow = {
+  id: string; name: string; public_key: string; fingerprint: string; address: string; role: Machine["role"];
+  paired_at: string; updated_at: string;
+};
+const toMachine = (r: MachineRow): Machine => ({
+  id: r.id, name: r.name, publicKey: r.public_key, fingerprint: r.fingerprint, address: r.address, role: r.role,
+  pairedAt: r.paired_at, updatedAt: r.updated_at,
+});
+
+/** Paired machines, by name then id. */
+export function listMachines(db: Db): Machine[] {
+  return (db.prepare("SELECT * FROM machines ORDER BY name, id").all() as MachineRow[]).map(toMachine);
+}
+
+export function getMachine(db: Db, id: string): Machine | null {
+  const r = db.prepare("SELECT * FROM machines WHERE id = ?").get(id) as MachineRow | undefined;
+  return r ? toMachine(r) : null;
+}
+
+type LinkRunRow = {
+  run_id: string; machine_id: string; direction: LinkRun["direction"]; project_id: string; state: LinkRunState;
+  last_seq: number; error: string | null; updated_at: string;
+};
+const toLinkRun = (r: LinkRunRow): LinkRun => ({
+  runId: r.run_id, machineId: r.machine_id, direction: r.direction, projectId: r.project_id, state: r.state,
+  lastSeq: r.last_seq, error: r.error, updatedAt: r.updated_at,
+});
+
+export function getLinkRun(db: Db, runId: string): LinkRun | null {
+  const r = db.prepare("SELECT * FROM link_runs WHERE run_id = ?").get(runId) as LinkRunRow | undefined;
+  return r ? toLinkRun(r) : null;
+}
+
+/** Runs that cross a link, in the order they were first recorded; with `state`, only those in it. */
+export function listLinkRuns(db: Db, state?: LinkRunState): LinkRun[] {
+  const rows = (state === undefined
+    ? db.prepare("SELECT * FROM link_runs ORDER BY rowid").all()
+    : db.prepare("SELECT * FROM link_runs WHERE state = ? ORDER BY rowid").all(state)) as LinkRunRow[];
+  return rows.map(toLinkRun);
 }
 
 type ShareSnapshotRow = {

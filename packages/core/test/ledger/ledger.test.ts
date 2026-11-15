@@ -179,6 +179,23 @@ describe("Ledger", () => {
       expect(ledger.list({ cardId: "c1", runIds: ["a"] }).map((e) => e.seq)).toEqual([1, 5, 7, 9, 10]);
     });
 
+    it("runIds and cardId also keep a linked machine's mirrored entries of those runs and that card", () => {
+      const H = "e".repeat(64);
+      const mirrored = (seq: number, type: string, payload: Record<string, unknown>) =>
+        entry("link.mirrored", {
+          machineId: "b".repeat(32), signature: "c".repeat(128),
+          origin: { seq, id: `w${seq}`, ts: "2026-11-15T00:00:00.000Z", projectId: "p", actor: { kind: "agent", id: "x" }, type, payload, prevHash: H, hash: H },
+        });
+      ledger.append(mirrored(1, "agent.started", { runId: "r", adapter: "fake", authMode: "none", prompt: "go", cardId: "c9", worktree: "wt/r" })); // 12
+      ledger.append(mirrored(2, "agent.message", { runId: "r", text: "hi" })); // 13
+      ledger.append(mirrored(3, "agent.message", { runId: "a", text: "hi" })); // 14
+      ledger.append(entry("link.run_failed", { runId: "r", machineId: "b".repeat(32), error: "unreachable" })); // 15
+      expect(ledger.list({ runIds: ["r"] }).map((e) => e.seq)).toEqual([12, 13, 15]);
+      expect(ledger.list({ runIds: ["a"] }).map((e) => e.seq)).toEqual([5, 7, 9, 14]);
+      expect(ledger.list({ cardId: "c9" }).map((e) => e.seq)).toEqual([12]);
+      expect(ledger.list({ cardId: "c9", runIds: [] }).map((e) => e.seq)).toEqual([12]);
+    });
+
     it("refuses more than 200 runIds", () => {
       const many = Array.from({ length: 201 }, (_, i) => `r${i}`);
       expect(() => ledger.list({ runIds: many })).toThrow(RangeError);

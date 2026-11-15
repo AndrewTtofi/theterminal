@@ -428,6 +428,157 @@ describe("narrate: override", () => {
   });
 });
 
+describe("narrate: linked machines", () => {
+  const fp = "0123456789abcdef".repeat(4);
+  const machineId = "ab".repeat(16);
+  const machines: NarrationContext = { ...ctx, machineName: (id) => (id === machineId ? "GPU box" : undefined) };
+  const system: Actor = { kind: "system", id: "link" };
+
+  it("narrates this computer's identity, name and linking switch", () => {
+    const identity = n(entry("machine.identity_created", { machineId, publicKey: "k", fingerprint: fp }, system));
+    expect(identity.headline).toBe("This computer got its identity (0123 4567 89ab cdef)");
+    expect(identity.topic).toBe("machine");
+    expect(identity.attention).toBe(false);
+    expect(h(entry("machine.named", { name: "Mac" }))).toBe('Owner named this computer "Mac"');
+    const on = n(entry("machine.linking_enabled", { port: 4418, acknowledgement: "…" }));
+    expect(on.headline).toBe("Owner allowed other computers on the local network to link with this one (port 4418)");
+    expect(on.attention).toBe(true);
+    expect(on.topic).toBe("machine");
+    expect(h(entry("machine.linking_disabled", {}))).toBe("Owner stopped linking");
+  });
+
+  it("narrates pairing and unpairing", () => {
+    const paired = n(
+      entry("machine.paired", { machineId, name: "GPU box", publicKey: "k", fingerprint: fp, address: "192.168.1.10:4418", role: "entered_code" }),
+    );
+    expect(paired.headline).toBe('Owner linked "GPU box" (0123456789abcdef)');
+    expect(paired.topic).toBe("machine");
+    expect(paired.refs).toEqual({ machineId });
+    expect(h(entry("machine.unpaired", { machineId, name: "GPU box" }))).toBe('Owner unlinked "GPU box"');
+  });
+
+  it("narrates why a remote run failed in fixed words, never the recorded error", () => {
+    const failed = (error: string) => h(entry("link.run_failed", { runId: "r1", machineId, error }, system), machines);
+    for (const code of ["unreachable", "not_sent", "machine_bad_reply", "upload_refused", "connection_disabled", "no_repo", "invalid_input", "repo_too_large"]) {
+      expect(failed(code)).toBe("GPU box could not start the run");
+    }
+    for (const code of ["bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame"]) {
+      expect(failed(code)).toBe("The run on GPU box stopped: signature check failed");
+    }
+    expect(failed("machine_unpaired")).toBe("The run on GPU box stopped: the machine was unlinked");
+    expect(failed("conflict")).toBe("The run on GPU box stopped: its entries clash with records here");
+    expect(failed("remote_not_found")).toBe("The run on GPU box stopped: the machine refused");
+    expect(failed("machine_key_mismatch")).toBe("The run on GPU box stopped: the machine's key changed");
+    expect(failed("<b>sk-ant-TESTKEY-000</b>")).toBe("The run on GPU box failed");
+    expect(failed("__proto__")).toBe("The run on GPU box failed");
+  });
+
+  it("narrates refused changes in fixed words", () => {
+    const refused = (reason: string) => n(entry("link.changes_refused", { runId: "r1", machineId, reason }, system), machines);
+    expect(refused("bad_bundle").headline).toBe("The changes from GPU box were refused: what it sent could not be read");
+    expect(refused("conflict").headline).toBe("The changes from GPU box were refused: they clash with records here");
+    expect(refused("not_from_base").headline).toBe("The changes from GPU box were refused: they do not start from the project as it was sent");
+    expect(refused("wrong_path").headline).toBe("The changes from GPU box were refused: they name the wrong working copy");
+    expect(refused("machine_refused").headline).toBe("The changes from GPU box were refused: the machine no longer has them");
+    expect(refused("machine_unpaired").headline).toBe("The changes from GPU box were refused: the machine was unlinked before they arrived");
+    expect(refused("other").headline).toBe("The changes from GPU box were refused");
+    expect(refused("bad_bundle")).toMatchObject({ attention: true, topic: "machine" });
+  });
+
+  it("narrates a run requested from and accepted by another machine", () => {
+    const requested = n(
+      entry("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "Train the model", cardId: null, connectionIds: [] }),
+      machines,
+    );
+    expect(requested.headline).toBe('Owner asked GPU box to run a Codex agent: "Train the model"');
+    expect(requested.detail).toBe("Train the model");
+    expect(requested.topic).toBe("machine");
+    expect(requested.refs).toEqual({ runId: "r1", machineId });
+    expect(h(entry("link.run_requested", { runId: "r1", machineId: "cd".repeat(16), adapter: "codex", prompt: "x".repeat(100), cardId: null, connectionIds: [] }), machines)).toBe(
+      `Owner asked a linked machine to run a Codex agent: "${"x".repeat(80)}…"`,
+    );
+    const failed = n(entry("link.run_failed", { runId: "r1", machineId, error: "no_repo" }, system), machines);
+    expect(failed.headline).toBe("GPU box could not start the run");
+    expect(failed.attention).toBe(true);
+    expect(failed.topic).toBe("machine");
+    expect(h(entry("link.run_failed", { runId: "r1", machineId, error: "unreachable" }, system))).toBe(
+      "A linked machine could not start the run",
+    );
+    expect(h(entry("link.project_received", { projectId: "p1", machineId, name: "Book club" }, system), machines)).toBe(
+      'Received the project "Book club" from GPU box',
+    );
+    expect(h(entry("link.run_accepted", { runId: "r1", machineId, projectId: "p1" }, system), machines)).toBe("Accepted a run from GPU box");
+    const decided = (decision: string) =>
+      n(entry("link.decision_received", { runId: "r1", actionId: "a1", machineId, decision }, system), machines);
+    expect(decided("allow").headline).toBe("Owner's decision arrived from GPU box: allowed");
+    expect(decided("deny").headline).toBe("Owner's decision arrived from GPU box: denied");
+    expect(decided("allow").topic).toBe("machine");
+    expect(decided("allow").refs).toEqual({ runId: "r1", actionId: "a1", machineId });
+    const imported = n(entry("link.changes_imported", { runId: "r1", machineId, commit: "d".repeat(40) }, system), machines);
+    expect(imported.headline).toBe("The run's changes arrived from GPU box");
+    expect(imported.topic).toBe("machine");
+  });
+
+  it("narrates a mirrored entry as the inner entry, on the machine it came from", () => {
+    const origin = {
+      seq: 3, id: "e3", ts: "2026-11-15T10:00:00.000Z", projectId: "p1", actor: { kind: "agent", id: "r7" },
+      type: "agent.action.requested",
+      payload: { runId: "r7", actionId: "a7", kind: "shell", tool: "Bash", summary: "Run tests", input: { command: "npm test" } },
+      prevHash: "a".repeat(64), hash: "b".repeat(64),
+    };
+    const out = n(entry("link.mirrored", { machineId, origin, signature: "c".repeat(128) }, system), machines);
+    expect(out.headline).toBe('On GPU box: The agent wants to run the command "npm test"');
+    expect(out.attention).toBe(true);
+    expect(out.topic).toBe("agent");
+    expect(out.detail).toBe(JSON.stringify({ command: "npm test" }, null, 2));
+    expect(out.refs).toEqual({ runId: "r7", actionId: "a7", machineId });
+    const decided = n(
+      entry("link.mirrored", {
+        machineId, signature: "c".repeat(128),
+        origin: { ...origin, actor: owner, type: "agent.action.decided", payload: { runId: "r7", actionId: "a7", decision: "allow", by: "human", reason: "" } },
+      }, system),
+    );
+    expect(decided.headline).toBe("On a linked machine: Owner allowed it");
+    expect(decided.topic).toBe("decision");
+    expect(decided.attention).toBe(false);
+    const long = n(
+      entry("link.mirrored", {
+        machineId, signature: "c".repeat(128),
+        origin: { ...origin, type: "agent.message", payload: { runId: "r7", text: "y".repeat(4000) } },
+      }, system),
+      machines,
+    );
+    expect(long.headline.length).toBeLessThan(200);
+    expect(long.headline.startsWith('On GPU box: The agent said: "yyy')).toBe(true);
+    expect(long.headline.endsWith('…"')).toBe(true);
+    const wide: NarrationContext = { machineName: () => "M".repeat(100) };
+    const failed = n(
+      entry("link.mirrored", {
+        machineId, signature: "c".repeat(128),
+        origin: { ...origin, type: "agent.finished", payload: { runId: "r7", status: "failed", costUsd: 1e15, error: "e".repeat(1000) } },
+      }, system),
+      wide,
+    );
+    expect(failed.headline.length).toBeLessThan(200);
+    expect(failed.headline.startsWith(`On ${"M".repeat(40)}…: The agent failed: eee`)).toBe(true);
+  });
+
+  it("does not narrate a mirrored entry of a type that is not mirrored", () => {
+    const out = n(entry("link.mirrored", { machineId, origin: { type: "card.moved", payload: {}, actor: owner }, signature: "" }, system));
+    expect(out.headline).toBe("A linked machine sent an entry that could not be read");
+    expect(out.topic).toBe("machine");
+    expect(out.attention).toBe(false);
+  });
+
+  it("narrates a run given a local model", () => {
+    const out = n(
+      entry("connection.used", { connectionId: "c1", name: "Qwen", runId: "abcdef1234567890", purpose: "local_model" }, runner),
+    );
+    expect(out.headline).toBe('Agent abcdef12 was given the local model "Qwen"');
+    expect(out.topic).toBe("connection");
+  });
+});
+
 describe("narrate: share", () => {
   const confirmed = {
     shareId: "s1",
@@ -778,6 +929,7 @@ describe("narration.ts purity", () => {
         "./text.js",
         "./override.js",
         "./learn.js",
+        "./link.js",
         "./share.js",
       ]).toContain(spec);
     }

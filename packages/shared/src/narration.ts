@@ -17,9 +17,11 @@ import { KIND_LABELS } from "./connections.js";
 import type { Actor, LedgerEntry } from "./domain.js";
 import { GATES, type GateId } from "./gates.js";
 import { INTAKE_DECISIONS, INTAKE_QUESTIONS, renderAnswer, type IntakeAnswer } from "./intake.js";
+import { CHANGES_REFUSED_PHRASES, MIRRORABLE_TYPES } from "./link.js";
 import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
-export type NarrationTopic = "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "share" | "other";
+export type NarrationTopic =
+  | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "share" | "other";
 export type NarrationRefs = {
   cardId?: string;
   runId?: string;
@@ -28,14 +30,16 @@ export type NarrationRefs = {
   intakeId?: string;
   gateId?: GateId;
   overrideId?: string;
+  machineId?: string;
   shareId?: string;
   linkId?: string;
 };
 export type Narration = { headline: string; detail: string | null; topic: NarrationTopic; attention: boolean; refs: NarrationRefs };
-/** What the caller knows beyond the entry: a card's title and a run's adapter. Narration adds nothing else. */
+/** What the caller knows beyond the entry: a card's title, a run's adapter, a linked machine's name. Nothing else. */
 export type NarrationContext = {
   cardTitle?: (cardId: string) => string | undefined;
   adapterName?: (runId: string) => string | undefined;
+  machineName?: (machineId: string) => string | undefined;
 };
 export type ActionLike = Pick<AgentAction, "kind" | "tool" | "summary" | "input">;
 
@@ -167,6 +171,9 @@ function topicOf(type: string): NarrationTopic {
       return "settings";
     case "override":
       return "override";
+    case "machine":
+    case "link":
+      return "machine";
     case "share":
       return "share";
     default:
@@ -182,6 +189,7 @@ function refsOf(p: Payload): NarrationRefs {
   const connectionId = idOf(p.connectionId);
   const intakeId = idOf(p.intakeId);
   const overrideId = idOf(p.overrideId);
+  const machineId = idOf(p.machineId);
   const shareId = idOf(p.shareId);
   const linkId = idOf(p.linkId);
   const gates = Array.isArray(p.gates) ? p.gates : [];
@@ -192,6 +200,7 @@ function refsOf(p: Payload): NarrationRefs {
   if (connectionId) refs.connectionId = connectionId;
   if (intakeId) refs.intakeId = intakeId;
   if (overrideId) refs.overrideId = overrideId;
+  if (machineId) refs.machineId = machineId;
   if (shareId) refs.shareId = shareId;
   if (linkId) refs.linkId = linkId;
   if (gateId && GATES.some((g) => g.id === gateId)) refs.gateId = gateId as GateId;
@@ -400,6 +409,7 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
         const label = own(CREDENTIAL_LABELS, p.credential) ?? "cloud credentials";
         return { headline: `${run8()} was given ${label} from "${name}"` };
       }
+      if (p.purpose === "local_model") return { headline: `${run8()} was given the local model "${name}"` };
       return { headline: `${run8()} was given access to "${name}"` };
     }
 
@@ -470,6 +480,52 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `Override failed (${how})`, detail, attention: true };
     }
 
+    case "machine.identity_created": {
+      const groups = str(p.fingerprint).slice(0, 16).match(/.{1,4}/g);
+      return { headline: groups ? `This computer got its identity (${show(groups.join(" "), 20)})` : "This computer got its identity" };
+    }
+    case "machine.named":
+      return { headline: fit(`${who} named this computer "`, p.name, `"`, 40) };
+    case "machine.linking_enabled": {
+      const port = str(p.port) ? ` (port ${show(p.port, 10)})` : "";
+      return { headline: `${who} allowed other computers on the local network to link with this one${port}`, attention: true };
+    }
+    case "machine.linking_disabled":
+      return { headline: `${who} stopped linking` };
+    case "machine.paired": {
+      const fp = str(p.fingerprint).slice(0, 16);
+      return { headline: `${who} linked "${show(p.name, 40)}"${fp ? ` (${show(fp, 16)})` : ""}` };
+    }
+    case "machine.unpaired":
+      return { headline: `${who} unlinked "${show(p.name, 40)}"` };
+    case "link.run_requested": {
+      const prompt = str(p.prompt);
+      return {
+        headline: fit(`${who} asked ${machine(p, ctx)} to run a ${adapterLabel(p.adapter)} agent: "`, prompt, `"`, 80),
+        detail: prompt || null,
+      };
+    }
+    case "link.run_failed":
+      // Fixed words only: the recorded error may have come from the other machine.
+      return { headline: runFailed(str(p.error), machine(p, ctx)), attention: true };
+    case "link.changes_refused": {
+      const reason = str(p.reason);
+      const why = Object.prototype.hasOwnProperty.call(CHANGES_REFUSED_PHRASES, reason)
+        ? CHANGES_REFUSED_PHRASES[reason as keyof typeof CHANGES_REFUSED_PHRASES]
+        : null;
+      return { headline: `The changes from ${machine(p, ctx)} were refused${why ? `: ${why}` : ""}`, attention: true };
+    }
+    case "link.project_received":
+      return { headline: `Received the project "${show(p.name, 120)}" from ${machine(p, ctx)}` };
+    case "link.run_accepted":
+      return { headline: `Accepted a run from ${machine(p, ctx)}` };
+    case "link.decision_received": {
+      const decider = e.actor.kind === "human" ? who : "Owner";
+      const what = p.decision === "allow" ? "allowed" : p.decision === "deny" ? "denied" : "unknown";
+      return { headline: `${decider}'s decision arrived from ${machine(p, ctx)}: ${what}` };
+    }
+    case "link.changes_imported":
+      return { headline: `The run's changes arrived from ${machine(p, ctx)}` };
     case "share.confirmed": {
       const sections = Array.isArray(p.sections) ? p.sections.length : 0;
       return {
@@ -502,10 +558,83 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
   }
 }
 
+/** Codes recorded when a remote run never started: this computer's own, and the worker's start refusals. */
+const START_CODES = new Set([
+  "unreachable", "not_sent", "machine_bad_reply", "upload_refused", "invalid_input", "not_found", "no_repo", "bundle_invalid",
+  "bundle_git_limit", "repo_too_large", "upload_limit", "connection_disabled", "connection_unsupported", "mcp_unsupported",
+  "local_model_unsupported", "duplicate_mcp_server", "duplicate_cloud_provider", "cloud_credentials_failed", "keychain_unavailable",
+  "identity_unavailable", "shutting_down", "read_only", "internal", "unknown",
+]);
+/** Refusals of a frame a correct machine never sends (the requester's FATAL_REFUSALS, and a frame of another run). */
+const FRAME_REFUSALS = new Set([
+  "bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame",
+  "wrong_worktree", "wrong_card",
+]);
+
+/** Why a remote run failed, in fixed words chosen by its recorded code; the code itself is never shown. */
+function runFailed(error: string, where: string): string {
+  if (START_CODES.has(error)) return `${cap(where)} could not start the run`;
+  const on = `The run on ${where}`;
+  if (FRAME_REFUSALS.has(error)) return `${on} stopped: signature check failed`;
+  if (error === "machine_unpaired") return `${on} stopped: the machine was unlinked`;
+  if (error === "conflict") return `${on} stopped: its entries clash with records here`;
+  if (error === "machine_key_mismatch") return `${on} stopped: the machine's key changed`;
+  if (error.startsWith("remote_")) return `${on} stopped: the machine refused`;
+  return `${on} failed`;
+}
+
+/** The linked machine an entry names, as the context knows it, else `a linked machine`. */
+function machine(p: Payload, ctx: NarrationContext): string {
+  const name = lookup(ctx.machineName, idOf(p.machineId));
+  return name ? show(name, 40) : "a linked machine";
+}
+
+const MIRRORED: readonly string[] = MIRRORABLE_TYPES;
+
+/**
+ * A `link.mirrored` entry, narrated as the worker's own entry it carries, prefixed with the machine it ran on: the
+ * inner narration's detail, topic and attention, and its refs plus `machineId`.
+ */
+function narrateMirrored(p: Payload, ctx: NarrationContext): Narration {
+  const machineId = idOf(p.machineId);
+  const refs: NarrationRefs = machineId ? { machineId } : {};
+  let where = "a linked machine";
+  try {
+    where = machine(p, ctx);
+  } catch {
+    // A context that throws names no machine.
+  }
+  const o = p.origin;
+  if (!isRecord(o) || !MIRRORED.includes(str(o.type))) {
+    return { headline: `${cap(where)} sent an entry that could not be read`, detail: null, topic: "machine", attention: false, refs };
+  }
+  const actor: Actor = isRecord(o.actor) ? { kind: o.actor.kind as Actor["kind"], id: str(o.actor.id) } : { kind: "system", id: "" };
+  const inner = narrate(
+    {
+      seq: typeof o.seq === "number" ? o.seq : 0,
+      id: str(o.id),
+      ts: str(o.ts),
+      projectId: typeof o.projectId === "string" ? o.projectId : null,
+      actor,
+      type: str(o.type) as LedgerEntry["type"],
+      payload: o.payload,
+      prevHash: str(o.prevHash),
+      hash: str(o.hash),
+    },
+    ctx,
+  );
+  const before = `On ${where}: `;
+  const room = Math.max(0, FIT - before.length - 1);
+  const chars = [...inner.headline];
+  const headline = chars.length > room ? `${before}${chars.slice(0, room).join("")}…` : `${before}${inner.headline}`;
+  return { headline: capHeadline(headline), detail: inner.detail, topic: inner.topic, attention: inner.attention, refs: { ...inner.refs, ...refs } };
+}
+
 /** A plain-language account of one ledger entry. Pure: it reads only its arguments and never throws. */
 export function narrate(e: LedgerEntry, ctx: NarrationContext = {}): Narration {
   const p = isRecord(e.payload) ? e.payload : {};
   const type = str(e.type);
+  if (type === "link.mirrored") return narrateMirrored(p, ctx);
   const topic = topicOf(type);
   let refs: NarrationRefs = {};
   let told: Told;

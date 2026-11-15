@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_SHARE_OPTIONS, SHARE_SECTIONS, type DailyDigest, type ShareSnapshot, type ShareSnapshotRecord } from "@theterminal/shared";
 import { SHARE_HEADER_CSP } from "../../src/share/render.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
@@ -21,7 +22,7 @@ afterEach(async () => {
 async function start(dataDir?: string) {
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), "tt-share-routes-"));
   if (!dataDir) dirs.push(dir);
-  const s = await createServer({ dataDir: dir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore() });
+  const s = await createServer({ dataDir: dir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   return { s, dataDir: dir };
 }
@@ -173,7 +174,8 @@ describe("share API", { timeout: 30_000 }, () => {
     await stop(s);
     const db = new Database(join(dataDir, "ledger.db"));
     db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
-    db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run(JSON.stringify({ cardId: "evil", title: "Evil", stage: "ship" }));
+    // The card's entry (not a fixed seq: the server's own identity entry comes first in a new data folder).
+    db.prepare("UPDATE ledger SET payload = ? WHERE type = 'card.created'").run(JSON.stringify({ cardId: "evil", title: "Evil", stage: "ship" }));
     db.close();
 
     const { s: b } = await start(dataDir);

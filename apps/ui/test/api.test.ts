@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl, shareDownloadUrl, shareSnapshotUrl } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -33,6 +33,37 @@ describe("error detail", () => {
     expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "not_found", detail: undefined });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
     expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "internal", detail: undefined });
+  });
+
+  it("words a run on a local model with an agent other than Codex", () => {
+    expect(errorMessage(new ApiError(400, "local_model_unsupported"), "run")).toBe("Only Codex can run on a local model in The Terminal yet.");
+  });
+
+  it("words remote runs' refusals as fixed text: never the machine's message, never an unknown code", () => {
+    expect(errorMessage(new ApiError(502, "machine_unreachable"), "run")).toBe("Could not reach that machine. Nothing was started.");
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU box" }), "run")).toBe(
+      '"GPU box" refused: that connection is disabled there.',
+    );
+    expect(errorMessage(new ApiError(409, "remote_refused", { code: "upload_refused", machine: "GPU box" }), "run")).toBe(
+      '"GPU box" refused: it did not accept the project\'s files.',
+    );
+    expect(errorMessage(new ApiError(502, "remote_refused", { code: "sk_live_TESTKEY", machine: "GPU box", message: "<b>x</b>" }), "run")).toBe(
+      '"GPU box" refused the request.',
+    );
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU\u202Ebox" }), "run")).not.toContain("\u202E");
+    expect(errorMessage(new ApiError(400, "remote_refused", { code: "conflict" }), "run")).toBe("A linked machine refused: it already has a project or run with that id.");
+    expect(errorMessage(new ApiError(502, "machine_refused"))).toBe("The linked machine refused the request. Nothing was changed.");
+  });
+
+  it("words refused changes of a run on a linked machine in fixed words", () => {
+    expect(refusedChangesNote("GPU box", "bad_bundle")).toBe("The changes from GPU box were refused: what it sent could not be read.");
+    expect(refusedChangesNote("GPU box", "not_from_base")).toBe(
+      "The changes from GPU box were refused: they do not start from the project as it was sent.",
+    );
+    expect(refusedChangesNote("GPU box", "machine_unpaired")).toBe("The changes from GPU box were refused: the machine was unlinked before they arrived.");
+    expect(refusedChangesNote("GPU box", "<b>sk-TESTKEY</b>")).toBe("The changes from GPU box were refused.");
+    expect(refusedChangesNote("GPU\u202Ebox", "conflict")).not.toContain("\u202E");
+    expect(LOCAL_MODEL_NOTE).toBe("Only Codex can run on a local model in The Terminal yet.");
   });
 
   it("ignores a detail of the wrong type when wording a message", () => {
@@ -340,6 +371,48 @@ describe("ledger pages", () => {
       "/api/ledger?afterSeq=3",
       "/api/ledger",
     ]);
+  });
+});
+
+describe("link api", () => {
+  it("calls each linking route with the plan's method and body", async () => {
+    const f = respond(200, {});
+    await api.getLink();
+    await api.renameMachine("GPU desktop");
+    await api.enableLinking("I accept");
+    await api.disableLinking();
+    await api.showPairingCode();
+    await api.pairMachine("192.168.1.10:4418", "ABCDE-FGHJK-MNPQR-STVWX");
+    const seen = (f.mock.calls as [string, RequestInit | undefined][]).map(([path, init]) => [path, init?.method ?? "GET", init?.body ?? null]);
+    expect(seen).toEqual([
+      ["/api/link", "GET", null],
+      ["/api/link/name", "POST", JSON.stringify({ name: "GPU desktop" })],
+      ["/api/link/enable", "POST", JSON.stringify({ acknowledgement: "I accept" })],
+      ["/api/link/disable", "POST", null],
+      ["/api/link/code", "POST", null],
+      ["/api/link/pair", "POST", JSON.stringify({ address: "192.168.1.10:4418", code: "ABCDE-FGHJK-MNPQR-STVWX" })],
+    ]);
+  });
+
+  it("cancels the code and unlinks a machine with DELETE, the id encoded", async () => {
+    const f = respond(204);
+    await api.cancelPairingCode();
+    await api.unpairMachine("a/b");
+    expect(call(f, 0)).toEqual(["/api/link/code", expect.objectContaining({ method: "DELETE" })]);
+    expect(call(f, 1)).toEqual(["/api/link/machines/a%2Fb", expect.objectContaining({ method: "DELETE" })]);
+  });
+
+  it("words each pairing refusal", () => {
+    const pair = (status: number, code: string) => errorMessage(new ApiError(status, code), "pair");
+    expect(pair(400, "pairing_code_mismatch")).toBe("That code was not shown by the machine at this address");
+    expect(pair(403, "pairing_rejected")).toBe("The other machine rejected the code");
+    expect(pair(404, "no_pairing")).toBe("That machine is not showing a code right now");
+    expect(pair(502, "machine_unreachable")).toBe("Could not reach that address");
+    expect(pair(409, "linking_disabled")).toBe("Turn on linking first (Machines view)");
+    expect(pair(400, "self_pairing")).toBe("That address is this computer");
+    expect(errorMessage(new ApiError(503, "identity_unavailable"))).toBe(
+      "Your keychain is unavailable, so this computer has no identity for linking.",
+    );
   });
 });
 

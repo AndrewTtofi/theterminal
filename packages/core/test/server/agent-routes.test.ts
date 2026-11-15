@@ -20,11 +20,12 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { createServer, repairSharedGitconfig, type RunningServer } from "../../src/server/server.js";
 import { AwsRejectedError, fakeSts, type StsCaller } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
   "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
-  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_API_KEY", "THETERMINAL_FAKE_LOG",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
@@ -67,7 +68,9 @@ async function start(
     if (script) process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
   }
   const dataDir = tmp();
-  const s = await createServer({ dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, ...opts });
+  const s = await createServer({
+    dataDir, port: 0, which: noCli, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...opts,
+  });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P", pitch: "x" })).json()) as { id: string };
   return { s, projectId: project.id, dataDir };
@@ -128,7 +131,7 @@ describe("agent API", { timeout: 15000 }, () => {
 
   it("reports every provider available from its bundled program alone, with nothing on PATH", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
-    const s = await createServer({ dataDir: tmp(), port: 0, which: noCli });
+    const s = await createServer({ dataDir: tmp(), port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     expect(await availability(s)).toEqual({ claude: true, codex: true, gemini: true });
   });
@@ -224,6 +227,36 @@ describe("agent API", { timeout: 15000 }, () => {
     expect(ledger).not.toContain(FAKE_OPENAI_KEY);
   });
 
+  it("with the fake env, a Codex run on a local model needs no key or login: authMode none, the provider in its thread", async () => {
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    delete process.env.OPENAI_API_KEY;
+    const log = join(tmp(), "fake.log");
+    process.env.THETERMINAL_FAKE_LOG = log;
+    process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([{ message: "Done on the local model." }]);
+    const key = "TESTKEY-local-000000";
+    const { s, projectId } = await start(script, { secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
+    const added = await post(s, "/api/connections", {
+      kind: "llm", provider: "local_model", name: "Fake coder", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "fake-coder:7b" },
+      secrets: { apiKey: key },
+    });
+    const id = ((await added.json()) as { id: string }).id;
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go", connectionIds: [id] });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect(run).toMatchObject({ adapter: "codex", authMode: "none" });
+    await untilFinished(s, run.id);
+    expect((await getRun(s, run.id)).run).toMatchObject({ status: "completed", error: null });
+    const entries = await json<{ type: string; payload: Record<string, unknown> }[]>(get(s, "/api/ledger"));
+    expect(entries.filter((e) => e.type === "connection.used").map((e) => e.payload)).toEqual([
+      { connectionId: id, name: "Fake coder", runId: run.id, purpose: "local_model" },
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(key);
+    const lines = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, any>);
+    expect(lines.find((l) => l.received === "thread/start")!.params.config).toMatchObject({
+      model: "fake-coder:7b", model_provider: "theterminal_local", "model_providers.theterminal_local.env_key": "LOCAL_MODEL_API_KEY",
+    });
+  });
+
   it("ignores THETERMINAL_CODEX_BIN without the fake env: the run fails because there is no bundled Codex and none on PATH", async () => {
     delete process.env.THETERMINAL_FAKE_AGENT;
     process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
@@ -288,6 +321,24 @@ describe("agent API", { timeout: 15000 }, () => {
     expect((await get(s, "/api/projects/nope/pending-actions")).status).toBe(404);
     expect((await get(s, "/api/runs/nope")).status).toBe(404);
     expect((await post(s, "/api/actions/nope/decision", { decision: "allow" })).status).toBe(404);
+  });
+
+  it("a run on a linked machine: an unpaired machine id is 404, a malformed one 400, and without auth 401; nothing is recorded", async () => {
+    const { s, projectId } = await start(script);
+    const ledgerLength = async () => (await json<unknown[]>(get(s, "/api/ledger?limit=500"))).length;
+    const before = await ledgerLength();
+    const unpaired = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", machineId: "0".repeat(32) });
+    expect(unpaired.status).toBe(404);
+    expect(await unpaired.json()).toEqual({ error: "not_found" });
+    const malformed = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", machineId: "../x" });
+    expect(malformed.status).toBe(400);
+    const anonymous = await fetch(`${base(s)}/api/projects/${projectId}/runs`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ adapter: "fake", prompt: "go", machineId: "0".repeat(32) }),
+    });
+    expect(anonymous.status).toBe(401);
+    expect(await ledgerLength()).toBe(before);
+    expect(await json<AgentRun[]>(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
   });
 
   it("an empty or oversized prompt is 400 invalid_input, before any project work", async () => {
@@ -432,14 +483,14 @@ describe("agent API", { timeout: 15000 }, () => {
   it("refuses to start when THETERMINAL_FAKE_SCRIPT is not valid JSON", async () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = "{not json";
-    await expect(createServer({ dataDir: tmp(), port: 0 })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
+    await expect(createServer({ dataDir: tmp(), port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() })).rejects.toThrow(/THETERMINAL_FAKE_SCRIPT/);
   });
 
   it("repairs a modified shared git config at startup: emptied and read-only", async () => {
     const dataDir = tmp();
     const cfg = join(dataDir, EMPTY_GITCONFIG);
     writeFileSync(cfg, "[user]\n\temail = someone@example.com\n");
-    const s = await createServer({ dataDir, port: 0, which: noCli });
+    const s = await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     expect(readFileSync(cfg, "utf8")).toBe("");
     if (process.platform !== "win32") expect(statSync(cfg).mode & 0o777).toBe(0o444);
@@ -450,7 +501,7 @@ describe("agent API", { timeout: 15000 }, () => {
     async function startWarned(dataDir: string): Promise<string[]> {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       try {
-        running.push(await createServer({ dataDir, port: 0, which: noCli }));
+        running.push(await createServer({ dataDir, port: 0, which: noCli, secrets: new MemorySecretStore(), discovery: fakeDiscovery() }));
         return warn.mock.calls.map((c) => c.map(String).join(" "));
       } finally {
         warn.mockRestore();
@@ -505,7 +556,7 @@ describe("agent API", { timeout: 15000 }, () => {
     const dataDir = tmp();
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
-    const s = await createServer({ dataDir, port: 0, shutdownTimeoutMs: 500 });
+    const s = await createServer({ dataDir, port: 0, shutdownTimeoutMs: 500, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     const project = await json<{ id: string }>(post(s, "/api/projects", { name: "P", pitch: "x" }));
     const run = await json<AgentRun>(post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" }));
     await untilPending(s, project.id);
@@ -514,7 +565,7 @@ describe("agent API", { timeout: 15000 }, () => {
     await s.close();
     expect(Date.now() - t).toBeLessThan(3000);
 
-    const b = await createServer({ dataDir, port: 0 });
+    const b = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(b);
     const detail = await getRun(b, run.id);
     expect(detail.run.status).toBe("stopped");
@@ -585,7 +636,7 @@ describe("agent API", { timeout: 15000 }, () => {
     await vi.waitFor(() => expect(listPendingActions(db, projectId)).toHaveLength(1), { timeout: WAIT_MS, interval: 25 });
     db.close();
 
-    const s = await createServer({ dataDir, port: 0 });
+    const s = await createServer({ dataDir, port: 0, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
     running.push(s);
     const detail = await getRun(s, run.id);
     expect(detail.run).toMatchObject({ status: "failed", error: "workspace restarted" });
@@ -686,6 +737,29 @@ describe("POST /api/projects/:id/runs with connectionIds", { timeout: 15000 }, (
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "mcp_unsupported", adapter: "codex" });
     expect(await used(s)).toEqual([]);
+  });
+
+  const LOCAL = {
+    kind: "llm", provider: "local_model", name: "Fake coder", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "fake-coder:7b" },
+  };
+
+  it.each(["gemini", "claude"])("a %s run on a local model is 400 local_model_unsupported, and nothing is recorded", async (adapter) => {
+    const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const id = await add(s, LOCAL);
+    const res = await startRun(s, projectId, [id], adapter);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "local_model_unsupported" });
+    expect(await used(s)).toEqual([]);
+    expect(await json(get(s, `/api/projects/${projectId}/runs`))).toEqual([]);
+  });
+
+  it("two local models are 400 invalid_input at connectionIds", async () => {
+    const { s, projectId } = await start(null, { secrets: new MemorySecretStore(), sts: fakeSts });
+    const a = await add(s, LOCAL);
+    const b = await add(s, { ...LOCAL, name: "Other" });
+    const res = await startRun(s, projectId, [a, b], "codex");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_input", issues: [{ path: ["connectionIds"] }] });
   });
 
   it("a Gemini run with an MCP server is 400 mcp_unsupported, and records no connection.used", async () => {

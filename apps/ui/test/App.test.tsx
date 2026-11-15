@@ -40,6 +40,9 @@ vi.mock("../src/api", () => ({
     removeConnection: vi.fn(),
     testConnection: vi.fn(),
     getGitHubOverview: vi.fn(),
+    getLink: vi.fn(),
+    getMachines: vi.fn(),
+    getMachineCapacity: vi.fn(),
     getIntake: vi.fn(),
     startIntake: vi.fn(),
     answerIntake: vi.fn(),
@@ -72,6 +75,8 @@ vi.mock("../src/api", () => ({
   },
   errorMessage: vi.fn(() => "err"),
   LIVE_RUN_CHANGES: "Changes show when the run is stopped or finished.",
+  remoteChangesNote: (machine: string) => `The changes arrive when the run finishes on ${machine}.`,
+  refusedChangesNote: (machine: string, reason: string) => `The changes from ${machine} were refused: ${reason}.`,
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
@@ -124,7 +129,7 @@ beforeEach(() => {
   h.subs.clear();
   m.getStatus.mockResolvedValue({
     runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], shareLinks: 0,
+    connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
   });
   m.getIntake.mockResolvedValue(null);
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
@@ -321,6 +326,58 @@ describe("App needs-you strip", () => {
     act(() => h.onEntry?.(agentEntry(8, "B")));
     expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Project B");
+  });
+
+  it("refreshes the strip on an agent entry a linked machine sent, and when a run on one ends", async () => {
+    m.listAllPendingActions
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([pendingAction("b1", "B", "run make")])
+      .mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await waitFor(() => expect(m.listAllPendingActions).toHaveBeenCalledTimes(1));
+    const inner = { ...agentEntry(3, "B"), actor: { kind: "agent", id: "r1" }, payload: { runId: "r1", actionId: "b1" } } as LedgerEntry;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(8, "B"), type: "link.mirrored", actor: { kind: "system", id: "link" },
+        payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
+      } as LedgerEntry),
+    );
+    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(9, "B"), type: "link.run_failed", actor: { kind: "system", id: "link" },
+        payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(screen.queryByText('Agent wants to run the command "run make"')).toBeNull());
+    expect(m.listAllPendingActions).toHaveBeenCalledTimes(3);
+  });
+
+  it("rereads the project's runs on an agent entry a linked machine sent, and when a run on one ends", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await waitFor(() => expect(m.listRuns).toHaveBeenCalledWith("A"));
+    await waitFor(() => expect(h.subs.size).toBe(2));
+    const before = m.listRuns.mock.calls.length;
+    const inner = { ...agentEntry(3, "A"), type: "agent.finished", payload: { runId: "r1", status: "completed" } } as LedgerEntry;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(8, "A"), type: "link.mirrored", actor: { kind: "system", id: "link" },
+        payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(m.listRuns.mock.calls.length).toBeGreaterThan(before));
+    const after = m.listRuns.mock.calls.length;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(9, "A"), type: "link.run_failed", actor: { kind: "system", id: "link" },
+        payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(m.listRuns.mock.calls.length).toBeGreaterThan(after));
   });
 
   it("does not refresh the strip for non-agent entries", async () => {
@@ -581,7 +638,7 @@ describe("App ledger scope", { timeout: 30_000 }, () => {
     m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
     m.listRuns.mockResolvedValue([
       { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w", base: null,
-        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null },
     ]);
     const said = (seq: number, runId: string, text: string): LedgerEntry => ({
       ...entry(seq, "A", "x"), type: "agent.message", actor: { kind: "agent", id: runId }, payload: { runId, text },
@@ -606,7 +663,7 @@ describe("App ledger scope", { timeout: 30_000 }, () => {
     m.getBoard.mockResolvedValue({ ...mk("A"), columns: { ...mk("A").columns, build: [card] } } as Board);
     m.listRuns.mockResolvedValue([
       { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w", base: null,
-        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null },
     ]);
     m.listLedger.mockResolvedValue([
       { ...entry(1, "A", "x"), type: "card.moved", payload: { cardId: "c9", from: "build", to: "ship" } },
@@ -663,6 +720,56 @@ describe("App GitHub view", () => {
     render(<App />);
     await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
     expect(await screen.findByRole("link", { name: "octo-org/example" })).toBeTruthy();
+  });
+});
+
+describe("App Machines view", () => {
+  const views = () => screen.getByRole("navigation", { name: "Views" });
+  const entry = (seq: number, type: LedgerEntry["type"]): LedgerEntry => ({
+    seq, id: `m${seq}`, ts: "", projectId: null, actor: { kind: "human", id: "owner" }, type, payload: {}, prevHash: "", hash: "",
+  });
+  const overview = {
+    identity: "ok" as const,
+    self: { machineId: "11".repeat(16), fingerprint: "ab".repeat(32), name: "Mac", linking: { enabled: false, port: null } },
+    machines: [],
+    discovered: [],
+  };
+
+  it("asks for nothing until the view opens, then reloads on machine entries only", async () => {
+    m.getLink.mockResolvedValue(overview);
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBeGreaterThan(0));
+    await act(async () => h.onEntry!(entry(5, "machine.named")));
+    expect(m.getLink).not.toHaveBeenCalled();
+    await userEvent.click(within(views()).getByRole("button", { name: "Machines" }));
+    expect(await screen.findByRole("switch", { name: "Allow linking" })).toBeTruthy();
+    const calls = m.getLink.mock.calls.length;
+    await act(async () => h.onEntry!(entry(6, "card.created")));
+    expect(m.getLink.mock.calls.length).toBe(calls);
+    await act(async () => h.onEntry!(entry(7, "machine.paired")));
+    await waitFor(() => expect(m.getLink.mock.calls.length).toBe(calls + 1));
+  });
+
+  it("with a machine paired, names come from the paired list: no machine is asked and the network is not browsed", async () => {
+    m.getStatus.mockResolvedValue({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 0, keyChanged: 0 }, shareLinks: 0,
+      network: { state: "unknown", basis: "inferred", since: null, lastError: null },
+    });
+    m.getMachines.mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(m.getMachines).toHaveBeenCalled());
+    await userEvent.click(within(views()).getByRole("button", { name: "Agents" }));
+    await act(async () => h.onEntry?.(entry(8, "machine.paired")));
+    await waitFor(() => expect(m.getMachines.mock.calls.length).toBeGreaterThan(1));
+    expect(m.getLink).not.toHaveBeenCalled();
+  });
+
+  it("says it could not load", async () => {
+    m.getLink.mockRejectedValue(new ApiError(500, "internal"));
+    render(<App />);
+    await userEvent.click(within(views()).getByRole("button", { name: "Machines" }));
+    expect(await screen.findByText("Could not load machines")).toBeTruthy();
   });
 });
 
@@ -928,6 +1035,28 @@ describe("App Changes view", () => {
     expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
     expect(m.getRunChanges).toHaveBeenCalledWith("run2");
     expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+  });
+
+  it("a run on a linked machine: its changes are awaited, then refused changes say why in fixed words", async () => {
+    const remote = { ...run2, machineId: "m1", status: "completed" as const };
+    m.getStatus.mockResolvedValue({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 1, online: 1, keyChanged: 0 }, shareLinks: 0,
+      network: { state: "unknown", basis: "inferred", since: null, lastError: null },
+    });
+    m.getMachines.mockResolvedValue([{ id: "m1", name: "GPU box" } as never]);
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, remote]);
+    m.getRunChanges.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    m.listRunDir.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await waitFor(() => expect(m.getMachines).toHaveBeenCalled());
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("The changes arrive when the run finishes on GPU box.")).toBeTruthy();
+    act(() => h.onEntry!({ ...runEntry("link.changes_refused", "run2"), seq: 20, projectId: "A", payload: { runId: "run2", machineId: "m1", reason: "bad_bundle" } }));
+    expect(await screen.findByText("The changes from GPU box were refused: bad_bundle.")).toBeTruthy();
   });
 
   it("discards through the override route, shows a refusal inside the form and the server's count after", async () => {

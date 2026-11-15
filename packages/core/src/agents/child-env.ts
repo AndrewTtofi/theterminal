@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { AuthMode, Provider } from "@theterminal/shared";
 import { CLOUD_ENV_ALLOWLIST } from "../connections/cloud/env.js";
+import { LOCAL_MODEL_ENV_ALLOWLIST } from "../capacity/local-models.js";
 import { allowlistedEnv } from "./env-allowlist.js";
 import { EMPTY_GITCONFIG, assertEmptyGitconfig } from "./worktrees.js";
 
@@ -20,8 +21,8 @@ export type ChildEnvOptions = {
   /** Gemini only: GOOGLE_CLOUD_PROJECT. */
   googleCloudProject?: string;
   /**
-   * A cloud grant's variables. Every name must be in CLOUD_ENV_ALLOWLIST, else a TypeError is thrown before anything
-   * is built. A variable this function already set (the Gemini connection's GOOGLE_CLOUD_PROJECT) is never replaced.
+   * A cloud grant's variables, and a local model's key variable. Every name must be in CLOUD_ENV_ALLOWLIST or
+   * LOCAL_MODEL_ENV_ALLOWLIST, else a TypeError is thrown before anything is built. A variable this function already set (the Gemini connection's GOOGLE_CLOUD_PROJECT) is never replaced.
    */
   extraEnv?: Record<string, string>;
   /**
@@ -78,7 +79,7 @@ export function baseChildEnv(
 export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnvOptions): NodeJS.ProcessEnv {
   const extra = Object.entries(opts.extraEnv ?? {});
   for (const [k] of extra) {
-    if (!CLOUD_ENV_ALLOWLIST.includes(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
+    if (!CLOUD_ENV_ALLOWLIST.includes(k) && !LOCAL_MODEL_ENV_ALLOWLIST.includes(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
   }
   const mcp = Object.entries(opts.mcpEnv ?? {});
   for (const [k] of mcp) {

@@ -25,6 +25,11 @@ import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
+import { wireLink } from "./link-wiring.js";
+import type { LinkService } from "../link/service.js";
+import type { Discovery } from "../link/discovery.js";
+import { registerLinkRoutes } from "./link-routes.js";
+import { RemoteRunService } from "../link/remote-runs.js";
 import { registerShareRoutes } from "./share-routes.js";
 import { registerShareLinkRoutes } from "./share-link-routes.js";
 import { shareCleaner } from "../share/clean.js";
@@ -42,8 +47,9 @@ import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type HardwareInfo, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
+import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
@@ -51,12 +57,13 @@ import { fakeAgentEnv } from "../agents/child-env.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
-import { secretEnvValues } from "../agents/redact.js";
+import { redact, secretEnvValues } from "../agents/redact.js";
 import { AgentRunner } from "../agents/runner.js";
 import { ProviderSettings } from "../agents/settings.js";
 import { bundledClaude, bundledCodex, bundledGemini, type BundledCli } from "../agents/bundled.js";
 import { which as whichOnPath } from "../agents/which.js";
 import { SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, type SharedGitconfigProblem } from "../agents/worktrees.js";
+import { NetworkObserver, observedFetch } from "../network.js";
 
 export type RunningServer = {
   /** Where to open the workspace: the app hostname, with the bootstrap token. */
@@ -237,6 +244,8 @@ export function repairSharedGitconfig(dataDir: string, ensure = ensureEmptyGitco
 export function selectSecretStore(env: NodeJS.ProcessEnv = process.env, injected?: SecretStore): SecretStore {
   if (injected) return injected;
   if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_SECRET_STORE === "memory") return new MemorySecretStore();
+  // Test-time guard (vitest sets VITEST): a test server that names no store never reaches the real keychain.
+  if (env.VITEST) throw new Error("Refusing to use the real keychain under vitest: inject `secrets` or set the test flags");
   return new ChunkedSecretStore(new KeychainSecretStore());
 }
 
@@ -287,11 +296,16 @@ function fakeGitHub(owner: string, name: string, path: string): unknown {
  *   Azure, a `client_secret` containing `TESTKEY`), and 401 otherwise;
  * - a GET to `https://api.github.com/repos/<owner>/<name>…` answers canned bodies for that repository when the
  *   Bearer token contains `TESTKEY` (401 otherwise), and 404 when `<name>` is `missing`;
+ * - this computer's model servers: Ollama's `/api/version` and `/api/tags` answer one fake model, anything on the
+ *   llama.cpp port is refused (`ECONNREFUSED`), and a GET to `/v1/models` on any loopback address lists that model, so
+ *   the detector and the connection tester agree;
  * - anything else answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise.
  */
 const fakeHttp: typeof fetch = async (input, init) => {
   const url = input instanceof Request ? input.url : String(input);
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const local = fakeLocalModels(url, method);
+  if (local !== undefined) return local;
   const google = url === "https://oauth2.googleapis.com/token";
   const azure = AZURE_TOKEN_URL.test(url);
   if (method === "POST" && (google || azure)) {
@@ -314,6 +328,23 @@ const fakeHttp: typeof fetch = async (input, init) => {
   });
   return accepted ? jsonResponse(200, {}) : jsonResponse(401, { error: "unauthorized" });
 };
+
+/** Tests only: the one model the fake model servers hold. */
+const FAKE_LOCAL_MODEL = { name: "fake-coder:7b", size: 4 * 1024 ** 3, details: { parameter_size: "7B", quantization_level: "Q4_K_M" } };
+
+/** The fake HTTP's answer for this computer's model servers (see fakeHttp), or undefined for any other URL. */
+function fakeLocalModels(url: string, method: string): Response | undefined {
+  if (url.startsWith(`${LLAMACPP_URL}/`) || url === LLAMACPP_URL) {
+    throw Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED", cause: { code: "ECONNREFUSED" } });
+  }
+  if (method !== "GET") return undefined;
+  if (url === `${OLLAMA_URL}/api/version`) return jsonResponse(200, { version: "0.0.0-fake" });
+  if (url === `${OLLAMA_URL}/api/tags`) return jsonResponse(200, { models: [FAKE_LOCAL_MODEL] });
+  if (isLoopbackUrl(url) && new URL(url).pathname.replace(/\/+$/, "").endsWith("/v1/models")) {
+    return jsonResponse(200, { object: "list", data: [{ id: FAKE_LOCAL_MODEL.name, object: "model" }] });
+  }
+  return undefined;
+}
 
 /**
  * The fetch connection tests use: the injected one, else the real fetch. Under THETERMINAL_FAKE_AGENT=1,
@@ -360,6 +391,23 @@ export function selectHardware(env: NodeJS.ProcessEnv = process.env, injected?: 
   return realHardware;
 }
 
+/** Detects this computer's model servers with the plain fetch: loopback probes are never observed or proxied. */
+const realLocalEngines = (): Promise<LocalEngine[]> => detectLocalEngines({ fetch: globalThis.fetch });
+/** Tests only: the model servers the fake HTTP serves. */
+const fakeLocalEngines = (): Promise<LocalEngine[]> => detectLocalEngines({ fetch: fakeHttp });
+
+/**
+ * The local model detector: the injected one, else the real probes. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HTTP=1 selects a detector over the fake HTTP; it is ignored otherwise.
+ */
+export function selectLocalEngines(
+  env: NodeJS.ProcessEnv = process.env, injected?: () => Promise<LocalEngine[]>,
+): () => Promise<LocalEngine[]> {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeLocalEngines;
+  return realLocalEngines;
+}
+
 /** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
 const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
@@ -387,6 +435,19 @@ export async function createServer(opts: {
   sts?: StsCaller;
   /** Detects this computer's hardware. Default: the real programs (see selectHardware). */
   hardware?: () => Promise<HardwareInfo>;
+  /** Detects the model servers on this computer. Default: the real probes (see selectLocalEngines). */
+  localEngines?: () => Promise<LocalEngine[]>;
+  /**
+   * The address the link listener binds once the Owner enabled linking. Default `0.0.0.0` (IPv4, the local network);
+   * tests pass `127.0.0.1`. The workspace server itself always binds loopback.
+   */
+  linkBind?: string;
+  /** The port the link listener asks for when the Owner enables linking. Default 4418; tests pass 0. */
+  linkPort?: number;
+  /** Finds other Terminals on the network. Default: mDNS, or the in-process fake under the test flags (selectDiscovery). */
+  discovery?: Discovery;
+  /** Tests only: shorter reconnect waits (and stream idle timeout) for runs on linked machines. */
+  remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
 }): Promise<RunningServer> {
@@ -413,6 +474,7 @@ export async function createServer(opts: {
   // Before the ledger opens: the CLI and the desktop app share one data folder, and only one server may use it.
   const lock = acquireDataDirLock(opts.dataDir);
   let openedDb: Db | undefined; // closed here when the start fails
+  let link: LinkService | undefined; // shut down here when the start fails
   try {
     const db = openDatabase(join(opts.dataDir, "ledger.db"));
     openedDb = db;
@@ -439,15 +501,47 @@ export async function createServer(opts: {
     repairSharedGitconfig(opts.dataDir);
 
     const sts = selectSts(process.env, opts.sts);
-    const fetchFn = selectFetch(process.env, opts.fetch);
+    // The Owner's own calls to the internet (connection tests, cloud grants, GitHub) go through the observed fetch,
+    // whose outcomes infer the network state. Local-model detection and the link client keep the plain fetch.
+    const network = new NetworkObserver();
+    const fetchFn = observedFetch(selectFetch(process.env, opts.fetch), network);
+    const secrets = selectSecretStore(process.env, opts.secrets);
     const connections = new ConnectionService({
       db,
       ledger,
-      secrets: selectSecretStore(process.env, opts.secrets),
+      secrets,
       testers: { ...CONNECTION_TESTERS, ...cloudTesters(sts) },
       fetch: fetchFn,
+      // Names other machines are told (publicConnections) are scrubbed like recorded text, and redacted of the token
+      // and minted values too (the runner is declared below; read lazily).
+      scrub: (t: string): string => recorded.scrub(t),
+      extraSecrets: (): string[] => [token, ...secretEnvValues(process.env), ...runner.mintedSecrets()],
     });
     await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+    // Linked machines' capacity: this computer's own report is set once the capacity routes exist (below); the link
+    // listener, which answers paired machines from it, starts only after that.
+    let localCapacity: (() => Promise<CapacityReport>) | null = null;
+    const programAvailable = (p: Provider) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null;
+    // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().
+    const wired = wireLink({
+      db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0", ...(opts.discovery !== undefined && { discovery: opts.discovery }),
+      // A paired machine's name is cleaned like any text that crosses the link.
+      cleanText: (t: string) => connections.publicText(t),
+      capacity: {
+        report: () => (localCapacity ? localCapacity() : Promise.reject(new Error("capacity is not ready"))),
+        adapters: () => ADAPTERS.filter((id) => adapters[id] !== undefined && (id === "fake" || programAvailable(id))),
+        connections,
+      },
+      // Read when the listener starts (link.load(), last), when the runner and the rest below exist.
+      runs: () => ({
+        runner, worktrees, dataDir: opts.dataDir,
+        // A paired machine's project name is cleaned like any text that crosses the link (6a's publicText).
+        cleanText: (t: string) => connections.publicText(t),
+        changes: { db, dataDir: opts.dataDir, worktrees, clean, settling: (id: string) => runner.settling(id) },
+      }),
+    });
+    link = wired.link;
+    const linkService = link;
 
     const signin = new SignInManager({
       dataDir: opts.dataDir,
@@ -481,7 +575,19 @@ export async function createServer(opts: {
     });
 
     const clean = (runId: string, s: string, max: number) => runner.cleanFor(runId)(s, max);
+    // What a linked machine sent is shown through this machine's own cleaning (redact, scrub, redact), never trusted
+    // as the worker cleaned it: the ledger keeps the signed bytes, every view and export gets this.
+    const cleanMirrored = (s: string): string => {
+      const secrets = [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()];
+      return redact(recorded.scrub(redact(s, secrets)), secrets);
+    };
     const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which, settling: (id) => runner.settling(id) });
+    // Runs this computer asks a linked machine to do: followed through its signed entries, decided and stopped there.
+    const remote = new RemoteRunService({
+      db, ledger, link: linkService, worktrees, dataDir: opts.dataDir, clean: cleanMirrored,
+      ...(opts.remoteRuns?.backoffMs !== undefined && { backoffMs: opts.remoteRuns.backoffMs }),
+      ...(opts.remoteRuns?.streamIdleMs !== undefined && { streamIdleMs: opts.remoteRuns.streamIdleMs }),
+    });
 
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });
@@ -528,8 +634,8 @@ export async function createServer(opts: {
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       if (!ledger.readOnly) links.recoverOnStartup(); // no link's listener survives a restart
       registerAuth(app, { token, port: () => boundPort });
-      registerLedgerStream(app, ledger);
-      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
+      registerLedgerStream(app, ledger, cleanMirrored);
+      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity, clean: cleanMirrored });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,
@@ -537,26 +643,36 @@ export async function createServer(opts: {
         settings,
         adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
         // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
-        available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
+        available: programAvailable,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
+        clean: cleanMirrored,
+        remoteRuns: remote,
       });
       registerIntakeRoutes(app, { intake });
-      registerStoryRoutes(app, { db, ledger });
+      registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
       registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
+        machines: () => linkService.counts(),
+        network: () => network.state(),
         shareLinks,
       });
       registerGitHubRoutes(app, { github });
       registerShareRoutes(app, { db, ledger, share });
       registerShareLinkRoutes(app, { links, addresses: () => shareAddresses() });
-      registerCapacityRoutes(app, {
+      localCapacity = registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
-      });
+        localEngines: selectLocalEngines(process.env, opts.localEngines), machines: () => wired.capacity.all(),
+      }).report;
+      registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, db, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
+      // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
+      await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported
+      // Runs on linked machines survive a restart: the runner left them alone; follow each from its cursor again.
+      if (!ledger.readOnly) remote.resume();
       await app.ready();
 
       const first = opts.port ?? DEFAULT_PORT;
@@ -577,6 +693,8 @@ export async function createServer(opts: {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
     } catch (err) {
+      await remote.shutdown();
+      await linkService.shutdown();
       await links.shutdown();
       await overrides.shutdown();
       await signin.shutdown();
@@ -592,6 +710,8 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart
+          await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await links.shutdown(); // closes every share link's listener and records it, while the db is open
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
@@ -607,6 +727,7 @@ export async function createServer(opts: {
       },
     };
   } catch (err) {
+    await link?.shutdown().catch(() => undefined);
     try {
       openedDb?.close();
     } finally {

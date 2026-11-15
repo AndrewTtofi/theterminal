@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
 import { pairValueSecrets, type McpServerSpec } from "../connections/mcp.js";
-import { UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
+import { ConflictError, UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
@@ -70,6 +70,29 @@ export class DuplicateCloudProviderError extends Error {
   }
 }
 
+/** A run on a local model was asked of an agent other than Codex: only Codex has a custom model provider. */
+export class LocalModelUnsupportedError extends Error {
+  constructor() {
+    super("Only Codex can run on a local model in The Terminal yet");
+    this.name = "LocalModelUnsupportedError";
+  }
+}
+
+/**
+ * The run executes on a linked machine: it is stopped and decided there, through the remote-run service, never by
+ * this machine's runner.
+ */
+export class RemoteRunError extends Error {
+  constructor(readonly runId: string) {
+    super("This run executes on a linked machine; stop it or decide for it there, through the link.");
+    this.name = "RemoteRunError";
+  }
+}
+
+/** A run id: what a path, a branch name (`run/<id>`) and a linked machine's request may carry. */
+export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
+const runIdSchema = z.string().regex(RUN_ID_PATTERN);
+
 /** How long all of a run's cloud grants together may take to mint, by default. */
 export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
 /** An MCP env or header value this long or longer is redacted from the run's output. */
@@ -113,7 +136,7 @@ export type AgentRunnerDeps = {
 
 function defaultSelect(ids: string[]): RunSelection {
   if (ids.length > 0) throw new UnsupportedConnectionError();
-  return { cloud: [], mcp: [] };
+  return { cloud: [], mcp: [], localModel: null };
 }
 
 /**
@@ -150,7 +173,7 @@ type Session = {
   secrets: string[];
 };
 type Payload = Record<string, unknown>;
-type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string };
+type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string; machine_id: string | null };
 type GateOutcome = GateResult & { actionId: string };
 
 const POLICY: Actor = { kind: "system", id: "policy" };
@@ -234,6 +257,8 @@ export class AgentRunner {
   private readonly minted = new Set<string>();
   /** Set once shutdown() begins; no run may start after that. */
   private closing = false;
+  /** Given run ids whose start is in progress, so two starts can never take one id. */
+  private readonly reserved = new Set<string>();
 
   constructor(private readonly deps: AgentRunnerDeps) {
     this.newId = deps.newId ?? (() => randomUUID());
@@ -250,9 +275,35 @@ export class AgentRunner {
     return (s) => this.scrubUser(paths(s));
   }
 
+  /**
+   * Starts a run. `runId` is given by a linked machine that asked for the run (it names the run on both machines):
+   * it must be an id (RUN_ID_PATTERN, else ZodError) that no run has (ConflictError); by default a new id is made.
+   * `foreignCard` says `cardId` names a card on that machine, so it is recorded without a local card to check.
+   */
   async start(
     actor: Actor,
-    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[] },
+    input: {
+      projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; runId?: string;
+      foreignCard?: boolean;
+    },
+  ): Promise<AgentRun> {
+    if (input.runId === undefined) return this.startRun(actor, input, this.newId());
+    const runId = runIdSchema.parse(input.runId);
+    if (this.reserved.has(runId) || this.deps.db.prepare("SELECT 1 FROM agent_runs WHERE id = ?").get(runId)) {
+      throw new ConflictError("a run with this id already exists");
+    }
+    this.reserved.add(runId);
+    try {
+      return await this.startRun(actor, input, runId);
+    } finally {
+      this.reserved.delete(runId);
+    }
+  }
+
+  private async startRun(
+    actor: Actor,
+    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean },
+    runId: string,
   ): Promise<AgentRun> {
     const { db, ledger, worktrees } = this.deps;
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(input.projectId)) {
@@ -264,11 +315,13 @@ export class AgentRunner {
     if (!adapter) throw new AdapterUnavailableError(input.adapter);
     const prompt = promptSchema.parse(input.prompt);
     const cardId = input.cardId ?? null;
-    if (cardId !== null && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
+    if (cardId !== null && input.foreignCard !== true && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
       throw new NotFoundError("card", cardId);
     }
     // Every selected connection is checked before anything is minted or created; errors propagate as they are.
     const selection = (this.deps.selectConnections ?? defaultSelect)(input.connectionIds ?? []);
+    const localModel = selection.localModel ?? null;
+    if (localModel !== null && input.adapter !== "codex") throw new LocalModelUnsupportedError();
     if ((input.adapter === "codex" || input.adapter === "gemini") && selection.mcp.length > 0) throw new McpUnsupportedError(input.adapter);
     const serverNames = selection.mcp.map((m) => m.serverName);
     if (new Set(serverNames).size !== serverNames.length) throw new DuplicateMcpServerError();
@@ -277,21 +330,25 @@ export class AgentRunner {
     const grants = await this.mintAll(selection.cloud);
     const names = grants.flatMap((g) => Object.keys(g.env));
     if (new Set(names).size !== names.length) throw new DuplicateCloudProviderError("two cloud grants would set the same variable");
-    const runSecrets = [...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp)];
+    const runSecrets = [
+      ...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp), ...(localModel?.apiKey ? [localModel.apiKey] : []),
+    ];
 
+    // A local model needs no login: the provider's own mode and connection are not used.
     const authMode: AuthMode =
-      input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
-    const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
+      input.adapter === "fake" || localModel !== null ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
+    const creds = input.adapter === "fake" || localModel !== null ? null : (this.deps.credentials?.(input.adapter) ?? null);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
     const env: Record<string, string> = Object.assign({}, ...grants.map((g) => g.env));
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
+    // Its key stays in `localModel`, never in `env`: Codex lets every `env` name through to the agent's commands.
+    if (localModel !== null) credentials.localModel = localModel;
     // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
     const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;
 
-    const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
     if (this.closing) throw new ShuttingDownError(); // shutdown began while the worktree was created
     const scrub = this.runScrubber(wt.absPath);
@@ -315,6 +372,7 @@ export class AgentRunner {
       uses.push({ connectionId: source.connectionId, name: source.name, runId, purpose: "cloud_credentials", credential, expiresAt });
     });
     for (const m of selection.mcp) uses.push({ connectionId: m.connectionId, name: m.name, runId, purpose: "mcp_server" });
+    if (localModel !== null) uses.push({ connectionId: localModel.connectionId, name: localModel.name, runId, purpose: "local_model" });
     try {
       for (const payload of uses) {
         commitEvent(db, ledger, () => ({
@@ -377,6 +435,7 @@ export class AgentRunner {
     const runId = commitEvent(db, ledger, () => {
       const row = this.actionRow(actionId);
       if (!row) throw new NotFoundError("action", actionId);
+      if (row.machine_id !== null) throw new RemoteRunError(row.run_id);
       if (row.status !== "pending" || !broker.pendingIds().includes(actionId)) throw new AlreadyDecidedError(actionId);
       const s = this.sessions.get(row.run_id);
       why = this.clean(reason, MAX.reason, s?.scrub ?? this.scrub, s?.secrets);
@@ -401,7 +460,9 @@ export class AgentRunner {
   }
 
   stop(_actor: Actor, runId: string): void {
-    if (!getRun(this.deps.db, runId)) throw new NotFoundError("run", runId);
+    const run = getRun(this.deps.db, runId);
+    if (!run) throw new NotFoundError("run", runId);
+    if (run.machineId !== null) throw new RemoteRunError(runId);
     this.close(runId, "stopped", null, "run stopped");
   }
 
@@ -427,28 +488,35 @@ export class AgentRunner {
     return (text, max) => this.clean(text, max, scrub, s?.secrets);
   }
 
-  /** After a restart nothing is waiting any more: deny every pending action and fail every running run. */
+  /**
+   * After a restart nothing is waiting any more: deny every pending action and fail every running run of this
+   * machine. A run on a linked machine (`machine_id` set) is left alone: it still runs there, its state arrives as
+   * mirrored entries, and this machine records nothing about it itself.
+   */
   recoverOnStartup(): void {
     const { db, ledger } = this.deps;
     if (ledger.readOnly) return;
     const pending = db
       .prepare(
         `SELECT a.id, a.run_id, r.project_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
-         WHERE a.status = 'pending' ORDER BY a.requested_at, a.rowid`,
+         WHERE a.status = 'pending' AND r.machine_id IS NULL ORDER BY a.requested_at, a.rowid`,
       )
       .all() as { id: string; run_id: string; project_id: string }[];
     for (const a of pending) {
       if (!this.sessions.has(a.run_id)) this.settle(a.project_id, a.run_id, a.id, "deny", "workspace restarted");
     }
-    const running = db.prepare("SELECT id FROM agent_runs WHERE status = 'running' ORDER BY started_at, rowid").all() as {
-      id: string;
-    }[];
+    const running = db
+      .prepare("SELECT id FROM agent_runs WHERE status = 'running' AND machine_id IS NULL ORDER BY started_at, rowid")
+      .all() as { id: string }[];
     for (const r of running) {
       if (!this.sessions.has(r.id)) this.close(r.id, "failed", "workspace restarted", "workspace restarted");
     }
   }
 
-  /** Stops every running run and waits for the adapters to return. */
+  /**
+   * Stops every running run of this process and waits for the adapters to return. Only runs with a session here are
+   * stopped: a run on a linked machine has none, so this machine never records it as stopped.
+   */
   async shutdown(): Promise<void> {
     this.closing = true;
     const all = [...this.sessions.entries()];
@@ -673,7 +741,8 @@ export class AgentRunner {
     s?.abort.abort();
     this.sessions.delete(runId); // even if its adapter never returns
     const run = getRun(db, runId);
-    if (!run || run.status !== "running") return;
+    // A run on a linked machine is never ended here: its end arrives mirrored (the last fail-safe behind stop/decide).
+    if (!run || run.status !== "running" || run.machineId !== null) return;
     for (const a of listActions(db, runId)) {
       if (a.status === "pending") this.settle(run.projectId, runId, a.id, "deny", pendingReason);
     }
@@ -696,7 +765,7 @@ export class AgentRunner {
   private actionRow(actionId: string): ActionRow | undefined {
     return this.deps.db
       .prepare(
-        `SELECT a.run_id, a.status, a.reason, r.project_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
+        `SELECT a.run_id, a.status, a.reason, r.project_id, r.machine_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
          WHERE a.id = ?`,
       )
       .get(actionId) as ActionRow | undefined;
