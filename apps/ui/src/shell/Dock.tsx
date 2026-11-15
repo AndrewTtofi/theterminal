@@ -14,7 +14,7 @@ export { diffPanelId, filePanelId, parsePanelPath } from "./dock-layout";
 /** `diff:` and `file:` ids are `<runId>:<encodeURIComponent(path)>`. */
 export type DockPanelId =
   | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | "conversation" | "needs_you" | "terminal" | "link_machine"
-  | "share" | "digest"
+  | "share" | "digest" | "people"
   | `connection:${string}` | `story:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
 export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
@@ -53,6 +53,7 @@ const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bo
   link_machine: { title: "Link a machine", where: "main" },
   share: { title: "Share", where: "main" },
   digest: { title: "Daily digest", where: "main" },
+  people: { title: "People", where: "main" },
 };
 function bottomPanel(api: DockviewApi): IDockviewPanel | undefined {
   return BOTTOM_IDS.map((id) => api.getPanel(id)).find((p) => p !== undefined);

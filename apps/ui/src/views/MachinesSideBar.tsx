@@ -4,7 +4,7 @@ import { LINKING_ACK } from "@theterminal/shared";
 import type { MachineCapacity, MachinePresence } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
 import type { LinkSelf } from "../api";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 import { KEY_CHANGED, hardwareSummary, shownName } from "./machine-text";
 
 export { shownName } from "./machine-text";
@@ -306,7 +306,7 @@ function MachineRow({ m, refresh }: { m: MachinePresence; refresh: () => void })
 }
 
 /** The Machines view: this computer's identity and linking switch, the linked machines, and Link a machine. */
-export function MachinesSideBar() {
+function MachinesSideBarOwned() {
   const { model, dock } = useShell();
   const { overview, error, refresh } = model.machines;
   const uid = useId();
@@ -336,4 +336,12 @@ export function MachinesSideBar() {
       </section>
     </div>
   );
+}
+
+/** Linking is the Owner's alone (every route behind it is): anyone else is told so and nothing is asked. */
+export function MachinesSideBar() {
+  const { model } = useShell();
+  const Owned = MachinesSideBarOwned;
+  if (roleOf(model) !== "owner") return <p className="empty">Only the Owner links and manages machines.</p>;
+  return <Owned />;
 }

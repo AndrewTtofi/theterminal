@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { OVERRIDE_MEANS, OVERRIDE_PROGRAM, plural, visibleControls } from "@theterminal/shared";
 import type { AgentRun, LedgerEntry, RunChanges } from "@theterminal/shared";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 
 /** What the override does and does not protect, said plainly: it is the Owner acting outside every safeguard. */
 const SCOPE =
@@ -293,6 +293,8 @@ function CommandForm({ run, disabled }: { run: AgentRun; disabled: boolean }) {
  */
 export function OverrideSection({ run }: { run: AgentRun }) {
   const { model, openLearn } = useShell();
+  // Overrides run as the Owner, and only the Owner may send one.
+  if (roleOf(model) !== "owner") return null;
   const running = run.status === "running";
   // The project stream, not the Ledger panel's page: that one may hold every project's entries, or none while it loads.
   const busy = overrideActive(model.projectEntries, run.id);

@@ -19,12 +19,13 @@ import { NeedsYouPanel } from "../views/NeedsYouPanel";
 import { StoryPanel } from "../views/StoryPanel";
 import { DigestPanel } from "../views/DigestPanel";
 import { SharePanel } from "../views/SharePanel";
+import { PeoplePanel } from "../views/PeoplePanel";
 import { ActivityBar } from "./ActivityBar";
 import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
 import type { DockApi, DockPanelId } from "./Dock";
 import { LAYOUT_KEY } from "./layout-store";
-import { ShellContext } from "./model";
+import { ShellContext, gateAccess } from "./model";
 import type { AppModel, ShellContextValue, WorkbenchModel } from "./model";
 import { SIDE_BAR_DEFAULT, SideBar } from "./SideBar";
 import { StatusBar } from "./StatusBar";
@@ -37,7 +38,7 @@ const PANELS = {
   intake: IntakePanel, story: StoryPanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
   link_machine: LinkMachinePanel,
-  share: SharePanel, digest: DigestPanel,
+  share: SharePanel, digest: DigestPanel, people: PeoplePanel,
 };
 
 type Props = { model: AppModel };
@@ -137,6 +138,13 @@ export function Workbench({ model }: Props) {
     // After the render that shows Learn on the topic: openLearn sets all three before this ref.
   }, [view, sideOpen, learnTopic]);
 
+  // Presence says what the person looks at: the view, or the one before Learn while Learn is shown.
+  const contextView = view === "learn" ? lastView : view;
+  const { onViewChange } = model;
+  useEffect(() => {
+    onViewChange?.(contextView);
+  }, [contextView, onViewChange]);
+
   const [dockReady, setDockReady] = useState(false);
   const [layoutName, setLayoutName] = useState("Guided");
   const [savedLayouts, setSavedLayouts] = useState<string[]>([]);
@@ -212,7 +220,7 @@ export function Workbench({ model }: Props) {
     showView,
     openLearn,
     learnTopic,
-    contextView: view === "learn" ? lastView : view,
+    contextView,
     stripShown,
   };
 
@@ -235,6 +243,7 @@ export function Workbench({ model }: Props) {
                     gate={model.gate}
                     onResolve={model.onResolveGate}
                     onCancel={model.onCancelGate}
+                    {...gateAccess(shellModel)}
                   />
                 )}
                 <IntakeNotices notices={notices} />
@@ -255,6 +264,7 @@ export function Workbench({ model }: Props) {
           onSelectView={showView}
           onResetLayout={() => dockRef.current?.reset()}
           layout={layout}
+          {...(model.me !== undefined && { me: model.me })}
         />
       </div>
     </ShellContext.Provider>

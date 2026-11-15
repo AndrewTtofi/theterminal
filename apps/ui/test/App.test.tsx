@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
-import type { Board, LedgerEntry } from "@theterminal/shared";
+import type { Board, LedgerEntry, Me } from "@theterminal/shared";
 
 const h = vi.hoisted(() => {
   const subs = new Set<{ after: number; cb: (e: LedgerEntry) => void }>();
@@ -10,6 +10,9 @@ const h = vi.hoisted(() => {
     subs,
     /** Delivers an entry to every open ledger subscription. */
     onEntry: undefined as undefined | ((e: LedgerEntry) => void),
+    /** The options the latest subscription was opened with (presence). */
+    opts: [] as { onPresence?: (people: unknown[]) => void; presence?: () => { projectId: string | null; view: string | null } }[],
+    unauthorized: null as null | (() => void),
   };
 });
 
@@ -65,6 +68,13 @@ vi.mock("../src/api", () => ({
     listShareLinks: vi.fn(),
     revokeShareLink: vi.fn(),
     getDigests: vi.fn(),
+    getMe: vi.fn(),
+    listPeople: vi.fn(),
+    listInvites: vi.fn(),
+    getRemote: vi.fn(),
+  },
+  setUnauthorizedHandler: (fn: (() => void) | null) => {
+    h.unauthorized = fn;
   },
   shareSnapshotUrl: (id: string) => `/api/share/snapshots/${id}`,
   shareDownloadUrl: (id: string) => `/api/share/snapshots/${id}/download`,
@@ -80,7 +90,8 @@ vi.mock("../src/api", () => ({
   blockedGates: (e: { code?: string; detail?: { gates?: unknown } }) =>
     e?.code === "gate_blocked" && Array.isArray(e.detail?.gates) ? e.detail.gates : null,
   exportLedgerUrl: (projectId: string | null) => (projectId === null ? "/export" : `/export?projectId=${projectId}`),
-  subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
+  subscribeLedger: (after: number, cb: (e: LedgerEntry) => void, opts: (typeof h.opts)[number] = {}) => {
+    h.opts.push(opts);
     const sub = { after, cb };
     h.subs.add(sub);
     h.onEntry = (e) => {
@@ -106,6 +117,7 @@ const mk = (id: string): Board => ({
   columns: { plan: [], design: [], build: [], ship: [], operate: [] },
 });
 const m = vi.mocked(api);
+const OWNER_ME: Me = { personId: "owner", name: "Owner", role: "owner", listener: "local", method: "token", credentials: [], sessions: [] };
 const AGENTS: AgentsInfo = {
   adapters: ["claude", "fake"],
   providers: {
@@ -145,6 +157,11 @@ beforeEach(() => {
   m.listShareLinks.mockResolvedValue([]);
   m.listShareAddresses.mockResolvedValue([]);
   m.getDigests.mockResolvedValue([]);
+  h.opts = [];
+  m.getMe.mockResolvedValue(OWNER_ME);
+  m.listPeople.mockResolvedValue([]);
+  m.listInvites.mockResolvedValue([]);
+  m.getRemote.mockResolvedValue({ enabled: false, listening: false });
 });
 
 describe("App status polling", () => {
@@ -425,6 +442,8 @@ describe("App provider settings", () => {
 
   it("shows the provider sign-in settings in a connection's editor tab with no project selected", async () => {
     render(<App />);
+    // The workspace shows once it knows who is signed in.
+    await screen.findByRole("navigation", { name: "Views" });
     await openCodex();
     expect(await screen.findByRole("group", { name: "Codex sign-in" })).toBeTruthy();
     // The Board and the Conversation both ask for a project.
@@ -434,6 +453,8 @@ describe("App provider settings", () => {
   it("re-fetches and keeps the radio on the server's mode when a change fails", async () => {
     m.setProviderAuth.mockRejectedValue(new Error("nope"));
     render(<App />);
+    // The workspace shows once it knows who is signed in.
+    await screen.findByRole("navigation", { name: "Views" });
     await openCodex();
     const codex = within(await screen.findByRole("group", { name: "Codex sign-in" }));
     await userEvent.click(codex.getByLabelText("My own ChatGPT plan"));
@@ -706,6 +727,8 @@ describe("App GitHub view", () => {
   it("loads the overview when the view opens and shows the error copy for a failed load", async () => {
     m.getGitHubOverview.mockRejectedValueOnce(new ApiError(404, "github_not_connected"));
     render(<App />);
+    // The workspace shows once it knows who is signed in.
+    await screen.findByRole("navigation", { name: "Views" });
     await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
     expect(await screen.findByText("Connect GitHub and set a repository in Connections.")).toBeTruthy();
     expect(m.getGitHubOverview).toHaveBeenCalledTimes(1);
@@ -718,6 +741,8 @@ describe("App GitHub view", () => {
       ci: { state: "unknown", url: null, branch: null, updatedAt: null }, fetchedAt: "2026-11-15T12:00:00Z", stale: false,
     });
     render(<App />);
+    // The workspace shows once it knows who is signed in.
+    await screen.findByRole("navigation", { name: "Views" });
     await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
     expect(await screen.findByRole("link", { name: "octo-org/example" })).toBeTruthy();
   });
@@ -768,6 +793,8 @@ describe("App Machines view", () => {
   it("says it could not load", async () => {
     m.getLink.mockRejectedValue(new ApiError(500, "internal"));
     render(<App />);
+    // The workspace shows once it knows who is signed in.
+    await screen.findByRole("navigation", { name: "Views" });
     await userEvent.click(within(views()).getByRole("button", { name: "Machines" }));
     expect(await screen.findByText("Could not load machines")).toBeTruthy();
   });
@@ -1264,5 +1291,56 @@ describe("App Share view", () => {
     await waitFor(() => expect(m.getDigests).toHaveBeenCalledWith("A", 7));
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Days" }), "30");
     await waitFor(() => expect(m.getDigests).toHaveBeenCalledWith("A", 30));
+  });
+});
+
+describe("App: who is signed in, and who is here", () => {
+  const views = () => screen.getByRole("navigation", { name: "Views" });
+  it("goes to /sign-in when nobody is signed in, and on any later 401 from the auth hook", async () => {
+    m.getMe.mockRejectedValue(new ApiError(401, "unauthorized"));
+    const navigate = vi.fn();
+    render(<App navigate={navigate} />);
+    // The real api calls the handler on the 401; this mock stands in for it.
+    await waitFor(() => expect(h.unauthorized).not.toBeNull());
+    act(() => h.unauthorized!());
+    expect(navigate).toHaveBeenCalledWith("/sign-in");
+    expect(screen.queryByRole("navigation", { name: "Views" })).toBeNull();
+  });
+
+  it("shows the person in the status bar, and a viewer's controls disabled", async () => {
+    m.getMe.mockResolvedValue({ ...OWNER_ME, personId: "v1", name: "Viewer One", role: "viewer" });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "You: Viewer One (Viewer)" })).toBeTruthy();
+    expect((screen.getByLabelText("New project name") as HTMLInputElement).disabled).toBe(true);
+    // A viewer is not the Owner: no invitations are asked for.
+    expect(m.listInvites).not.toHaveBeenCalled();
+  });
+
+  it("reports the project and view for presence on every stream, and lists who is here", async () => {
+    render(<App />);
+    await screen.findByRole("navigation", { name: "Views" });
+    await waitFor(() => expect(h.opts.some((o) => o.onPresence)).toBe(true));
+    await userEvent.click(within(views()).getByRole("button", { name: "People" }));
+    const opts = h.opts.find((o) => o.onPresence)!;
+    expect(opts.presence!()).toEqual({ projectId: null, view: "people" });
+    act(() =>
+      opts.onPresence!([{ personId: "r1", name: "Reviewer One", role: "reviewer", projectId: null, view: null, since: "2026-11-15T00:00:00Z" }]),
+    );
+    expect(await screen.findByText("Reviewer One · Reviewer · not in a project")).toBeTruthy();
+    expect(m.listInvites).toHaveBeenCalled();
+  });
+
+  it("reads people again on a person.* entry", async () => {
+    render(<App />);
+    await screen.findByRole("navigation", { name: "Views" });
+    await waitFor(() => expect(h.onEntry).toBeDefined());
+    const before = m.listPeople.mock.calls.length;
+    await act(async () => {
+      h.onEntry!({
+        seq: 9, id: "9", ts: "2026-01-01T00:00:00Z", projectId: null, actor: { kind: "human", id: "owner" },
+        type: "person.role_changed", payload: { personId: "r1", from: "reviewer", to: "maintainer" }, prevHash: "", hash: "",
+      });
+    });
+    await waitFor(() => expect(m.listPeople.mock.calls.length).toBeGreaterThan(before));
   });
 });

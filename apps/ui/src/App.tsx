@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DEFAULT_SHARE_OPTIONS } from "@theterminal/shared";
+import { DEFAULT_SHARE_OPTIONS, atLeast } from "@theterminal/shared";
+import type { Invite, Me, Person, PresenceEntry } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, DailyDigest, DigestDays, GateEvaluation, GitHubOverview, IntakeView,
   LedgerEntry, MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, ShareLink, ShareOptions,
@@ -7,8 +8,11 @@ import type {
 } from "@theterminal/shared";
 import { innerEntry } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, subscribeLedger } from "./api";
-import type { AgentsInfo, Health, LinkOverview, ShareAddress, SharePreview, Status } from "./api";
+import {
+  ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, setUnauthorizedHandler, subscribeLedger,
+} from "./api";
+import type { AgentsInfo, Health, LinkOverview, PresenceWhere, RemoteInfo, ShareAddress, SharePreview, Status } from "./api";
+import type { ViewId } from "./shell/views";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
@@ -83,8 +87,33 @@ function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () =>
   return () => void run();
 }
 
-export function App() {
+type Props = {
+  /** Where to send someone who is not signed in; `location.assign` by default. */
+  navigate?: (url: string) => void;
+};
+
+/** Entries that change who is in the workspace, their sessions and credentials, or remote access. */
+const touchesPeople = (type: string) => type.startsWith("person.") || type.startsWith("remote.");
+
+export function App({ navigate = (url: string) => location.assign(url) }: Props = {}) {
   const [health, setHealth] = useState<Health | null>(null);
+  /** Who is signed in: undefined while asked, null when the answer was not one (the UI then acts as a viewer). */
+  const [me, setMe] = useState<Me | null | undefined>(undefined);
+  const [presence, setPresence] = useState<PresenceEntry[]>([]);
+  const [people, setPeople] = useState<Person[]>([]);
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [remote, setRemote] = useState<RemoteInfo | null>(null);
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  /** What presence reports: the selected project and the view shown, read when the stream sends. */
+  const viewRef = useRef<ViewId | null>(null);
+  const setView = useCallback((v: ViewId) => {
+    viewRef.current = v;
+  }, []);
+  const [presenceWhere] = useState(() => (): PresenceWhere => ({ projectId: selectedRef.current, view: viewRef.current }));
+  const meRef = useRef<Me | null | undefined>(undefined);
+  meRef.current = me;
+  const refreshPeopleRef = useRef<() => void>(() => {});
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [board, setBoard] = useState<BoardData | null>(null);
@@ -178,6 +207,43 @@ export function App() {
     }
   }, []);
 
+  // Who is signed in, everyone, the invitations (the Owner's) and remote access; read again on any person.* or
+  // remote.* entry. Nobody signed in (the auth hook's 401, here or on any later request) goes to the sign-in page.
+  useEffect(() => {
+    let cancelled = false;
+    setUnauthorizedHandler(() => navigateRef.current("/sign-in"));
+    const refresh = coalesced(async () => {
+      let who: Me;
+      try {
+        who = await api.getMe();
+      } catch (e) {
+        if (cancelled) return;
+        if (e instanceof ApiError && e.status === 401) return;
+        setMe((prev) => (prev === undefined ? null : prev));
+        throw e;
+      }
+      if (cancelled) return;
+      setMe(who);
+      const owner = who.role === "owner";
+      const [list, pending, r] = await Promise.all([
+        api.listPeople(),
+        owner ? api.listInvites() : Promise.resolve([] as Invite[]),
+        api.getRemote().catch(() => null),
+      ]);
+      if (cancelled) return;
+      setPeople(list.filter((p) => p.removedAt === null));
+      setInvites(pending);
+      setRemote(r);
+    }, () => cancelled);
+    refreshPeopleRef.current = refresh;
+    refresh();
+    return () => {
+      cancelled = true;
+      refreshPeopleRef.current = () => {};
+      setUnauthorizedHandler(null);
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let unsubscribe = () => {};
@@ -199,6 +265,7 @@ export function App() {
       setHealth(h);
       unsubscribe = subscribeLedger(h.headSeq, (e) => {
         refreshStatus();
+        if (touchesPeople(e.type)) refreshPeopleRef.current();
         if (touchesRuns(e)) refresh();
         // Tests, enables and removals change a connection's status: reread the list from the server.
         if (e.type.startsWith("connection.")) refreshConnections.current();
@@ -211,7 +278,7 @@ export function App() {
         const g = gateRef.current;
         if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
         for (const listener of [...entryListeners.current]) listener(e);
-      });
+      }, { onPresence: setPresence, presence: presenceWhere });
       refresh();
       refreshStatus();
       setProjects(await api.listProjects());
@@ -223,7 +290,7 @@ export function App() {
       clearInterval(timer);
       unsubscribe();
     };
-  }, [run]);
+  }, [run, presenceWhere]);
 
   // The GitHub view asks for this when it opens and every 60 s while it stays open. Made once, during the first
   // render, so the view can call it from its own mount effect (which runs before this component's effects).
@@ -292,7 +359,8 @@ export function App() {
     };
   });
   refreshPairedRef.current = refreshPaired;
-  const anyLinked = (status?.machines?.linked ?? 0) > 0;
+  // The paired list is the Owner's (GET /api/link/machines): nobody else asks for it.
+  const anyLinked = (status?.machines?.linked ?? 0) > 0 && (me === undefined || me?.role === "owner");
   useEffect(() => {
     if (anyLinked) refreshPaired();
   }, [anyLinked, refreshPaired]);
@@ -378,7 +446,7 @@ export function App() {
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
         if (e.type.startsWith("share.")) refreshShare.current();
         if (digestWatchers.current > 0) refreshDigests.current();
-      });
+      }, { presence: presenceWhere });
     });
     return () => {
       cancelled = true;
@@ -386,7 +454,7 @@ export function App() {
       unsubscribe();
       stream.cancel();
     };
-  }, [selectedId, run]);
+  }, [selectedId, run, presenceWhere]);
 
   // The selected project's guided intake: undefined while it loads, null when the project has none.
   useEffect(() => {
@@ -528,14 +596,14 @@ export function App() {
       const { page, headSeq } = await newestLedgerPage(null);
       if (cancelled || load !== allLoad.current) return;
       setAllLedger({ ...EMPTY_SCOPE, entries: page, hasOlder: page.length === LEDGER_FETCH });
-      unsubscribe = subscribeLedger(headSeq, (e) => stream.push(e));
+      unsubscribe = subscribeLedger(headSeq, (e) => stream.push(e), { presence: presenceWhere });
     });
     return () => {
       cancelled = true;
       unsubscribe();
       stream.cancel();
     };
-  }, [ledgerScope, run]);
+  }, [ledgerScope, run, presenceWhere]);
 
   /**
    * Puts the page before the oldest loaded entry of a scope (every project's, or the selected project's) in front,
@@ -599,6 +667,8 @@ export function App() {
 
   /** True while the Changes run is live: the server refuses its changes, so none are asked for until it ends. */
   const changesLive = runIsLive(runs, changesRunId);
+  /** A run's changes, files and diffs are a reviewer's to read: nothing is asked for anyone below. */
+  const mayReadChanges = me !== undefined && me !== null && atLeast(me.role, "reviewer");
   /** The linked machine the Changes run ran on (its name), or null for a run of this computer. */
   const changesRun = runs.find((r) => r.id === changesRunId);
   const changesMachine = changesRun?.machineId ? (machineNames.get(changesRun.machineId) ?? "a linked machine") : null;
@@ -610,7 +680,7 @@ export function App() {
     return typeof reason === "string" ? reason : null;
   }, [entries, changesRunId, changesMachine]);
   useEffect(() => {
-    if (changesRunId === null) {
+    if (changesRunId === null || !mayReadChanges) {
       setChanges(null);
       return;
     }
@@ -647,7 +717,7 @@ export function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [changesRunId, changesLive, changesMachine, changesRefused, runChanges, subscribeEntries]);
+  }, [changesRunId, changesLive, changesMachine, changesRefused, runChanges, subscribeEntries, mayReadChanges]);
 
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
@@ -914,6 +984,15 @@ export function App() {
     dir: api.listRunDir,
     file: api.getRunFile,
     diff: api.getRunDiff,
+    me: me ?? null,
+    presence,
+    people,
+    invites,
+    remote,
+    refreshPeople: () => refreshPeopleRef.current(),
+    onMeChange: setMe,
+    onRequirementChanged: refreshGate,
+    onViewChange: setView,
   };
 
   return (
@@ -928,7 +1007,13 @@ export function App() {
           {error}
         </div>
       )}
-      <Workbench model={model} />
+      {me === undefined ? (
+        <p className="empty" role="status">
+          Loading…
+        </p>
+      ) : (
+        <Workbench model={model} />
+      )}
     </div>
   );
 }

@@ -28,6 +28,7 @@ const ICONS: Record<ViewId, ReactNode> = {
   github: svg(<><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" /><path d="M6 7v10M18 11c0 4-6 3-11 6.5" /></>),
   capacity: svg(<><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>),
   machines: svg(<><rect x="2" y="4" width="9" height="7" rx="1" /><rect x="13" y="13" width="9" height="7" rx="1" /><path d="M6.5 11v3h6.5M17.5 13v-3H11" /></>),
+  people: svg(<><circle cx="9" cy="8" r="3" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14c2.5 0 4.5 2 4.5 5" /></>),
   share: svg(<><circle cx="18" cy="5" r="2.5" /><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="19" r="2.5" /><path d="M8.2 10.8l7.6-4.6M8.2 13.2l7.6 4.6" /></>),
   learn: svg(<><path d="M12 6C10 4.5 7 4 3 4v14c4 0 7 .5 9 2 2-1.5 5-2 9-2V4c-4 0-7 .5-9 2z" /><path d="M12 6v14" /></>),
 };

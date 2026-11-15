@@ -7,9 +7,13 @@ import type { LedgerScope, WorkbenchModel } from "../src/shell/model";
 import { LedgerSideBar } from "../src/views/LedgerSideBar";
 import { fakeDock, shellNav } from "./connections-harness";
 
-const ALL: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "other"];
+const ALL: NarrationTopic[] = [
+  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
+];
 
-function renderSideBar(over: { ledgerScope?: LedgerScope; selectedId?: string | null; ledgerTopics?: NarrationTopic[] } = {}) {
+function renderSideBar(
+  over: { ledgerScope?: LedgerScope; selectedId?: string | null; ledgerTopics?: NarrationTopic[]; me?: WorkbenchModel["me"] } = {},
+) {
   const onLedgerTopicsChange = vi.fn();
   const model = {
     ledgerScope: "project",
@@ -29,12 +33,12 @@ function renderSideBar(over: { ledgerScope?: LedgerScope; selectedId?: string | 
 }
 
 describe("LedgerSideBar", () => {
-  it("offers eleven topic checkboxes under Show, Share after Overrides and Machines after Settings, all ticked by default", () => {
+  it("offers thirteen topic checkboxes under Show, Share after Overrides, Machines after Settings, then People and Remote access, all ticked by default", () => {
     renderSideBar();
     const show = screen.getByRole("group", { name: "Show" });
     const boxes = within(show).getAllByRole("checkbox") as HTMLInputElement[];
     expect(boxes.map((b) => b.labels?.[0]?.textContent)).toEqual([
-      "Board", "Agents", "Decisions", "Gates", "Overrides", "Share", "Intake", "Connections", "Settings", "Machines", "Other",
+      "Board", "Agents", "Decisions", "Gates", "Overrides", "Share", "Intake", "Connections", "Settings", "Machines", "People", "Remote access", "Other",
     ]);
     expect(boxes.every((b) => b.checked)).toBe(true);
   });
@@ -83,5 +87,13 @@ describe("LedgerSideBar", () => {
   it("links the export of every project when all projects are shown", () => {
     renderSideBar({ ledgerScope: "all" });
     expect(screen.getByRole("link", { name: "Export for audit" }).getAttribute("href")).toBe("/api/ledger/export");
+  });
+
+  it("offers no audit export to a viewer, whose role cannot read it, and says so", () => {
+    renderSideBar({ me: { personId: "v1", name: "Viewer One", role: "viewer", listener: "remote", method: "key", credentials: [], sessions: [] } });
+    expect(screen.queryByRole("link", { name: "Export for audit" })).toBeNull();
+    const button = screen.getByRole("button", { name: "Export for audit" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe("Your role (Viewer) cannot do this.");
   });
 });

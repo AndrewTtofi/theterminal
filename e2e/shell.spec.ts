@@ -10,13 +10,13 @@ async function createProject(page: Page, url: string, name: string) {
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
 }
 
-test("the activity bar shows the eleven views and the Board is home with the five columns", async ({ page }) => {
+test("the activity bar shows the twelve views and the Board is home with the five columns", async ({ page }) => {
   await page.goto(process.env.TT_E2E_URL!);
   const buttons = views(page).getByRole("button");
-  await expect(buttons).toHaveCount(11);
+  await expect(buttons).toHaveCount(12);
   // Icon buttons: their names are their aria-labels.
   const names = await buttons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
-  expect(names).toEqual(["Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "Share", "Learn"]);
+  expect(names).toEqual(["Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "People", "Share", "Learn"]);
   await expect(views(page).getByRole("button", { name: "Board" })).toHaveAttribute("aria-pressed", "true");
   // The default layout is Guided: the Board and the Conversation, no bottom panel.
   const tabs = await page.getByRole("tab").allInnerTexts();
@@ -142,4 +142,19 @@ test("with the bottom panel closed and Connections selected, a new decision stil
   await card.getByRole("button", { name: "Allow" }).click();
   await expect(card).toHaveCount(0);
   await expect(statusBar.getByRole("button", { name: "Needs you: 0" })).toBeVisible();
+});
+
+test("the sign-in page and a join link that is no longer valid open on their own, and the Owner's People view lists the Owner", async ({ page }) => {
+  await page.goto(process.env.TT_E2E_URL!);
+  const origin = new URL(page.url()).origin;
+  await page.getByRole("contentinfo", { name: "Status bar" }).getByRole("button", { name: /^You: .* \(Owner\)$/ }).click();
+  await expect(page.getByRole("region", { name: "Everyone" })).toContainText("Owner");
+  await expect(page.getByRole("button", { name: "Invite someone" })).toBeVisible();
+
+  await page.goto(`${origin}/sign-in`);
+  await expect(page.getByRole("main", { name: "Sign in" }).getByRole("heading", { level: 1, name: "Sign in" })).toBeVisible();
+  await page.goto(`${origin}/join/no-such-code`);
+  await expect(page.getByRole("main", { name: "Join this workspace" })).toContainText(
+    "This invitation is no longer valid. Ask the Owner for a new one.",
+  );
 });

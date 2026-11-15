@@ -3,7 +3,7 @@ import { DIGEST_DAYS, visibleControls } from "@theterminal/shared";
 import type { DigestDays, ShareScope, ShareSnapshotRecord } from "@theterminal/shared";
 import { errorMessage, shareDownloadUrl, shareSnapshotUrl } from "../api";
 import { ShareLinkForm } from "../components/ShareLinkForm";
-import { useShell } from "../shell/model";
+import { gateFor, roleOf, useShell } from "../shell/model";
 
 export const SCOPE_LABELS: Record<ShareScope, string> = { this_computer: "This computer only", local_network: "Local network" };
 /** The scope's label; a scope this build does not know is shown as text, never as "undefined". */
@@ -15,6 +15,7 @@ const when = (iso: string) => new Date(iso).toLocaleString();
 
 function SnapshotRow({ s }: { s: ShareSnapshotRecord }) {
   const { model } = useShell();
+  const mayShare = gateFor(roleOf(model), "owner");
   const [sharing, setSharing] = useState(false);
   const formId = useId();
   return (
@@ -27,7 +28,14 @@ function SnapshotRow({ s }: { s: ShareSnapshotRecord }) {
         <a download href={shareDownloadUrl(s.id)}>
           Download
         </a>
-        <button type="button" aria-expanded={sharing} aria-controls={sharing ? formId : undefined} onClick={() => setSharing((v) => !v)}>
+        <button
+          type="button"
+          aria-expanded={sharing}
+          aria-controls={sharing ? formId : undefined}
+          disabled={mayShare.disabled}
+          title={mayShare.title}
+          onClick={() => setSharing((v) => !v)}
+        >
           Share on your network…
         </button>
       </span>
@@ -51,6 +59,7 @@ function SnapshotRow({ s }: { s: ShareSnapshotRecord }) {
  */
 export function ShareSideBar() {
   const { model, dock } = useShell();
+  const mayShare = gateFor(roleOf(model), "owner");
   const share = model.share;
   const uid = useId();
   const [error, setError] = useState<string | null>(null);
@@ -122,7 +131,7 @@ export function ShareSideBar() {
           ))}
         </select>
         <p className="note">Everything else that is private stays out: secrets, file contents, raw agent output, account details.</p>
-        <button type="button" onClick={() => void preview()} disabled={share.previewing}>
+        <button type="button" onClick={() => void preview()} disabled={share.previewing || mayShare.disabled} title={mayShare.title}>
           Preview share page
         </button>
         {error !== null && (
@@ -154,7 +163,7 @@ export function ShareSideBar() {
             {live.map((l) => (
               <li key={l.id}>
                 <span className="share-row-text">{`${scopeLabel(l.scope)} · until ${when(l.expiresAt)} · port ${l.port}`}</span>
-                <button type="button" onClick={() => void revoke(l.id)}>
+                <button type="button" disabled={mayShare.disabled} title={mayShare.title} onClick={() => void revoke(l.id)}>
                   Revoke
                 </button>
               </li>

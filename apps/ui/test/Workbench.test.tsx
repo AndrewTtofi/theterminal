@@ -728,4 +728,68 @@ describe("Workbench", () => {
       expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
     });
   });
+
+  describe("roles", () => {
+    const as = (role: "viewer" | "reviewer" | "maintainer") => ({
+      me: { personId: `${role[0]}1`, name: `${role} one`, role, listener: "remote" as const, method: "key" as const, credentials: [], sessions: [] },
+    });
+
+    it("keeps every view for a viewer, and disables the writes with the role's title", async () => {
+      render(<Workbench model={model({ ...as("viewer"), pending: [pendingAction] })} />);
+      expect(within(views()).getAllByRole("button")).toHaveLength(12);
+      const name = screen.getByLabelText("New project name") as HTMLInputElement;
+      expect(name.disabled).toBe(true);
+      expect(name.title).toBe("Your role (Viewer) cannot do this.");
+      const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
+      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      // The decision card stays in the strip, without Allow or Deny.
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(within(strip).getByText(/nvidia-smi/)).toBeTruthy();
+      expect(within(strip).queryByRole("button", { name: "Allow" })).toBeNull();
+      expect(within(strip).queryByRole("button", { name: "Deny" })).toBeNull();
+      expect(within(strip).getByText("Your role (Viewer) cannot do this.")).toBeTruthy();
+      await userEvent.click(view("Agents"));
+      const start = within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Start agent" }) as HTMLButtonElement;
+      expect(start.disabled).toBe(true);
+      expect(start.title).toBe("Your role (Viewer) cannot do this.");
+    });
+
+    it("shows a viewer the Changes view without file contents, and the line that says why", async () => {
+      render(<Workbench model={model({ ...as("viewer"), changesRunId: "run1" })} />);
+      await userEvent.click(view("Changes"));
+      const side = screen.getByRole("complementary", { name: "Side bar" });
+      expect(within(side).getByText("Only reviewers and above can open file contents.")).toBeTruthy();
+      expect(within(side).queryByRole("heading", { name: "Files" })).toBeNull();
+    });
+
+    it("lets a reviewer decide and move cards, but not add cards or start agents", async () => {
+      render(<Workbench model={model({ ...as("reviewer"), pending: [pendingAction] })} />);
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(within(strip).getByRole("button", { name: "Allow" })).toBeTruthy();
+      const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
+      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByLabelText("New project name") as HTMLInputElement).disabled).toBe(true);
+    });
+
+    it("lets a maintainer add cards and start agents", async () => {
+      render(<Workbench model={model(as("maintainer"))} />);
+      expect((screen.getByLabelText("New project name") as HTMLInputElement).disabled).toBe(false);
+      await userEvent.click(view("Agents"));
+      expect((within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Start agent" }) as HTMLButtonElement).title).toBe("");
+    });
+
+    it("tells the app which view is shown, for presence", async () => {
+      const onViewChange = vi.fn();
+      render(<Workbench model={model({ onViewChange })} />);
+      await userEvent.click(view("Ledger"));
+      expect(onViewChange).toHaveBeenLastCalledWith("ledger");
+    });
+
+    it("opens the People view from the status bar's You item", async () => {
+      render(<Workbench model={model(as("reviewer"))} />);
+      await userEvent.click(screen.getByRole("button", { name: "You: reviewer one (Reviewer)" }));
+      expect(view("People").getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("region", { name: "People here" })).toBeTruthy();
+    });
+  });
 });

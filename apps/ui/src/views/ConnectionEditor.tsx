@@ -6,10 +6,16 @@ import type { ConnectionPatch, NewConnection } from "../api";
 import { OWN_LABEL, PROVIDER_NAMES, ProviderModeSection } from "../components/ProviderAuthSettings";
 import { SignInPanel } from "./SignInPanel";
 import { OWNER_ONLY_NOTE } from "./ConnectionsSideBar";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 import { engineText } from "./CapacityPanel";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
+const FILE_STORE_NOTE = "Stored in this server's encrypted secret store. Never written to the ledger or the API.";
+/** Where a stored secret is, as the server says: its own encrypted file on a server install, else the keychain. */
+const storedIn = (status: { connections: { secretStore?: "keychain" | "file" } } | null) =>
+  status?.connections.secretStore === "file"
+    ? { placeholder: "Stored in this server's encrypted secret store", note: FILE_STORE_NOTE }
+    : { placeholder: "Stored in your keychain", note: KEYCHAIN_NOTE };
 const DETECTED_NOTE = "Filled in by detection. Use Detect this computer in the Capacity view.";
 const ENV_VARS: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
@@ -115,6 +121,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
   // Hardware is written by detection only: its values are shown, never edited here.
   const detected = entry.kind === "hardware";
   const info = model.agentsInfo;
+  const store = storedIn(model.status);
 
   const act = async (task: () => Promise<void>) => {
     setError(null);
@@ -192,7 +199,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
                 data-lpignore="true"
                 spellCheck={false}
                 value={secrets[f.name] ?? ""}
-                placeholder={stored ? "Stored in your keychain" : ""}
+                placeholder={stored ? store.placeholder : ""}
                 disabled={locked || busy}
                 onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
               />
@@ -205,7 +212,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
                 data-lpignore="true"
                 spellCheck={false}
                 value={secrets[f.name] ?? ""}
-                placeholder={stored ? "Stored in your keychain" : ""}
+                placeholder={stored ? store.placeholder : ""}
                 disabled={locked || busy}
                 onChange={(e) => setSecrets((s) => ({ ...s, [f.name]: e.target.value }))}
               />
@@ -217,7 +224,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
             )}
           </div>
           {f.help && <p className="field-help">{f.help}</p>}
-          <p className="field-help">{KEYCHAIN_NOTE}</p>
+          <p className="field-help">{store.note}</p>
         </div>
       );
     }
@@ -360,6 +367,8 @@ export function ConnectionEditor({ id }: { id: string }) {
   }
   // A summary is what a collaborator was given: there are no details here to edit, and the server would refuse anyway.
   if (found !== undefined && !hasConnectionDetails(found)) return <p className="muted">{OWNER_ONLY_NOTE}</p>;
+  // Only the Owner sees or changes connection details; the server refuses anyone else's Save, Test and Remove.
+  if (roleOf(model) !== "owner") return <p className="muted">{OWNER_ONLY_NOTE}</p>;
   const conn: Connection | undefined = found;
 
   if (!entry || !entry.available) {

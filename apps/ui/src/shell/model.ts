@@ -33,8 +33,9 @@ import type {
   ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
-import { innerEntry, runIdOf } from "@theterminal/shared";
-import type { AgentsInfo, LinkOverview, ShareAddress, SharePreview, Status } from "../api";
+import type { Invite, Me, Person, PresenceEntry, Role } from "@theterminal/shared";
+import { ROLE_LABELS, atLeast, innerEntry, runIdOf } from "@theterminal/shared";
+import type { AgentsInfo, LinkOverview, RemoteInfo, ShareAddress, SharePreview, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 import type { ViewId } from "./views";
@@ -57,7 +58,9 @@ export type GatePrompt = {
 };
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "other"];
+export const LEDGER_TOPICS: NarrationTopic[] = [
+  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
+];
 
 /**
  * True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. A
@@ -267,7 +270,60 @@ export type WorkbenchModel = {
   onOpenDiff: (runId: string, path: string) => void;
   /** Opens (or shows) the read-only tab of one file of a run. */
   onOpenFile: (runId: string, path: string) => void;
+
+  /**
+   * Who is signed in. Absent means the Owner (a model built before Plan 8, as the tests do); null means the person is
+   * not known, which counts as a viewer. The UI disables what the role cannot do; the server is the real guard.
+   */
+  me?: Me | null;
+  /** Who is here now and what they look at, as the event stream last said. */
+  presence?: PresenceEntry[];
+  /** Everyone in the workspace (removed people excluded). */
+  people?: Person[];
+  /** The pending invitations: the Owner's only. */
+  invites?: Invite[];
+  /** `GET /api/remote`: the whole state for the Owner, on/off for anyone else; null until read. */
+  remote?: RemoteInfo | null;
+  /** Reads me, people, invitations and remote access again (after a change made on the People view). */
+  refreshPeople?: () => void;
+  /** The server answered with the person's new `Me` (a credential added, a rename). */
+  onMeChange?: (me: Me) => void;
+  /** After the Owner changed who may sign a gate: the open gate's checklist is read again. */
+  onRequirementChanged?: () => void;
+  /** The view the person is looking at changed: what presence reports. */
+  onViewChange?: (view: ViewId) => void;
 };
+
+/** The role the UI acts for: the Owner when the model has no `me` (before Plan 8), a viewer when `me` is null. */
+export function roleOf(model: Pick<WorkbenchModel, "me"> | null | undefined): Role {
+  if (!model || model.me === undefined) return "owner";
+  return model.me?.role ?? "viewer";
+}
+
+/** What a gate card needs to know of the person at it, and of everyone (to name a requirement's person). */
+export function gateAccess(model: WorkbenchModel) {
+  const role = roleOf(model);
+  return {
+    viewer: { personId: model.me?.personId ?? "owner", role },
+    people: model.people ?? [],
+    ...(model.selectedId !== null && { projectId: model.selectedId }),
+    ...(model.onRequirementChanged !== undefined && { onRequirementChanged: model.onRequirementChanged }),
+  };
+}
+
+/** The title on a control the role cannot use. */
+export const roleTitle = (role: Role): string => `Your role (${ROLE_LABELS[role]}) cannot do this.`;
+
+/** `disabled` and `title` for a control that needs `min`: nothing when the role has it. */
+export function gateFor(role: Role, min: Role): { disabled: boolean; title?: string } {
+  return atLeast(role, min) ? { disabled: false } : { disabled: true, title: roleTitle(role) };
+}
+
+/** The role of whoever is at the shell; the Owner outside it (a component rendered on its own). */
+export function useViewerRole(): Role {
+  const ctx = useContext(ShellContext);
+  return roleOf(ctx?.model);
+}
 
 /** What App provides: the shell adds the actions that open tabs, since it owns the dock. */
 export type AppModel = Omit<WorkbenchModel, "onOpenDiff" | "onOpenFile">;

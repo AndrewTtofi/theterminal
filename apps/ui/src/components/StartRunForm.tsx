@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { KIND_LABELS, visibleControls } from "@theterminal/shared";
 import type { AdapterId, AuthMode, Card, Connection, ConnectionSummary, MachineCapacity, MachinePresence, Provider, Role } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, LOCAL_MODEL_NOTE } from "../api";
+import { gateFor, useViewerRole } from "../shell/model";
 
 export const OFFLINE_NOTE = "You seem to be offline. Cloud models will not answer; a local model will.";
 
@@ -42,8 +43,12 @@ type Offer = Pick<Connection, "id" | "kind" | "provider" | "name">;
 /** Starts an agent run: the agent, an optional card, the prompt and the connections the run may use. */
 export function StartRunForm({
   adapters, providers, cards, connections, defaultCardId, offline = false, submitLabel = "Start agent", startedMessage, machines = [],
-  machineCapacity, onStart, viewerRole,
+  machineCapacity, onStart, viewerRole: givenRole,
 }: Props) {
+  // The role given, else the shell's: starting a run is a maintainer's.
+  const shellRole = useViewerRole();
+  const viewerRole: Role = givenRole ?? shellRole;
+  const may = gateFor(viewerRole, "maintainer");
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -96,7 +101,7 @@ export function StartRunForm({
   const localChosen = localUsable && locals.some((c) => picked.includes(c.id));
   const offlineNote = target === null && offline && chosen !== "" && chosen !== "fake" && !localChosen;
   /** A collaborator's run is on the Owner's API key for the provider, never on anyone's subscription or login. */
-  const apiKeyNote = viewerRole !== undefined && viewerRole !== "owner" && chosen !== "" && chosen !== "fake" && !localChosen
+  const apiKeyNote = viewerRole !== "owner" && chosen !== "" && chosen !== "fake" && !localChosen
     ? `Runs you start use the Owner's API key for ${ADAPTER_NAMES[chosen]}, never a personal subscription.`
     : null;
   /** The linked machine answered, and none of the agent programs is available there: nothing can start. */
@@ -223,7 +228,7 @@ export function StartRunForm({
       )}
       {offlineNote && <p className="note offline-note">{OFFLINE_NOTE}</p>}
       {noAgentThere && <p className="note" role="status">{`${targetName} reports no agent program available, so nothing can start there.`}</p>}
-      <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
+      <button type="submit" disabled={!chosen || !prompt.trim() || starting || may.disabled} title={may.title}>
         {submitLabel}
       </button>
       <p className="started" role="status" aria-live="polite">

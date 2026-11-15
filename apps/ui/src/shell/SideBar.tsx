@@ -10,6 +10,8 @@ import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
 import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
 import { ShareSideBar } from "../views/ShareSideBar";
+import { PeopleSideBar } from "../views/PeopleSideBar";
+import { useViewerRole } from "./model";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
 
@@ -18,16 +20,23 @@ export const SIDE_BAR_MAX = 480;
 export const SIDE_BAR_DEFAULT = 260;
 const KEY_STEP = 20;
 
+/** The Connections side bar for the person at the shell: read-only below the Owner. */
+function ConnectionsForViewer() {
+  const role = useViewerRole();
+  return <ConnectionsSideBar viewer={{ role }} />;
+}
+
 const CONTENT: Record<ViewId, ComponentType> = {
   board: ProjectsSideBar,
   agents: AgentsSideBar,
   changes: ChangesSideBar,
   needs_you: NeedsYouSideBar,
   ledger: LedgerSideBar,
-  connections: ConnectionsSideBar,
+  connections: ConnectionsForViewer,
   github: GitHubSideBar,
   capacity: CapacitySideBar,
   machines: MachinesSideBar,
+  people: PeopleSideBar,
   share: ShareSideBar,
   learn: LearnSideBar,
 };

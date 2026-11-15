@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { visibleControls } from "@theterminal/shared";
 import { ApiError, errorMessage } from "../api";
-import { useShell } from "../shell/model";
+import { gateFor, roleOf, useShell } from "../shell/model";
 
 const ACK = "I have read this page and I am happy to share everything on it.";
 
@@ -15,6 +15,7 @@ const isStale = (e: unknown) => e instanceof ApiError && (e.code === "preview_st
  */
 export function SharePanel(_props: { id: string }) {
   const { model } = useShell();
+  const mayShare = gateFor(roleOf(model), "owner");
   const { preview, onConfirm } = model.share;
   const uid = useId();
   const [ack, setAck] = useState(false);
@@ -98,7 +99,7 @@ export function SharePanel(_props: { id: string }) {
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
               {ACK}
             </label>
-            <button type="button" disabled={!ack || busy} onClick={() => void confirm()}>
+            <button type="button" disabled={!ack || busy || mayShare.disabled} title={mayShare.title} onClick={() => void confirm()}>
               Confirm and save snapshot
             </button>
           </div>

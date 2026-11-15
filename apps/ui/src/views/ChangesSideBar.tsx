@@ -5,7 +5,8 @@ import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
 import { OverrideSection } from "../components/OverrideSection";
 import { clip } from "../components/text";
 import { errorMessage } from "../api";
-import { namesRun, runIsLive, useShell } from "../shell/model";
+import { atLeast } from "@theterminal/shared";
+import { namesRun, roleOf, runIsLive, useShell } from "../shell/model";
 
 const LETTER: Record<ChangeStatus, string> = {
   added: "A", modified: "M", deleted: "D", typechange: "T", untracked: "U", unchanged: "",
@@ -168,7 +169,10 @@ export function ChangesSideBar() {
           Learn more
         </button>
       </p>
-      {runId !== null && (
+      {runId !== null && !atLeast(roleOf(model), "reviewer") && (
+        <p className="note">Only reviewers and above can open file contents.</p>
+      )}
+      {runId !== null && atLeast(roleOf(model), "reviewer") && (
         <>
           {model.changesError !== null ? (
             <p className="note">{model.changesError}</p>

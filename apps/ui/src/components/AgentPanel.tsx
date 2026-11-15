@@ -4,6 +4,7 @@ import type {
 } from "@theterminal/shared";
 import { runCost } from "./cost";
 import { StartRunForm } from "./StartRunForm";
+import { gateFor } from "../shell/model";
 
 export const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
@@ -60,6 +61,7 @@ export function AgentPanel({
   machineCapacity, machineName, viewer,
 }: Props) {
   const selected = runs.find((r) => r.id === selectedRunId);
+  const mayStop = gateFor(viewer?.role ?? "owner", "maintainer");
 
   return (
     <section className="agent-panel" aria-label="Agents">
@@ -83,7 +85,7 @@ export function AgentPanel({
               {cost(r)})
             </button>
             {r.status === "running" && (
-              <button type="button" onClick={() => onStop(r.id)}>
+              <button type="button" disabled={mayStop.disabled} title={mayStop.title} onClick={() => onStop(r.id)}>
                 Stop
               </button>
             )}
