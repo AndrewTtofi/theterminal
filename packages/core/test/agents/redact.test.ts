@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED, redact, truncate } from "../../src/index.js";
-import { secretEnvValues, trailingSecretContext } from "../../src/agents/redact.js";
+import { OUTPUT_BATCH, Output, secretEnvValues, trailingSecretContext } from "../../src/agents/redact.js";
 import { KEY_FORMS, OPENSSH_KEY, RSA_KEY, keyLines, leakedKeyBody } from "../fixtures/key-forms.js";
 
 describe("redact", () => {
@@ -333,6 +333,27 @@ describe("redact: leak fixes", () => {
       // while still catching a quadratic path. A floor of 10 ms keeps timer resolution from deciding fast cases.
       expect(t4, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, four times the input ${t4.toFixed(1)} ms`).toBeLessThanOrEqual(8 * Math.max(t1, 10));
     }
+  });
+});
+
+describe("Output", () => {
+  // The timing test above catches a superlinear scan; this pins the fix for the one it found deterministically. Keeping
+  // a heap object alive per redaction made garbage collection grow with the input times the redaction count.
+  it("never holds more than one batch of unjoined pieces, and joins them in order", () => {
+    const out = new Output();
+    const pieces = Array.from({ length: OUTPUT_BATCH * 3 + 7 }, (_, i) => `<${i}>`);
+    for (const piece of pieces) {
+      out.push(piece);
+      expect(out.pending).toBeLessThan(OUTPUT_BATCH);
+    }
+    expect(out.pending).toBe(7);
+    expect(out.toString()).toBe(pieces.join(""));
+  });
+
+  it("redacts every pair when the redactions span many batches", () => {
+    const n = OUTPUT_BATCH * 2 + 3;
+    const input = Array.from({ length: n }, (_, i) => `\\"password\\":\\"fake${i}\\" `).join("");
+    expect(redact(input)).toBe(`\\"password\\":\\"${REDACTED}\\" `.repeat(n));
   });
 });
 

@@ -169,8 +169,41 @@ function isEnvReference(s: string, pos: number, header: boolean, structured: boo
   return isBlank(next);
 }
 
+/** How many pieces `Output` gathers before joining them into one flat string. */
+export const OUTPUT_BATCH = 1024;
+
+/**
+ * Builds a string from many pieces in linear time. Appending every piece to one string, or keeping every piece in one
+ * array until the end, keeps one or more heap objects alive per piece for the whole scan. On an input with hundreds of
+ * thousands of redactions the garbage collector then copies and marks that growing set again on every collection, so
+ * the time grows faster than the input. Joining each batch of OUTPUT_BATCH pieces into one flat string at once lets
+ * the pieces die young: what stays alive is one string per batch.
+ */
+export class Output {
+  private readonly batches: string[] = [];
+  private pieces: string[] = [];
+
+  /** Pieces appended since the last join; never more than OUTPUT_BATCH. */
+  get pending(): number {
+    return this.pieces.length;
+  }
+
+  push(piece: string): void {
+    this.pieces.push(piece);
+    if (this.pieces.length >= OUTPUT_BATCH) {
+      this.batches.push(this.pieces.join(""));
+      this.pieces = [];
+    }
+  }
+
+  /** The whole string. Call once, after the last push. */
+  toString(): string {
+    return this.batches.join("") + this.pieces.join("");
+  }
+}
+
 function redactPairs(s: string): string {
-  let out = "";
+  const out = new Output();
   let last = 0;
   KEY_SEP.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -219,11 +252,14 @@ function redactPairs(s: string): string {
       }
       if (end === pos) continue;
     }
-    out += s.slice(last, pos) + replacement;
+    out.push(s.slice(last, pos));
+    out.push(replacement);
     last = end;
     KEY_SEP.lastIndex = end;
   }
-  return out + s.slice(last);
+  if (last === 0) return s;
+  out.push(s.slice(last));
+  return out.toString();
 }
 
 function redactString(s: string, extra: string[]): string {
