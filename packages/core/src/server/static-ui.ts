@@ -39,9 +39,14 @@ function forms(p: string): string[] {
   }
 }
 
+/** An invite code as the join page's path carries it: one plain segment, nothing a file path could use. */
+const JOIN_CODE = /^[A-Za-z0-9_-]{1,200}$/;
+
 /**
  * Serves the built UI. "/" is its own explicit public route so the ?token= bootstrap in auth can
- * match it; every other file goes through a public wildcard that cannot leave uiDir.
+ * match it; every other file goes through a public wildcard that cannot leave uiDir. The join page
+ * (`/join/<code>`) and the sign-in page (`/sign-in`) are the same single-page app: both serve the fixed
+ * index.html and nothing else, so neither can reach a file or an API route.
  */
 export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { deny?: string[] } = {}): void {
   const root = realpathSync(resolve(uiDir));
@@ -63,5 +68,10 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
   };
 
   app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
+  app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
+  app.get("/join/*", { config: PUBLIC_ROUTE }, (req, reply) => {
+    const code = (req.params as { "*": string })["*"];
+    return JOIN_CODE.test(code) ? serve("index.html", reply) : reply.code(404).send({ error: "not_found" });
+  });
   app.get("/*", { config: PUBLIC_ROUTE }, (req, reply) => serve((req.params as { "*": string })["*"], reply));
 }
