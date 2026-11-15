@@ -5,7 +5,7 @@ import { chmod, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "../adapter.js";
+import { RATE_LIMIT_TEXT, type AdapterStartOptions, type AgentAdapter, type ProposedAction, type RunCredentials } from "../adapter.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
@@ -118,6 +118,10 @@ const STDERR_KEEP = 4096;
 const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+/** How gemini-cli 0.68.0 prefixes an API error it prints (parseAndFormatApiError). */
+const API_ERROR = "[API Error:";
+/** gemini-cli 0.68.0 names HTTP 429 by its status, RESOURCE_EXHAUSTED; the shared pattern covers the rest. */
+const GEMINI_RATE_LIMIT = new RegExp(`${RATE_LIMIT_TEXT.source}|\\bRESOURCE_EXHAUSTED\\b`, "i");
 const KILL_GRACE_MS = 5000;
 
 const TOOL_KINDS: Record<string, ActionKind> = { edit: "file_edit", delete: "file_write", execute: "shell", read: "file_read", fetch: "web" };
@@ -372,6 +376,8 @@ class GeminiRun {
   private stderrTail = "";
   /** The latest cumulative USD cost from an ACP usage_update, if any. */
   private costUsd: number | undefined;
+  /** At most one rate limit per run: Gemini may print the API error and then fail the prompt with it. */
+  private rateLimited = false;
   private closing: Promise<void> | null = null;
 
   constructor(
@@ -441,7 +447,13 @@ class GeminiRun {
       await this.setup("session/set_mode", { sessionId: this.sessionId, modeId: DEFAULT_MODE });
     }
     this.inTurn = true;
-    const res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
+    let res: unknown;
+    try {
+      res = await this.peer.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: this.o.prompt }] });
+    } catch (e) {
+      this.noteRateLimit(errorMessage(e));
+      throw e;
+    }
     this.inTurn = false;
     if (this.costUsd !== undefined) this.o.emit({ type: "usage", costUsd: this.costUsd });
     const stopReason = isRecord(res) && typeof res.stopReason === "string" ? res.stopReason : "unknown";
@@ -524,7 +536,11 @@ class GeminiRun {
     const u = params.update;
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        if (isRecord(u.content) && u.content.type === "text" && typeof u.content.text === "string") this.text(u.content.text);
+        if (isRecord(u.content) && u.content.type === "text" && typeof u.content.text === "string") {
+          // Only Gemini's own API error text counts, never prose that happens to mention a rate limit.
+          if (u.content.text.includes(API_ERROR)) this.noteRateLimit(u.content.text);
+          this.text(u.content.text);
+        }
         return;
       case "tool_call":
       case "tool_call_update":
@@ -577,6 +593,13 @@ class GeminiRun {
    * An open private key block is never cut: it is held until its END marker arrives, and only the end of the run
    * flushes one still open, as REDACTED. One that reaches MAX_HELD_BLOCK goes out as REDACTED at once.
    */
+  /** Emits rate_limited once when `message` reads as a rate limit (a heuristic, so the count is an estimate). */
+  private noteRateLimit(message: string): void {
+    if (this.rateLimited || !GEMINI_RATE_LIMIT.test(message)) return;
+    this.rateLimited = true;
+    this.o.emit({ type: "rate_limited" });
+  }
+
   private text(t: string): void {
     this.pendingText += t;
     while (this.pendingText.length >= MAX_HELD_BLOCK) {

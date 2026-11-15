@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DecisionCard } from "../components/DecisionCard";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
 import { BoardView } from "../views/BoardView";
+import { CapacityPanel } from "../views/CapacityPanel";
 import { ConnectionEditor } from "../views/ConnectionEditor";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { ActivityBar } from "./ActivityBar";
@@ -16,7 +17,9 @@ import { StatusBar } from "./StatusBar";
 import type { ViewId } from "./views";
 
 // Stable registry: dockview keys components by name, so this object must not change between renders.
-const PANELS = { board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor };
+const PANELS = {
+  board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
+};
 
 type Props = { model: WorkbenchModel };
 

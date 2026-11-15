@@ -6,11 +6,13 @@ import type {
   Board,
   Card,
   CatalogEntry,
+  CapacityReport,
   CiStatus,
   Connection,
   ConnectionKind,
   ConnectionProvider,
   GitHubOverview,
+  HardwareInfo,
   LedgerEntry,
   PendingAgentAction,
   Project,
@@ -97,6 +99,10 @@ export type Status = {
   runningAgents: number;
   pendingDecisions: number;
   todayCostUsd: number;
+  /** Over runs started this calendar month (the server's local time). */
+  monthCostUsd: number;
+  /** The summed monthly budgets of the enabled model connections; null when none has one. */
+  monthlyBudgetUsd: number | null;
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
   /** null when GitHub is not connected. */
   ci: CiStatus | null;
@@ -149,6 +155,8 @@ export const api = {
     request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST" }),
   getStatus: () => request<Status>("/api/status"),
   getGitHubOverview: () => request<GitHubOverview>("/api/github/overview"),
+  getCapacity: () => request<CapacityReport>("/api/capacity"),
+  detectHardware: () => request<HardwareInfo>("/api/capacity/detect", { method: "POST" }),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),

@@ -4,6 +4,7 @@ export type FakeStep =
   | { propose: ProposedAction; result?: { ok: boolean; output: string } }
   | { message: string }
   | { usage: Omit<Extract<AdapterEvent, { type: "usage" }>, "type"> }
+  | { rateLimited: Omit<Extract<AdapterEvent, { type: "rate_limited" }>, "type"> }
   | { throw: string };
 
 /**
@@ -21,6 +22,10 @@ export class FakeAdapter implements AgentAdapter {
       if ("throw" in step) throw new Error(step.throw);
       if ("message" in step) {
         o.emit({ type: "message", text: step.message });
+        continue;
+      }
+      if ("rateLimited" in step) {
+        o.emit({ type: "rate_limited", ...step.rateLimited });
         continue;
       }
       if ("usage" in step) {

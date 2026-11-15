@@ -37,6 +37,12 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         "UPDATE agent_runs SET status = ?, cost_usd = ?, input_tokens = ?, output_tokens = ?, error = ?, finished_at = ? WHERE id = ?",
       ).run(p.status, p.costUsd, p.inputTokens ?? null, p.outputTokens ?? null, p.error, e.ts, p.runId);
       break;
+    case "agent.rate_limited":
+      // The adapter comes from the run; an entry for an unknown run projects nothing.
+      db.prepare("INSERT INTO rate_limits (run_id, adapter, at, retry_after_s) SELECT id, adapter, ?, ? FROM agent_runs WHERE id = ?").run(
+        e.ts, p.retryAfterS ?? null, p.runId,
+      );
+      break;
     case "agent.action.requested":
       db.prepare(
         `INSERT INTO agent_actions (id, run_id, kind, tool, summary, input, status, decided_by, reason, output, requested_at, decided_at)
@@ -114,7 +120,7 @@ function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
-const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings", "connections"];
+const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits"];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
 export function rebuildAllProjections(db: Db, ledger: Ledger, opts: { beforeSeq?: number } = {}): void {
@@ -206,6 +212,8 @@ export type WorkspaceCounts = {
   pendingDecisions: number;
   /** Sum of cost over runs started on the local calendar day of `now`; a running run has no cost yet. */
   todayCostUsd: number;
+  /** The same over runs started in the local calendar month of `now`. */
+  monthCostUsd: number;
   /** Enabled connections, and those of them whose last test failed. */
   connections: { enabled: number; failed: number };
 };
@@ -214,14 +222,18 @@ export type WorkspaceCounts = {
 export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts {
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const nextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
-  const cost = db
-    .prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM agent_runs WHERE started_at >= ? AND started_at < ?")
-    .get(dayStart.toISOString(), nextDay.toISOString()) as { total: number };
+  const cost = (from: Date, to: Date) =>
+    (db
+      .prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM agent_runs WHERE started_at >= ? AND started_at < ?")
+      .get(from.toISOString(), to.toISOString()) as { total: number }).total;
   return {
     runningAgents: count("SELECT COUNT(*) AS n FROM agent_runs WHERE status = 'running'"),
     pendingDecisions: count("SELECT COUNT(*) AS n FROM agent_actions WHERE status = 'pending'"),
-    todayCostUsd: cost.total,
+    todayCostUsd: cost(dayStart, nextDay),
+    monthCostUsd: cost(monthStart, nextMonth),
     connections: {
       enabled: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1"),
       failed: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1 AND status_state = 'failed'"),

@@ -273,7 +273,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -289,7 +289,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     await vi.waitFor(async () => {
       expect((await json<{ run: AgentRun }>(get(s, `/api/runs/${run.id}`))).run.status).toBe("completed");
     }, { timeout: 5000, interval: 25 });
-    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25 });
+    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25, monthCostUsd: 0.25 });
 
     await addClaude(s);
     expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });

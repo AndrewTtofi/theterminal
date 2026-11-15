@@ -196,3 +196,19 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .github-draft { margin-left: 6px; padding: 0 4px; border: 1px solid var(--muted); border-radius: 3px; font-size: 10px; color: var(--muted); }
 .github-branch { color: var(--muted); }
 .github-run-failing { color: var(--attention); }
+.capacity-side { padding: 8px 12px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.capacity-side h3 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; color: var(--muted); }
+.capacity-side ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; align-self: stretch; }
+.capacity-side .empty { padding: 0; }
+.capacity-spend { margin: 2px 0 0; }
+.capacity-bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.capacity-bar-fill { height: 100%; background: var(--accent); }
+.capacity-bar-fill.attention { background: var(--attention); }
+.capacity-error { margin: 0; color: var(--attention); }
+.capacity-panel { padding: 8px 12px; overflow: auto; }
+.capacity-table { border-collapse: collapse; width: 100%; }
+.capacity-table th, .capacity-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.capacity-table th { color: var(--muted); font-weight: normal; }
+.capacity-footer { color: var(--muted); margin: 8px 0 0; }
+.status-item .attention { color: var(--attention); }
+abbr[title] { text-decoration: underline dotted; cursor: help; }

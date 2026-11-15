@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
+import { RATE_LIMIT_TEXT, retryAfterSeconds, type AdapterStartOptions, type AgentAdapter, type ProposedAction } from "../adapter.js";
 import { CHILD_ENV_ALLOWLIST, CHILD_ENV_ALLOWLIST_PREFIXES, WIN32_ALLOWLIST, buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { heldTailStart, redact } from "../redact.js";
@@ -355,6 +355,8 @@ class CodexSession {
   private turnId: string | undefined;
   /** The latest cumulative token counts Codex reported for our thread. */
   private tokenTotal: { inputTokens: unknown; outputTokens: unknown } | undefined;
+  /** Whether a rate limit was reported for the current error, so the failed turn that follows is not counted again. */
+  private rateLimitSeen = false;
   /** Set once the run is ending: from then on every approval is declined. */
   private stopping = false;
   private settle!: (r: StartResult) => void;
@@ -566,11 +568,14 @@ class CodexSession {
         this.reportUsage();
         if (turn.status === "completed") return this.end({ status: "completed" });
         const error = isRecord(turn.error) ? str(turn.error.message) : "";
+        if (!this.rateLimitSeen) this.noteRateLimit(error);
         return this.fail(redact(error || `Codex turn ${turn.status}`));
       }
       case P.ERROR: {
-        if (params.willRetry === true) return;
         const error = isRecord(params.error) ? str(params.error.message) : "";
+        // A rate limit Codex retries is still one the provider imposed: each such notification is counted.
+        this.rateLimitSeen = this.noteRateLimit(error);
+        if (params.willRetry === true) return;
         return this.fail(redact(error || "Codex reported an error"));
       }
     }
@@ -632,6 +637,17 @@ class CodexSession {
     };
     this.o.recordDenied(action, "ran without approval").catch(() => {});
     this.fail(`Codex ran ${label} without approval`);
+  }
+
+  /**
+   * Emits rate_limited when an error message reads as a rate limit (a heuristic: Codex's `account/rateLimits/*`
+   * figures are not read yet), with the wait it names. Returns whether it did.
+   */
+  private noteRateLimit(message: string): boolean {
+    if (!RATE_LIMIT_TEXT.test(message)) return false;
+    const retryAfterS = retryAfterSeconds(message);
+    this.o.emit(retryAfterS === undefined ? { type: "rate_limited" } : { type: "rate_limited", retryAfterS });
+    return true;
   }
 
   private fail(error: string): void {

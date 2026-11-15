@@ -83,6 +83,7 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
     github: { overview: null, error: null, refresh: vi.fn() },
+    capacity: { report: null, error: null, refresh: vi.fn() },
     ...over,
   };
 }
@@ -229,14 +230,24 @@ describe("Workbench", () => {
     expect(container.querySelector('[data-panel="connection:new:github"]')).toBeTruthy();
   });
 
-  it("loads the GitHub view when it is selected, and still shows the placeholder for Capacity", async () => {
+  it("loads the GitHub view when it is selected", async () => {
     const github = { overview: null, error: null, refresh: vi.fn() };
     render(<Workbench model={model({ github })} />);
     await userEvent.click(view("GitHub"));
     expect(github.refresh).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Loading…")).toBeTruthy();
+  });
+
+  it("loads the Capacity view when it is selected, and opens the Capacity tab from it", async () => {
+    const capacity = { report: { sources: [], hardware: null, generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
+    const { container } = render(<Workbench model={model({ capacity })} />);
+    expect(container.querySelector('[data-panel="capacity"]')).toBeNull();
     await userEvent.click(view("Capacity"));
-    expect(screen.getByText("Arrives with Plan 5B.")).toBeTruthy();
+    expect(capacity.refresh).toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Open capacity" }));
+    const tab = container.querySelector('[data-panel="capacity"]');
+    expect(tab?.getAttribute("data-active")).toBe("true");
+    expect(within(tab as HTMLElement).getByRole("table")).toBeTruthy();
   });
 
   it("opens the Connections view from the GitHub view when GitHub is not connected", async () => {

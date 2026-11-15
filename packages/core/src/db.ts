@@ -89,6 +89,13 @@ const MIGRATIONS = [
     updated_at TEXT NOT NULL
   );
   CREATE INDEX connections_provider ON connections (provider);`,
+  `CREATE TABLE rate_limits (
+    run_id TEXT NOT NULL,
+    adapter TEXT NOT NULL,
+    at TEXT NOT NULL,
+    retry_after_s INTEGER
+  );
+  CREATE INDEX rate_limits_at ON rate_limits (at);`,
 ];
 
 export type Db = Database.Database;

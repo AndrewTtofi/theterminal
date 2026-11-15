@@ -82,7 +82,7 @@ beforeEach(() => {
   h.onEntry = undefined;
   h.subs.clear();
   m.getStatus.mockResolvedValue({
-    runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0,
+    runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
     connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
   });
   m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });

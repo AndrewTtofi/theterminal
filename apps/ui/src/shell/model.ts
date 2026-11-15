@@ -5,6 +5,7 @@ import type {
   AgentRun,
   AuthMode,
   Board,
+  CapacityReport,
   GitHubOverview,
   LedgerEntry,
   PendingAgentAction,
@@ -56,6 +57,9 @@ export type WorkbenchModel = {
 
   /** The GitHub view's data: the last overview, or the error code of the last failed load. */
   github: { overview: GitHubOverview | null; error: string | null; refresh: () => void };
+
+  /** The Capacity view's data: the last report, or the error code of the last failed load. */
+  capacity: { report: CapacityReport | null; error: string | null; refresh: () => void };
 };
 
 export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };

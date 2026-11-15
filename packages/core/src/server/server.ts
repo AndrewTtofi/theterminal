@@ -1,7 +1,10 @@
+import { execFile as nodeExecFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
+import { arch, cpus, release, totalmem } from "node:os";
+import { promisify } from "node:util";
 import Fastify from "fastify";
 import { openDatabase } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
@@ -13,6 +16,7 @@ import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerGitHubRoutes } from "./github-routes.js";
+import { registerCapacityRoutes } from "./capacity-routes.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -23,7 +27,8 @@ import { mintCloudGrant } from "../connections/cloud/grant.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type AdapterId, type HardwareInfo, type Provider } from "@theterminal/shared";
+import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
@@ -315,6 +320,31 @@ export function selectSts(env: NodeJS.ProcessEnv = process.env, injected?: StsCa
   return realSts;
 }
 
+const execFileAsync = promisify(nodeExecFile);
+const execFileUtf8: ExecFile = async (file, args, opts) => {
+  const { stdout } = await execFileAsync(file, args, { ...opts, encoding: "utf8" });
+  return { stdout };
+};
+
+/** Detects this computer with the real programs (see detectHardware). */
+const realHardware = (): Promise<HardwareInfo> =>
+  detectHardware({
+    execFile: execFileUtf8, platform: process.platform, arch: arch(), totalmem, cpus, release,
+    which: (cmd) => whichOnPath(cmd), env: process.env,
+  });
+/** Tests only: the fixed machine, stamped with the time of each detection. */
+const fakeDetector = async (): Promise<HardwareInfo> => ({ ...fakeHardware, detectedAt: new Date().toISOString() });
+
+/**
+ * The hardware detector: the injected one, else the real programs. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HARDWARE=1 selects a fixed fake machine, so tests never depend on a runner's GPU; it is ignored otherwise.
+ */
+export function selectHardware(env: NodeJS.ProcessEnv = process.env, injected?: () => Promise<HardwareInfo>): () => Promise<HardwareInfo> {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HARDWARE === "1") return fakeDetector;
+  return realHardware;
+}
+
 /** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
 const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
@@ -335,6 +365,8 @@ export async function createServer(opts: {
   fetch?: typeof fetch;
   /** Tests only: the STS caller AWS tests and grants use. Default: the AWS SDK (see selectSts). */
   sts?: StsCaller;
+  /** Detects this computer's hardware. Default: the real programs (see selectHardware). */
+  hardware?: () => Promise<HardwareInfo>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -417,10 +449,11 @@ export async function createServer(opts: {
     registerAuth(app, { token, port: () => boundPort });
     registerLedgerStream(app, ledger);
     registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+    const settings = new ProviderSettings(db, ledger);
     registerAgentRoutes(app, {
       db,
       runner,
-      settings: new ProviderSettings(db, ledger),
+      settings,
       adapters: ADAPTERS.filter((id) => adapters[id] !== undefined),
       // As a run would locate it: a test fixture, else the bundled program, else (only then) PATH.
       available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
@@ -432,6 +465,9 @@ export async function createServer(opts: {
       ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
     });
     registerGitHubRoutes(app, { github });
+    registerCapacityRoutes(app, {
+      db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
+    });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 

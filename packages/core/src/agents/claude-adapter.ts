@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { query as sdkQuery, type HookCallback, type HookJSONOutput, type McpServerConfig, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ActionKind } from "@theterminal/shared";
-import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "./adapter.js";
+import { RATE_LIMIT_TEXT, type AdapterStartOptions, type AgentAdapter, type ProposedAction, type RunCredentials } from "./adapter.js";
 import { MCP_SERVER_NAME, type McpServerSpec } from "../connections/mcp.js";
 import { redact } from "./redact.js";
 import { buildChildEnv } from "./child-env.js";
@@ -284,8 +284,9 @@ export class ClaudeAdapter implements AgentAdapter {
     o.signal.addEventListener("abort", stop, { once: true });
 
     let result: StartResult | null = null;
+    const seen = { rateLimited: false };
     try {
-      for await (const m of q) result = this.handle(m, o) ?? result;
+      for await (const m of q) result = this.handle(m, o, seen) ?? result;
     } catch (e) {
       if (!o.signal.aborted && failure === null) failure = redact(errorMessage(e));
     } finally {
@@ -296,8 +297,27 @@ export class ClaudeAdapter implements AgentAdapter {
     return result ?? { status: "failed", error: "Claude ended without a result" };
   }
 
-  /** Emits what a message carries; returns the run outcome for a result message. */
-  private handle(m: SDKMessage, o: AdapterStartOptions): StartResult | null {
+  /**
+   * Emits what a message carries; returns the run outcome for a result message. Rate limits come from the SDK's typed
+   * signals (a rejected `rate_limit_event`, an `api_retry` for `rate_limit`); the text of an error result is read only
+   * when neither was seen in this run (`seen`).
+   */
+  private handle(m: SDKMessage, o: AdapterStartOptions, seen: { rateLimited: boolean }): StartResult | null {
+    const rateLimited = (retryAfterS?: number) => {
+      seen.rateLimited = true;
+      o.emit(retryAfterS === undefined ? { type: "rate_limited" } : { type: "rate_limited", retryAfterS });
+    };
+    if (m.type === "rate_limit_event") {
+      if (isRecord(m.rate_limit_info) && m.rate_limit_info.status === "rejected") rateLimited();
+      return null;
+    }
+    if (m.type === "system" && m.subtype === "api_retry") {
+      if (m.error === "rate_limit") {
+        const delay = m.retry_delay_ms;
+        rateLimited(typeof delay === "number" && Number.isFinite(delay) && delay >= 0 ? Math.round(delay / 1000) : undefined);
+      }
+      return null;
+    }
     if (m.type === "assistant") {
       for (const block of m.message.content) {
         if (block.type === "text" && block.text) o.emit({ type: "message", text: block.text });
@@ -315,6 +335,7 @@ export class ClaudeAdapter implements AgentAdapter {
     if (Object.keys(event).length > 0) o.emit({ type: "usage", ...event });
     if (m.subtype === "success" && !m.is_error) return { status: "completed" };
     const detail = m.subtype === "success" ? m.result : m.errors.join("; ");
+    if (!seen.rateLimited && m.subtype !== "error_max_turns" && typeof detail === "string" && RATE_LIMIT_TEXT.test(detail)) rateLimited();
     return { status: "failed", error: redact(detail || m.subtype) };
   }
 

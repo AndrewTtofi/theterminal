@@ -13,6 +13,18 @@ const entry = (seq: number, type: LedgerEntry["type"], payload: unknown, actor: 
   actor,
 });
 
+describe("describeEntry rate limits", () => {
+  it("describes an observed rate limit, with the wait when there is one", () => {
+    const agent = { kind: "agent", id: "abcdef1234567890" } as const;
+    expect(describeEntry(entry(1, "agent.rate_limited", { runId: "abcdef1234567890", retryAfterS: null }, agent))).toBe(
+      "Agent abcdef12 was rate-limited by the provider",
+    );
+    expect(describeEntry(entry(2, "agent.rate_limited", { runId: "abcdef1234567890", retryAfterS: 30 }, agent))).toBe(
+      "Agent abcdef12 was rate-limited by the provider; retry after 30 s",
+    );
+  });
+});
+
 describe("describeEntry connections", () => {
   const c = { connectionId: "c1", name: "Work key" };
   it("describes connection events", () => {

@@ -500,6 +500,43 @@ describe("ClaudeAdapter", () => {
     expect(h.events).toEqual([{ type: "usage", costUsd: 0.5 }]);
   });
 
+  describe("rate limits", () => {
+    const start = async (steps: Step[]) => {
+      const h = harness();
+      const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: fakeQuery(steps).fn, apiKey: () => FAKE_KEY }).start(h.opts);
+      return { r, limited: h.events.filter((e) => e.type === "rate_limited") };
+    };
+    const rateEvent = (status: string) => ({ msg: { type: "rate_limit_event", rate_limit_info: { status, rateLimitType: "five_hour" }, uuid: "u", session_id: "s" } });
+    const retry = (error: string, delayMs: number) => ({
+      msg: { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: delayMs, error_status: 429, error, uuid: "u", session_id: "s" },
+    });
+
+    it("emits rate_limited for a rejected rate_limit_event and ignores allowed ones", async () => {
+      const { limited } = await start([rateEvent("allowed"), rateEvent("allowed_warning"), rateEvent("rejected"), success(0)]);
+      expect(limited).toEqual([{ type: "rate_limited" }]);
+    });
+
+    it("emits rate_limited with the delay in whole seconds for an api_retry caused by a rate limit, and ignores other retries", async () => {
+      const { limited } = await start([retry("overloaded", 4000), retry("rate_limit", 12_400), success(0)]);
+      expect(limited).toEqual([{ type: "rate_limited", retryAfterS: 12 }]);
+    });
+
+    it("falls back to the error text of a result: an is_error result saying 429 rate limit is a rate limit", async () => {
+      const { r, limited } = await start([{ msg: { type: "result", subtype: "success", is_error: true, result: "API Error: 429 rate limit exceeded", total_cost_usd: 0 } }]);
+      expect(r.status).toBe("failed");
+      expect(limited).toEqual([{ type: "rate_limited" }]);
+    });
+
+    it("does not count the fallback again after a typed signal, nor treat error_max_turns or other errors as rate limits", async () => {
+      const typed = await start([rateEvent("rejected"), { msg: { type: "result", subtype: "success", is_error: true, result: "429 rate limit", total_cost_usd: 0 } }]);
+      expect(typed.limited).toHaveLength(1);
+      const turns = await start([{ msg: { type: "result", subtype: "error_max_turns", is_error: true, total_cost_usd: 0, errors: ["rate limit of turns reached"] } }]);
+      expect(turns.limited).toEqual([]);
+      const other = await start([{ msg: { type: "result", subtype: "success", is_error: true, result: "invalid request", total_cost_usd: 0 } }]);
+      expect(other.limited).toEqual([]);
+    });
+  });
+
   it("fails with a redacted error when the SDK throws", async () => {
     const q = fakeQuery([{ msg: { type: "system", subtype: "init" } }]);
     const throwing = ((p: Parameters<typeof sdkQuery>[0]) => {

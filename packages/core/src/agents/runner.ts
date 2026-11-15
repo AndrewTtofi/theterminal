@@ -621,6 +621,13 @@ export class AgentRunner {
           };
         });
         if (!committed) fail(NOT_ALLOWED_RESULT);
+      } else if (e.type === "rate_limited") {
+        const r = e.retryAfterS; // read once
+        const retryAfterS = typeof r === "number" && Number.isSafeInteger(r) && r >= 0 ? r : null;
+        commitEvent(db, ledger, () => ({
+          event: { projectId: s.projectId, actor: agent, type: "agent.rate_limited", payload: { runId, retryAfterS } },
+          result: () => undefined,
+        }));
       } else if (e.type === "usage") {
         const { costUsd, inputTokens, outputTokens } = e; // each read once
         s.costUsd = addUsage(s.costUsd, costUsd);

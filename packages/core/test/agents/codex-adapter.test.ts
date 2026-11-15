@@ -429,6 +429,24 @@ describe("CodexAdapter (fake app-server)", () => {
     expect(await result).toEqual({ status: "failed", error: "model overloaded" });
   });
 
+  it("emits rate_limited with the retry delay when the turn fails on a rate limit", async () => {
+    script([{ fail: "Rate limit reached, retry after 12 seconds" }]);
+    const { result, events } = run(make());
+    expect((await result).status).toBe("failed");
+    expect(events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited", retryAfterS: 12 }]);
+  });
+
+  it("emits rate_limited without a delay for a 429 error, and nothing for other errors", async () => {
+    script([{ fail: "unexpected status 429 Too Many Requests" }]);
+    const limited = run(make());
+    await limited.result;
+    expect(limited.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
+    script([{ fail: "model overloaded" }]);
+    const other = run(make());
+    await other.result;
+    expect(other.events.filter((e) => e.type === "rate_limited")).toEqual([]);
+  });
+
   it("fails when Codex exits mid-turn, with a short stderr tail", async () => {
     script([{ exit: 3, stderr: `${"noise ".repeat(200)}fatal: it broke` }]);
     const { result } = run(make());
