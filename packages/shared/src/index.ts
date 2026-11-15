@@ -4,3 +4,6 @@ export * from "./agents.js";
 export * from "./connections.js";
 export * from "./github.js";
 export * from "./capacity.js";
+export * from "./text.js";
+export * from "./intake.js";
+export * from "./gates.js";
