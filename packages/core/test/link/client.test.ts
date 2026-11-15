@@ -7,8 +7,9 @@ import type { FastifyInstance } from "fastify";
 import type { LinkIdentity } from "../../src/link/identity.js";
 import { LinkListener } from "../../src/link/listener.js";
 import {
-  LinkClient, LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError, type Peer,
+  LinkClient, LinkProtocolError, MAX_FRAME_BYTES, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError, type Peer,
 } from "../../src/link/client.js";
+import { MAX_FRAME_BYTES as MIRROR_FRAME_BYTES } from "../../src/link/mirror.js";
 import { holdPort, newIdentity, tlsServer } from "./helpers.js";
 
 let server: LinkIdentity;
@@ -54,6 +55,21 @@ function routes(app: FastifyInstance): void {
     reply.raw.writeHead(200, { "content-type": "application/x-ndjson" });
     reply.raw.write('{"n":1}\n');
     setTimeout(() => reply.raw.socket?.destroy(), 20);
+  });
+  // One line just over the mirrored frame cap, sent in pieces with no newline, then one at the cap exactly.
+  app.get("/t/oversize", (_req, reply) => {
+    reply.hijack();
+    reply.raw.writeHead(200, { "content-type": "application/x-ndjson" });
+    const piece = Buffer.alloc(65_536, 0x61);
+    for (let i = 0; i < 4; i++) reply.raw.write(piece);
+    reply.raw.write("a");
+    setTimeout(() => reply.raw.end(), 2000);
+  });
+  app.get("/t/atcap", (_req, reply) => {
+    reply.hijack();
+    reply.raw.writeHead(200, { "content-type": "application/x-ndjson" });
+    reply.raw.write(`${"b".repeat(262_144)}\n\n`);
+    reply.raw.end();
   });
   app.get("/t/big", (_req, reply) => {
     reply.hijack();
@@ -173,6 +189,20 @@ describe("LinkClient.stream", () => {
     await expect(client.stream(peerAt(port, other.publicKeyDer), "/t/stream", async () => undefined, new AbortController().signal)).rejects.toBeInstanceOf(
       MachineKeyMismatchError,
     );
+  });
+
+  it("caps each line at the mirrored frame cap, before its newline arrives, and skips blank heartbeat lines", async () => {
+    const port = await startListener();
+    const client = new LinkClient({ identity: me });
+    expect(MAX_FRAME_BYTES).toBe(MIRROR_FRAME_BYTES);
+    const started = Date.now();
+    await expect(client.stream(peerAt(port), "/t/oversize", async () => undefined, new AbortController().signal)).rejects.toBeInstanceOf(
+      LinkProtocolError,
+    );
+    expect(Date.now() - started).toBeLessThan(2000);
+    const lines: string[] = [];
+    await client.stream(peerAt(port), "/t/atcap", async (l) => void lines.push(l), new AbortController().signal);
+    expect(lines.map((l) => l.length)).toEqual([262_144]);
   });
 
   it("resolves when the caller aborts", async () => {

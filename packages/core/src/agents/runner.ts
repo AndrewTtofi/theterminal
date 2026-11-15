@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
 import { pairValueSecrets, type McpServerSpec } from "../connections/mcp.js";
-import { UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
+import { ConflictError, UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
 import { commitEvent } from "../events/commit.js";
@@ -88,6 +88,10 @@ export class RemoteRunError extends Error {
     this.name = "RemoteRunError";
   }
 }
+
+/** A run id: what a path, a branch name (`run/<id>`) and a linked machine's request may carry. */
+export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
+const runIdSchema = z.string().regex(RUN_ID_PATTERN);
 
 /** How long all of a run's cloud grants together may take to mint, by default. */
 export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
@@ -253,6 +257,8 @@ export class AgentRunner {
   private readonly minted = new Set<string>();
   /** Set once shutdown() begins; no run may start after that. */
   private closing = false;
+  /** Given run ids whose start is in progress, so two starts can never take one id. */
+  private readonly reserved = new Set<string>();
 
   constructor(private readonly deps: AgentRunnerDeps) {
     this.newId = deps.newId ?? (() => randomUUID());
@@ -269,9 +275,35 @@ export class AgentRunner {
     return (s) => this.scrubUser(paths(s));
   }
 
+  /**
+   * Starts a run. `runId` is given by a linked machine that asked for the run (it names the run on both machines):
+   * it must be an id (RUN_ID_PATTERN, else ZodError) that no run has (ConflictError); by default a new id is made.
+   * `foreignCard` says `cardId` names a card on that machine, so it is recorded without a local card to check.
+   */
   async start(
     actor: Actor,
-    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[] },
+    input: {
+      projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; runId?: string;
+      foreignCard?: boolean;
+    },
+  ): Promise<AgentRun> {
+    if (input.runId === undefined) return this.startRun(actor, input, this.newId());
+    const runId = runIdSchema.parse(input.runId);
+    if (this.reserved.has(runId) || this.deps.db.prepare("SELECT 1 FROM agent_runs WHERE id = ?").get(runId)) {
+      throw new ConflictError("a run with this id already exists");
+    }
+    this.reserved.add(runId);
+    try {
+      return await this.startRun(actor, input, runId);
+    } finally {
+      this.reserved.delete(runId);
+    }
+  }
+
+  private async startRun(
+    actor: Actor,
+    input: { projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean },
+    runId: string,
   ): Promise<AgentRun> {
     const { db, ledger, worktrees } = this.deps;
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(input.projectId)) {
@@ -283,7 +315,7 @@ export class AgentRunner {
     if (!adapter) throw new AdapterUnavailableError(input.adapter);
     const prompt = promptSchema.parse(input.prompt);
     const cardId = input.cardId ?? null;
-    if (cardId !== null && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
+    if (cardId !== null && input.foreignCard !== true && !db.prepare("SELECT 1 FROM cards WHERE id = ? AND project_id = ?").get(cardId, input.projectId)) {
       throw new NotFoundError("card", cardId);
     }
     // Every selected connection is checked before anything is minted or created; errors propagate as they are.
@@ -317,7 +349,6 @@ export class AgentRunner {
     // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
     const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;
 
-    const runId = this.newId();
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
     if (this.closing) throw new ShuttingDownError(); // shutdown began while the worktree was created
     const scrub = this.runScrubber(wt.absPath);

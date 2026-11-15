@@ -220,6 +220,11 @@ export class LinkService {
     }
   }
 
+  /** This computer's identity, to sign what it sends a paired machine (mirrored entries); null while unavailable. */
+  signer(): LinkIdentity | null {
+    return this.state === "ok" ? this.identity : null;
+  }
+
   identityState(): "ok" | "unavailable" {
     return this.state;
   }

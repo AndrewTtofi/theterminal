@@ -3,10 +3,11 @@ import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import { PROVIDER_ACKS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter, ProposedAction, RunCredentials } from "../../src/agents/adapter.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
-import { ConnectionService, UnsupportedConnectionError } from "../../src/connections/service.js";
+import { ConflictError, ConnectionService, UnsupportedConnectionError } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
@@ -998,6 +999,40 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
       UnsupportedConnectionError,
     );
     noRun();
+  });
+});
+
+describe("AgentRunner.start with a given run id", () => {
+  it("records the given id, refuses it a second time with ConflictError, and refuses an id that is not an id", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-remote-1" });
+    expect(run.id).toBe("run-remote-1");
+    expect(run.worktree).toBe(`projects/${projectId}/worktrees/run-remote-1`);
+    await untilFinished("run-remote-1");
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-remote-1" })).rejects.toBeInstanceOf(ConflictError);
+    for (const bad of ["../x", "", "a".repeat(101), "a b", "run\u0000x"]) {
+      await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: bad }), bad).rejects.toBeInstanceOf(ZodError);
+    }
+    expect(ledger.list().filter((e) => e.type === "agent.started")).toHaveLength(1);
+  });
+
+  it("refuses the same id for two starts at once, before either creates anything", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const both = await Promise.allSettled([
+      runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-twice" }),
+      runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-twice" }),
+    ]);
+    expect(both.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect((both.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+    await untilFinished("run-twice");
+  });
+
+  it("records a card id that names a card on the requesting machine when the start says so", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "card-elsewhere" })).rejects.toBeInstanceOf(NotFoundError);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "card-elsewhere", runId: "run-c", foreignCard: true });
+    expect(run.cardId).toBe("card-elsewhere");
+    await untilFinished("run-c");
   });
 });
 

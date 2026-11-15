@@ -3,10 +3,10 @@ import https from "node:https";
 import tls, { type TLSSocket } from "node:tls";
 import type { ClientRequest, IncomingMessage, OutgoingHttpHeaders } from "node:http";
 import { createReadStream, createWriteStream, rmSync, statSync } from "node:fs";
-import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import { machineAddressSchema } from "@theterminal/shared";
 import type { LinkIdentity } from "./identity.js";
+import { MAX_FRAME_BYTES as MIRROR_FRAME_BYTES, MirrorFrameError, NdjsonLines } from "./mirror.js";
 
 /** The machine did not answer: refused, timed out, or the connection was cut. Nothing about the cause is kept. */
 export class MachineUnreachableError extends Error {
@@ -64,9 +64,10 @@ export class LinkProtocolError extends Error {
 
 export type Peer = { machineId: string; address: string; publicKeyDer: Buffer };
 
-/** JSON replies, refusal bodies and each NDJSON line are capped at this many bytes. */
+/** JSON replies and refusal bodies are capped at this many bytes. */
 export const MAX_JSON_BYTES = 1024 * 1024;
-export const MAX_FRAME_BYTES = 1024 * 1024;
+/** Each NDJSON line of a stream: the mirrored frame cap, enforced before a line's newline arrives (NdjsonLines). */
+export const MAX_FRAME_BYTES = MIRROR_FRAME_BYTES;
 const DEFAULT_TIMEOUT_MS = 10_000;
 /** How long a stream may stay silent before it is treated as cut (the caller then reconnects). */
 const DEFAULT_STREAM_IDLE_MS = 120_000;
@@ -177,29 +178,30 @@ export class LinkClient {
     res.socket.setTimeout(this.streamIdleMs);
     const abort = () => req.destroy();
     signal.addEventListener("abort", abort, { once: true });
-    const decoder = new StringDecoder("utf8");
+    // Lines past the cap or not UTF-8 are refused as they arrive; blank lines (the worker's heartbeat) are skipped.
+    const splitter = new NdjsonLines();
+    const split = (fn: () => string[] | void): string[] => {
+      try {
+        return fn() ?? [];
+      } catch (err) {
+        if (err instanceof MirrorFrameError) throw new LinkProtocolError();
+        throw err;
+      }
+    };
     const deliver = async (line: string) => {
-      if (Buffer.byteLength(line, "utf8") > MAX_FRAME_BYTES) throw new LinkProtocolError();
-      if (line.length === 0) return;
       try {
         await onFrame(line);
       } catch (err) {
         throw new CallerError(err);
       }
     };
-    let pending = "";
     try {
       try {
         for await (const chunk of res as AsyncIterable<Buffer>) {
-          pending += decoder.write(chunk);
-          let nl: number;
-          while ((nl = pending.indexOf("\n")) >= 0) {
-            const line = pending.slice(0, nl).replace(/\r$/, "");
-            pending = pending.slice(nl + 1);
+          for (const line of split(() => splitter.push(chunk))) {
             await deliver(line);
             if (signal.aborted) return;
           }
-          if (Buffer.byteLength(pending, "utf8") > MAX_FRAME_BYTES) throw new LinkProtocolError();
         }
       } catch (err) {
         if (signal.aborted) return;
@@ -210,11 +212,8 @@ export class LinkClient {
       }
       if (signal.aborted) return;
       if (!res.complete) throw new MachineUnreachableError(peer.machineId);
-      try {
-        await deliver((pending + decoder.end()).replace(/\r$/, ""));
-      } catch (err) {
-        throw err instanceof CallerError ? err.cause : err;
-      }
+      // A clean end must not leave half a line behind.
+      split(() => splitter.end());
     } finally {
       signal.removeEventListener("abort", abort);
     }

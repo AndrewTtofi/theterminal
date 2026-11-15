@@ -517,6 +517,11 @@ export async function createServer(opts: {
         adapters: () => ADAPTERS.filter((id) => adapters[id] !== undefined && (id === "fake" || programAvailable(id))),
         connections,
       },
+      // Read when the listener starts (link.load(), last), when the runner and the rest below exist.
+      runs: () => ({
+        runner, worktrees, dataDir: opts.dataDir,
+        changes: { db, dataDir: opts.dataDir, worktrees, clean, settling: (id: string) => runner.settling(id) },
+      }),
     });
     link = wired.link;
     const linkService = link;

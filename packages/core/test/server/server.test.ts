@@ -16,7 +16,9 @@ import { Ledger } from "../../src/ledger/ledger.js";
 import { LinkService } from "../../src/link/service.js";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { LinkListener } from "../../src/link/listener.js";
-import { LinkClient } from "../../src/link/client.js";
+import { LinkClient, RemoteRefusedError } from "../../src/link/client.js";
+import { commitEvent } from "../../src/events/commit.js";
+import { getSetting } from "../../src/events/projections.js";
 import { LinkIdentity } from "../../src/link/identity.js";
 import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
 import { rawTlsGet, tcpAccepts } from "../link/helpers.js";
@@ -516,6 +518,43 @@ describe("createServer link listener", { timeout: 30_000 }, () => {
     expect((await fetch(`${base(again)}/link/v1/hello`, { headers: auth(again) })).status).toBe(404);
     await stop(again);
     expect(await tcpAccepts(port)).toBe(false);
+  });
+
+  it("serves the remote-run routes to a paired machine once the listener starts", async () => {
+    const dataDir = tmp();
+    const secrets = new MemorySecretStore();
+    await stop(await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" }));
+    const requester = await LinkIdentity.load({ secrets: new MemorySecretStore(), onCreated: () => undefined });
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    const ledger = new Ledger(db);
+    const link: LinkService = new LinkService({
+      db, ledger, secrets, bind: "127.0.0.1", discovery: fakeDiscovery(),
+      listener: (deps) => new LinkListener(deps),
+      client: (identity) => new LinkClient({ identity }),
+      registerProtocol: (app) => registerLinkProtocolRoutes(app, { link }),
+    });
+    await link.load();
+    const port = await link.enableLinking({ kind: "human", id: "owner" }, LINKING_ACK, 0);
+    await link.shutdown();
+    commitEvent(db, ledger, () => ({
+      event: {
+        projectId: null, actor: { kind: "human", id: "owner" }, type: "machine.paired",
+        payload: {
+          machineId: requester.machineId, name: "Laptop", publicKey: requester.publicKeyBase64, fingerprint: requester.fingerprint,
+          address: "127.0.0.1:1", role: "showed_code",
+        },
+      },
+      result: () => undefined,
+    }));
+    const peer = { machineId: getSetting(db, "link.machineId")!, address: `127.0.0.1:${port}`, publicKeyDer: Buffer.from(getSetting(db, "link.publicKey")!, "base64") };
+    db.close();
+
+    const s = await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" });
+    const body = { v: 1, projectId: "p1", projectName: "Demo", adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    const err = await new LinkClient({ identity: requester }).request(peer, "POST", "/link/v1/runs/run-1/start", body).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RemoteRefusedError);
+    expect((err as RemoteRefusedError).code).toBe("no_repo");
+    await stop(s);
   });
 
   it("records this computer's identity once in the ledger", async () => {

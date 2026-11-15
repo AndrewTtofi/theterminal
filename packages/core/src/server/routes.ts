@@ -13,6 +13,7 @@ import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigErr
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
 import { LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError } from "../link/client.js";
+import { BundleGitLimitError, BundleInvalidError, NoRepoError, RepoTooLargeError } from "../link/bundles.js";
 import {
   IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
 } from "../link/service.js";
@@ -148,6 +149,11 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof MachineUnreachableError) return reply.code(502).send({ error: "machine_unreachable" });
   if (err instanceof MachineKeyMismatchError) return reply.code(409).send({ error: "machine_key_mismatch" });
   if (err instanceof RemoteRefusedError) return reply.code(502).send({ error: "machine_refused" });
+  // Remote runs, worker side: a repository sent by a paired machine.
+  if (err instanceof RepoTooLargeError) return reply.code(413).send({ error: "repo_too_large" });
+  if (err instanceof BundleInvalidError) return reply.code(400).send({ error: "bundle_invalid" });
+  if (err instanceof BundleGitLimitError) return reply.code(503).send({ error: "bundle_git_limit" });
+  if (err instanceof NoRepoError) return reply.code(409).send({ error: "no_repo" });
   if (err instanceof LedgerReadOnlyError) {
     return reply.code(423).send({ error: "ledger_read_only" });
   }

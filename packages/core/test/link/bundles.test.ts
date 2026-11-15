@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { GitOutputTooLargeError, GitTimeoutError, WorktreeManager } from "../../src/agents/worktrees.js";
+import { ConflictError } from "../../src/connections/service.js";
 import {
-  BundleInvalidError, MAX_BUNDLE_BYTES, exportRepoBundle, importRepoBundle, importSnapshot, snapshotBundle,
+  BundleGitLimitError, BundleInvalidError, MAX_BUNDLE_BYTES, exportRepoBundle, importRepoBundle, importSnapshot, snapshotBundle,
 } from "../../src/link/bundles.js";
 
 const run = promisify(execFile);
@@ -151,7 +152,34 @@ describe("repository bundles", () => {
       await expect(importRepoBundle(b, "p1", file), revs.join(" ")).rejects.toBeInstanceOf(BundleInvalidError);
       expect(existsSync(file)).toBe(false);
     }
+    // A branch literally named HEAD, beside HEAD itself (added last: it makes `HEAD` ambiguous for the cases above).
+    await git(other, "update-ref", "refs/heads/HEAD", "refs/heads/main");
+    const file = join(scratch, "head-branch.bundle");
+    await git(other, "bundle", "create", "-q", file, "refs/heads/HEAD");
+    // git will not write HEAD beside it (the name is ambiguous), so the header gets a HEAD line at the same commit.
+    const raw = readFileSync(file);
+    const end = raw.indexOf("\n\n");
+    const id = raw.subarray(0, end).toString("latin1").split("\n")[1]!.split(" ")[0]!;
+    writeFileSync(file, Buffer.concat([raw.subarray(0, end), Buffer.from(`\n${id} HEAD`), raw.subarray(end)]));
+    const heads = (await git(other, "bundle", "list-heads", file)).split("\n").map((l) => l.split(" ")[1]).sort();
+    expect(heads).toEqual(["HEAD", "refs/heads/HEAD"]);
+    await expect(importRepoBundle(b, "p1", file)).rejects.toBeInstanceOf(BundleInvalidError);
     expect(await refsOf(dst)).toBe(before);
+  });
+
+  it("reports git running past its time or output limit as BundleGitLimitError, not as an invalid bundle", { timeout: T }, async () => {
+    await sourceRepo();
+    for (const limit of [() => new GitTimeoutError(), () => new GitOutputTooLargeError()]) {
+      const file = join(scratch, "repo.bundle");
+      await exportRepoBundle(a, "p1", file);
+      // The same manager, with `git bundle verify` running past a limit.
+      const slow = Object.create(b) as WorktreeManager;
+      slow.runGit = (cwd, args, opts) => (args[0] === "bundle" ? Promise.reject(limit()) : b.runGit(cwd, args, opts));
+      const err = await importRepoBundle(slow, "p1", file).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BundleGitLimitError);
+      expect(err).not.toBeInstanceOf(BundleInvalidError);
+      expect(existsSync(file)).toBe(false);
+    }
   });
 
   it("runs no hook of the importing repository", { timeout: T }, async (ctx) => {
@@ -244,6 +272,29 @@ describe("run snapshots", () => {
     const file = join(scratch, "y.bundle");
     writeFileSync(file, "");
     await expect(importSnapshot(a, "p1", "../x", file)).rejects.toThrow();
+  });
+
+  it("importSnapshot refuses a run branch at another commit with ConflictError, before the snapshot ref is touched", { timeout: T }, async () => {
+    const wt = await workerRun();
+    const out = join(scratch, "snap.bundle");
+    await snapshotBundle(b, wt, "run-1", out);
+    const repo = await a.ensureProjectRepo("p1");
+    await git(repo, "branch", "run/run-1", "HEAD");
+    await expect(importSnapshot(a, "p1", "run-1", out)).rejects.toBeInstanceOf(ConflictError);
+    expect(await git(repo, "for-each-ref", "refs/theterminal/")).toBe("");
+    expect(existsSync(join(dataA, "projects", "p1", "worktrees", "run-1"))).toBe(false);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it("importSnapshot refuses a run whose worktree folder already exists with ConflictError", { timeout: T }, async () => {
+    const wt = await workerRun();
+    const out = join(scratch, "snap.bundle");
+    await snapshotBundle(b, wt, "run-1", out);
+    const repo = await a.ensureProjectRepo("p1");
+    mkdirSync(join(dataA, "projects", "p1", "worktrees", "run-1"), { recursive: true });
+    await expect(importSnapshot(a, "p1", "run-1", out)).rejects.toBeInstanceOf(ConflictError);
+    expect(await git(repo, "branch", "--list", "run/*")).toBe("");
+    expect(await git(repo, "for-each-ref", "refs/theterminal/")).toBe("");
   });
 
   it("importSnapshot refuses a bundle that is not that run's snapshot", { timeout: T }, async () => {

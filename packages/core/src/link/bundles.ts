@@ -1,9 +1,11 @@
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  GitEnvRefusedError, HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError, type WorktreeManager,
+  GitEnvRefusedError, GitOutputTooLargeError, GitTimeoutError, HooksDirModifiedError, SharedGitconfigModifiedError,
+  UnsafeGitConfigError, type WorktreeManager,
 } from "../agents/worktrees.js";
 import { WorktreeMissingError } from "../changes/changes.js";
+import { ConflictError } from "../connections/service.js";
 
 /** The largest repository or snapshot bundle a machine accepts from another: 256 MiB. */
 export const MAX_BUNDLE_BYTES = 268_435_456;
@@ -13,6 +15,33 @@ export class BundleInvalidError extends Error {
   constructor() {
     super("the repository bundle is not valid");
     this.name = "BundleInvalidError";
+  }
+}
+
+/** No repository was uploaded for this run (by this machine) before its start. */
+export class NoRepoError extends Error {
+  constructor() {
+    super("the repository for this run has not been received");
+    this.name = "NoRepoError";
+  }
+}
+
+/** The uploaded repository is larger than MAX_BUNDLE_BYTES. */
+export class RepoTooLargeError extends Error {
+  constructor() {
+    super("the repository is too large to receive");
+    this.name = "RepoTooLargeError";
+  }
+}
+
+/**
+ * Git ran past its time or output limit while reading a bundle: not proof the bundle is bad (a slow disk, a busy
+ * machine), so it is reported apart from BundleInvalidError and may be tried again.
+ */
+export class BundleGitLimitError extends Error {
+  constructor() {
+    super("git could not finish reading the repository bundle within its limits");
+    this.name = "BundleGitLimitError";
   }
 }
 
@@ -47,20 +76,27 @@ function assertBundlePath(file: string): void {
   if (typeof file !== "string" || !isAbsolute(file) || file.includes("\0")) throw new Error("the bundle path must be absolute");
 }
 
-/** A ref name with nothing git or a later step could misread: conservative characters, no `..`, `//`, `.lock` or `/.`. */
+/**
+ * A ref name with nothing git or a later step could misread: conservative characters, no `..`, `//`, `.lock` or `/.`,
+ * and never `refs/heads/HEAD`, which `HEAD` itself would shadow.
+ */
 function isProjectBranch(ref: string): boolean {
-  return PROJECT_BRANCH.test(ref) && !/\.\.|\/\/|\/\.|\.lock(?:\/|$)|[/.]$/.test(ref);
+  return PROJECT_BRANCH.test(ref) && ref !== "refs/heads/HEAD" && !/\.\.|\/\/|\/\.|\.lock(?:\/|$)|[/.]$/.test(ref);
 }
 
 /** The data folder a manager works in, from the one path it names for a project. */
 const dataDirOf = (wt: WorktreeManager, projectId: string): string => dirname(dirname(dirname(wt.repoPath(projectId))));
 
-/** Runs a git step over an untrusted bundle: any failure but a safeguard's refusal is BundleInvalidError. */
+/**
+ * Runs a git step over an untrusted bundle: a safeguard's refusal passes as it is, a time or output limit is
+ * BundleGitLimitError, and any other failure is BundleInvalidError.
+ */
 async function overBundle(step: Promise<string>): Promise<string> {
   try {
     return await step;
   } catch (e) {
     if (isRefusal(e)) throw e;
+    if (e instanceof GitTimeoutError || e instanceof GitOutputTooLargeError) throw new BundleGitLimitError();
     throw new BundleInvalidError();
   }
 }
@@ -238,7 +274,8 @@ export async function snapshotBundle(wt: WorktreeManager, worktreeAbs: string, r
  * the run's worktree at the path createRunWorktree would have used (`projects/<projectId>/worktrees/<runId>`). The
  * bundle must pass `git bundle verify` and hold exactly `refs/theterminal/snapshot/<runId>`, else BundleInvalidError
  * with nothing fetched. The run's branch `run/<runId>` is created at the snapshot commit, or reused when it is
- * already there. The bundle file is deleted afterwards in every case.
+ * already there; the branch at another commit, or the worktree folder already there, is ConflictError, checked
+ * before anything is fetched. The bundle file is deleted afterwards in every case.
  */
 export async function importSnapshot(
   wt: WorktreeManager,
@@ -254,18 +291,21 @@ export async function importSnapshot(
     const ref = snapshotRef(runId);
     const heads = await verifiedHeads(wt, repo, file);
     if (heads.length !== 1 || heads[0]!.ref !== ref) throw new BundleInvalidError();
-    await fetchRef(wt, repo, file, ref);
-    const commit = (await wt.runGit(repo, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
-    if (commit !== heads[0]!.id) throw new BundleInvalidError();
+    const expected = heads[0]!.id;
+    // Both conflicts are checked before anything is fetched, so a refused import leaves no snapshot ref behind.
+    const dataDir = dataDirOf(wt, projectId);
+    const absPath = join(dataDir, "projects", projectId, "worktrees", runId);
+    if (existsSync(absPath)) throw new ConflictError("the run's working copy already exists");
     const branch = `run/${runId}`;
     const existing = await wt.runGit(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]).then(
       (out) => out.trim(),
       () => null,
     );
+    if (existing !== null && existing !== expected) throw new ConflictError("the run's branch already exists at another commit");
+    await fetchRef(wt, repo, file, ref);
+    const commit = (await wt.runGit(repo, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+    if (commit !== expected) throw new BundleInvalidError();
     if (existing === null) await wt.runGit(repo, ["branch", branch, commit]);
-    else if (existing !== commit) throw new Error("the run's branch already exists at another commit");
-    const dataDir = dataDirOf(wt, projectId);
-    const absPath = join(dataDir, "projects", projectId, "worktrees", runId);
     mkdirSync(dirname(absPath), { recursive: true });
     await wt.runGit(repo, ["worktree", "add", "--quiet", absPath, branch], { timeoutMs: BUNDLE_TIMEOUT_MS });
     const relPath = relative(dataDir, absPath).split(sep).join("/");
