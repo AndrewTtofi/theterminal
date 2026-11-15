@@ -420,6 +420,18 @@ describe("remote listener", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("every response over the remote listener carries HSTS for a year, without subdomains or preload; local ones do not", async () => {
+    const cookie = sessionCookie("p-viewer");
+    const hsts = "max-age=31536000";
+    expect((await app.inject({ url: "/api/me", headers: { host: REMOTE_HOST, cookie } })).headers["strict-transport-security"]).toBe(hsts);
+    expect((await app.inject({ url: "/", headers: { host: REMOTE_HOST } })).headers["strict-transport-security"]).toBe(hsts);
+    expect((await app.inject({ url: "/api/me", headers: { host: REMOTE_HOST } })).headers["strict-transport-security"]).toBe(hsts);
+    expect((await app.inject({ url: "/api/me", headers: { host: `evil.example.org:${REMOTE_PORT}` } })).headers["strict-transport-security"]).toBe(hsts);
+    listener = "local";
+    expect((await app.inject({ url: "/api/me", headers: bearer })).headers["strict-transport-security"]).toBeUndefined();
+    expect((await app.inject({ url: "/", headers: { host: HOST } })).headers["strict-transport-security"]).toBeUndefined();
+  });
+
   it("accepts the listener's own names with its port, and refuses other hosts and ports", async () => {
     const cookie = sessionCookie("p-viewer");
     for (const host of [REMOTE_HOST, `192.168.1.10:${REMOTE_PORT}`, `[::1]:${REMOTE_PORT}`, `TT-Test.local:${REMOTE_PORT}`]) {

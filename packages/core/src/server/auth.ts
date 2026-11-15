@@ -318,6 +318,8 @@ export function registerAuth(app: FastifyInstance, deps: AuthDeps): void {
     const appHost = `${APP_HOST}:${port}`;
 
     if (listener === "remote") {
+      // Every answer over TLS, refusals included, tells the browser to keep using https for this host for a year.
+      reply.header("strict-transport-security", "max-age=31536000");
       const rule = deps.hostRule();
       if (rule === null || !checkRemoteHost(request, rule)) return reject(403, { error: "bad_host" });
       // The token belongs to the local listener alone: it is never compared here, and never traded for a cookie.
