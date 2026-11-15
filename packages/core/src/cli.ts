@@ -34,9 +34,11 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   if (!process.send) {
-    // With remote access on, stdout is a container or service log others may read: no token there. Locally it is the
-    // Owner's own terminal, and the link with the token is how they open the workspace.
-    console.log(`The Terminal is running at ${options.remote ? running.loopbackUrl : running.url}`);
+    // With remote access on, whether by the flag or by the recorded state at a restart, stdout is a container or
+    // service log others may read: no token there. Locally it is the Owner's own terminal, and the link with the
+    // token is how they open the workspace.
+    const headless = options.remote || running.remoteUrl !== null;
+    console.log(`The Terminal is running at ${headless ? running.loopbackUrl : running.url}`);
     return;
   }
   // Supervised by a host: the bootstrap URL (it carries the token) goes over IPC only, never to the log. The listeners

@@ -49,6 +49,33 @@ function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}):
   return { child, stdout: () => out, stderr: () => err, exit };
 }
 
+/** Resolves once the child's stdout holds `text`; rejects if it exits first. */
+function untilOutput(spawned: Spawned, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (spawned.stdout().includes(text)) {
+        clearInterval(timer);
+        resolve();
+      }
+    };
+    const timer = setInterval(check, 50);
+    void spawned.exit.then((code) => {
+      clearInterval(timer);
+      check();
+      reject(new Error(`exited ${code} before printing: ${spawned.stderr()}`));
+    });
+  });
+}
+
+/** A port nothing listens on right now. */
+async function freePort(): Promise<number> {
+  const s = net.createServer();
+  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+  const port = (s.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => s.close(() => resolve()));
+  return port;
+}
+
 function firstMessage(child: ChildProcess): Promise<unknown> {
   return new Promise((resolve, reject) => {
     child.once("message", resolve);
@@ -218,6 +245,26 @@ describe("theterminal start as a host's child process", () => {
     expect(await exit).toBe(1);
     expect(stderr()).toBe("The Terminal could not start: the secret key does not open the secrets file\n");
     expect(stdout()).toBe("");
+  });
+
+  it("a restart without --remote while the ledger says remote is on prints the token-free address", { timeout: TIMEOUT * 2 }, async () => {
+    const dir = tmp();
+    const port = await freePort();
+    const first = startCli(["start", "--data-dir", dir, "--port", "0", "--remote", "--remote-port", String(port), "--remote-bind", "127.0.0.1"], false);
+    await untilOutput(first, "The Terminal is running at");
+    expect(first.stdout()).toContain("The Terminal is running at http://127.0.0.1:");
+    expect(first.stdout()).not.toContain("token=");
+    first.child.kill("SIGTERM");
+    await first.exit;
+
+    // The headless service log is the same place: the recorded state turns remote on again, so no token goes there.
+    const second = startCli(["start", "--data-dir", dir, "--port", "0"], false);
+    await untilOutput(second, "The Terminal is running at");
+    expect(second.stdout()).toContain("The Terminal is running at http://127.0.0.1:");
+    expect(second.stdout()).not.toContain("token=");
+    expect(second.stdout()).not.toContain("theterminal.localhost");
+    second.child.kill("SIGTERM");
+    await second.exit;
   });
 
   it("--secret-store file creates the key file at startup, outside the data folder", { timeout: TIMEOUT }, async () => {
