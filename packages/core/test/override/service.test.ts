@@ -426,16 +426,49 @@ describe("discard", () => {
     expect(completedFor(result.overrideId)!.payload).toMatchObject({ ok: true });
   });
 
-  it("counts a rename on the working-tree side once (final review, Minor 4)", async () => {
+  it("counts a renamed file as the working copy has it: one gone, one new, whatever the agent staged (final review, Minor 4)", async () => {
     writeFileSync(join(wt, "a.txt"), "content\n");
     await git(["add", "-A"]);
     await git(["commit", "--no-verify", "-m", "agent work"]);
     renameSync(join(wt, "a.txt"), join(wt, "b.txt"));
-    await git(["add", "-N", "b.txt"]); // porcelain v1 shows ` R a.txt -> b.txt`: one entry with an extra field
+    await git(["add", "-N", "b.txt"]); // the agent's index would show ` R a.txt -> b.txt`; the count never reads it
     const result = await service.discard(owner, run.id, REASON);
-    expect(result.files).toBe(1);
+    expect(result.files).toBe(2);
     expect(existsSync(join(wt, "a.txt"))).toBe(true);
     expect(existsSync(join(wt, "b.txt"))).toBe(false);
+  });
+
+  it("resets files the agent marked skip-worktree or assume-unchanged, and counts them (final re-review, Important 1)", async () => {
+    writeFileSync(join(wt, "a.txt"), "one\n");
+    writeFileSync(join(wt, "b.txt"), "two\n");
+    await git(["add", "-A"]);
+    await git(["commit", "--no-verify", "-m", "agent work"]);
+    writeFileSync(join(wt, "a.txt"), "one\nmore\n");
+    writeFileSync(join(wt, "b.txt"), "two\nmore\n");
+    await plainGit(wt, "update-index", "--skip-worktree", "a.txt");
+    await plainGit(wt, "update-index", "--assume-unchanged", "b.txt");
+    expect((await plainGit(wt, "status", "--porcelain")).trim()).toBe(""); // control: the agent's index hides both
+    const result = await service.discard(owner, run.id, REASON);
+    expect(result.files).toBe(2);
+    expect(completedFor(result.overrideId)!.payload).toMatchObject({ ok: true });
+    expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("one\n");
+    expect(readFileSync(join(wt, "b.txt"), "utf8")).toBe("two\n");
+    expect((await plainGit(wt, "ls-files", "-v")).split(/\r?\n/).sort()).toEqual(["H a.txt", "H b.txt"]);
+  });
+
+  it("restores a file a sparse checkout removed from the working copy, and counts it", async () => {
+    mkdirSync(join(wt, "sub"));
+    mkdirSync(join(wt, "other"));
+    writeFileSync(join(wt, "sub", "in.txt"), "in\n");
+    writeFileSync(join(wt, "other", "out.txt"), "out\n");
+    await git(["add", "-A"]);
+    await git(["commit", "--no-verify", "-m", "agent work"]);
+    await plainGit(wt, "sparse-checkout", "set", "sub"); // cone mode: root files stay, other/ is removed
+    expect(existsSync(join(wt, "other", "out.txt"))).toBe(false);
+    const result = await service.discard(owner, run.id, REASON);
+    expect(result.files).toBe(1);
+    expect(completedFor(result.overrideId)!.payload).toMatchObject({ ok: true });
+    expect(readFileSync(join(wt, "other", "out.txt"), "utf8")).toBe("out\n");
   });
 
   it.runIf(posix)("never recurses into a planted submodule, so its filter driver never runs; plain git does (final review, Important 1)", async () => {

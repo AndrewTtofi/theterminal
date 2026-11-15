@@ -53,14 +53,21 @@ export class HooksDirModifiedError extends Error {
  * Given to every runGit call, before the subcommand: no pager; no fsmonitor program; paths printed as they are; no
  * recursion into submodules (a nested repository's own configuration is never scanned, so a reset or checkout that
  * entered it could run its filter driver) and no submodule summaries; replace objects ignored (`git replace` in the
- * shared repository would otherwise substitute what every diff and rev-parse sees); and `core.bigFileThreshold`
- * pinned to git's default, so a planted `core.bigFileThreshold=1` cannot make every text file read as binary.
+ * shared repository would otherwise substitute what every diff and rev-parse sees); `core.bigFileThreshold`
+ * pinned to git's default, so a planted `core.bigFileThreshold=1` cannot make every text file read as binary; and
+ * the index features that can make git call a changed file unchanged or skip a directory switched off: no sparse
+ * checkout (a planted `core.sparseCheckout=true` with patterns would mark files skip-worktree on the next checkout
+ * or reset), no sparse index, no split index (a scratch index written by the views would otherwise leave a
+ * `sharedindex` file in the agent's git directory), no untracked cache, and no `core.ignoreStat` (which sets
+ * assume-unchanged on files git writes).
  */
 export const GIT_COMMON_ARGS = [
   "--no-pager", "--no-replace-objects",
   "-c", "core.fsmonitor=false", "-c", "core.quotePath=false",
   "-c", "submodule.recurse=false", "-c", "status.submoduleSummary=false",
   "-c", "core.bigFileThreshold=512m",
+  "-c", "core.sparseCheckout=false", "-c", "index.sparse=false", "-c", "core.splitIndex=false",
+  "-c", "core.untrackedCache=false", "-c", "core.ignoreStat=false",
 ] as const;
 export const GIT_TIMEOUT_MS = 30_000;
 export const GIT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -311,13 +318,14 @@ export class WorktreeManager {
    * anything else runs in it. The environment is the allowlisted one
    * (safeGitEnv), never the server's. Diff callers add `--no-ext-diff --no-textconv`. `gitDir` and `workTree`, when
    * given, are passed as `--git-dir`/`--work-tree`, so a planted `core.worktree` or `.git` file cannot redirect the
-   * call. Every call this manager makes goes through here, repository setup included. Bounded by `timeoutMs`
-   * (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError).
+   * call. `indexFile`, when given, is passed as `GIT_INDEX_FILE`, so the call reads and writes that index instead of
+   * the repository's own. Every call this manager makes goes through here, repository setup included. Bounded by
+   * `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError).
    */
   async runGit(
     cwd: string,
     args: string[],
-    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string } = {},
+    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string } = {},
   ): Promise<string> {
     assertEmptyGitconfig(this.dataDir);
     this.assertEmptyHooks();
@@ -325,7 +333,7 @@ export class WorktreeManager {
     const run: GitRunOptions = {
       timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
       maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
-      env: safeGitEnv(cwd, this.emptyGlobalConfig),
+      env: { ...safeGitEnv(cwd, this.emptyGlobalConfig), ...(opts.indexFile !== undefined && { GIT_INDEX_FILE: opts.indexFile }) },
     };
     // The checks before the call have their own fixed bounds; the caller's bounds apply to its call only.
     const check: GitRunOptions = { ...run, timeoutMs: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER };

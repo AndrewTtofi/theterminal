@@ -8,7 +8,7 @@ import { NotFoundError } from "../board/board-service.js";
 import { baseChildEnv } from "../agents/child-env.js";
 import { truncate } from "../agents/redact.js";
 import { which as whichOnPath } from "../agents/which.js";
-import { RunActiveError, isGitSegment, runWorktree, verifiedGit, type ChangesDeps } from "../changes/changes.js";
+import { RunActiveError, isGitSegment, runWorktree, verifiedGit, withScratchIndex, type ChangesDeps } from "../changes/changes.js";
 import { commitEvent } from "../events/commit.js";
 import { getRun } from "../events/projections.js";
 import type { RecordedText } from "../intake/recorded-text.js";
@@ -283,10 +283,14 @@ export class OverrideService {
   }
 
   /**
-   * Drops the working copy's uncommitted changes (`git reset --hard --no-recurse-submodules HEAD`, then
-   * `git clean -fd`) and keeps the agent's commits. Neither enters a nested repository: its own configuration, which
-   * the worktree manager never scans, could name a filter driver that a recursing reset would run as the Owner.
-   * `files` counts the uncommitted entries git reported before. Resolves after override.completed.
+   * Drops the working copy's uncommitted changes (`git read-tree HEAD`, then `git reset --hard --no-recurse-submodules
+   * HEAD`, then `git clean -fd`) and keeps the agent's commits. The run's index is rebuilt from HEAD first because it
+   * is the agent's: `reset --hard` leaves a file marked skip-worktree (`update-index --skip-worktree`, or a sparse
+   * checkout) as it is, whatever its content, and `read-tree` drops that bit and assume-unchanged with everything else
+   * the agent put in the index. Neither reset nor clean enters a nested repository: its own configuration, which the
+   * worktree manager never scans, could name a filter driver that a recursing reset would run as the Owner. `files`
+   * counts the entries `git status` reports before, over a scratch index for the same reason (the agent's index would
+   * hide those files from the count too). Resolves after override.completed.
    */
   async discard(actor: Actor, runId: string, reason: string): Promise<{ overrideId: string; files: number }> {
     if (actor.kind !== "human") throw new HumanRequiredError();
@@ -298,7 +302,10 @@ export class OverrideService {
     let git: Awaited<ReturnType<typeof verifiedGit>>;
     try {
       git = await verifiedGit(this.deps, run, abs);
-      files = countStatus(await git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"]));
+      const status = await withScratchIndex(this.deps, git, "HEAD", (scratch) =>
+        scratch(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"]),
+      );
+      files = countStatus(status);
       if (this.shuttingDown) throw new OverridesShuttingDownError();
       this.record(hold, "override.discard", { overrideId: hold.overrideId, runId, reason: why, files });
     } catch (e) {
@@ -307,9 +314,10 @@ export class OverrideService {
     }
     let completion: Completion;
     try {
+      const read = await git(["read-tree", "HEAD"]);
       const reset = await git(["reset", "--hard", "--no-recurse-submodules", "HEAD"]);
       const clean = await git(["clean", "-fd"]);
-      completion = { ok: true, exitCode: 0, signal: null, timedOut: false, output: this.cleanOutput(runId, reset + clean) };
+      completion = { ok: true, exitCode: 0, signal: null, timedOut: false, output: this.cleanOutput(runId, read + reset + clean) };
     } catch (e) {
       const text = e instanceof Error ? e.message : String(e);
       completion = { ok: false, exitCode: null, signal: null, timedOut: false, output: this.cleanOutput(runId, text) };

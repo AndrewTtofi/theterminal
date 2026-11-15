@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_CHANGED_FILES, MAX_FILE_BYTES, type AgentRun } from "@theterminal/shared";
@@ -65,7 +67,10 @@ const write = (rel: string, content: string | Buffer) => writeFileSync(join(wt, 
 /** Commits `files` to the project repository, then starts a fresh run from that commit, so they are part of its fork point. */
 const startWithBase = async (files: Record<string, string>) => {
   const repo = worktrees.repoPath(run.projectId);
-  for (const [rel, content] of Object.entries(files)) writeFileSync(join(repo, rel), content);
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(repo, rel)), { recursive: true });
+    writeFileSync(join(repo, rel), content);
+  }
   await worktrees.runGit(repo, ["add", "-A"]);
   await worktrees.runGit(repo, ["commit", "--no-verify", "-m", "base"]);
   run = await startRun(run.projectId);
@@ -105,22 +110,22 @@ describe("a live run", () => {
       await expect(listChanges(d, r.id)).rejects.toThrow(new RunActiveError());
       await expect(listChanges(d, r.id)).rejects.toThrow(message);
       await expect(fileDiff(d, r.id, "notes.txt")).rejects.toBeInstanceOf(RunActiveError);
-      expect(() => listDir(d, r.id, "")).toThrow(RunActiveError);
-      expect(() => readFile(d, r.id, "notes.txt")).toThrow(RunActiveError);
+      await expect(listDir(d, r.id, "")).rejects.toThrow(RunActiveError);
+      await expect(readFile(d, r.id, "notes.txt")).rejects.toThrow(RunActiveError);
       expect(gitCalls).toBe(0);
 
       live.stop(owner, r.id);
       await vi.waitFor(() => expect(getRun(db, r.id)!.status).toBe("stopped"), { timeout: 5000 });
       await vi.waitFor(() => expect(live.settling(r.id)).toBe(false), { timeout: 5000 });
       expect((await listChanges(d, r.id)).files.map((f) => f.path)).toEqual(["notes.txt"]);
-      expect(readFile(d, r.id, "notes.txt").text).toBe("x\n");
+      expect((await readFile(d, r.id, "notes.txt")).text).toBe("x\n");
       expect(gitCalls).toBeGreaterThan(0);
     } finally {
       await live.shutdown();
     }
   });
 
-  it("refuses every view while a stopped run's agent may still be writing (settling), without starting git", async () => {
+  it("refuses every view while a stopped run's agent may still be writing (settling) past the wait, without starting git", async () => {
     let release!: () => void;
     const returned = new Promise<void>((resolve) => {
       release = resolve;
@@ -147,16 +152,64 @@ describe("a live run", () => {
       };
       const d: ChangesDeps = {
         ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max), settling: (id) => live.settling(id),
+        settleWaitMs: 300,
       };
       writeFileSync(join(dataDir, r.worktree, "notes.txt"), "x\n");
+      const started = Date.now();
       await expect(listChanges(d, r.id)).rejects.toBeInstanceOf(RunActiveError);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
       await expect(fileDiff(d, r.id, "notes.txt")).rejects.toBeInstanceOf(RunActiveError);
-      expect(() => listDir(d, r.id, "")).toThrow(RunActiveError);
-      expect(() => readFile(d, r.id, "notes.txt")).toThrow(RunActiveError);
+      await expect(listDir(d, r.id, "")).rejects.toThrow(RunActiveError);
+      await expect(readFile(d, r.id, "notes.txt")).rejects.toThrow(RunActiveError);
       expect(gitCalls).toBe(0);
       release();
       await vi.waitFor(() => expect(live.settling(r.id)).toBe(false));
       expect((await listChanges(d, r.id)).files.map((f) => f.path)).toEqual(["notes.txt"]);
+    } finally {
+      release();
+      await live.shutdown();
+    }
+  });
+
+  it("a view asked for on Stop waits for the agent to return and then answers, with no git before (final re-review, Important 2)", async () => {
+    let release!: () => void;
+    const returned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: AgentAdapter = {
+      id: "fake",
+      start: async () => {
+        await returned; // like an adapter waiting out its kill grace after SIGTERM
+        return { status: "completed" };
+      },
+    };
+    const live = new AgentRunner({
+      db, ledger: new Ledger(db), worktrees, broker: new ApprovalBroker(), dataDir, extraSecrets: () => [KEY], username: "someuser", adapters: { fake: slow },
+    });
+    try {
+      const r = await live.start(owner, { projectId: run.projectId, adapter: "fake", prompt: "slow" });
+      live.stop(owner, r.id); // agent.finished is recorded now; the UI asks on that entry
+      expect(live.settling(r.id)).toBe(true);
+      let gitCalls = 0;
+      const counting: GitRunner = async (args, cwd, opts) => {
+        gitCalls++;
+        return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+      };
+      const d: ChangesDeps = {
+        ...deps, worktrees: new WorktreeManager(dataDir, counting), clean: (id, s, max) => live.cleanFor(id)(s, max), settling: (id) => live.settling(id),
+      };
+      writeFileSync(join(dataDir, r.worktree, "notes.txt"), "x\n");
+      const asked = Promise.all([listChanges(d, r.id), fileDiff(d, r.id, "notes.txt"), listDir(d, r.id, ""), readFile(d, r.id, "notes.txt")]);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(gitCalls).toBe(0);
+      expect(live.settling(r.id)).toBe(true);
+      release();
+      const [changes, diff, dir, file] = await asked;
+      expect(changes.files.map((f) => f.path)).toEqual(["notes.txt"]);
+      expect(diff.text).toContain("+x");
+      expect(dir.entries.map((e) => e.name)).toEqual(["notes.txt"]);
+      expect(file.text).toBe("x\n");
+      expect(live.settling(r.id)).toBe(false);
     } finally {
       release();
       await live.shutdown();
@@ -287,8 +340,8 @@ describe("the fork point is the commit recorded when the run started (final revi
     writeFileSync(join(legacy.absPath, "notes.txt"), "x\n");
     await expect(listChanges(deps, "legacy-run")).rejects.toBeInstanceOf(NoBaseError);
     await expect(fileDiff(deps, "legacy-run", "notes.txt")).rejects.toBeInstanceOf(NoBaseError);
-    expect(listDir(deps, "legacy-run", "").entries.map((e) => e.name)).toEqual(["notes.txt"]);
-    expect(readFile(deps, "legacy-run", "notes.txt").text).toBe("x\n");
+    expect((await listDir(deps, "legacy-run", "")).entries.map((e) => e.name)).toEqual(["notes.txt"]);
+    expect((await readFile(deps, "legacy-run", "notes.txt")).text).toBe("x\n");
   });
 
   it("fails closed with NoBaseError when the recorded fork commit is no longer in the repository", async () => {
@@ -305,6 +358,64 @@ describe("the fork point is the commit recorded when the run started (final revi
     await fileDiff(deps, run.id, ".gitmodules");
     expect(trap.ran()).toBe(false);
     expect(existsSync(trap.inner)).toBe(false);
+  });
+});
+
+describe("index flags the agent sets never hide a change (final re-review, Important 1)", () => {
+  const agentGit = (...args: string[]) => plainGit(wt, ...args);
+  const gitDir = () => join(worktrees.repoPath(run.projectId), ".git", "worktrees", run.worktree.split(/[\\/]/).at(-1)!);
+  const modifiedPaths = async () => (await listChanges(deps, run.id)).files.filter((f) => f.status === "modified").map((f) => f.path);
+
+  it("lists and diffs files marked skip-worktree or assume-unchanged, which plain git hides", async () => {
+    await startWithBase({ "a.txt": "one\n", "b.txt": "two\n" });
+    write("a.txt", "one\nmore\n");
+    write("b.txt", "two\nmore\n");
+    await agentGit("update-index", "--skip-worktree", "a.txt");
+    await agentGit("update-index", "--assume-unchanged", "b.txt");
+    // Control: the agent's index hides both from plain git.
+    expect((await plainGit(wt, "diff", "--numstat", run.base!)).trim()).toBe("");
+    expect(await modifiedPaths()).toEqual(["a.txt", "b.txt"]);
+    const d = await fileDiff(deps, run.id, "a.txt");
+    expect(d).toMatchObject({ status: "modified", added: 1, deleted: 0 });
+    expect(d.text).toContain("+more");
+    // The agent's own index is left as it was: the view never writes into it.
+    expect((await plainGit(wt, "ls-files", "-v")).split(/\r?\n/).sort()).toEqual(["S a.txt", "h b.txt"]);
+  });
+
+  it("shows a file a sparse checkout removed from the working copy as deleted, and an untracked cache or split index changes nothing", async () => {
+    await startWithBase({ "sub/in.txt": "in\n", "other/out.txt": "out\n" });
+    await agentGit("sparse-checkout", "set", "sub"); // cone mode: root files stay, other/ is removed
+    expect(existsSync(join(wt, "other", "out.txt"))).toBe(false);
+    expect((await plainGit(wt, "diff", "--name-status", run.base!)).trim()).toBe("");
+    const sparse = await listChanges(deps, run.id);
+    expect(sparse.files).toEqual([{ path: "other/out.txt", status: "deleted", added: 0, deleted: 1, binary: false }]);
+    await agentGit("sparse-checkout", "disable");
+
+    await agentGit("update-index", "--untracked-cache");
+    await agentGit("update-index", "--split-index");
+    await agentGit("config", "core.splitIndex", "true");
+    await agentGit("status", "--porcelain"); // warms both caches
+    write("sub/in.txt", "in\nmore\n");
+    write("new.txt", "x\n");
+    const before = { names: readdirSync(gitDir()).sort(), index: readFileSync(join(gitDir(), "index")) };
+    const c = await listChanges(deps, run.id);
+    expect(c.files.map((f) => [f.path, f.status])).toEqual([["new.txt", "untracked"], ["sub/in.txt", "modified"]]);
+    expect((await fileDiff(deps, run.id, "sub/in.txt")).text).toContain("+more");
+    // The scratch index the views use is gone, and nothing was written into the agent's git directory or its index.
+    expect(readdirSync(dataDir).filter((n) => n.includes("index"))).toEqual([]);
+    expect(readdirSync(gitDir()).sort()).toEqual(before.names);
+    expect(readFileSync(join(gitDir(), "index")).equals(before.index)).toBe(true);
+  });
+
+  it("a staged file is shown as the working copy has it: new and untracked, or unchanged after rm --cached", async () => {
+    await startWithBase({ "a.txt": "one\n" });
+    write("staged.txt", "s\n");
+    await agentGit("add", "staged.txt");
+    await agentGit("rm", "--cached", "a.txt");
+    const c = await listChanges(deps, run.id);
+    expect(c.files).toEqual([{ path: "staged.txt", status: "untracked", added: null, deleted: null, binary: false }]);
+    expect((await fileDiff(deps, run.id, "a.txt")).status).toBe("unchanged");
+    expect((await fileDiff(deps, run.id, "staged.txt")).text).toContain("+s");
   });
 });
 
@@ -358,51 +469,51 @@ describe("listDir and readFile", () => {
   it("lists directories first, then files, never .git", async () => {
     write("notes.txt", "hi\n");
     mkdirSync(join(wt, "src"));
-    const l = listDir(deps, run.id, "");
+    const l = await listDir(deps, run.id, "");
     expect(l).toMatchObject({ runId: run.id, path: "", truncated: false });
     expect(l.entries).toEqual([
       { name: "src", kind: "dir", size: null },
       { name: "notes.txt", kind: "file", size: 3 },
     ]);
-    expect(listDir(deps, run.id, "src").entries).toEqual([]);
-    expect(() => listDir(deps, run.id, "notes.txt")).toThrow(NotFoundError);
+    expect((await listDir(deps, run.id, "src")).entries).toEqual([]);
+    await expect(listDir(deps, run.id, "notes.txt")).rejects.toThrow(NotFoundError);
   });
 
-  it("reads a file, cleaning secrets and the worktree's absolute path", () => {
+  it("reads a file, cleaning secrets and the worktree's absolute path", async () => {
     write("notes.txt", `key=${KEY}\nat ${join(wt, "x")}\n`);
-    const f = readFile(deps, run.id, "notes.txt");
+    const f = await readFile(deps, run.id, "notes.txt");
     expect(f).toMatchObject({ runId: run.id, path: "notes.txt", binary: false, tooLarge: false });
     expect(f.text).toContain("key=[REDACTED]");
     expect(f.text).not.toContain(wt);
     expect(f.text).toMatch(/at \.[\\/]x/);
-    expect(() => readFile(deps, run.id, "")).toThrow(NotFoundError);
+    await expect(readFile(deps, run.id, "")).rejects.toThrow(NotFoundError);
   });
 
-  it("a 2 MiB file is tooLarge; the cap counts bytes (Review Focus 4)", () => {
+  it("a 2 MiB file is tooLarge; the cap counts bytes (Review Focus 4)", async () => {
     write("big.txt", Buffer.alloc(2 * 1024 * 1024, 0x61));
-    expect(readFile(deps, run.id, "big.txt")).toMatchObject({ size: 2 * 1024 * 1024, tooLarge: true, binary: false, text: null });
+    expect(await readFile(deps, run.id, "big.txt")).toMatchObject({ size: 2 * 1024 * 1024, tooLarge: true, binary: false, text: null });
     write("wide.txt", "\u00e9".repeat(MAX_FILE_BYTES / 2 + 1)); // fewer characters than the cap, more bytes
-    expect(readFile(deps, run.id, "wide.txt")).toMatchObject({ tooLarge: true, text: null });
+    expect(await readFile(deps, run.id, "wide.txt")).toMatchObject({ tooLarge: true, text: null });
     write("fits.txt", "\u00e9".repeat(MAX_FILE_BYTES / 2)); // exactly the cap in bytes
-    const fits = readFile(deps, run.id, "fits.txt");
+    const fits = await readFile(deps, run.id, "fits.txt");
     expect(fits).toMatchObject({ size: MAX_FILE_BYTES, tooLarge: false });
     expect(fits.text).toHaveLength(MAX_FILE_BYTES / 2);
   });
 
-  it("refuses a file whose path resolves differently once it is open", () => {
+  it("refuses a file whose path resolves differently once it is open", async () => {
     write("notes.txt", "hello\n");
     write("other.txt", "other\n");
     const real = worktrees.resolveInside.bind(worktrees);
     const spy = vi.spyOn(worktrees, "resolveInside");
     spy.mockImplementationOnce(real).mockImplementationOnce((root) => join(root, "other.txt"));
-    expect(() => readFile(deps, run.id, "notes.txt")).toThrow(NotFoundError);
+    await expect(readFile(deps, run.id, "notes.txt")).rejects.toThrow(NotFoundError);
     spy.mockRestore();
-    expect(readFile(deps, run.id, "notes.txt").text).toBe("hello\n");
+    expect((await readFile(deps, run.id, "notes.txt")).text).toBe("hello\n");
   });
 
-  it("a NUL byte in the first 8 KiB makes a file binary with no text", () => {
+  it("a NUL byte in the first 8 KiB makes a file binary with no text", async () => {
     write("blob.bin", Buffer.from([0x41, 0, 0x42]));
-    expect(readFile(deps, run.id, "blob.bin")).toMatchObject({ size: 3, binary: true, tooLarge: false, text: null });
+    expect(await readFile(deps, run.id, "blob.bin")).toMatchObject({ size: 3, binary: true, tooLarge: false, text: null });
   });
 });
 
@@ -444,7 +555,7 @@ describe("paths that leave the worktree (Review Focus 1)", () => {
       symlinkSync(outside, join(wt, "dlink"));
       symlinkSync(join(outside, "planted"), join(wt, "dangling"));
       for (const p of ["flink", "dlink", "dlink/secret", "dangling"]) await rejectsAll(p);
-      const names = listDir(deps, run.id, "").entries;
+      const names = (await listDir(deps, run.id, "")).entries;
       expect(names).toEqual(expect.arrayContaining([{ name: "flink", kind: "other", size: null }]));
     });
   });
@@ -453,8 +564,8 @@ describe("paths that leave the worktree (Review Focus 1)", () => {
     rmSync(wt, { recursive: true, force: true });
     await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
     await expect(fileDiff(deps, run.id, "a.txt")).rejects.toBeInstanceOf(WorktreeMissingError);
-    expect(() => listDir(deps, run.id, "")).toThrow(WorktreeMissingError);
-    expect(() => readFile(deps, run.id, "a.txt")).toThrow(WorktreeMissingError);
+    await expect(listDir(deps, run.id, "")).rejects.toThrow(WorktreeMissingError);
+    await expect(readFile(deps, run.id, "a.txt")).rejects.toThrow(WorktreeMissingError);
   });
 });
 
@@ -492,8 +603,8 @@ describe.skipIf(process.platform === "win32")("agent-planted git configuration n
     expect(c.files.map((f) => f.path)).toEqual([".gitattributes", "a.txt", "b.txt"]);
     expect((await fileDiff(deps, run.id, "a.txt")).text).toContain("+two");
     await fileDiff(deps, run.id, "b.txt");
-    readFile(deps, run.id, "a.txt");
-    listDir(deps, run.id, "");
+    await readFile(deps, run.id, "a.txt");
+    await listDir(deps, run.id, "");
     await worktrees.runGit(wt, ["commit", "--allow-empty", "-m", "x"]);
     for (const name of ["clean", "smudge", "textconv", "external", "fsmonitor", "hook"]) expect(ran(name), name).toBe(false);
 
@@ -549,11 +660,11 @@ describe.skipIf(process.platform === "win32")("agent-planted git configuration n
 
   it("never blocks on a FIFO: refused as a file, not a regular file in a diff", async () => {
     await exec("mkfifo", [join(wt, "pipe")]);
-    expect(() => readFile(deps, run.id, "pipe")).toThrow(NotFoundError);
+    await expect(readFile(deps, run.id, "pipe")).rejects.toThrow(NotFoundError);
     await listChanges(deps, run.id);
     const d = await fileDiff(deps, run.id, "pipe");
     expect(d.text === null || d.text === "").toBe(true);
-    expect(listDir(deps, run.id, "").entries).toEqual(expect.arrayContaining([{ name: "pipe", kind: "other", size: null }]));
+    expect((await listDir(deps, run.id, "")).entries).toEqual(expect.arrayContaining([{ name: "pipe", kind: "other", size: null }]));
   });
 });
 
@@ -586,12 +697,12 @@ describe("names changed by cleaning", () => {
       { path: "plain.txt", status: "untracked", added: null, deleted: null, binary: false },
       { path: "[REDACTED].txt", status: "untracked", added: null, deleted: null, binary: false, cleaned: true },
     ]);
-    expect(listDir(deps, run.id, "").entries).toEqual([
+    expect((await listDir(deps, run.id, "")).entries).toEqual([
       { name: "plain.txt", kind: "file", size: 2 },
       { name: "[REDACTED].txt", kind: "file", size: 2, cleaned: true },
     ]);
-    expect(() => readFile(deps, run.id, `${KEY}.txt`)).toThrow(NotFoundError);
+    await expect(readFile(deps, run.id, `${KEY}.txt`)).rejects.toThrow(NotFoundError);
     await expect(fileDiff(deps, run.id, `${KEY}.txt`)).rejects.toBeInstanceOf(NotFoundError);
-    expect(() => readFile(deps, run.id, "[REDACTED].txt")).toThrow(NotFoundError);
+    await expect(readFile(deps, run.id, "[REDACTED].txt")).rejects.toThrow(NotFoundError);
   });
 });

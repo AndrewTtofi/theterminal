@@ -1,4 +1,6 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readSync, readdirSync, realpathSync, rmSync, statSync,
+} from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   MAX_CHANGED_FILES, MAX_DIFF_BYTES, MAX_DIFF_LINES, MAX_DIR_ENTRIES, MAX_FILE_BYTES,
@@ -44,8 +46,9 @@ export class NoBaseError extends Error {
 export const RUN_ACTIVE_MESSAGE = "Changes show when the run is stopped or finished.";
 
 /**
- * The run is live (`running`, which includes waiting on a decision, or stopped but its agent process not yet gone):
- * its working copy may still be changing, so none of its views is served and no git process is started on it.
+ * The run is live (`running`, which includes waiting on a decision, or stopped but its agent process still not gone
+ * after the views' bounded wait): its working copy may still be changing, so none of its views is served and no git
+ * process is started on it.
  */
 export class RunActiveError extends Error {
   constructor(message = RUN_ACTIVE_MESSAGE) {
@@ -62,7 +65,20 @@ export type ChangesDeps = {
   clean: (runId: string, s: string, max: number) => string;
   /** Whether a run's agent may still be writing (runner.settling): true until its adapter has returned. */
   settling: (runId: string) => boolean;
+  /** How long a view waits for a stopped run's agent to return before refusing. Default SETTLE_WAIT_MS; test-only. */
+  settleWaitMs?: number;
 };
+
+/**
+ * How long a view of a stopped run waits for its agent to return (`settling`) before refusing with RunActiveError.
+ * Stop records `agent.finished` at once while the adapter may take up to about 5 s to end its process, and nothing
+ * else is recorded when it has; a request made on `agent.finished` would otherwise be refused with nothing to tell
+ * the Owner when to ask again.
+ */
+export const SETTLE_WAIT_MS = 10_000;
+const SETTLE_POLL_MS = 100;
+/** The directory, inside dataDir, that holds one scratch index while a view or the discard's count runs. */
+const SCRATCH_INDEX_PREFIX = ".theterminal-index-";
 
 /** Bytes read to decide whether a file is binary (a NUL byte in them). */
 const SNIFF_BYTES = 8192;
@@ -96,15 +112,25 @@ const isGitName = (name: string): boolean => isGitSegment(name);
 const isRefusal = (e: unknown): boolean =>
   e instanceof UnsafeGitConfigError || e instanceof HooksDirModifiedError || e instanceof SharedGitconfigModifiedError;
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * The worktree of a run that is not live: NotFoundError for an unknown run, RunActiveError while it runs or while
- * its stopped agent may still be writing (`settling`), both checked before anything touches its worktree, then
- * runWorktree's checks.
+ * The worktree of a run that is not live: NotFoundError for an unknown run, RunActiveError while it runs, both
+ * checked before anything touches its worktree, then runWorktree's checks. A stopped run whose agent may still be
+ * writing (`settling`) is waited for, up to `settleWaitMs`, polling the flag; still settling after that is
+ * RunActiveError too. No git runs on the worktree before the wait is over.
  */
-function stoppedRunWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; abs: string } {
+async function stoppedRunWorktree(deps: ChangesDeps, runId: string): Promise<{ run: AgentRun; abs: string }> {
   const run = getRun(deps.db, runId);
   if (!run) throw new NotFoundError("run", runId);
-  if (run.status === "running" || deps.settling(runId)) throw new RunActiveError();
+  if (run.status === "running") throw new RunActiveError();
+  if (deps.settling(runId)) {
+    const deadline = Date.now() + (deps.settleWaitMs ?? SETTLE_WAIT_MS);
+    while (deps.settling(runId)) {
+      if (Date.now() >= deadline) throw new RunActiveError();
+      await sleep(SETTLE_POLL_MS);
+    }
+  }
   return runWorktree(deps, runId);
 }
 
@@ -226,8 +252,8 @@ function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
   }
 }
 
-/** Git in the run's worktree, pinned to its verified git directory and work tree. */
-export type WorktreeGit = (args: string[]) => Promise<string>;
+/** Git in the run's worktree, pinned to its verified git directory and work tree; `indexFile` replaces its index. */
+export type WorktreeGit = (args: string[], opts?: { indexFile?: string }) => Promise<string>;
 
 const isWindows = process.platform === "win32";
 const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
@@ -258,7 +284,31 @@ export async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string)
     if (isRefusal(e)) throw e;
     throw new WorktreeMissingError();
   }
-  return (args) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs });
+  return (args, opts = {}) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs, ...opts });
+}
+
+/**
+ * Runs `fn` with git reading a scratch index instead of the run's own. The run's index is the agent's, and four of
+ * its features make `diff`, `status` and `ls-files` call a changed file unchanged or skip a directory: the
+ * skip-worktree bit (`update-index --skip-worktree`, or a sparse checkout), the assume-unchanged bit
+ * (`update-index --assume-unchanged`), the untracked cache and a split index. The scratch index is `read-tree <head>`
+ * into a fresh file inside dataDir, named with `GIT_INDEX_FILE`, refreshed against the working tree so the diffs
+ * need not hash every file, and removed afterwards. It has none of those bits or extensions, nothing is written into
+ * the agent's index or git directory (GIT_COMMON_ARGS pins the split index off, so no `sharedindex` lands there), and
+ * what the views show is the working tree against `head`'s tree: a file the agent staged but did not commit is
+ * `untracked`, one it `rm --cached` with its content unchanged is unchanged.
+ */
+export async function withScratchIndex<T>(deps: ChangesDeps, git: WorktreeGit, head: string, fn: (git: WorktreeGit) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(deps.dataDir, SCRATCH_INDEX_PREFIX));
+  try {
+    const indexFile = join(dir, "index");
+    const scratch: WorktreeGit = (args, opts = {}) => git(args, { ...opts, indexFile });
+    await scratch(["read-tree", head]);
+    await scratch(["update-index", "-q", "--refresh"]);
+    return await fn(scratch);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -321,14 +371,16 @@ async function untrackedPaths(git: WorktreeGit, only?: string): Promise<string[]
 }
 
 export async function listChanges(deps: ChangesDeps, runId: string): Promise<RunChanges> {
-  const { run, abs } = stoppedRunWorktree(deps, runId);
+  const { run, abs } = await stoppedRunWorktree(deps, runId);
   const git = await verifiedGit(deps, run, abs);
   const { base, head } = await forkPoint(run, git);
   let tracked: Map<string, ChangedFile>;
   let untracked: string[];
   try {
-    tracked = await trackedChanges(git, base);
-    untracked = await untrackedPaths(git);
+    ({ tracked, untracked } = await withScratchIndex(deps, git, head, async (scratch) => ({
+      tracked: await trackedChanges(scratch, base),
+      untracked: await untrackedPaths(scratch),
+    })));
   } catch (e) {
     // The list itself is too large or too slow to read: say so instead of failing.
     if (e instanceof GitOutputTooLargeError || e instanceof GitTimeoutError) {
@@ -356,11 +408,17 @@ export async function listChanges(deps: ChangesDeps, runId: string): Promise<Run
 }
 
 export async function fileDiff(deps: ChangesDeps, runId: string, path: string): Promise<FileDiff> {
-  const { run, abs } = stoppedRunWorktree(deps, runId);
+  const { run, abs } = await stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   if (rel === "") throw notFound();
-  const git = await verifiedGit(deps, run, abs);
-  const { base } = await forkPoint(run, git);
+  const verified = await verifiedGit(deps, run, abs);
+  const { base, head } = await forkPoint(run, verified);
+  return withScratchIndex(deps, verified, head, (git) => fileDiffWith(deps, git, runId, abs, resolved, rel, base));
+}
+
+async function fileDiffWith(
+  deps: ChangesDeps, git: WorktreeGit, runId: string, abs: string, resolved: string, rel: string, base: string,
+): Promise<FileDiff> {
   const shown = deps.clean(runId, rel, PATH_MAX);
   const answer = (d: Omit<FileDiff, "runId" | "path">): FileDiff => ({ runId, path: shown, ...d });
   /** Cleans first, then applies the byte cap: over it the diff is tooLarge with no text, never cut. */
@@ -403,8 +461,8 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
   return answer({ status: "unchanged", binary: false, tooLarge: false, added: 0, deleted: 0, text: "" });
 }
 
-export function listDir(deps: ChangesDeps, runId: string, path: string): DirListing {
-  const { abs } = stoppedRunWorktree(deps, runId);
+export async function listDir(deps: ChangesDeps, runId: string, path: string): Promise<DirListing> {
+  const { abs } = await stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   let dirents;
   try {
@@ -433,8 +491,8 @@ export function listDir(deps: ChangesDeps, runId: string, path: string): DirList
   return { runId, path: deps.clean(runId, rel, PATH_MAX), entries, truncated: all.length > MAX_DIR_ENTRIES };
 }
 
-export function readFile(deps: ChangesDeps, runId: string, path: string): FileContent {
-  const { abs } = stoppedRunWorktree(deps, runId);
+export async function readFile(deps: ChangesDeps, runId: string, path: string): Promise<FileContent> {
+  const { abs } = await stoppedRunWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
   const file = readCapped(deps, abs, rel, resolved, MAX_FILE_BYTES);
   if (file === null) throw notFound();

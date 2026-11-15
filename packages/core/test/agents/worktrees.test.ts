@@ -342,6 +342,25 @@ describe("WorktreeManager", () => {
       expect(last.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
       expect(last.opts!.env!.GIT_CONFIG_GLOBAL).toBe(join(dataDir, EMPTY_GITCONFIG));
       expect(last.opts!.env!.GIT_CONFIG_NOSYSTEM).toBe("1");
+      expect(last.opts!.env!.GIT_INDEX_FILE).toBeUndefined();
+    });
+
+    it("names a scratch index with GIT_INDEX_FILE only when asked, and pins the index features that hide changes off", async () => {
+      const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, _cwd, opts) => {
+        calls.push({ args, opts });
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      const indexFile = join(outside, "scratch", "index");
+      await m.runGit(outside, ["status"], { indexFile });
+      expect(calls.at(-1)!.opts!.env!.GIT_INDEX_FILE).toBe(indexFile);
+      const pairs = calls.at(-1)!.args.filter((a, i, all) => all[i - 1] === "-c");
+      expect(pairs).toEqual(
+        expect.arrayContaining([
+          "core.sparseCheckout=false", "index.sparse=false", "core.splitIndex=false", "core.untrackedCache=false", "core.ignoreStat=false",
+        ]),
+      );
     });
 
     it("neutralises every filter driver the repository configures", async () => {
