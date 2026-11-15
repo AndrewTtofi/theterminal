@@ -546,6 +546,12 @@ export async function createServer(opts: {
    * `--allow-restricted-signin` or THETERMINAL_RESTRICTED_SIGNIN=1, read once at start.
    */
   restrictedSignIn?: boolean;
+  /**
+   * Shows the system folder picker through the host (the desktop app), resolving with an absolute path or null. Set
+   * by the CLI only when it runs under a host with an IPC channel; absent on a headless server, which then answers
+   * `folder_picker_unavailable`.
+   */
+  pickFolder?: () => Promise<string | null>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.

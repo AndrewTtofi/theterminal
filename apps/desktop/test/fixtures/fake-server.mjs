@@ -50,6 +50,31 @@ if (mode === "fail") {
   g.unref();
   writeFileSync(process.argv[3], String(g.pid));
   process.send(ready);
+} else if (mode === "pick" || mode === "pick-twice") {
+  // Asks the host for folders, then reports the answers it got in the ready URL.
+  exitOnShutdown();
+  const want = mode === "pick" ? 1 : 2;
+  const got = [];
+  process.on("message", (m) => {
+    if (m?.type !== "picked_folder") return;
+    got.push(m);
+    if (got.length === want) {
+      process.send({ ...ready, url: `http://127.0.0.1:4321/?answers=${encodeURIComponent(JSON.stringify(got))}` });
+    }
+  });
+  if (mode === "pick") {
+    // Malformed requests are ignored and never answered.
+    process.send({ type: "pick_folder" });
+    process.send({ type: "pick_folder", id: 42 });
+    process.send({ type: "pick_folder", id: "" });
+    process.send({ type: "pick_folder", id: "x".repeat(200) });
+    process.send({ type: "pick_folder", id: "../p1" });
+    process.send({ type: "pick_folders", id: "p9" });
+    process.send({ type: "pick_folder", id: "p1" });
+  } else {
+    process.send({ type: "pick_folder", id: "p1" });
+    process.send({ type: "pick_folder", id: "p2" });
+  }
 } else {
   process.stderr.write(`unknown mode ${mode}\n`);
   process.exit(2);
