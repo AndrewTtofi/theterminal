@@ -130,7 +130,12 @@ export function ConversationPanel() {
                       {clean(m)}
                     </p>
                   ))}
-                  <p className="result">{resultLine(t)}</p>
+                  {run.status === "running" && (
+                    <p className="agent-says working">
+                      <span className="cursor" aria-hidden="true" />
+                    </p>
+                  )}
+                  <p className={run.status === "completed" ? "result done" : "result"}>{resultLine(t)}</p>
                   <div className="actions">
                     <button
                       type="button"

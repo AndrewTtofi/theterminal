@@ -61,6 +61,17 @@ fieldset { border: 1px solid var(--line-strong); border-radius: 2px; margin: 0 0
 legend { color: var(--muted); padding: 0 4px; }
 .empty { color: var(--muted); padding: 12px; margin: 0; }
 
+/* Brand: the block cursor and the empty state. Quiet by design: no flicker, and still under reduced motion. */
+.cursor { display: inline-block; width: 0.6em; height: 1.1em; vertical-align: text-bottom; background: var(--accent); animation: cursor-blink 1.1s steps(1) infinite; }
+@keyframes cursor-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .cursor { animation: none; }
+}
+.welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
+.wordmark { margin: 0; font: 600 28px/1 var(--font-mono); letter-spacing: 0.3em; color: var(--fg-strong); }
+.wordmark .accent { color: var(--accent); }
+.welcome-line { margin: 0; color: var(--muted); font-family: var(--font-mono); }
+
 /* Shell layout */
 .app { display: flex; flex-direction: column; height: 100vh; }
 .workbench { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -69,7 +80,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .activity-bar { width: 48px; flex: none; background: var(--activity); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .activity-bar button { position: relative; width: 48px; height: 48px; padding: 0; display: grid; place-items: center; background: none; color: var(--activity-fg); border-left: 2px solid transparent; border-radius: 0; }
 .activity-bar button:hover:not(:disabled) { background: none; color: var(--activity-active); }
-.activity-bar button.active { color: var(--activity-active); border-left-color: var(--activity-active); }
+.activity-bar button.active { color: var(--activity-active); border-left-color: var(--activity-active); box-shadow: 0 0 6px var(--glow); }
 .badge { position: absolute; right: 6px; bottom: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--badge); color: var(--badge-fg); font-size: 9px; font-weight: 600; line-height: 16px; text-align: center; }
 .badge-needs_you { background: var(--attention); }
 
@@ -85,7 +96,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .dock-host { height: 100%; width: 100%; }
 .dock-panel { height: 100%; overflow: auto; padding: 12px 16px; background: var(--bg); }
 
-.status-bar { height: 22px; flex: none; display: flex; justify-content: space-between; align-items: stretch; background: var(--status); color: var(--status-fg); font-size: 12px; }
+.status-bar { height: 22px; flex: none; display: flex; justify-content: space-between; align-items: stretch; background: var(--status); color: var(--status-fg); font-size: 12px; font-family: var(--font-mono); }
 .status-left, .status-right { display: flex; align-items: stretch; }
 .status-item { display: flex; align-items: center; padding: 0 8px; white-space: nowrap; }
 .status-item.attention { background: var(--attention); }
@@ -107,11 +118,14 @@ legend { color: var(--muted); padding: 0 4px; }
 .projects ul { margin: 0 -12px 8px; }
 .projects button { width: 100%; text-align: left; background: none; color: inherit; border: 0; border-radius: 0; padding: 4px 20px; }
 .projects button:hover:not(:disabled) { background: var(--hover); }
-.projects button.selected { background: var(--selected); color: var(--fg-strong); }
+.projects button.selected { background: var(--selected); color: var(--fg-strong); box-shadow: 0 0 6px var(--glow); }
 .projects input, .column input { width: 100%; }
 .start-run label { display: block; margin-bottom: 8px; }
 .start-run select { display: block; width: 100%; margin-top: 2px; }
-.start-run textarea { display: block; width: 100%; margin-top: 2px; resize: vertical; }
+.prompt-box { position: relative; display: block; margin-top: 2px; }
+.start-run textarea { display: block; width: 100%; resize: vertical; font-family: var(--font-mono); }
+.start-run textarea.awaiting { caret-color: transparent; }
+.prompt-box > .cursor { position: absolute; top: 6px; left: 7px; pointer-events: none; }
 .run-connections { border: 1px solid var(--line-strong); margin: 0 0 8px; padding: 4px 8px; }
 .run-connections legend { color: var(--muted); padding: 0 4px; }
 .run-connections label { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
@@ -120,7 +134,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .runs li { display: flex; gap: 4px; padding: 1px 0; }
 .runs li button:first-child { flex: 1; min-width: 0; text-align: left; background: none; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; }
 .runs li button:first-child:hover:not(:disabled) { background: var(--hover); }
-.runs button.selected { background: var(--selected); color: var(--fg-strong); }
+.runs button.selected { background: var(--selected); color: var(--fg-strong); box-shadow: 0 0 6px var(--glow); }
 .needs-you-list li { margin-bottom: 6px; }
 .ledger-side label { display: block; padding: 2px 0; }
 .ledger-side fieldset + fieldset { margin-top: 8px; }
@@ -188,7 +202,7 @@ button.danger:hover:not(:disabled) { background: var(--danger-hover); }
 .card { background: var(--bg); border: 1px solid var(--line-strong); border-radius: 3px; padding: 6px; margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
 .card-title { flex: 1; } .card select { width: 100%; font-size: 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
-.dot.active { background: var(--running); } .dot.blocked { background: var(--danger); } .dot.done { background: var(--ok); }
+.dot.active { background: var(--running); box-shadow: 0 0 6px var(--glow); } .dot.blocked { background: var(--danger); } .dot.done { background: var(--ok); }
 
 /* Bottom panels */
 .ledger li { padding: 3px 0; border-bottom: 1px solid var(--line); font-family: var(--font-mono); font-size: 12px; }
@@ -209,7 +223,9 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .feed-items li { padding: 3px 0; border-bottom: 1px solid var(--line); font-family: var(--font-mono); font-size: 12px; }
 .feed-items time { color: var(--muted); }
 .feed-items li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
-.agent-feed .live { margin: 0; font-size: 12px; color: var(--muted); }
+.agent-feed .live { margin: 0; font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+.feed-items li.prompt .headline::before { content: "\276F  "; content: "\276F  " / ""; color: var(--accent); }
+.feed-items li.done .headline::before { content: "\2713  "; content: "\2713  " / ""; color: var(--accent); }
 .agent-feed .jump, .terminal .jump { align-self: center; font-size: 12px; }
 
 /* Conversation: the asks and answers scroll; the Ask form stays below them. */
@@ -220,9 +236,11 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .conversation article header { display: flex; gap: 8px; align-items: baseline; }
 .conversation article h3 { margin: 0; }
 .conversation article time, .conversation .result { color: var(--muted); font-size: 12px; }
-.conversation blockquote { margin: 6px 0; padding: 4px 8px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; overflow-wrap: anywhere; }
-.conversation .agent-says { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation blockquote { margin: 6px 0; padding: 4px 8px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); }
+.conversation blockquote::before { content: "\276F  "; content: "\276F  " / ""; color: var(--accent); }
+.conversation .agent-says { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); }
 .conversation .result { margin: 6px 0 4px; }
+.conversation .result.done::before { content: "\2713  "; content: "\2713  " / ""; color: var(--accent); }
 .conversation .actions { display: flex; gap: 6px; }
 .conversation .jump { align-self: center; font-size: 12px; }
 .conversation .ask { border-top: 1px solid var(--line-strong); padding-top: 8px; }

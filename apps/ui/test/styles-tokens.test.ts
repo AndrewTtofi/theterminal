@@ -34,4 +34,19 @@ describe("styles.css tokens", () => {
     expect(rootBlock).toMatch(/--font-mono:\s*ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace/);
     expect(/\nbody\s*\{[^}]*var\(--font-ui\)/.test(css)).toBe(true);
   });
+
+  it("stops the cursor blinking under reduced motion", () => {
+    expect(/\.cursor\s*\{[^}]*animation:[^;}]*1\.1s steps\(1\)/.test(css)).toBe(true);
+    expect(/@media \(prefers-reduced-motion: reduce\)\s*\{[^{}]*\.cursor\s*\{[^}]*animation:\s*none/.test(css)).toBe(true);
+  });
+  it("glows live things and sets output in mono", () => {
+    for (const sel of [".activity-bar button.active", ".dot.active", ".runs button.selected"]) {
+      const re = new RegExp(`${sel.replace(/[.[\]]/g, "\\$&")}[^{]*\\{[^}]*box-shadow: 0 0 6px var\\(--glow\\)`);
+      expect(re.test(css), sel).toBe(true);
+    }
+    for (const sel of [".status-bar", ".start-run textarea", ".conversation blockquote", ".conversation .agent-says"]) {
+      const re = new RegExp(`${sel.replace(/[.[\]]/g, "\\$&")}[^{]*\\{[^}]*var\\(--font-mono\\)`);
+      expect(re.test(css), sel).toBe(true);
+    }
+  });
 });
