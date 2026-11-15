@@ -85,7 +85,8 @@ export class ShareService {
     const buf = Buffer.from(this.render(snapshot), "utf8");
     if (buf.length > MAX_SHARE_BYTES) throw new ShareTooLargeError();
     const html = buf.toString("utf8");
-    assertClean(html, this.deps.clean);
+    // The markup for secrets, emails and paths; the snapshot's free text for the username too.
+    assertClean(html, this.deps.clean, snapshot);
 
     const previewId = this.newId();
     if (!ID.test(previewId)) throw new Error("invalid preview id");
@@ -158,8 +159,8 @@ export class ShareService {
 
   /**
    * A saved page's bytes, only while they match the hash the ledger recorded (SnapshotTamperedError otherwise,
-   * SnapshotMissingError when the file is gone) and still pass the cleaner, whose secrets may have grown since
-   * (ShareNotCleanError).
+   * SnapshotMissingError when the file is gone) and their markup still passes the cleaner, whose secrets may have
+   * grown since (ShareNotCleanError). The link server calls this on every request it serves.
    */
   readHtml(shareId: string): string {
     const record = this.record(shareId);

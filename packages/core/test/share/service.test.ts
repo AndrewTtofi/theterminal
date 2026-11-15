@@ -87,7 +87,7 @@ describe("ShareService.preview", () => {
 
   it("refuses a page that is not clean and holds nothing", async () => {
     w.db.prepare("UPDATE projects SET pitch = ? WHERE id = ?").run(`key ${SLIPPED}`, projectId);
-    const s = service({}, (x) => x); // the build does not clean; the service's own last check must catch it
+    const s = service({}, { text: (x) => x, markup: (x) => x }); // the build does not clean; the service's own last check must catch it
     await expect(s.preview(projectId, DEFAULT_SHARE_OPTIONS)).rejects.toBeInstanceOf(ShareNotCleanError);
     expect(s.size()).toBe(0);
   });
