@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "../../src/ledger/canonical.js";
 
 /**
- * The encoding as it was before objects were built without a prototype: a reference copy, kept here so the tests
+ * The encoding as it was before the canonical string was built directly: a reference copy, kept here so the tests
  * can prove the new encoder is byte-identical to it for every value that has no own `__proto__` key. (For values
  * that do have one, this copy silently drops the key, which is the bug the encoder fixes.)
  */
@@ -208,5 +208,16 @@ describe("canonicalJson", () => {
       );
       expect(sha256(canonicalJson(entry2))).toBe("803591817cfc29a15f06d5545c9f1b3f2e2afe07e615c66c1d100328ce6f5378");
     });
+  });
+});
+
+describe("canonicalJson: sparse arrays", () => {
+  it("encodes a hole as null, as the old encoder did, so the output is always valid JSON", () => {
+    // eslint-disable-next-line no-sparse-arrays
+    const sparse = [1, , 3];
+    expect(canonicalJson(sparse)).toBe("[1,null,3]");
+    expect(canonicalJson(new Array(2))).toBe("[null,null]");
+    expect(canonicalJson({ a: [, "x"] })).toBe('{"a":[null,"x"]}');
+    expect(() => JSON.parse(canonicalJson(sparse))).not.toThrow();
   });
 });

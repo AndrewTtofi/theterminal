@@ -25,7 +25,10 @@ function canonicalize(value: unknown, path: string): string {
       return JSON.stringify(value);
     case "object": {
       if (value === null) return "null";
-      if (Array.isArray(value)) return `[${value.map((v, i) => canonicalize(v, `${path}[${i}]`)).join(",")}]`;
+      if (Array.isArray(value)) {
+        // Array.from visits holes too: a hole encodes as null, exactly as JSON.stringify (and the old encoder) wrote it.
+        return `[${Array.from(value, (v, i) => (i in value ? canonicalize(v, `${path}[${i}]`) : "null")).join(",")}]`;
+      }
       const record = value as Record<string, unknown>;
       const members = sortedKeys(record).map(
         (key) => `${JSON.stringify(key)}:${canonicalize(record[key], `${path}.${key}`)}`,
