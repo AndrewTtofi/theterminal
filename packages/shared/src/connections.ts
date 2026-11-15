@@ -6,6 +6,7 @@ export type ConnectionKind = (typeof CONNECTION_KINDS)[number];
 
 export const CONNECTION_PROVIDERS = [
   "claude", "codex", "gemini", "github", "aws", "gcp", "azure", "mcp_stdio", "mcp_http", "local_hardware",
+  "local_model",
 ] as const;
 export type ConnectionProvider = (typeof CONNECTION_PROVIDERS)[number];
 
@@ -183,6 +184,28 @@ export const CONNECTION_CATALOG: readonly CatalogEntry[] = [
     ],
     single: true, available: true,
   },
+  {
+    provider: "local_model", kind: "llm", label: "Local model (Ollama or llama.cpp)",
+    description: "An open-weight model served on this computer through an OpenAI-compatible endpoint.",
+    fields: [
+      {
+        name: "baseUrl", label: "Server URL", storage: "config", required: true, input: "url",
+        help: "http://127.0.0.1:11434/v1 for Ollama, http://127.0.0.1:8080/v1 for llama.cpp server. Only this computer: to use another computer's model, run the agent there.",
+      },
+      {
+        name: "model", label: "Model", storage: "config", required: true, input: "text",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,120}$",
+        help: "The model name the server lists, for example qwen2.5-coder:14b.",
+      },
+      {
+        name: "wireApi", label: "API style", storage: "config", required: false, input: "text",
+        pattern: "^(chat|responses)$",
+        help: "chat works with Ollama and llama.cpp; responses only with servers that offer it. Default chat.",
+      },
+      { name: "apiKey", label: "API key (if the server wants one)", storage: "secret", required: false, input: "password" },
+    ],
+    single: false, available: true,
+  },
 ];
 
 export const KIND_LABELS: Record<ConnectionKind, string> = {
@@ -272,7 +295,7 @@ export const connectionPayloadSchemas = {
       connectionId: id,
       name: connectionNameSchema,
       runId: id,
-      purpose: z.enum(["api_key", "cli_home", "cloud_credentials", "mcp_server"]),
+      purpose: z.enum(["api_key", "cli_home", "cloud_credentials", "mcp_server", "local_model"]),
       /** Which kind of cloud credential the run was given; never its value. */
       credential: z.enum(["aws_session_token", "aws_static_keys", "gcp_access_token", "azure_client_secret"]).optional(),
       expiresAt: z.iso.datetime().nullable().optional(),

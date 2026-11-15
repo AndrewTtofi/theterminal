@@ -38,6 +38,8 @@ export type AgentRun = {
   error: string | null;
   startedAt: string;
   finishedAt: string | null;
+  /** The linked machine the run executes on; null when it runs on this computer. */
+  machineId: string | null;
 };
 
 export type AgentAction = {

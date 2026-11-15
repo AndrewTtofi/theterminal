@@ -17,6 +17,7 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   intake: "Intake",
   connection: "Connections",
   settings: "Settings",
+  machine: "Machines",
   other: "Other",
 };
 

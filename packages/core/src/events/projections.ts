@@ -208,6 +208,8 @@ type RunRow = {
   auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
   started_at: string; finished_at: string | null;
+  /** Absent until the linked-machines migration adds the column. */
+  machine_id?: string | null;
 };
 type ActionRow = {
   id: string; run_id: string; kind: AgentAction["kind"]; tool: string; summary: string; input: string;
@@ -219,7 +221,7 @@ const toRun = (r: RunRow): AgentRun => ({
   id: r.id, projectId: r.project_id, cardId: r.card_id, adapter: r.adapter, authMode: r.auth_mode,
   prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
-  startedAt: r.started_at, finishedAt: r.finished_at,
+  startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id ?? null,
 });
 const toAction = (r: ActionRow): AgentAction => ({
   id: r.id, runId: r.run_id, kind: r.kind, tool: r.tool, summary: r.summary, input: JSON.parse(r.input),

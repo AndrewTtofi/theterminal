@@ -44,6 +44,8 @@ export function report(over: Partial<CapacityReport> = {}): CapacityReport {
       source("gemini"),
     ],
     hardware: null,
+    localModels: [],
+    machines: [],
     generatedAt: "2026-11-15T12:00:00.000Z",
     ...over,
   };

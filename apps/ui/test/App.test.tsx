@@ -563,7 +563,7 @@ describe("App ledger scope", () => {
     m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
     m.listRuns.mockResolvedValue([
       { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w", base: null,
-        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null },
     ]);
     const said = (seq: number, runId: string, text: string): LedgerEntry => ({
       ...entry(seq, "A", "x"), type: "agent.message", actor: { kind: "agent", id: runId }, payload: { runId, text },
@@ -588,7 +588,7 @@ describe("App ledger scope", () => {
     m.getBoard.mockResolvedValue({ ...mk("A"), columns: { ...mk("A").columns, build: [card] } } as Board);
     m.listRuns.mockResolvedValue([
       { id: "r1", projectId: "A", cardId: null, adapter: "claude", authMode: "none", prompt: "p", status: "running", worktree: "w", base: null,
-        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null },
     ]);
     m.listLedger.mockResolvedValue([
       { ...entry(1, "A", "x"), type: "card.moved", payload: { cardId: "c9", from: "build", to: "ship" } },

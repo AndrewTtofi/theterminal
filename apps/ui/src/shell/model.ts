@@ -49,7 +49,7 @@ export type GatePrompt = {
 };
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "machine", "other"];
 
 /** True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. */
 export function namesRun(e: LedgerEntry, runId: string): boolean {

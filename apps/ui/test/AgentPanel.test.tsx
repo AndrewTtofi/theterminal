@@ -20,6 +20,7 @@ const run: AgentRun = {
   error: null,
   startedAt: "",
   finishedAt: null,
+  machineId: null,
 };
 const act: AgentAction = {
   id: "a1",

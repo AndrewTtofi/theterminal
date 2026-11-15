@@ -39,7 +39,7 @@ const board: Board = {
 };
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
-  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
+  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null,
 };
 const pendingAction: PendingAgentAction = {
   id: "p1a", runId: "run1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: {}, status: "pending",
@@ -88,7 +88,7 @@ function model(over: Partial<AppModel> = {}): AppModel {
     onLoadOlderProject: vi.fn(async () => {}),
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
-    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
+    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "machine", "other"],
     onLedgerTopicsChange: vi.fn(),
     narration: {},
     onProviderAuthChange: vi.fn(),
@@ -295,7 +295,7 @@ describe("Workbench", () => {
   });
 
   it("loads the Capacity view when it is selected, and opens the Capacity tab from it", async () => {
-    const capacity = { report: { sources: [], hardware: null, generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
+    const capacity = { report: { sources: [], hardware: null, localModels: [], machines: [], generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
     const { container } = render(<Workbench model={model({ capacity })} />);
     expect(container.querySelector('[data-panel="capacity"]')).toBeNull();
     await userEvent.click(view("Capacity"));

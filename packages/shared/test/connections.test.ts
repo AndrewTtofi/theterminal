@@ -24,7 +24,7 @@ describe("connection catalog", () => {
     const kindOf = Object.fromEntries(CONNECTION_CATALOG.map((e) => [e.provider, e.kind]));
     expect(kindOf).toEqual({
       claude: "llm", codex: "llm", gemini: "llm", github: "github", aws: "cloud", gcp: "cloud", azure: "cloud",
-      mcp_stdio: "mcp", mcp_http: "mcp", local_hardware: "hardware",
+      mcp_stdio: "mcp", mcp_http: "mcp", local_hardware: "hardware", local_model: "llm",
     });
   });
 
@@ -91,6 +91,25 @@ describe("connection catalog", () => {
     expect(fields("local_hardware")).toEqual(
       ["cpu", "cores", "memoryGb", "gpu", "gpuMemoryGb", "platform", "wsl", "detectedAt"].map((n) => [n, "config", false, "text"]),
     );
+    expect(fields("local_model")).toEqual([
+      ["baseUrl", "config", true, "url"],
+      ["model", "config", true, "text"],
+      ["wireApi", "config", false, "text"],
+      ["apiKey", "secret", false, "password"],
+    ]);
+    expect(entry("local_model")).toMatchObject({
+      kind: "llm", single: false, available: true, label: "Local model (Ollama or llama.cpp)",
+      description: "An open-weight model served on this computer through an OpenAI-compatible endpoint.",
+    });
+    expect(entry("local_model").fields.map((f) => [f.label, f.help])).toEqual([
+      [
+        "Server URL",
+        "http://127.0.0.1:11434/v1 for Ollama, http://127.0.0.1:8080/v1 for llama.cpp server. Only this computer: to use another computer's model, run the agent there.",
+      ],
+      ["Model", "The model name the server lists, for example qwen2.5-coder:14b."],
+      ["API style", "chat works with Ollama and llama.cpp; responses only with servers that offer it. Default chat."],
+      ["API key (if the server wants one)", undefined],
+    ]);
     expect(entry("mcp_stdio").fields[2]!.format).toBe("pairs");
     expect(entry("mcp_stdio").fields[2]!.help).toBe(
       "NAME=value, one per line. Stored in your keychain. Values of 8 or more characters are also redacted from agent output, so avoid common words as values.",
@@ -120,6 +139,13 @@ describe("connection catalog", () => {
     expect(uuid.test("00000000-0000-4000-8000-00000000ABCD")).toBe(true);
     expect(uuid.test("00000000-0000-4000-8000-00000000abcd")).toBe(true);
     expect(uuid.test("not-a-uuid")).toBe(false);
+    expect(pattern("local_model", "model").test("qwen2.5-coder:14b")).toBe(true);
+    expect(pattern("local_model", "model").test("library/llama3.1:8b-instruct-q4_K_M")).toBe(true);
+    expect(pattern("local_model", "model").test("-rm")).toBe(false);
+    expect(pattern("local_model", "model").test("a b")).toBe(false);
+    expect(pattern("local_model", "wireApi").test("chat")).toBe(true);
+    expect(pattern("local_model", "wireApi").test("responses")).toBe(true);
+    expect(pattern("local_model", "wireApi").test("grpc")).toBe(false);
   });
 
   it("labels every kind", () => {
@@ -164,6 +190,11 @@ const added = {
 
 describe("connection.added", () => {
   it("accepts a valid payload", () => ok("connection.added", added));
+  it("files a local model under the llm kind", () => {
+    const local = { ...added, provider: "local_model", config: { baseUrl: "http://127.0.0.1:11434/v1", model: "m" }, privateFields: [] };
+    ok("connection.added", local);
+    bad("connection.added", { ...local, kind: "hardware" });
+  });
   it("rejects a provider outside its kind", () => {
     bad("connection.added", { ...added, kind: "cloud" });
     bad("connection.added", { ...added, kind: "github", provider: "claude" });
@@ -214,6 +245,7 @@ describe("connection.removed, connection.tested, connection.used", () => {
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cli_home" });
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials" });
     ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "mcp_server" });
+    ok("connection.used", { connectionId: "c1", name: "n", runId: "r1", purpose: "local_model" });
     ok("connection.used", {
       connectionId: "c1", name: "n", runId: "r1", purpose: "cloud_credentials",
       credential: "aws_session_token", expiresAt: "2026-11-15T12:00:00.000Z",

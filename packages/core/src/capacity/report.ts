@@ -73,5 +73,6 @@ export function capacityReport(db: Db, deps: CapacityDeps): CapacityReport {
       rateLimits: rateLimits(db, provider, now),
     };
   });
-  return { sources, hardware: deps.hardware(), generatedAt: now.toISOString() };
+  // Local models and linked machines are filled in by later Plan 6 tasks; until then there are none.
+  return { sources, hardware: deps.hardware(), localModels: [], machines: [], generatedAt: now.toISOString() };
 }
