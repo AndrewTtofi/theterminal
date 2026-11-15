@@ -82,6 +82,7 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     onLedgerScopeChange: vi.fn(),
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
+    github: { overview: null, error: null, refresh: vi.fn() },
     ...over,
   };
 }
@@ -228,12 +229,21 @@ describe("Workbench", () => {
     expect(container.querySelector('[data-panel="connection:new:github"]')).toBeTruthy();
   });
 
-  it("shows the Plan 5B placeholder for GitHub and Capacity", async () => {
-    render(<Workbench model={model()} />);
+  it("loads the GitHub view when it is selected, and still shows the placeholder for Capacity", async () => {
+    const github = { overview: null, error: null, refresh: vi.fn() };
+    render(<Workbench model={model({ github })} />);
     await userEvent.click(view("GitHub"));
-    expect(screen.getByText("Arrives with Plan 5B.")).toBeTruthy();
+    expect(github.refresh).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Loading…")).toBeTruthy();
     await userEvent.click(view("Capacity"));
     expect(screen.getByText("Arrives with Plan 5B.")).toBeTruthy();
+  });
+
+  it("opens the Connections view from the GitHub view when GitHub is not connected", async () => {
+    render(<Workbench model={model({ github: { overview: null, error: "github_not_connected", refresh: vi.fn() } })} />);
+    await userEvent.click(view("GitHub"));
+    await userEvent.click(screen.getByRole("button", { name: "Open Connections" }));
+    expect(view("Connections").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("keeps the Needs-you strip above the dock in every view, even with the bottom panel closed", async () => {

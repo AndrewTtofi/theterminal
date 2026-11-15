@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentAction, AgentRun, Board as BoardData, LedgerEntry, PendingAgentAction, Project } from "@theterminal/shared";
-import { api, errorMessage, subscribeLedger } from "./api";
+import type { AgentAction, AgentRun, Board as BoardData, GitHubOverview, LedgerEntry, PendingAgentAction, Project } from "@theterminal/shared";
+import { ApiError, api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import type { LedgerScope, WorkbenchModel } from "./shell/model";
@@ -51,6 +51,7 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runActions, setRunActions] = useState<AgentAction[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
+  const [github, setGitHub] = useState<{ overview: GitHubOverview | null; error: string | null }>({ overview: null, error: null });
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -101,6 +102,26 @@ export function App() {
       unsubscribe();
     };
   }, [run]);
+
+  // The GitHub view asks for this when it opens and every 60 s while it stays open. Made once, during the first
+  // render, so the view can call it from its own mount effect (which runs before this component's effects).
+  const mounted = useRef(true);
+  const [refreshGitHub] = useState(() =>
+    coalesced(async () => {
+      try {
+        const overview = await api.getGitHubOverview();
+        if (mounted.current) setGitHub({ overview, error: null });
+      } catch (e) {
+        if (mounted.current) setGitHub({ overview: null, error: e instanceof ApiError ? e.code : "github_unavailable" });
+      }
+    }, () => !mounted.current),
+  );
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     selectedRunRef.current = selectedRunId;
@@ -264,6 +285,7 @@ export function App() {
     },
     connections,
     status,
+    github: { ...github, refresh: refreshGitHub },
   };
 
   return (

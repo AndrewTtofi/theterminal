@@ -11,6 +11,9 @@ import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
 import { SecretStoreUnavailableError } from "../secrets/store.js";
+import {
+  GitHubNotConnectedError, GitHubRejectedError, GitHubRepoNotFoundError, GitHubUnavailableError,
+} from "../github/client.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -73,6 +76,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof CloudCredentialError) return reply.code(502).send({ error: "cloud_credentials_failed", name: err.connectionName });
     if (err instanceof SecretStoreUnavailableError) return reply.code(503).send({ error: "keychain_unavailable" });
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
+    if (err instanceof GitHubNotConnectedError) return reply.code(404).send({ error: "github_not_connected" });
+    if (err instanceof GitHubRepoNotFoundError) return reply.code(404).send({ error: "repo_not_found" });
+    if (err instanceof GitHubRejectedError) return reply.code(502).send({ error: "github_rejected" });
+    if (err instanceof GitHubUnavailableError) return reply.code(503).send({ error: "github_unavailable" });
     if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
     if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
     if (err instanceof LedgerReadOnlyError) {

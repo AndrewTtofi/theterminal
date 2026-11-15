@@ -1,6 +1,7 @@
 import type { ComponentType, KeyboardEvent, PointerEvent } from "react";
 import { AgentsSideBar } from "../views/AgentsSideBar";
 import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
+import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
 import { PlaceholderSideBar } from "../views/PlaceholderSideBar";
@@ -19,7 +20,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   needs_you: NeedsYouSideBar,
   ledger: LedgerSideBar,
   connections: ConnectionsSideBar,
-  github: PlaceholderSideBar,
+  github: GitHubSideBar,
   capacity: PlaceholderSideBar,
 };
 

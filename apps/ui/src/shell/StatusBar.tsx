@@ -1,3 +1,4 @@
+import type { CiStatus } from "@theterminal/shared";
 import type { Status } from "../api";
 import type { ViewId } from "./views";
 
@@ -46,11 +47,23 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
             {connections}
           </button>
         )}
-        <span className="status-item">CI: not connected</span>
+        <CiItem ci={status?.ci ?? null} />
         <button type="button" className="status-item" onClick={onResetLayout}>
           Reset layout
         </button>
       </div>
     </footer>
+  );
+}
+
+function CiItem({ ci }: { ci: CiStatus | null }) {
+  if (!ci) return <span className="status-item">CI: not connected</span>;
+  const className = `status-item${ci.state === "failing" ? " attention" : ""}`;
+  return ci.url ? (
+    <a className={className} href={ci.url} target="_blank" rel="noopener noreferrer">
+      {`CI: ${ci.state}`}
+    </a>
+  ) : (
+    <span className={className}>{`CI: ${ci.state}`}</span>
   );
 }
