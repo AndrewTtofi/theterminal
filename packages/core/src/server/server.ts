@@ -25,6 +25,8 @@ import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
+import { wireLink } from "./link-wiring.js";
+import type { LinkService } from "../link/service.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -423,6 +425,11 @@ export async function createServer(opts: {
   hardware?: () => Promise<HardwareInfo>;
   /** Detects the model servers on this computer. Default: the real probes (see selectLocalEngines). */
   localEngines?: () => Promise<LocalEngine[]>;
+  /**
+   * The address the link listener binds once the Owner enabled linking. Default `0.0.0.0` (IPv4, the local network);
+   * tests pass `127.0.0.1`. The workspace server itself always binds loopback.
+   */
+  linkBind?: string;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -447,6 +454,7 @@ export async function createServer(opts: {
   // Before the ledger opens: the CLI and the desktop app share one data folder, and only one server may use it.
   const lock = acquireDataDirLock(opts.dataDir);
   let openedDb: Db | undefined; // closed here when the start fails
+  let link: LinkService | undefined; // shut down here when the start fails
   try {
     const db = openDatabase(join(opts.dataDir, "ledger.db"));
     openedDb = db;
@@ -474,14 +482,18 @@ export async function createServer(opts: {
 
     const sts = selectSts(process.env, opts.sts);
     const fetchFn = selectFetch(process.env, opts.fetch);
+    const secrets = selectSecretStore(process.env, opts.secrets);
     const connections = new ConnectionService({
       db,
       ledger,
-      secrets: selectSecretStore(process.env, opts.secrets),
+      secrets,
       testers: { ...CONNECTION_TESTERS, ...cloudTesters(sts) },
       fetch: fetchFn,
     });
     await connections.load(); // never throws: an unavailable keychain is reported, and the server still starts
+    // Constructed here, loaded (identity, and the listener when the recorded opt-in says so) just before app.ready().
+    link = wireLink({ db, ledger, secrets, bind: opts.linkBind ?? "0.0.0.0" }).link;
+    const linkService = link;
 
     const signin = new SignInManager({
       dataDir: opts.dataDir,
@@ -555,6 +567,8 @@ export async function createServer(opts: {
         localEngines: selectLocalEngines(process.env, opts.localEngines),
       });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
+      // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
+      await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported
       await app.ready();
 
       const first = opts.port ?? DEFAULT_PORT;
@@ -575,6 +589,7 @@ export async function createServer(opts: {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
     } catch (err) {
+      await linkService.shutdown();
       await overrides.shutdown();
       await signin.shutdown();
       await app.close().catch(() => undefined);
@@ -589,6 +604,7 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
           await signin.shutdown(); // kills every login and status check before the db closes
@@ -603,6 +619,7 @@ export async function createServer(opts: {
       },
     };
   } catch (err) {
+    await link?.shutdown().catch(() => undefined);
     try {
       openedDb?.close();
     } finally {

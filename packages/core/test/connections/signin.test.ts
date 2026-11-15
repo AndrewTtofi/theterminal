@@ -324,8 +324,9 @@ describe("sign-in API", { timeout: 15000 }, () => {
     expect(body).toEqual({ state: "succeeded", lines: ["https://auth.openai.com/codex/device", "ABCD-12345"] });
 
     const entries = (await (await call(s, "GET", "/api/ledger")).json()) as LedgerEntry[];
-    expect(entries.map((e) => e.type)).toEqual(["connection.signin"]);
-    expect(entries[0]!.payload).toEqual({ provider: "codex", ok: true });
+    // Besides this computer's link identity, recorded at the server's first start.
+    expect(entries.map((e) => e.type)).toEqual(["machine.identity_created", "connection.signin"]);
+    expect(entries[1]!.payload).toEqual({ provider: "codex", ok: true });
   });
 
   it("answers 409 while a sign-in for the provider runs, and 404 for an unknown id", async () => {

@@ -84,3 +84,14 @@ export { base32Encode, base32Decode } from "./link/base32.js";
 export { selfSignedCertificate, derToPem, CERT_NOT_BEFORE, CERT_NOT_AFTER } from "./link/x509.js";
 export { LinkIdentity, IDENTITY_ACCOUNT, machineIdOf, fingerprintOf, verifySignature } from "./link/identity.js";
 export type { IdentityCreated } from "./link/identity.js";
+export { LinkListener, PAIR_PATH, LINK_BODY_LIMIT } from "./link/listener.js";
+export type { ListenerDeps, PeerCheck } from "./link/listener.js";
+export {
+  LinkClient, MachineUnreachableError, MachineKeyMismatchError, RemoteRefusedError, LinkProtocolError, MAX_JSON_BYTES,
+  MAX_FRAME_BYTES, parseAddress,
+} from "./link/client.js";
+export type { Peer } from "./link/client.js";
+export { LinkService, LinkingDisabledError, IdentityUnavailableError } from "./link/service.js";
+export type { LinkServiceDeps } from "./link/service.js";
+export { registerLinkProtocolRoutes } from "./link/protocol-routes.js";
+export type { LinkProtocolDeps } from "./link/protocol-routes.js";
