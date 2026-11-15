@@ -288,7 +288,7 @@ describe("redact: leak fixes", () => {
     expect(r("password: |\r\n  FAKE1\r\n  FAKE2\r\nnext: x")).toBe(`password: ${REDACTED}\r\nnext: x`);
   });
   // Growth, not an absolute bound: a slow or loaded runner (Windows CI) slows both sizes alike, while a quadratic
-  // path takes four times as long on twice the input. Each size is timed after a warm-up, best of three.
+  // path takes sixteen times as long on four times the input. Each size is timed after a warm-up, best of three.
   it("is linear on large input", { timeout: 120_000 }, () => {
     const time = (input: string): number => {
       let best = Infinity;
@@ -325,12 +325,13 @@ describe("redact: leak fixes", () => {
     ];
     for (const input of inputs) {
       const once = input(1);
-      const twice = input(2);
+      const four = input(4);
       redact(once); // warm-up: JIT and regex compilation are not part of the growth
       const t1 = time(once);
-      const t2 = time(twice);
-      // A floor of 10 ms keeps timer resolution and scheduler noise from deciding a case that is fast at both sizes.
-      expect(t2, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, twice as long input ${t2.toFixed(1)} ms`).toBeLessThanOrEqual(3 * Math.max(t1, 10));
+      const t4 = time(four);
+      // Four times the input: linear work takes ~4x, quadratic ~16x. Allowing 8x leaves room for a noisy CI runner
+      // while still catching a quadratic path. A floor of 10 ms keeps timer resolution from deciding fast cases.
+      expect(t4, `${once.slice(0, 24)}… took ${t1.toFixed(1)} ms, four times the input ${t4.toFixed(1)} ms`).toBeLessThanOrEqual(8 * Math.max(t1, 10));
     }
   });
 });
