@@ -75,7 +75,7 @@ export const HIDDEN_BY_DEFAULT: readonly string[] = [
   HIDDEN_PROMPTS_LINE,
   HIDDEN_HARDWARE_LINE,
   "Connection names and account details: regions, project ids, repository names",
-  "File paths outside the project, your username and email addresses",
+  "Paths under your home folder and The Terminal's data folder, your username and email addresses",
   "Anything from other projects",
 ];
 

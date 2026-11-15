@@ -61,6 +61,8 @@ describe("share catalogs", () => {
     expect(HIDDEN_BY_DEFAULT[0]).toBe(
       "Credentials, API keys and tokens (they live only in your keychain and are never in the ledger)",
     );
+    // Says what the cleaner does: it scrubs the home and data folders, not every path on the computer.
+    expect(HIDDEN_BY_DEFAULT[7]).toBe("Paths under your home folder and The Terminal's data folder, your username and email addresses");
   });
 });
 

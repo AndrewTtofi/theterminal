@@ -67,7 +67,7 @@ Everything on the page is text that has been cleaned (see the next section). Som
 5. Your prompts to agents (shown only when you tick Include my prompts to agents)
 6. This computer's hardware (shown only when you tick Include this computer's hardware)
 7. Connection names and account details: regions, project ids, repository names
-8. File paths outside the project, your username and email addresses
+8. Paths under your home folder and The Terminal's data folder, your username and email addresses
 9. Anything from other projects
 
 Two things are off by default and you can switch each one on:
@@ -91,7 +91,7 @@ Every piece of text goes through the same steps, in this order:
 
 1. **Redact** known secrets and anything that looks like a key or token. They become `[REDACTED]`.
 2. **Replace email addresses** with `[email]`. This happens before usernames are scrubbed, so an address whose first part is your username goes whole, domain included, instead of leaving half of it behind.
-3. **Scrub** paths and names. The data folder becomes `<data>`, your home folder becomes `~` and then your username becomes `<user>`.
+3. **Scrub** paths and names. The data folder becomes `<data>`, your home folder becomes `~` and then your username becomes `<user>`. Only paths under those two folders are scrubbed; a path elsewhere on the computer, if an agent's action named one, stays as it is, and you see it in the preview. The placeholders themselves are never scrubbed again, so cleaning a cleaned text changes nothing, even when your username is `user` or `data`.
 4. **Redact again**, in case scrubbing joined something back together.
 5. **Cut to length**, last, so that a cut can never leave half of a secret behind. No single text on the page is longer than 4,000 characters.
 
@@ -99,9 +99,11 @@ The list of known secrets is read every time, so a connection you add later is c
 
 For example, a pitch that reads "by alice at /Users/alice, someone@example.test" appears on the page as "by <user> at ~, [email]".
 
-**The final check.** After the whole page is built, it is cleaned once more. If that changes a single character, the page is not generated and you see "The page could not be cleaned of sensitive text and was not generated." A page that cannot be proven clean is never produced, and nothing is kept.
+These steps apply to the text people wrote or agents produced: the project's name and pitch, the plan summary and idea, tech stack choices and reasons, headlines, card titles, decision reasons, gate details, digest summaries and items, prompts and hardware names. The page's fixed words are not cleaned, because they are not content: section titles, state words such as `Open` or `Signed off`, stage names, agent program names, the `Owner` label and the Not included list. So a username that is also an ordinary word (`user`, `data`, `work`, `owner`, `open`, `build`) is scrubbed wherever you or an agent wrote it, and never breaks the page's own labels.
 
-**The same check runs every time the page is served.** Whenever a saved snapshot is opened, downloaded or served on a link, its text is checked again. If cleaning it now would change anything, for example because you have since stored a secret that happens to appear in it, the page and the link refuse to show it. Nothing that would leak a stored secret is ever shown.
+**The final check.** After the whole page is built, it is checked once more: cleaning the finished page again for secrets, email addresses and paths must change nothing, and cleaning the page's text again for your username must change nothing either. If either would change a single character, the page is not generated and you see "The page could not be cleaned of sensitive text and was not generated." A page that cannot be proven clean is never produced, and nothing is kept.
+
+**The same check runs every time the page is served.** Whenever a saved snapshot is opened or downloaded, and on every single request a link answers, the file is compared with the hash in the ledger and its text is checked again for secrets, email addresses and paths. If cleaning it now would change anything, for example because you have since stored a secret that happens to appear in it, the workspace refuses to show it, and the link answers an empty `404`, the same as for a wrong token, until you revoke it. The link stays listed as live so that you can see it and revoke it. Nothing that would leak a stored secret is ever shown.
 
 ## Preview and confirm
 
@@ -118,7 +120,7 @@ What to know about this:
 - **The hash.** The page is fingerprinted with SHA-256. Confirming only works if the hash matches the preview you are holding.
 - **What the ledger records.** Confirming adds a `share.confirmed` entry with the hash, the size in bytes, the sections, your options and the ledger position at that moment. The ledger shows it as "Owner confirmed a share page (12 sections, …)". So "what was shared" can always be answered later from the ledger.
 - **Where the file lives.** The confirmed page is saved as a file in the project's `share` folder inside your data folder, readable only by you. It is a snapshot: it never changes.
-- **It is checked before it is used again.** Each time the file is opened, downloaded or served on a link, its hash is compared with the one in the ledger. If the file is missing, you see "This snapshot's file is missing." If it no longer matches, you see "This snapshot's file no longer matches the ledger. It will not be shared." and it is not served.
+- **It is checked before it is used again.** Each time the file is opened, downloaded or served on a link, its hash is compared with the one in the ledger. If the file is missing, you see "This snapshot's file is missing." If it no longer matches, you see "This snapshot's file no longer matches the ledger. It will not be shared." and it is not served. Opened or downloaded from the workspace, the page comes with the same headers a link sends (see "What the link server answers").
 - **A page that is too large is refused.** The limit is 8 MiB. If you hit it, you see "The page is too large to share. Choose fewer digest days."
 - **Read-only ledger.** If the ledger is read-only because its chain is broken, you can still preview, but you cannot confirm or create a link.
 - **Previews are held in memory only.** The Terminal keeps at most 20 at a time and drops the oldest first.
@@ -167,7 +169,7 @@ The link server is a separate, tiny listener. The workspace itself stays on this
 - Everything else answers `404` with an empty reply: a wrong token, an unknown path, and the workspace's own addresses (for example `/api/ledger`). A wrong token and an unknown path look the same.
 - Other methods (such as `POST`) answer `405`.
 - A request addressed to a name or port other than the link's own answers `403`.
-- The page is served with `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, and the same content security policy as above.
+- The page is served with `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, and the same content security policy as above plus `frame-ancestors 'none'`, so no other page can frame it. The workspace sends the same headers when you open or download a snapshot.
 
 ### When a link ends
 
