@@ -377,4 +377,73 @@ describe("WorktreeManager", () => {
       expect(existsSync(marker)).toBe(false);
     });
   });
+
+  describe("repository setup runs through the same hardening (R2)", () => {
+    it("ensureProjectRepo and createRunWorktree call git with the common args, no hooks, no signing, an allowlisted env and bounds", async () => {
+      const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, cwd, opts) => {
+        calls.push({ args, opts });
+        if (args.includes("--absolute-git-dir")) return join(realpathSync.native(cwd), ".git");
+        if (args.includes("--verify")) throw new Error("no HEAD yet");
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      process.env.TT_TEST_PLANTED_VAR = "planted-value";
+      try {
+        await m.createRunWorktree("proj1", "run-a");
+      } finally {
+        delete process.env.TT_TEST_PLANTED_VAR;
+      }
+      const subcommands = calls.map((c) => c.args.find((a, i) => i > 0 && c.args[i - 1] !== "-c" && !a.startsWith("-")));
+      expect(subcommands).toEqual(expect.arrayContaining(["init", "commit", "worktree"]));
+      for (const c of calls) {
+        expect(c.args.slice(0, GIT_COMMON_ARGS.length)).toEqual([...GIT_COMMON_ARGS]);
+        expect(c.args).toContain(`core.hooksPath=${join(dataDir, ".theterminal-empty-hooks")}`);
+        expect(c.args).toContain("commit.gpgsign=false");
+        expect(c.opts).toMatchObject({ timeoutMs: 30000, maxBuffer: 2 * 1024 * 1024 });
+        expect(c.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
+      }
+    });
+
+    it.skipIf(process.platform === "win32")("never runs a planted post-commit, post-checkout hook or smudge filter; plain git does", async () => {
+      const evil = (name: string) => {
+        const f = join(outside, `${name}.sh`);
+        writeFileSync(f, `#!/bin/sh\necho ran >> "${join(outside, `${name}.ran`)}"\ncat\n`);
+        chmodSync(f, 0o755);
+        return f;
+      };
+      const ran = (name: string) => existsSync(join(outside, `${name}.ran`));
+      const hook = (repo: string, name: string) => {
+        writeFileSync(join(repo, ".git", "hooks", name), `#!/bin/sh\necho ran >> "${join(outside, `${name}.ran`)}"\n`);
+        chmodSync(join(repo, ".git", "hooks", name), 0o755);
+      };
+
+      // A repository planted before the initial commit: its post-commit hook must not run on that commit.
+      const repo = join(dataDir, "projects", "proj1", "repo");
+      mkdirSync(repo, { recursive: true });
+      await git(repo, "init");
+      hook(repo, "post-commit");
+      await mgr.ensureProjectRepo("proj1");
+      expect(ran("post-commit")).toBe(false);
+
+      // A smudge filter and a post-checkout hook in the shared .git must not run when a worktree is checked out.
+      writeFileSync(join(repo, ".gitattributes"), "*.txt filter=evil\n");
+      writeFileSync(join(repo, "a.txt"), "hello\n");
+      await mgr.runGit(repo, ["add", "-A"]);
+      await mgr.runGit(repo, ["commit", "-m", "files"]);
+      await git(repo, "config", "filter.evil.smudge", evil("smudge"));
+      await git(repo, "config", "filter.evil.clean", evil("clean"));
+      hook(repo, "post-checkout");
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      expect(readFileSync(join(wt.absPath, "a.txt"), "utf8")).toBe("hello\n");
+      expect([ran("post-commit"), ran("post-checkout"), ran("smudge")]).toEqual([false, false, false]);
+
+      // Controls: plain git runs each of them.
+      await git(repo, "commit", "--allow-empty", "-m", "control");
+      expect(ran("post-commit")).toBe(true);
+      await git(repo, "worktree", "add", join(outside, "control-wt"));
+      expect(ran("post-checkout")).toBe(true);
+      expect(ran("smudge")).toBe(true);
+    });
+  });
 });

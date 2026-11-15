@@ -8,10 +8,10 @@ import { MAX_CHANGED_FILES, MAX_FILE_BYTES, type AgentRun } from "@theterminal/s
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { FakeAdapter } from "../../src/agents/fake-adapter.js";
 import { AgentRunner } from "../../src/agents/runner.js";
-import { WorktreeManager } from "../../src/agents/worktrees.js";
+import { GitOutputTooLargeError, GitTimeoutError, WorktreeManager, type GitRunner } from "../../src/agents/worktrees.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import {
-  NoBaseError, WorktreeMissingError, fileDiff, listChanges, listDir, readFile, runWorktree, type ChangesDeps,
+  NoBaseError, WorktreeMissingError, fileDiff, isGitSegment, listChanges, listDir, readFile, runWorktree, type ChangesDeps,
 } from "../../src/changes/changes.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getRun } from "../../src/events/projections.js";
@@ -220,10 +220,21 @@ describe("paths that leave the worktree (Review Focus 1)", () => {
 
   it("refuses .., absolute paths and .git", async () => {
     writeFileSync(join(dataDir, "projects", run.projectId, "worktrees", "token"), "secret");
-    for (const p of ["../token", "../../../../etc/hosts", "/etc/hosts", join(outside, "x"), ".git", ".git/config", "sub/.git/config"]) {
+    const winGitNames = [".git./config", ".git /config", "sub/.git. ./x", ".git::$INDEX_ALLOCATION/config", "GIT~1/config"];
+    const gitNames = [".git", ".git/config", "sub/.git/config", ".GIT/config", ...(process.platform === "win32" ? winGitNames : [])];
+    for (const p of ["../token", "../../../../etc/hosts", "/etc/hosts", join(outside, "x"), ...gitNames]) {
       await rejectsAll(p);
     }
     if (process.platform === "win32") await rejectsAll("C:\\Windows\\win.ini");
+  });
+
+  it("knows the git directory's other names on Windows, at any depth", () => {
+    for (const n of [".git", ".GIT", ".git.", ".git ", ".git. .", ".git::$INDEX_ALLOCATION", "GIT~1", "git~12"]) {
+      expect(isGitSegment(n, "win32"), n).toBe(true);
+    }
+    for (const n of [".gitignore", ".github", "git", ".git.x", "git~"]) expect(isGitSegment(n, "win32"), n).toBe(false);
+    expect(isGitSegment(".GIT", "darwin")).toBe(true);
+    expect(isGitSegment(".git.", "darwin")).toBe(false);
   });
 
   describe.skipIf(process.platform === "win32")("symlinks", () => {
@@ -247,24 +258,30 @@ describe("paths that leave the worktree (Review Focus 1)", () => {
   });
 });
 
-describe.skipIf(process.platform === "win32")("agent-planted git configuration never runs (R2)", () => {
-  it("ignores a planted filter driver, textconv, external diff and hooks", async () => {
-    const marker = join(outside, "ran");
-    const evil = join(outside, "evil.sh");
-    writeFileSync(evil, `#!/bin/sh\necho "$0 $*" >> "${marker}"\nif [ -n "$1" ] && [ -f "$1" ]; then cat "$1"; else cat; fi\n`);
-    chmodSync(evil, 0o755);
+describe.skipIf(process.platform === "win32")("agent-planted git configuration never runs (R2)", { timeout: 20000 }, () => {
+  it("ignores a planted filter driver, textconv, external diff, fsmonitor and hooks; plain git runs each", async () => {
+    const evil = (name: string, passThrough = true) => {
+      const f = join(outside, `${name}.sh`);
+      const tail = passThrough ? `if [ -n "$1" ] && [ -f "$1" ]; then cat "$1"; else cat; fi\n` : "";
+      writeFileSync(f, `#!/bin/sh\necho ran >> "${join(outside, `${name}.ran`)}"\n${tail}`);
+      chmodSync(f, 0o755);
+      return f;
+    };
+    const ran = (name: string) => existsSync(join(outside, `${name}.ran`));
     write("a.txt", "one\n");
     await commitAll();
 
     const repo = worktrees.repoPath(run.projectId);
     const plant = (...args: string[]) => exec("git", ["config", ...args], { cwd: repo, env: testEnv() });
-    await plant("filter.evil.clean", evil);
-    await plant("filter.evil.smudge", evil);
+    await plant("filter.evil.clean", evil("clean"));
+    await plant("filter.evil.smudge", evil("smudge"));
     await plant("filter.evil.required", "true");
-    await plant("diff.evil.textconv", evil);
-    await plant("diff.external", evil);
-    for (const hook of ["post-index-change", "reference-transaction", "pre-commit", "post-checkout"]) {
-      writeFileSync(join(repo, ".git", "hooks", hook), `#!/bin/sh\necho hook >> "${marker}"\n`);
+    await plant("diff.evil.textconv", evil("textconv"));
+    await plant("diff.external", evil("external"));
+    await plant("core.fsmonitor", evil("fsmonitor", false));
+    const hooks = ["post-index-change", "reference-transaction", "pre-commit", "post-commit", "post-checkout"];
+    for (const hook of hooks) {
+      writeFileSync(join(repo, ".git", "hooks", hook), `#!/bin/sh\necho ran >> "${join(outside, "hook.ran")}"\n`);
       chmodSync(join(repo, ".git", "hooks", hook), 0o755);
     }
     write(".gitattributes", "* filter=evil diff=evil\n");
@@ -278,10 +295,86 @@ describe.skipIf(process.platform === "win32")("agent-planted git configuration n
     readFile(deps, run.id, "a.txt");
     listDir(deps, run.id, "");
     await worktrees.runGit(wt, ["commit", "--allow-empty", "-m", "x"]);
-    expect(existsSync(marker)).toBe(false);
+    for (const name of ["clean", "smudge", "textconv", "external", "fsmonitor", "hook"]) expect(ran(name), name).toBe(false);
 
-    // Control: the same repository, read by plain git, does run the planted program.
-    await exec("git", ["diff", "HEAD"], { cwd: wt, env: testEnv() });
-    expect(existsSync(marker)).toBe(true);
+    // Controls: the same repository, used by plain git, runs each planted program.
+    const plain = (...args: string[]) => exec("git", args, { cwd: wt, env: testEnv() });
+    await plain("status");
+    expect(ran("fsmonitor")).toBe(true);
+    await plain("diff", "HEAD");
+    expect(ran("external")).toBe(true);
+    await plain("diff", "--no-ext-diff", "HEAD");
+    expect(ran("textconv")).toBe(true);
+    await plain("add", "a.txt");
+    expect(ran("clean")).toBe(true);
+    await plain("commit", "--allow-empty", "-m", "control");
+    expect(ran("hook")).toBe(true);
+  });
+
+  it("refuses a worktree whose git configuration points its work tree elsewhere, never serving outside content", async () => {
+    writeFileSync(join(outside, "stolen.txt"), "outside content\n");
+    const repo = worktrees.repoPath(run.projectId);
+    await exec("git", ["config", "extensions.worktreeConfig", "true"], { cwd: repo, env: testEnv() });
+    await exec("git", ["config", "--worktree", "core.worktree", outside], { cwd: wt, env: testEnv() });
+    // Control: plain git now treats the outside folder as this worktree.
+    expect((await exec("git", ["rev-parse", "--show-toplevel"], { cwd: wt, env: testEnv() })).stdout.trim()).toBe(outside);
+    await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
+    await expect(fileDiff(deps, run.id, "stolen.txt")).rejects.toBeInstanceOf(WorktreeMissingError);
+  });
+
+  it("refuses a worktree whose .git file points at another repository", async () => {
+    const other = join(outside, "other");
+    mkdirSync(other);
+    await exec("git", ["init"], { cwd: other, env: testEnv() });
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(other, ".git")}\n`);
+    await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
+  });
+
+  it("never blocks on a FIFO: refused as a file, not a regular file in a diff", async () => {
+    await exec("mkfifo", [join(wt, "pipe")]);
+    expect(() => readFile(deps, run.id, "pipe")).toThrow(NotFoundError);
+    await listChanges(deps, run.id);
+    const d = await fileDiff(deps, run.id, "pipe");
+    expect(d.text === null || d.text === "").toBe(true);
+    expect(listDir(deps, run.id, "").entries).toEqual(expect.arrayContaining([{ name: "pipe", kind: "other", size: null }]));
+  });
+});
+
+describe("too many changes", () => {
+  const injected = (fail: (args: string[]) => Error | null): ChangesDeps => {
+    const runner: GitRunner = async (args, cwd, opts) => {
+      const err = fail(args);
+      if (err) throw err;
+      return (await exec("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+    };
+    return { ...deps, worktrees: new WorktreeManager(dataDir, runner) };
+  };
+
+  it("an over-large or slow listing is the tooMany state, never an error", async () => {
+    write("notes.txt", "x\n");
+    const big = await listChanges(injected((a) => (a.includes("--numstat") ? new GitOutputTooLargeError() : null)), run.id);
+    expect(big).toMatchObject({ runId: run.id, files: [], truncated: true, tooMany: true });
+    const slow = await listChanges(injected((a) => (a.includes("ls-files") ? new GitTimeoutError() : null)), run.id);
+    expect(slow).toMatchObject({ files: [], truncated: true, tooMany: true });
+    expect(await listChanges(deps, run.id)).toMatchObject({ truncated: false, tooMany: false });
+  });
+});
+
+describe("names changed by cleaning", () => {
+  it("are flagged and never served as a path (sorted by their real names)", async () => {
+    write(`${KEY}.txt`, "x\n");
+    write("plain.txt", "y\n");
+    const c = await listChanges(deps, run.id);
+    expect(c.files).toEqual([
+      { path: "plain.txt", status: "untracked", added: null, deleted: null, binary: false },
+      { path: "[REDACTED].txt", status: "untracked", added: null, deleted: null, binary: false, cleaned: true },
+    ]);
+    expect(listDir(deps, run.id, "").entries).toEqual([
+      { name: "plain.txt", kind: "file", size: 2 },
+      { name: "[REDACTED].txt", kind: "file", size: 2, cleaned: true },
+    ]);
+    expect(() => readFile(deps, run.id, `${KEY}.txt`)).toThrow(NotFoundError);
+    await expect(fileDiff(deps, run.id, `${KEY}.txt`)).rejects.toBeInstanceOf(NotFoundError);
+    expect(() => readFile(deps, run.id, "[REDACTED].txt")).toThrow(NotFoundError);
   });
 });

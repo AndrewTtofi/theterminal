@@ -1,5 +1,5 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, statSync } from "node:fs";
-import { isAbsolute, join, sep } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   MAX_CHANGED_FILES, MAX_DIFF_BYTES, MAX_DIFF_LINES, MAX_DIR_ENTRIES, MAX_FILE_BYTES,
   type AgentRun, type ChangeStatus, type ChangedFile, type DirEntry, type DirListing, type FileContent, type FileDiff,
@@ -53,10 +53,24 @@ const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "--no-textconv", "--no-rename
 const STATUS: Record<string, ChangeStatus> = { A: "added", M: "modified", D: "deleted", T: "typechange" };
 
 const notFound = (): NotFoundError => new NotFoundError("path", "(given)");
+/** Never follows a symlink, never blocks on a FIFO or device. */
+const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 /** A pathspec git matches as written, never as a glob or with magic. */
 const literal = (rel: string): string => `:(literal)${rel}`;
-const isGitName = (name: string): boolean => name.toLowerCase() === ".git";
+/**
+ * Whether a path segment names the git directory. Case is ignored everywhere. On Windows a name is also the same as
+ * `.git` after the trailing dots and spaces and any `:stream` suffix are dropped, and `GIT~<n>` may be its short
+ * name, so those are refused too.
+ */
+export function isGitSegment(name: string, platform: NodeJS.Platform = process.platform): boolean {
+  const n = name.toLowerCase();
+  if (n === ".git") return true;
+  if (platform !== "win32") return false;
+  const base = n.split(":")[0]!.replace(/[. ]+$/, "");
+  return base === ".git" || /^git~\d+$/.test(base);
+}
+const isGitName = (name: string): boolean => isGitSegment(name);
 
 /** Errors that mean the workspace refused to run git at all; never reported as "no base". */
 const isRefusal = (e: unknown): boolean =>
@@ -78,9 +92,10 @@ export function runWorktree(deps: ChangesDeps, runId: string): { run: AgentRun; 
 
 /**
  * The resolved path for `path` inside the worktree, and the path as git names it (relative, `/`-separated).
- * Refuses (NotFoundError, with no detail) an absolute path, any `.git` segment, and anything resolveInside refuses.
+ * Refuses (NotFoundError, with no detail) an absolute path, any `.git` segment, anything resolveInside refuses, and
+ * a path that the run's cleaning would change.
  */
-function confine(deps: ChangesDeps, abs: string, path: string): { resolved: string; rel: string } {
+function confine(deps: ChangesDeps, runId: string, abs: string, path: string): { resolved: string; rel: string } {
   if (typeof path !== "string" || path.length > PATH_MAX) throw notFound();
   if (isAbsolute(path) || /^[A-Za-z]:/.test(path) || path.startsWith("\\")) throw notFound();
   if (path.split(/[\\/]/).some(isGitName)) throw notFound();
@@ -90,6 +105,8 @@ function confine(deps: ChangesDeps, abs: string, path: string): { resolved: stri
     .split(sep === "\\" ? /[\\/]/ : "/")
     .filter((s) => s !== "" && s !== ".")
     .join("/");
+  // A path that cleaning would change is never served: it holds a secret or a private path.
+  if (deps.clean(runId, rel, PATH_MAX) !== rel) throw notFound();
   return { resolved, rel };
 }
 
@@ -101,7 +118,8 @@ function confine(deps: ChangesDeps, abs: string, path: string): { resolved: stri
 function readCapped(file: string, max: number): { size: number; buf: Buffer | null } | null {
   let fd: number;
   try {
-    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    if (!lstatSync(file).isFile()) return null; // never open a FIFO, socket or device
+    fd = openSync(file, OPEN_FLAGS);
   } catch {
     return null;
   }
@@ -133,7 +151,7 @@ function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
   if (resolved === null) return false;
   try {
     if (!lstatSync(resolved).isFile()) return false;
-    const fd = openSync(resolved, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const fd = openSync(resolved, OPEN_FLAGS);
     try {
       const buf = Buffer.alloc(SNIFF_BYTES);
       return hasNul(buf.subarray(0, readSync(fd, buf, 0, SNIFF_BYTES, 0)));
@@ -145,13 +163,43 @@ function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
   }
 }
 
+/** Git in the run's worktree, pinned to its verified git directory and work tree. */
+type WorktreeGit = (args: string[]) => Promise<string>;
+
+const isWindows = process.platform === "win32";
+const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
+const isUnder = (child: string, parent: string): boolean => {
+  const rel = relative(fold(parent), fold(child));
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+};
+
+/**
+ * Checks that git sees the worktree as itself before anything is read through git: its top level is the worktree,
+ * and its git directory is one of the project repository's own worktree entries. A planted `core.worktree`, or a
+ * `.git` file pointing anywhere else, fails with WorktreeMissingError. Every later call passes the verified
+ * `--git-dir` and `--work-tree`, so neither can change in between.
+ */
+async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string): Promise<WorktreeGit> {
+  let gitDir: string;
+  try {
+    const top = realpathSync.native((await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel"])).trim());
+    gitDir = realpathSync.native((await deps.worktrees.runGit(abs, ["rev-parse", "--absolute-git-dir"])).trim());
+    const entries = realpathSync.native(join(deps.worktrees.repoPath(run.projectId), ".git", "worktrees"));
+    if (fold(top) !== fold(realpathSync.native(abs)) || !isUnder(gitDir, entries)) throw new WorktreeMissingError();
+  } catch (e) {
+    if (isRefusal(e)) throw e;
+    throw new WorktreeMissingError();
+  }
+  return (args) => deps.worktrees.runGit(abs, args, { gitDir, workTree: abs });
+}
+
 /** The fork point (`merge-base HEAD <repo HEAD>`) and the run's HEAD; NoBaseError when either cannot be found. */
-async function forkPoint(deps: ChangesDeps, run: AgentRun, abs: string): Promise<{ base: string; head: string }> {
+async function forkPoint(deps: ChangesDeps, run: AgentRun, git: WorktreeGit): Promise<{ base: string; head: string }> {
   try {
     const repoHead = (await deps.worktrees.runGit(deps.worktrees.repoPath(run.projectId), ["rev-parse", "--verify", "HEAD"])).trim();
     if (!COMMIT_ID.test(repoHead)) throw new NoBaseError();
-    const base = (await deps.worktrees.runGit(abs, ["merge-base", "HEAD", repoHead])).trim();
-    const head = (await deps.worktrees.runGit(abs, ["rev-parse", "--verify", "HEAD"])).trim();
+    const base = (await git(["merge-base", "HEAD", repoHead])).trim();
+    const head = (await git(["rev-parse", "--verify", "HEAD"])).trim();
     if (!COMMIT_ID.test(base) || !COMMIT_ID.test(head)) throw new NoBaseError();
     return { base, head };
   } catch (e) {
@@ -161,11 +209,11 @@ async function forkPoint(deps: ChangesDeps, run: AgentRun, abs: string): Promise
 }
 
 /** Tracked changes from `base` to the working tree, by path (optionally only those under one literal pathspec). */
-async function trackedChanges(deps: ChangesDeps, abs: string, base: string, only?: string): Promise<Map<string, ChangedFile>> {
+async function trackedChanges(git: WorktreeGit, base: string, only?: string): Promise<Map<string, ChangedFile>> {
   const spec = ["--", ...(only === undefined ? [] : [literal(only)])];
   const [numstat, names] = await Promise.all([
-    deps.worktrees.runGit(abs, ["diff", "--numstat", "-z", ...DIFF_FLAGS, base, ...spec]),
-    deps.worktrees.runGit(abs, ["diff", "--name-status", "-z", ...DIFF_FLAGS, base, ...spec]),
+    git(["diff", "--numstat", "-z", ...DIFF_FLAGS, base, ...spec]),
+    git(["diff", "--name-status", "-z", ...DIFF_FLAGS, base, ...spec]),
   ]);
   const files = new Map<string, ChangedFile>();
   const tokens = names.split("\0");
@@ -189,8 +237,8 @@ async function trackedChanges(deps: ChangesDeps, abs: string, base: string, only
   return files;
 }
 
-async function untrackedPaths(deps: ChangesDeps, abs: string, only?: string): Promise<string[]> {
-  const out = await deps.worktrees.runGit(abs, [
+async function untrackedPaths(git: WorktreeGit, only?: string): Promise<string[]> {
+  const out = await git([
     "ls-files", "--others", "--exclude-standard", "-z", ...(only === undefined ? [] : ["--", literal(only)]),
   ]);
   return out.split("\0").filter((p) => p !== "");
@@ -198,28 +246,45 @@ async function untrackedPaths(deps: ChangesDeps, abs: string, only?: string): Pr
 
 export async function listChanges(deps: ChangesDeps, runId: string): Promise<RunChanges> {
   const { run, abs } = runWorktree(deps, runId);
-  const { base, head } = await forkPoint(deps, run, abs);
-  const tracked = await trackedChanges(deps, abs, base);
-  const untracked = await untrackedPaths(deps, abs);
+  const git = await verifiedGit(deps, run, abs);
+  const { base, head } = await forkPoint(deps, run, git);
+  let tracked: Map<string, ChangedFile>;
+  let untracked: string[];
+  try {
+    tracked = await trackedChanges(git, base);
+    untracked = await untrackedPaths(git);
+  } catch (e) {
+    // The list itself is too large or too slow to read: say so instead of failing.
+    if (e instanceof GitOutputTooLargeError || e instanceof GitTimeoutError) {
+      return { runId, base, head, files: [], truncated: true, tooMany: true };
+    }
+    throw e;
+  }
   const all: ChangedFile[] = [...tracked.values()];
   for (const path of untracked) {
     if (!tracked.has(path)) all.push({ path, status: "untracked", added: null, deleted: null, binary: false });
   }
   all.sort((a, b) => byName(a.path, b.path));
   const kept = all.slice(0, MAX_CHANGED_FILES);
-  const files = kept.map((f) => ({
-    ...f,
-    path: deps.clean(runId, f.path, PATH_MAX),
-    ...(f.status === "untracked" && { binary: sniffBinary(deps, abs, f.path) }),
-  }));
-  return { runId, base, head, files, truncated: all.length > MAX_CHANGED_FILES };
+  const files = kept.map((f): ChangedFile => {
+    const path = deps.clean(runId, f.path, PATH_MAX);
+    return {
+      ...f,
+      path,
+      // A path that cleaning changed is never opened, so its contents are not even sniffed.
+      ...(f.status === "untracked" && { binary: path === f.path && sniffBinary(deps, abs, f.path) }),
+      ...(path !== f.path && { cleaned: true as const }),
+    };
+  });
+  return { runId, base, head, files, truncated: all.length > MAX_CHANGED_FILES, tooMany: false };
 }
 
 export async function fileDiff(deps: ChangesDeps, runId: string, path: string): Promise<FileDiff> {
   const { run, abs } = runWorktree(deps, runId);
-  const { resolved, rel } = confine(deps, abs, path);
+  const { resolved, rel } = confine(deps, runId, abs, path);
   if (rel === "") throw notFound();
-  const { base } = await forkPoint(deps, run, abs);
+  const git = await verifiedGit(deps, run, abs);
+  const { base } = await forkPoint(deps, run, git);
   const shown = deps.clean(runId, rel, PATH_MAX);
   const answer = (d: Omit<FileDiff, "runId" | "path">): FileDiff => ({ runId, path: shown, ...d });
   /** Cleans first, then applies the byte cap: over it the diff is tooLarge with no text, never cut. */
@@ -229,14 +294,14 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
     return answer({ ...d, tooLarge, text: tooLarge ? null : text });
   };
 
-  const t = (await trackedChanges(deps, abs, base, rel)).get(rel);
+  const t = (await trackedChanges(git, base, rel)).get(rel);
   if (t) {
     const counts = { status: t.status, binary: t.binary, added: t.added, deleted: t.deleted };
     if (t.binary) return answer({ ...counts, tooLarge: false, text: null });
     if ((t.added ?? 0) + (t.deleted ?? 0) > MAX_DIFF_LINES) return answer({ ...counts, tooLarge: true, text: null });
     let raw: string;
     try {
-      raw = await deps.worktrees.runGit(abs, ["diff", ...DIFF_FLAGS, "-U3", base, "--", literal(rel)]);
+      raw = await git(["diff", ...DIFF_FLAGS, "-U3", base, "--", literal(rel)]);
     } catch (e) {
       if (e instanceof GitOutputTooLargeError || e instanceof GitTimeoutError) return answer({ ...counts, tooLarge: true, text: null });
       throw e;
@@ -244,7 +309,7 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
     return capped(raw, counts);
   }
 
-  if ((await untrackedPaths(deps, abs, rel)).includes(rel)) {
+  if ((await untrackedPaths(git, rel)).includes(rel)) {
     const status = "untracked" as const;
     const file = readCapped(resolved, MAX_FILE_BYTES);
     if (file === null) return answer({ status, binary: false, tooLarge: false, added: null, deleted: null, text: null });
@@ -264,7 +329,7 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
 
 export function listDir(deps: ChangesDeps, runId: string, path: string): DirListing {
   const { abs } = runWorktree(deps, runId);
-  const { resolved, rel } = confine(deps, abs, path);
+  const { resolved, rel } = confine(deps, runId, abs, path);
   let dirents;
   try {
     if (!statSync(resolved).isDirectory()) throw notFound();
@@ -286,14 +351,15 @@ export function listDir(deps: ChangesDeps, runId: string, path: string): DirList
         size = null;
       }
     }
-    return { name: deps.clean(runId, name, NAME_MAX), kind, size };
+    const shown = deps.clean(runId, name, NAME_MAX);
+    return { name: shown, kind, size, ...(shown !== name && { cleaned: true as const }) };
   });
   return { runId, path: deps.clean(runId, rel, PATH_MAX), entries, truncated: all.length > MAX_DIR_ENTRIES };
 }
 
 export function readFile(deps: ChangesDeps, runId: string, path: string): FileContent {
   const { abs } = runWorktree(deps, runId);
-  const { resolved, rel } = confine(deps, abs, path);
+  const { resolved, rel } = confine(deps, runId, abs, path);
   const file = readCapped(resolved, MAX_FILE_BYTES);
   if (file === null) throw notFound();
   const out = { runId, path: deps.clean(runId, rel, PATH_MAX), size: file.size };

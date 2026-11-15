@@ -190,7 +190,7 @@ const gitRunner =
 function readSmallRegularFile(file: string, max: number): string {
   try {
     if (!lstatSync(file).isFile()) return "";
-    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     try {
       const buf = Buffer.alloc(max);
       const n = readSync(fd, buf, 0, max, 0);
@@ -250,14 +250,20 @@ export class WorktreeManager {
   }
 
   /**
-   * Runs git in `cwd`, which may be a tree an agent controlled, so nothing in it may make git run a program:
-   * GIT_COMMON_ARGS (no pager, no fsmonitor), `core.hooksPath` set to an always-empty directory, and every filter
-   * driver named in the repository's configuration or its attribute files set to empty commands and not required.
-   * The environment is the allowlisted one (safeGitEnv), never the server's. Diff callers add `--no-ext-diff
-   * --no-textconv`. Bounded by `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB,
-   * GitOutputTooLargeError).
+   * Runs git in `cwd`, which may be a tree or repository an agent controlled, so nothing in it may make git run a
+   * program: GIT_COMMON_ARGS (no pager, no fsmonitor), `core.hooksPath` set to an always-empty directory,
+   * `commit.gpgsign=false` (no signing program), and every filter driver named in the repository's configuration or
+   * its attribute files set to empty commands and not required. The environment is the allowlisted one
+   * (safeGitEnv), never the server's. Diff callers add `--no-ext-diff --no-textconv`. `gitDir` and `workTree`, when
+   * given, are passed as `--git-dir`/`--work-tree`, so a planted `core.worktree` or `.git` file cannot redirect the
+   * call. Every call this manager makes goes through here, repository setup included. Bounded by `timeoutMs`
+   * (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError).
    */
-  async runGit(cwd: string, args: string[], opts: { timeoutMs?: number; maxBuffer?: number } = {}): Promise<string> {
+  async runGit(
+    cwd: string,
+    args: string[],
+    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string } = {},
+  ): Promise<string> {
     assertEmptyGitconfig(this.dataDir);
     this.assertEmptyHooks();
     const run: GitRunOptions = {
@@ -265,12 +271,16 @@ export class WorktreeManager {
       maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
       env: safeGitEnv(cwd, this.emptyGlobalConfig),
     };
-    const hardened = [...GIT_COMMON_ARGS, "-c", `core.hooksPath=${this.emptyHooks}`];
-    const names = await this.filterDrivers(cwd, hardened, run);
+    const hardened = [...GIT_COMMON_ARGS, "-c", `core.hooksPath=${this.emptyHooks}`, "-c", "commit.gpgsign=false"];
+    const location = [
+      ...(opts.gitDir !== undefined ? [`--git-dir=${opts.gitDir}`] : []),
+      ...(opts.workTree !== undefined ? [`--work-tree=${opts.workTree}`] : []),
+    ];
+    const names = await this.filterDrivers(opts.workTree ?? cwd, [...hardened, ...location], cwd, run);
     const filters = names.flatMap((n) =>
       [`filter.${n}.clean=`, `filter.${n}.smudge=`, `filter.${n}.process=`, `filter.${n}.required=false`].flatMap((kv) => ["-c", kv]),
     );
-    return this.git([...hardened, ...filters, ...args], cwd, run);
+    return this.git([...hardened, ...filters, ...location, ...args], cwd, run);
   }
 
   /**
@@ -278,7 +288,7 @@ export class WorktreeManager {
    * followed), and `filter=<name>` in the worktree's top-level .gitattributes and the repository's info/attributes.
    * A name that `-c name=value` could not carry unambiguously is refused (UnsafeGitConfigError), never skipped.
    */
-  private async filterDrivers(cwd: string, hardened: string[], run: GitRunOptions): Promise<string[]> {
+  private async filterDrivers(top: string, hardened: string[], cwd: string, run: GitRunOptions): Promise<string[]> {
     const names = new Set<string>();
     const keys = await this.git([...hardened, "config", "--null", "--name-only", "--get-regexp", "^filter\\."], cwd, run).catch(
       (e: unknown) => {
@@ -291,7 +301,7 @@ export class WorktreeManager {
       const dot = k.lastIndexOf(".");
       if (k.toLowerCase().startsWith("filter.") && dot > "filter.".length) names.add(k.slice("filter.".length, dot));
     }
-    const attrFiles = [join(cwd, ".gitattributes")];
+    const attrFiles = [join(top, ".gitattributes")];
     const common = await this.git([...hardened, "rev-parse", "--git-common-dir"], cwd, run).then(
       (out) => resolve(cwd, out.trim()),
       () => null,
@@ -324,18 +334,18 @@ export class WorktreeManager {
     // Before any git call: recreated if it was deleted, and never used once something was written to it.
     ensureEmptyGitconfig(this.dataDir);
     assertEmptyGitconfig(this.dataDir);
-    await this.git(["init"], repo); // idempotent; also repairs an empty .git
-    const gitDir = (await this.git(["rev-parse", "--absolute-git-dir"], repo)).trim();
+    await this.runGit(repo, ["init"]); // idempotent; also repairs an empty .git
+    const gitDir = (await this.runGit(repo, ["rev-parse", "--absolute-git-dir"])).trim();
     if (fold(normalize(gitDir)) !== fold(join(realpathSync.native(repo), ".git"))) {
       throw new Error("project repo is not its own git repository");
     }
-    for (const [key, value] of REPO_CONFIG) await this.git(["config", key, value], repo);
-    const hasHead = await this.git(["rev-parse", "--verify", "HEAD"], repo).then(
+    for (const [key, value] of REPO_CONFIG) await this.runGit(repo, ["config", key, value]);
+    const hasHead = await this.runGit(repo, ["rev-parse", "--verify", "HEAD"]).then(
       () => true,
       () => false,
     );
     if (!hasHead) {
-      await this.git(["commit", "--allow-empty", "--no-verify", "-m", "Initial commit"], repo);
+      await this.runGit(repo, ["commit", "--allow-empty", "--no-verify", "-m", "Initial commit"]);
     }
     return repo;
   }
@@ -347,7 +357,7 @@ export class WorktreeManager {
       const repo = await this.initRepo(projectId);
       const absPath = join(this.dataDir, "projects", projectId, "worktrees", runId);
       mkdirSync(dirname(absPath), { recursive: true });
-      await this.git(["worktree", "add", "-b", `run/${runId}`, absPath], repo);
+      await this.runGit(repo, ["worktree", "add", "-b", `run/${runId}`, absPath]);
       const relPath = relative(this.dataDir, absPath).split(sep).join("/");
       return { absPath, relPath };
     });

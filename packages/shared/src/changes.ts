@@ -20,7 +20,7 @@ export const MAX_RENDERED_LINES = 20000;
 export type ChangeStatus = "added" | "modified" | "deleted" | "typechange" | "untracked" | "unchanged";
 /**
  * `added` and `deleted` are line counts, null for binary and untracked files. `cleaned` is set when cleaning changed
- * the path (it looked like a secret or a private path): the path shown is not the real one, so it opens nothing.
+ * the path (it held a secret or a private path): it is shown as cleaned and cannot be opened as a diff or a file.
  */
 export type ChangedFile = {
   path: string;
@@ -31,8 +31,8 @@ export type ChangedFile = {
   cleaned?: true;
 };
 /**
- * `base` and `head` are full commit ids; `files` are sorted by path. `tooMany` is set when the run changed too much
- * to list at all: `files` is then partial or empty and must not be counted or summed.
+ * `base` and `head` are full commit ids; `files` are sorted by path. `tooMany` (always sent by the server) means
+ * the change list itself was too large or too slow to read: `files` is empty and `truncated` is true.
  */
 export type RunChanges = { runId: string; base: string; head: string; files: ChangedFile[]; truncated: boolean; tooMany?: boolean };
 export type FileDiff = {
@@ -47,7 +47,7 @@ export type FileDiff = {
 };
 /**
  * `other` is a symlink, socket or anything else that is not a plain file or directory; it is never followed.
- * `cleaned` is set when cleaning changed the name, which then opens nothing.
+ * `cleaned` is set when cleaning changed the name; such an entry cannot be opened.
  */
 export type DirEntry = { name: string; kind: "file" | "dir" | "other"; size: number | null; cleaned?: true };
 /** Directories first, then files, each by name; `.git` is never listed. */
