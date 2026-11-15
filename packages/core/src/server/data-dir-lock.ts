@@ -81,11 +81,20 @@ export function acquireDataDirLock(
   } finally {
     rmSync(temp, { force: true });
   }
-  return {
-    release() {
-      if (parsePid(readText(file)) === pid) rmSync(file, { force: true });
-    },
-  };
+  return { release: () => releaseDataDirLock(dataDir, pid) };
+}
+
+/**
+ * Removes `<dataDir>/server.lock` only while it names `pid`. Never throws: a host whose server hangs on close calls
+ * it as a best effort before exiting.
+ */
+export function releaseDataDirLock(dataDir: string, pid: number = process.pid): void {
+  const file = join(dataDir, LOCK_FILE);
+  try {
+    if (parsePid(readText(file)) === pid) rmSync(file, { force: true });
+  } catch {
+    // Best effort: a lock left behind names a dead pid and is taken over by the next start.
+  }
 }
 
 /** Removes a stale lock, or throws DataDirInUseError when it is held (or changes while it is being judged). */

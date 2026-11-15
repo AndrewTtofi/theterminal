@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DataDirInUseError, acquireDataDirLock } from "../../src/server/data-dir-lock.js";
+import { DataDirInUseError, acquireDataDirLock, releaseDataDirLock } from "../../src/server/data-dir-lock.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import type { Db } from "../../src/db.js";
@@ -117,6 +117,17 @@ describe("acquireDataDirLock", () => {
     writeFileSync(lockFile(dir), "333\n");
     lock.release();
     expect(readFileSync(lockFile(dir), "utf8")).toBe("333\n");
+  });
+
+  it("releaseDataDirLock removes the lock only while it names the given pid, and never throws", () => {
+    const dir = tmp();
+    acquireDataDirLock(dir, 111);
+    releaseDataDirLock(dir, 222);
+    expect(readFileSync(lockFile(dir), "utf8")).toBe("111\n");
+    releaseDataDirLock(dir, 111);
+    expect(existsSync(lockFile(dir))).toBe(false);
+    expect(() => releaseDataDirLock(dir, 111)).not.toThrow();
+    expect(() => releaseDataDirLock(join(dir, "missing"), 111)).not.toThrow();
   });
 
   it("the default liveness check treats this process as alive", () => {
