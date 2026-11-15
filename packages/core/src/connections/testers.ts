@@ -1,5 +1,9 @@
 import type { ConnectionProvider } from "@theterminal/shared";
 import type { ConnectionTester } from "./service.js";
+import { keyRejection, type StsCaller } from "./cloud/aws.js";
+import { fetchAzureToken } from "./cloud/azure.js";
+import { GCP_SCOPE_READ, fetchGcpToken, parseServiceAccount } from "./cloud/gcp.js";
+import { TokenEndpointError, type AccessToken } from "./cloud/token.js";
 
 type Check = {
   url: string;
@@ -60,3 +64,76 @@ export const CONNECTION_TESTERS: Partial<Record<ConnectionProvider, ConnectionTe
     connected: (res) => `Connected (scopes: ${res.headers.get("x-oauth-scopes")?.trim() || "fine-grained"})`,
   }),
 };
+
+const NO_CREDENTIALS = "No credentials stored";
+const UNREACHABLE = "Could not reach the provider";
+
+type Outcome = { ok: boolean; message: string };
+
+/**
+ * Gets a token, then reads one resource with it. `target` names the resource in messages, for example
+ * "project my-project". Messages never hold the token or the response body.
+ */
+async function tokenThenRead(
+  getToken: () => Promise<AccessToken>, url: string, target: string, f: typeof fetch, signal: AbortSignal, cannotSee: string,
+): Promise<Outcome> {
+  let token: AccessToken;
+  try {
+    token = await getToken();
+  } catch (err) {
+    if (!(err instanceof TokenEndpointError)) return { ok: false, message: UNREACHABLE };
+    if (err.status === 400 || err.status === 401) return { ok: false, message: `Rejected by the provider (HTTP ${err.status})` };
+    return { ok: false, message: `Unexpected response (HTTP ${err.status})` };
+  }
+  let res: Response;
+  try {
+    res = await f(url, { method: "GET", headers: { Authorization: `Bearer ${token.accessToken}`, Accept: "application/json" }, signal });
+  } catch {
+    return { ok: false, message: UNREACHABLE };
+  }
+  if (res.ok) return { ok: true, message: "Connected" };
+  if (res.status === 403 || res.status === 404) return { ok: false, message: `${cannotSee} ${target} (HTTP ${res.status})` };
+  if (res.status === 401) return { ok: false, message: `Rejected by the provider (HTTP ${res.status})` };
+  return { ok: false, message: `Unexpected response (HTTP ${res.status})` };
+}
+
+/** Testers for cloud accounts. AWS goes through `sts`; Google Cloud and Azure through the tester's fetch. */
+export function cloudTesters(sts: StsCaller): Partial<Record<ConnectionProvider, ConnectionTester>> {
+  return {
+    // No ARN or account id is recorded: only that the identity was verified.
+    aws: async (input, deps) => {
+      const { accessKeyId, secretAccessKey } = input.secrets;
+      const region = input.config.region;
+      if (!accessKeyId || !secretAccessKey || !region) return { ok: false, message: NO_CREDENTIALS };
+      try {
+        await sts.callerIdentity({ accessKeyId, secretAccessKey, region }, deps.signal);
+        return { ok: true, message: "Connected (identity verified)" };
+      } catch (err) {
+        const name = keyRejection(err) ?? ((err as Error | null)?.name === "AccessDenied" ? "AccessDenied" : null);
+        return { ok: false, message: name ? `Rejected by the provider (${name})` : UNREACHABLE };
+      }
+    },
+    gcp: async (input, deps) => {
+      const json = input.secrets.serviceAccountJson;
+      if (!json) return { ok: false, message: NO_CREDENTIALS };
+      const sa = parseServiceAccount(json);
+      if (!sa) return { ok: false, message: "The key is not a service account JSON" };
+      const project = input.config.project ?? sa.project_id;
+      return tokenThenRead(
+        () => fetchGcpToken(sa, GCP_SCOPE_READ, deps),
+        `https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(project)}`,
+        `project ${project}`, deps.fetch, deps.signal, "The service account cannot see",
+      );
+    },
+    azure: async (input, deps) => {
+      const clientSecret = input.secrets.clientSecret;
+      const { tenantId, clientId, subscriptionId } = input.config;
+      if (!clientSecret || !tenantId || !clientId || !subscriptionId) return { ok: false, message: NO_CREDENTIALS };
+      return tokenThenRead(
+        () => fetchAzureToken({ tenantId, clientId, clientSecret }, deps),
+        `https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}?api-version=2022-12-01`,
+        `subscription ${subscriptionId}`, deps.fetch, deps.signal, "The service principal cannot see",
+      );
+    },
+  };
+}
