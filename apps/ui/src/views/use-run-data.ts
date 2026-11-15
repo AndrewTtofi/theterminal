@@ -7,7 +7,8 @@ import { namesRun, useShell } from "../shell/model";
  * Loads one file's data for a `diff:` or `file:` tab on mount, and again on every agent.* or override.* entry
  * naming its run (one load in flight, one more queued). A 404 `not_found` asks whether the run still exists: when
  * the server no longer knows it, the tab closes quietly, as stale tabs are pruned on load; otherwise the failure
- * is worded for the Owner and the last data loaded stays.
+ * is worded for the Owner and the last data loaded stays. A live run (409 `run_active`) never closes the tab: it
+ * says the changes show once the run stops, and the run's finish entry loads them.
  */
 export function useRunData<T>(
   panelId: string,
@@ -49,7 +50,7 @@ export function useRunData<T>(
           if (!cancelled) dockRef.current()?.closeQuietly(panelId as DockPanelId);
           return;
         }
-        if (!cancelled) setError(errorMessage(e));
+        if (!cancelled) setError(errorMessage(e, "changes"));
       } finally {
         inFlight = false;
         if (again && !cancelled) {

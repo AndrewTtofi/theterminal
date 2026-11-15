@@ -299,4 +299,30 @@ describe("run changes", () => {
     expect(errorMessage(new ApiError(404, "worktree_missing"))).toBe("This run's working copy no longer exists on this computer");
     expect(errorMessage(new ApiError(409, "no_base"))).toBe("Could not work out what this run changed");
   });
+
+  it("words a live run and an unsafe repository for the changes views", () => {
+    expect(errorMessage(new ApiError(409, "run_active", { message: "x" }), "changes")).toBe("Changes show when the run is stopped or finished.");
+    expect(errorMessage(new ApiError(409, "unsafe_repository"), "changes")).toBe(
+      "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.",
+    );
+    expect(errorMessage(new ApiError(409, "unsafe_repository"))).toBe(
+      "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.",
+    );
+    // An override refused for a live run keeps its own wording.
+    expect(errorMessage(new ApiError(409, "run_active"))).toBe("Stop the agent first: it is still working in this run");
+  });
+});
+
+describe("ledger pages", () => {
+  it("asks for a page after, or the newest page before, a seq, for one project or every project", async () => {
+    const f = respond(200, []);
+    await api.listLedger("p 1", { beforeSeq: 8, limit: 500 });
+    await api.listLedger(null, { afterSeq: 3 });
+    await api.listLedger(null, {});
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/ledger?projectId=p%201&beforeSeq=8&limit=500",
+      "/api/ledger?afterSeq=3",
+      "/api/ledger",
+    ]);
+  });
 });

@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { narrate } from "@theterminal/shared";
 import type { LedgerEntry } from "@theterminal/shared";
-import { LedgerPanel, describeEntry } from "../src/components/LedgerPanel";
+import { LEDGER_PAGE, LedgerPanel, describeEntry } from "../src/components/LedgerPanel";
 
 const base = { id: "x", ts: "2026-01-01T10:00:00Z", projectId: "p1", prevHash: "", hash: "" };
 const owner = { kind: "human", id: "owner" } as const;
@@ -299,5 +299,32 @@ describe("LedgerPanel narration and raw record", () => {
     expect(screen.getByText("1 entry needing attention is hidden by the topic filter")).toBeTruthy();
     rerender(<LedgerPanel entries={[requested(2)]} />);
     expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
+  });
+});
+
+describe("LedgerPanel paging", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => entry(i + 1, "project.created", { name: `P${i + 1}` }));
+  const items = () => within(screen.getByRole("complementary", { name: "Ledger" })).getAllByRole("listitem");
+  const older = () => screen.getByRole("button", { name: "Show older entries" });
+
+  it("paints the newest 200, grows by 200, then asks for older entries when it has shown them all", () => {
+    const onLoadOlder = vi.fn();
+    render(<LedgerPanel entries={many(450)} hasOlder onLoadOlder={onLoadOlder} />);
+    expect(LEDGER_PAGE).toBe(200);
+    expect(items()).toHaveLength(200);
+    expect(items()[0]!.textContent).toContain("P450");
+    fireEvent.click(older());
+    expect(items()).toHaveLength(400);
+    fireEvent.click(older());
+    expect(items()).toHaveLength(450);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    fireEvent.click(older());
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no older entries once everything is shown and the server has no more", () => {
+    render(<LedgerPanel entries={many(150)} hasOlder={false} onLoadOlder={vi.fn()} />);
+    expect(items()).toHaveLength(150);
+    expect(screen.queryByRole("button", { name: "Show older entries" })).toBeNull();
   });
 });

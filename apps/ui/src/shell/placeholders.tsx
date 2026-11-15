@@ -1,5 +1,5 @@
 /**
- * Stand-ins for the Conversation, Needs-you and Terminal panels and the Learn side bar, so layouts holding them
+ * Stand-ins for the Conversation and Needs-you panels and the Learn side bar, so layouts holding them
  * restore (an unregistered component would make the whole layout fall back). Each is replaced by its real view.
  */
 export function PlaceholderPanel() {

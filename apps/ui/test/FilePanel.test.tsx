@@ -95,4 +95,10 @@ describe("FilePanel", () => {
     expect(await screen.findByText("Not found")).toBeTruthy();
     expect(dock.closeQuietly).not.toHaveBeenCalled();
   });
+
+  it("says plainly that changes show once the run stops, and keeps the tab open", async () => {
+    const { dock } = setup(() => Promise.reject(new ApiError(409, "run_active", { message: "x" })));
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    expect(dock.closeQuietly).not.toHaveBeenCalled();
+  });
 });

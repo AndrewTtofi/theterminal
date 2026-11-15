@@ -97,7 +97,17 @@ export type WorkbenchModel = {
   pending: PendingAgentAction[];
   onDecide: (id: string, decision: "allow" | "deny", reason?: string) => Promise<unknown>;
 
+  /** The entries the ledger panel shows: the selected project's, or every project's, by `ledgerScope`. */
   entries: LedgerEntry[];
+  /** The selected project's stream, whatever the ledger scope: what the Agent feed and the Terminal are made from. */
+  projectEntries: LedgerEntry[];
+  /** The run the Agent feed and the Terminal follow; null follows every run of the project. */
+  feedRunId: string | null;
+  onFollowRun: (runId: string | null) => void;
+  /** True while the server may hold entries older than the oldest loaded for the ledger scope. */
+  ledgerHasOlder: boolean;
+  /** Fetches the 500 entries before the oldest loaded for the ledger scope and puts them in front. */
+  onLoadOlderLedger: () => Promise<void>;
   ledgerScope: LedgerScope;
   onLedgerScopeChange: (scope: LedgerScope) => void;
   /** Which narration topics the ledger shows; every topic by default. */

@@ -3,6 +3,7 @@ import { MAX_CHANGED_FILES, MAX_DIR_ENTRIES, plural, visibleControls } from "@th
 import type { AgentRun, ChangeStatus, ChangedFile, DirEntry, DirListing } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "../components/AgentPanel";
 import { OverrideSection } from "../components/OverrideSection";
+import { clip } from "../components/text";
 import { errorMessage } from "../api";
 import { namesRun, useShell } from "../shell/model";
 
@@ -15,10 +16,7 @@ const PROMPT_CLIP = 40;
 const HIDDEN_NAME = "Name hidden because it looked like a secret or a private path";
 
 function runLabel(r: AgentRun): string {
-  // By code point, so a character made of two UTF-16 units is never cut in half.
-  const chars = Array.from(visibleControls(r.prompt));
-  const clipped = chars.length > PROMPT_CLIP ? `${chars.slice(0, PROMPT_CLIP).join("")}…` : chars.join("");
-  return `${ADAPTER_NAMES[r.adapter]} · ${clipped} · ${r.status}`;
+  return `${ADAPTER_NAMES[r.adapter]} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)} · ${r.status}`;
 }
 
 /** `+a −d` for a file with line counts, `binary` for a binary one, nothing for an untracked one. */
@@ -54,7 +52,7 @@ function DirList({ runId, path, label }: { runId: string; path: string; label?: 
           setListing(l);
           setError(null);
         },
-        (e: unknown) => !cancelled && setError(errorMessage(e)),
+        (e: unknown) => !cancelled && setError(errorMessage(e, "changes")),
       );
     void load();
     const unsubscribe = subscribe((e) => {

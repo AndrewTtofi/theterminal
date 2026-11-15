@@ -420,11 +420,57 @@ describe("App ledger scope", () => {
 
     await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
     await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
-    expect(m.listLedger).toHaveBeenCalledWith(null);
+    expect(m.listLedger).toHaveBeenCalledWith(null, { beforeSeq: 8, limit: 500 });
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(2));
 
     await userEvent.click(screen.getByRole("radio", { name: "This project" }));
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+  });
+
+  it("loads the newest page before the head, then pages older entries in with beforeSeq", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => entry(from + i, "A", `P${from + i}`));
+    m.listLedger.mockImplementation(async (_projectId, q) => (q.beforeSeq === 8 ? page(601, 500) : page(501, 100)));
+    m.health.mockResolvedValue({ ok: true, integrity: "ok", readOnly: false, headSeq: 7 });
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    const ledger = () => screen.getByRole("complementary", { name: "Ledger" });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(200));
+    expect(m.listLedger).toHaveBeenCalledWith("A", { beforeSeq: 8, limit: 500 });
+    const older = () => within(ledger()).getByRole("button", { name: "Show older entries" });
+    await userEvent.click(older());
+    await userEvent.click(older());
+    expect(within(ledger()).getAllByRole("listitem")).toHaveLength(500);
+    await userEvent.click(older());
+    expect(m.listLedger).toHaveBeenLastCalledWith("A", { beforeSeq: 601, limit: 500 });
+    await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(600));
+    // A short page means the start of the ledger: nothing older to ask for.
+    expect(within(ledger()).queryByRole("button", { name: "Show older entries" })).toBeNull();
+  });
+
+  it("feeds the Agent feed from the project's stream whatever the ledger scope, following the chosen run", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([
+      { id: "r1", projectId: "A", cardId: null, adapter: "fake", authMode: "none", prompt: "p", status: "completed", worktree: "w",
+        costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null },
+    ]);
+    const said = (seq: number, runId: string, text: string): LedgerEntry => ({
+      ...entry(seq, "A", "x"), type: "agent.message", actor: { kind: "agent", id: runId }, payload: { runId, text },
+    });
+    m.listLedger.mockImplementation(async (projectId) => (projectId === null ? [] : [said(1, "r1", "one"), said(2, "r2", "two")]));
+    render(<App />);
+    await operatorLayout();
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    act(() => testDock.api!.focus("agent_feed"));
+    const feed = () => screen.getByRole("region", { name: "Agent feed" });
+    await waitFor(() => expect(within(feed()).getAllByRole("listitem")).toHaveLength(2));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Ledger" }));
+    await userEvent.click(screen.getByRole("radio", { name: "All projects" }));
+    await userEvent.selectOptions(within(feed()).getByRole("combobox", { name: "Follow" }), "r1");
+    expect(within(feed()).getAllByRole("listitem").map((li) => li.querySelector(".headline")?.textContent)).toEqual([
+      'The Fake agent said: "one"',
+    ]);
   });
 
   it("narrates with the card titles on the board and the adapters of the runs", async () => {
@@ -760,5 +806,6 @@ describe("App Changes view", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
     expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
+    expect(errorMessage).toHaveBeenCalledWith(expect.any(ApiError), "changes");
   });
 });

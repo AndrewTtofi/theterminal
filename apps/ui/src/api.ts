@@ -188,11 +188,19 @@ export const api = {
       body: reason ? { decision, reason } : { decision },
     }),
   health: () => request<Health>("/api/health"),
-  /** A project's entries, or every project's when `projectId` is null. */
-  listLedger: (projectId: string | null, afterSeq = 0, limit = 500) =>
-    request<LedgerEntry[]>(
-      `/api/ledger?${projectId === null ? "" : `projectId=${encodeURIComponent(projectId)}&`}afterSeq=${afterSeq}&limit=${limit}`,
-    ),
+  /**
+   * A page of a project's entries, or every project's when `projectId` is null, in ascending seq order: those after
+   * `afterSeq`, or the newest `limit` before `beforeSeq`.
+   */
+  listLedger: (projectId: string | null, q: { afterSeq?: number; beforeSeq?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (projectId !== null) params.set("projectId", projectId);
+    if (q.afterSeq !== undefined) params.set("afterSeq", String(q.afterSeq));
+    if (q.beforeSeq !== undefined) params.set("beforeSeq", String(q.beforeSeq));
+    if (q.limit !== undefined) params.set("limit", String(q.limit));
+    const query = params.toString().replace(/\+/g, "%20");
+    return request<LedgerEntry[]>(query === "" ? "/api/ledger" : `/api/ledger?${query}`);
+  },
   listConnections: () => request<Connection[]>("/api/connections"),
   getConnectionCatalog: () => request<CatalogEntry[]>("/api/connections/catalog"),
   addConnection: (i: NewConnection) => request<Connection>("/api/connections", { method: "POST", body: i }),
@@ -269,9 +277,10 @@ export function exportLedgerUrl(projectId: string | null): string {
 /**
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
- * conflict as the plan being open already.
+ * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
+ * cannot be read yet.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
     if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
@@ -302,7 +311,11 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
+    if (context === "changes" && e.code === "run_active") return "Changes show when the run is stopped or finished.";
     if (e.code === "run_active") return "Stop the agent first: it is still working in this run";
+    if (e.code === "unsafe_repository") {
+      return "This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.";
+    }
     if (e.code === "override_busy") return "An override is already running for this run";
     if (e.code === "program_not_found") return "That program was not found on this computer's PATH";
     if (e.code === "program_not_allowed") return "Programs inside the project folder, and Windows batch files, cannot be run as an override";

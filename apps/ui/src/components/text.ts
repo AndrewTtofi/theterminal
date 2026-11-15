@@ -14,3 +14,9 @@ export function basename(path: string): string {
   const parts = path.split("/").filter((p) => p !== "");
   return parts[parts.length - 1] ?? path;
 }
+
+/** `s` cut to `max` characters with `…` when longer; by code point, so a character of two UTF-16 units is never split. */
+export function clip(s: string, max: number): string {
+  const chars = Array.from(s);
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : s;
+}

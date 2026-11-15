@@ -130,6 +130,11 @@ describe("ChangesSideBar", () => {
     expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
   });
 
+  it("says plainly that a live run's tree shows once the run stops", async () => {
+    setup({ dir: vi.fn(async () => Promise.reject(new ApiError(409, "run_active", { message: "x" }))) });
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+  });
+
   it("asks for a project first", () => {
     setup({ selectedId: null });
     expect(screen.getByText("Select a project to see what its agents changed.")).toBeTruthy();

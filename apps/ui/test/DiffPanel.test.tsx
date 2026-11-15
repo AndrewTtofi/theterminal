@@ -110,4 +110,23 @@ describe("DiffPanel", () => {
     expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
     expect(dock.closeQuietly).not.toHaveBeenCalled();
   });
+
+  it("says plainly that changes show once the run stops, keeps the tab open, and loads once the run finishes", async () => {
+    let live = true;
+    const { dock, model, emit } = setup(() =>
+      live ? Promise.reject(new ApiError(409, "run_active", { message: "x" })) : Promise.resolve(fileDiff()),
+    );
+    expect(await screen.findByText("Changes show when the run is stopped or finished.")).toBeTruthy();
+    expect(dock.closeQuietly).not.toHaveBeenCalled();
+    expect(model.runExists).not.toHaveBeenCalled();
+    live = false;
+    emit(runEntry("agent.finished", "run1"));
+    expect(await panel()).toBeTruthy();
+  });
+
+  it("says why an unsafe repository's diff cannot be shown", async () => {
+    const { dock } = setup(() => Promise.reject(new ApiError(409, "unsafe_repository")));
+    expect(await screen.findByText("This repository's git setup includes settings The Terminal does not allow, so its changes cannot be shown.")).toBeTruthy();
+    expect(dock.closeQuietly).not.toHaveBeenCalled();
+  });
 });

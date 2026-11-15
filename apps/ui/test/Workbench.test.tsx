@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CONNECTION_CATALOG } from "@theterminal/shared";
-import type { AgentAction, AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
+import type { AgentRun, Board, Connection, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
 
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
@@ -41,10 +41,6 @@ const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
   status: "running", worktree: "w/run1", costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
 };
-const action: AgentAction = {
-  id: "a1", runId: "run1", kind: "file_read", tool: "Read", summary: "read README.md", input: {},
-  status: "allowed", decidedBy: "policy", reason: "", output: null, requestedAt: "", decidedAt: null,
-};
 const pendingAction: PendingAgentAction = {
   id: "p1a", runId: "run1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: {}, status: "pending",
   decidedBy: null, reason: "", output: null, requestedAt: "", decidedAt: null, projectId: "p1", projectName: "Local Model Hub",
@@ -82,6 +78,11 @@ function model(over: Partial<AppModel> = {}): AppModel {
     pending: [],
     onDecide: vi.fn(),
     entries: [entry],
+    projectEntries: [entry],
+    feedRunId: null,
+    onFollowRun: vi.fn(),
+    ledgerHasOlder: false,
+    onLoadOlderLedger: vi.fn(async () => {}),
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
     ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
@@ -179,12 +180,17 @@ describe("Workbench", () => {
     expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", []);
   });
 
-  it("shows the selected run's actions in the Agent feed panel", () => {
-    const { container } = render(<Workbench model={model({ selectedRunId: "run1", runActions: [action] })} />);
+  it("shows the project's agent entries in the Agent feed panel and its commands in the Terminal panel", () => {
+    const requested: LedgerEntry = {
+      ...entry, seq: 2, id: "e2", actor: { kind: "agent", id: "run1" }, type: "agent.action.requested",
+      payload: { runId: "run1", actionId: "a1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" } },
+    };
+    const { container } = render(<Workbench model={model({ projectEntries: [entry, requested] })} />);
     operator();
     const feed = container.querySelector<HTMLElement>('[data-panel="agent_feed"]')!;
-    expect(within(feed).getByText(/Detect GPU/)).toBeTruthy();
-    expect(within(feed).getByRole("listitem").textContent).toMatch(/Allowed to read read README\.md.*allowed · decided by policy/);
+    expect(within(feed).getByRole("listitem").textContent).toContain('wants to run the command "nvidia-smi"');
+    const terminal = container.querySelector<HTMLElement>('[data-panel="terminal"]')!;
+    expect(within(terminal).getByRole("listitem").textContent).toBe("$ nvidia-smi");
   });
 
   it("keeps the ledger in an aside labelled Ledger in the bottom panel", () => {

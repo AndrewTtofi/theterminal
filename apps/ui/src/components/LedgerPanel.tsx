@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { narrate, plural, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, NarrationContext, NarrationTopic } from "@theterminal/shared";
 import { stripAnsi } from "./text";
@@ -80,7 +80,28 @@ export function RawRecord({
   );
 }
 
-export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; topics?: NarrationTopic[]; ctx?: NarrationContext }) {
+/** How many entries the ledger panel paints at first, and how many more each "Show older entries" adds. */
+export const LEDGER_PAGE = 200;
+
+/**
+ * The ledger, newest first. It paints the newest `LEDGER_PAGE` entries the topic filter keeps, `LEDGER_PAGE` more on
+ * each "Show older entries"; once every loaded entry is painted and `hasOlder` says the server has more, the button
+ * asks for them with `onLoadOlder` instead.
+ */
+export function LedgerPanel({
+  entries,
+  topics,
+  ctx,
+  hasOlder = false,
+  onLoadOlder,
+}: {
+  entries: LedgerEntry[];
+  topics?: NarrationTopic[];
+  ctx?: NarrationContext;
+  hasOlder?: boolean;
+  onLoadOlder?: () => void;
+}) {
+  const [shown, setShown] = useState(LEDGER_PAGE);
   // Narrating every entry is the costly part: redone only when the entries or the context change, not per filter.
   const narrated = useMemo(
     () => [...entries].sort((a, b) => b.seq - a.seq).map((e) => ({ e, n: narrate(e, ctx) })),
@@ -89,8 +110,11 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
   // Overrides are always shown, whatever the filter says.
   const inTopics = ({ n }: { n: { topic: NarrationTopic } }) =>
     topics === undefined || n.topic === "override" || topics.includes(n.topic);
-  const shown = narrated.filter(inTopics);
+  const kept = narrated.filter(inTopics);
+  const painted = kept.slice(0, shown);
   const hiddenAttention = narrated.filter((x) => x.n.attention && !inTopics(x)).length;
+  const more = shown < kept.length;
+  const older = () => (more ? setShown((n) => n + LEDGER_PAGE) : onLoadOlder?.());
   return (
     <aside className="ledger" aria-label="Ledger">
       <h2>Ledger</h2>
@@ -100,7 +124,7 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
         </p>
       )}
       <ul>
-        {shown.map(({ e, n }) => (
+        {painted.map(({ e, n }) => (
           <li key={e.seq} className={entryClass(e, n.attention)}>
             <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <OverrideTag entry={e} headline={n.headline} />
             <span className="headline">{n.headline}</span>
@@ -108,6 +132,11 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
           </li>
         ))}
       </ul>
+      {(more || (hasOlder && onLoadOlder)) && (
+        <button type="button" className="link older" onClick={older}>
+          Show older entries
+        </button>
+      )}
     </aside>
   );
 }

@@ -4,6 +4,7 @@ import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
 import { basename } from "../components/text";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
+import { TerminalPanel } from "../views/TerminalPanel";
 import { BoardView } from "../views/BoardView";
 import { CapacityPanel } from "../views/CapacityPanel";
 import { ConnectionEditor } from "../views/ConnectionEditor";
@@ -29,7 +30,7 @@ import type { ViewId } from "./views";
 const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
-  conversation: PlaceholderPanel, needs_you: PlaceholderPanel, terminal: PlaceholderPanel, diff: DiffPanel, file: FilePanel,
+  conversation: PlaceholderPanel, needs_you: PlaceholderPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
 };
 
 type Props = { model: AppModel };

@@ -18,6 +18,22 @@ const GATE_REFRESHED = "Something changed: a condition is no longer met. The che
 /** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
 const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
 
+/** How many ledger entries one request loads: the newest page first, then older pages on request. */
+const LEDGER_FETCH = 500;
+
+/** The newest page of a project's ledger (every project's for null), and the head to stream from after it. */
+async function newestLedgerPage(projectId: string | null): Promise<{ page: LedgerEntry[]; headSeq: number }> {
+  const { headSeq } = await api.health();
+  const page = await api.listLedger(projectId, { beforeSeq: headSeq + 1, limit: LEDGER_FETCH });
+  return { page, headSeq };
+}
+
+/** `older` in front of `current`, without the entries `current` already has. */
+function prependEntries(older: LedgerEntry[], current: LedgerEntry[]): LedgerEntry[] {
+  const have = new Set(current.map((e) => e.seq));
+  return [...older.filter((e) => !have.has(e.seq)), ...current];
+}
+
 /** How long a run's changes are reused before they are read again. */
 const CHANGES_MEMO_MS = 10_000;
 
@@ -62,6 +78,15 @@ export function App() {
   const [ledgerScope, setLedgerScope] = useState<LedgerScope>("project");
   const [ledgerTopics, setLedgerTopics] = useState<NarrationTopic[]>(LEDGER_TOPICS);
   const [allEntries, setAllEntries] = useState<LedgerEntry[]>([]);
+  /** Whether the server may hold entries older than those loaded: for the selected project, and for every project. */
+  const [projectHasOlder, setProjectHasOlder] = useState(false);
+  const [allHasOlder, setAllHasOlder] = useState(false);
+  /** Bumped each time a scope's entries are loaded afresh, so an older page asked for before is dropped. */
+  const projectLoad = useRef(0);
+  const allLoad = useRef(0);
+  const loadingOlder = useRef(false);
+  /** The run the Agent feed and the Terminal follow; null follows every run of the project. */
+  const [feedRunId, setFeedRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const refreshAgents = useRef<() => void>(() => {});
@@ -235,17 +260,20 @@ export function App() {
     refreshRef.current = refresh;
     setBoard(null);
     setEntries([]);
+    setProjectHasOlder(false);
+    setFeedRunId(null);
+    const load = ++projectLoad.current;
     // Board and ledger load independently, so one failing does not hide the other.
     void run(async () => {
       const initialBoard = await api.getBoard(selectedId);
       if (!cancelled) setBoard(initialBoard);
     });
     void run(async () => {
-      const initial = await api.listLedger(selectedId);
-      if (cancelled) return;
-      setEntries(initial);
-      const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
-      unsubscribe = subscribeLedger(lastSeq, (e) => {
+      const { page, headSeq } = await newestLedgerPage(selectedId);
+      if (cancelled || load !== projectLoad.current) return;
+      setEntries(page);
+      setProjectHasOlder(page.length === LEDGER_FETCH);
+      unsubscribe = subscribeLedger(headSeq, (e) => {
         if (e.projectId !== selectedId) return;
         setEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
         refresh();
@@ -324,12 +352,14 @@ export function App() {
     let cancelled = false;
     let unsubscribe = () => {};
     setAllEntries([]);
+    setAllHasOlder(false);
+    const load = ++allLoad.current;
     void run(async () => {
-      const initial = await api.listLedger(null);
-      if (cancelled) return;
-      setAllEntries(initial);
-      const lastSeq = initial.length ? initial[initial.length - 1]!.seq : 0;
-      unsubscribe = subscribeLedger(lastSeq, (e) => {
+      const { page, headSeq } = await newestLedgerPage(null);
+      if (cancelled || load !== allLoad.current) return;
+      setAllEntries(page);
+      setAllHasOlder(page.length === LEDGER_FETCH);
+      unsubscribe = subscribeLedger(headSeq, (e) => {
         setAllEntries((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
       });
     });
@@ -338,6 +368,28 @@ export function App() {
       unsubscribe();
     };
   }, [ledgerScope, run]);
+
+  /** Puts the page before the oldest loaded entry of the ledger scope in front; one request at a time. */
+  const loadOlderLedger = async (): Promise<void> => {
+    const all = ledgerScope === "all";
+    const projectId = all ? null : selectedId;
+    const current = all ? allEntries : entries;
+    if ((!all && projectId === null) || current.length === 0 || loadingOlder.current) return;
+    const load = all ? allLoad : projectLoad;
+    const at = load.current;
+    const oldest = current.reduce((min, e) => Math.min(min, e.seq), Infinity);
+    loadingOlder.current = true;
+    try {
+      const page = await api.listLedger(projectId, { beforeSeq: oldest, limit: LEDGER_FETCH });
+      if (load.current !== at) return;
+      (all ? setAllEntries : setEntries)((prev) => prependEntries(page, prev));
+      (all ? setAllHasOlder : setProjectHasOlder)(page.length === LEDGER_FETCH);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      loadingOlder.current = false;
+    }
+  };
 
   // A gate belongs to the project it was raised in: choosing another project closes it.
   useEffect(() => setGate(null), [selectedId]);
@@ -387,7 +439,7 @@ export function App() {
         const c = await runChanges(runId, read);
         if (!cancelled) setChanges({ runId, changes: c, error: null });
       } catch (e) {
-        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error: errorMessage(e) }));
+        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error: errorMessage(e, "changes") }));
       }
     }, () => cancelled);
     refresh();
@@ -509,6 +561,7 @@ export function App() {
           ...(connectionIds.length > 0 && { connectionIds }),
         });
         setSelectedRunId(started.id);
+        setFeedRunId(started.id);
         refreshAgents.current();
         return true;
       } catch (e) {
@@ -516,7 +569,11 @@ export function App() {
         return false;
       }
     },
-    onSelectRun: setSelectedRunId,
+    onSelectRun: (runId) => {
+      setSelectedRunId(runId);
+      // Picking a run in the Agents view follows it in the Agent feed and the Terminal.
+      if (runId !== null) setFeedRunId(runId);
+    },
     onStopRun: (runId) =>
       void run(async () => {
         await api.stopRun(runId);
@@ -532,6 +589,11 @@ export function App() {
       }
     },
     entries: ledgerScope === "all" ? allEntries : entries,
+    projectEntries: entries,
+    feedRunId,
+    onFollowRun: setFeedRunId,
+    ledgerHasOlder: ledgerScope === "all" ? allHasOlder : projectHasOlder,
+    onLoadOlderLedger: loadOlderLedger,
     ledgerScope,
     onLedgerScopeChange: setLedgerScope,
     ledgerTopics,
