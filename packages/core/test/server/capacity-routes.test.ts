@@ -304,7 +304,7 @@ describe("GET /api/capacity for a collaborator", { timeout: 30_000 }, () => {
     const theirsOnBox = owners.machines[0]!.sources.find((x) => x.provider === "claude")!;
     expect(theirsOnBox).toMatchObject({ plan: "Max 20x", monthlyBudgetUsd: 120, mode: "api_key" });
     for (const p of COLLABORATORS) {
-      const res = await fetch(`http://127.0.0.1:${requester.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
+      const res = await localFetch(`http://127.0.0.1:${requester.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
       expect(res.status, p.role).toBe(200);
       const text = await res.text();
       for (const word of ["plan", "monthlyBudgetUsd", "mode", "Max 20x", KEY]) expect(text, `${p.role}: ${word}`).not.toContain(word);
