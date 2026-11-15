@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DataDirInUseError, acquireDataDirLock, releaseDataDirLock } from "../../src/server/data-dir-lock.js";
 import { createServer, type RunningServer } from "../../src/server/server.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import type { Db } from "../../src/db.js";
 
 /** Every database the server opens, so a test can check that a failed start closed it. */
@@ -142,7 +143,7 @@ describe("createServer and the data folder lock", () => {
   afterEach(async () => {
     while (running.length) await running.pop()!.close().catch(() => undefined);
   });
-  const opts = (dataDir: string, port: number) => ({ dataDir, port, which: () => null, secrets: new MemorySecretStore() });
+  const opts = (dataDir: string, port: number) => ({ dataDir, port, which: () => null, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
 
   it("a second server on the same data folder is refused while the first runs", async () => {
     const dataDir = tmp();

@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, type GateId } from "@theterminal/shared";
+import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, LINKING_ACK, type GateId, type LedgerEntry } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -9,10 +9,14 @@ import { commitEvent, commitEvents } from "../../src/events/commit.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getRun, getSetting, getShareSnapshot, listActions,
-  listAllPendingActions, listGateDecisions, listOpenIntakes, listPendingActions, listProjectGateDecisions, listRuns, listShareLinks,
-  listShareSnapshots, projectSpendUsd, rebuildAllProjections, workspaceCounts,
+  countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting,
+  getShareSnapshot, listActions, listAllPendingActions, listGateDecisions, listLinkRuns, listMachines, listOpenIntakes,
+  listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
+  rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
+import { canonicalJson } from "../../src/ledger/canonical.js";
+import { MirroredEntryRefusedError } from "../../src/events/projections.js";
+import { pairAndRequest, remoteRun, requestRun, type RemoteRun } from "../link/remote-fixtures.js";
 
 describe("workspaceCounts", () => {
   it("sums cost only over runs started on the local calendar day", () => {
@@ -52,6 +56,7 @@ describe("workspaceCounts", () => {
 
 const human = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "claude" } as const;
+const link = { kind: "system", id: "link" } as const;
 let db: Db;
 let ledger: Ledger;
 
@@ -60,7 +65,7 @@ beforeEach(() => {
   ledger = new Ledger(db);
 });
 
-const emit = (type: string, payload: Record<string, unknown>, actor: typeof human | typeof agent = agent, projectId: string | null = "p1") =>
+const emit = (type: string, payload: Record<string, unknown>, actor: { kind: "human" | "agent" | "system"; id: string } = agent, projectId: string | null = "p1") =>
   commitEvent(db, ledger, () => ({ event: { projectId, actor, type, payload }, result: (e) => e }));
 
 function script() {
@@ -413,6 +418,121 @@ describe("gate fact queries", () => {
   });
 });
 
+describe("linked-machine projections", () => {
+  const mA = "a".repeat(32);
+  const mB = "b".repeat(32);
+  const own = { machineId: "c".repeat(32), publicKey: `${"A".repeat(59)}=`, fingerprint: "c".repeat(64) };
+  const peer = (id: string, name: string) => ({
+    machineId: id, name, publicKey: `${"B".repeat(59)}=`, fingerprint: id.repeat(2), address: "studio.local:4418",
+    role: "entered_code",
+  });
+  const runRequested = (runId: string, machineId: string) => ({
+    runId, machineId, adapter: "fake", prompt: "do it", cardId: null, connectionIds: [],
+  });
+
+  it("migrates to user_version 10 with the machines and link_runs tables and agent_runs.machine_id", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(10);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("machines")).toEqual(["id", "name", "public_key", "fingerprint", "address", "role", "paired_at", "updated_at"]);
+    expect(columns("link_runs")).toEqual(["run_id", "machine_id", "direction", "project_id", "state", "last_seq", "error", "updated_at"]);
+    expect(columns("agent_runs")).toContain("machine_id");
+  });
+
+  it("projects this machine's identity, name and linking switch into settings", () => {
+    emit("machine.identity_created", own, link, null);
+    expect(getSetting(db, "link.machineId")).toBe(own.machineId);
+    expect(getSetting(db, "link.publicKey")).toBe(own.publicKey);
+    expect(getSetting(db, "link.fingerprint")).toBe(own.fingerprint);
+    emit("machine.named", { name: "Studio" }, human, null);
+    expect(getSetting(db, "link.name")).toBe("Studio");
+    emit("machine.named", { name: "Studio Mac" }, human, null);
+    expect(getSetting(db, "link.name")).toBe("Studio Mac");
+    expect(getSetting(db, "link.enabled")).toBeNull();
+    emit("machine.linking_enabled", { port: 4419, acknowledgement: LINKING_ACK }, human, null);
+    expect(getSetting(db, "link.enabled")).toBe("1");
+    expect(getSetting(db, "link.port")).toBe("4419");
+    emit("machine.linking_disabled", {}, human, null);
+    expect(getSetting(db, "link.enabled")).toBe("0");
+    expect(getSetting(db, "link.port")).toBe("4419");
+  });
+
+  it("projects paired machines, re-pairing replaces the row, and unpairing deletes it", () => {
+    expect(listMachines(db)).toEqual([]);
+    const paired = emit("machine.paired", peer(mA, "Laptop"), human, null);
+    emit("machine.paired", { ...peer(mB, "Desktop"), role: "showed_code" }, human, null);
+    expect(getMachine(db, mA)).toEqual({
+      id: mA, name: "Laptop", publicKey: `${"B".repeat(59)}=`, fingerprint: mA.repeat(2), address: "studio.local:4418",
+      role: "entered_code", pairedAt: paired.ts, updatedAt: paired.ts,
+    });
+    expect(listMachines(db).map((m) => [m.name, m.role])).toEqual([["Desktop", "showed_code"], ["Laptop", "entered_code"]]);
+    const again = emit("machine.paired", { ...peer(mA, "Laptop 2"), address: "10.0.0.5:4420" }, human, null);
+    expect(getMachine(db, mA)).toMatchObject({ name: "Laptop 2", address: "10.0.0.5:4420", updatedAt: again.ts });
+    expect(listMachines(db)).toHaveLength(2);
+    emit("machine.unpaired", { machineId: mA, name: "Laptop 2" }, human, null);
+    expect(getMachine(db, mA)).toBeNull();
+    expect(listMachines(db).map((m) => m.id)).toEqual([mB]);
+  });
+
+  it("projects link runs on both sides through their states", () => {
+    const requested = emit("link.run_requested", runRequested("r1", mA), human, "p1");
+    expect(getLinkRun(db, "r1")).toEqual({
+      runId: "r1", machineId: mA, direction: "requested", projectId: "p1", state: "requested", lastSeq: 0, error: null,
+      updatedAt: requested.ts,
+    });
+    const accepted = emit("link.run_accepted", { runId: "r2", machineId: mB, projectId: "p2" }, link, "p2");
+    expect(getLinkRun(db, "r2")).toEqual({
+      runId: "r2", machineId: mB, direction: "accepted", projectId: "p2", state: "running", lastSeq: 0, error: null,
+      updatedAt: accepted.ts,
+    });
+    emit("link.run_requested", runRequested("r3", mA), human, "p1");
+    const failed = emit("link.run_failed", { runId: "r3", machineId: mA, error: "unreachable" }, link, "p1");
+    expect(getLinkRun(db, "r3")).toMatchObject({ state: "failed", error: "unreachable", updatedAt: failed.ts });
+    const imported = emit(
+      "link.changes_imported", { runId: "r1", machineId: mA, commit: "f".repeat(40) }, link, "p1",
+    );
+    expect(getLinkRun(db, "r1")).toMatchObject({ state: "imported", updatedAt: imported.ts });
+    expect(getLinkRun(db, "nope")).toBeNull();
+    expect(listLinkRuns(db).map((r) => r.runId)).toEqual(["r1", "r2", "r3"]);
+    expect(listLinkRuns(db, "running").map((r) => r.runId)).toEqual(["r2"]);
+    expect(listLinkRuns(db, "failed").map((r) => r.runId)).toEqual(["r3"]);
+    expect(listLinkRuns(db, "finished")).toEqual([]);
+  });
+
+  it("maps agent_runs.machine_id to machineId in getRun and listRuns", () => {
+    script();
+    expect(getRun(db, "r1")!.machineId).toBeNull();
+    db.prepare("UPDATE agent_runs SET machine_id = ? WHERE id = 'r1'").run(mA);
+    expect(getRun(db, "r1")!.machineId).toBe(mA);
+    expect(listRuns(db, "p1").map((r) => r.machineId)).toEqual([mA]);
+  });
+
+  it("rebuild after identity, naming, linking, pairing and link runs equals the live tables", () => {
+    emit("machine.identity_created", own, link, null);
+    emit("machine.named", { name: "Studio" }, human, null);
+    emit("machine.linking_enabled", { port: 4418, acknowledgement: LINKING_ACK }, human, null);
+    emit("machine.paired", peer(mA, "Laptop"), human, null);
+    emit("machine.paired", peer(mB, "Desktop"), human, null);
+    emit("machine.unpaired", { machineId: mB, name: "Desktop" }, human, null);
+    emit("link.run_requested", runRequested("r1", mA), human, "p1");
+    emit("link.run_requested", runRequested("r2", mA), human, "p1");
+    emit("link.run_failed", { runId: "r2", machineId: mA, error: "repo_too_large" }, link, "p1");
+    emit("link.run_accepted", { runId: "r3", machineId: mA, projectId: "p3" }, link, "p3");
+    emit("link.changes_imported", { runId: "r1", machineId: mA, commit: "e".repeat(40) }, link, "p1");
+    emit("machine.linking_disabled", {}, human, null);
+    const tables = ["settings", "machines", "link_runs"];
+    const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1`).all());
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([6, 1, 3]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+    // A rebuild clears the link tables first: rows not backed by the ledger disappear.
+    db.prepare("INSERT INTO machines VALUES ('x', 'n', 'k', 'f', 'a:1', 'showed_code', 't', 't')").run();
+    db.prepare("INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, updated_at) VALUES ('x', 'm', 'requested', 'p', 'requested', 't')").run();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+});
+
 describe("share projections", () => {
   const HASH = "a".repeat(64);
   const DIGEST = "b".repeat(64);
@@ -494,6 +614,202 @@ describe("share projections", () => {
     expect(live.map((rows) => rows.length)).toEqual([1, 2]);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
+  });
+});
+
+describe("mirrored remote runs (applyMirrored)", () => {
+  const PROJECT = "p1";
+  let remote: RemoteRun;
+
+  beforeEach(async () => {
+    emit("project.created", { projectId: PROJECT, name: "Demo", pitch: "" }, human, PROJECT);
+    remote = await remoteRun("run-remote-1", PROJECT);
+    pairAndRequest(db, ledger, remote);
+  });
+
+  /** Commits the worker entry as the requester does: link.mirrored, by the link, in the origin's project. */
+  const mirror = (entry: LedgerEntry, machineId = remote.machineId, via = remote) => {
+    const frame = JSON.parse(via.line(entry)) as { origin: LedgerEntry; signature: string };
+    return emit("link.mirrored", { machineId, origin: frame.origin, signature: frame.signature }, link, frame.origin.projectId);
+  };
+  const tables = ["agent_runs", "agent_actions", "link_runs", "rate_limits"];
+  const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+
+  it("an inner agent.started creates the run with the machine it runs on, and the link run is running at its seq", async () => {
+    const carded = await remoteRun("run-remote-2", PROJECT, remote.identity);
+    requestRun(db, ledger, carded, "c1");
+    const started = carded.started("c1");
+    const e = mirror(started, carded.machineId, carded);
+    expect(getRun(db, carded.runId)).toMatchObject({
+      id: carded.runId, projectId: PROJECT, cardId: "c1", adapter: "fake", status: "running", machineId: carded.machineId,
+      worktree: `projects/${PROJECT}/worktrees/${carded.runId}`, startedAt: started.ts,
+    });
+    expect(getLinkRun(db, carded.runId)).toMatchObject({ state: "running", lastSeq: started.seq, updatedAt: e.ts, error: null });
+  });
+
+  it("refuses an inner agent.started whose working copy or card is not the one this computer requested, and rolls the commit back", () => {
+    const payload = remote.started().payload as Record<string, unknown>;
+    const attempt = (over: Record<string, unknown>) => {
+      const origin = { ...(JSON.parse(remote.line(remote.started())) as { origin: Record<string, unknown> }).origin, payload: { ...payload, ...over } };
+      const signature = remote.identity.sign(Buffer.from(canonicalJson(origin)));
+      return () => emit("link.mirrored", { machineId: remote.machineId, origin, signature }, link, PROJECT);
+    };
+    const head = ledger.headSeq();
+    for (const worktree of [".", "projects/another-project/repo", "link/incoming", `projects/${PROJECT}/worktrees/other-run`]) {
+      expect(attempt({ worktree })).toThrow(MirroredEntryRefusedError);
+    }
+    expect(attempt({ cardId: "c-foreign" })).toThrow(MirroredEntryRefusedError);
+    expect(ledger.headSeq()).toBe(head);
+    expect(getRun(db, remote.runId)).toBeNull();
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "requested", lastSeq: 0 });
+    // The honest entry still lands.
+    mirror(remote.started());
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "running", cardId: null, worktree: `projects/${PROJECT}/worktrees/${remote.runId}` });
+  });
+
+  it("an inner agent.action.requested is a pending action Needs-you lists, with the project's name", () => {
+    mirror(remote.started());
+    mirror(remote.message("Looking"));
+    const req = remote.requested("act-1", "nvidia-smi");
+    mirror(req);
+    expect(listAllPendingActions(db)).toEqual([
+      expect.objectContaining({ id: "act-1", runId: remote.runId, status: "pending", projectId: PROJECT, projectName: "Demo", summary: "Run: nvidia-smi" }),
+    ]);
+    expect(getLinkRun(db, remote.runId)!.lastSeq).toBe(req.seq);
+  });
+
+  it("decided, completed and finished entries settle the action, end the run, and finish the link run", () => {
+    mirror(remote.started());
+    mirror(remote.connectionUsed());
+    mirror(remote.requested("act-1"));
+    mirror(remote.decided("act-1"));
+    mirror(remote.completed("act-1", "all green"));
+    expect(getLinkRun(db, remote.runId)!.state).toBe("running");
+    const fin = remote.finished();
+    mirror(fin);
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "act-1", status: "completed", decidedBy: "human", output: "all green" })]);
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "completed", machineId: remote.machineId });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "finished", lastSeq: fin.seq });
+    emit("link.changes_imported", { runId: remote.runId, machineId: remote.machineId, commit: "f".repeat(40) }, link, PROJECT);
+    expect(getLinkRun(db, remote.runId)!.state).toBe("imported");
+  });
+
+  it("mirroredIds lists the origin ids already mirrored for a run, and only that run's", () => {
+    expect(mirroredIds(db, remote.runId)).toEqual(new Set());
+    const a = remote.started();
+    const b = remote.message("hi");
+    mirror(a);
+    mirror(b);
+    expect(mirroredIds(db, remote.runId)).toEqual(new Set([a.id, b.id]));
+    expect(mirroredIds(db, "another-run")).toEqual(new Set());
+  });
+
+  it("link.run_failed fails the mirrored run while it is running, and leaves a finished one and this machine's runs alone", () => {
+    mirror(remote.started());
+    mirror(remote.requested("act-1"));
+    script(); // a local run r1
+    const failed = emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "bad_signature" }, link, PROJECT);
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "failed", error: "bad_signature", finishedAt: failed.ts });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "bad_signature" });
+    emit("link.run_failed", { runId: "r1", machineId: remote.machineId, error: "unreachable" }, link, PROJECT);
+    expect(getRun(db, "r1")).toMatchObject({ status: "completed", error: null });
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  it("a pending action of a mirrored run that link.run_failed ended is closed: denied by nobody, with the run's end as the reason", () => {
+    mirror(remote.started());
+    mirror(remote.requested("act-1"));
+    mirror(remote.requested("act-2"));
+    mirror(remote.decided("act-2", "allow"));
+    // A running local run with a pending action of its own.
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "do it", cardId: null, worktree: "wt/r2" });
+    emit("agent.action.requested", { runId: "r2", actionId: "a-local", kind: "shell", tool: "Bash", summary: "ls", input: {} });
+    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["act-1", "a-local"]);
+    expect(countPendingActions(db, PROJECT)).toBe(2);
+    const failed = emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "machine_unpaired" }, link, PROJECT);
+    // Nothing from that machine can be checked any more, so nothing can settle it: no one is asked to decide it, and
+    // the record says so, so the run's page never lists it as waiting.
+    expect(listAllPendingActions(db).map((a) => a.id)).toEqual(["a-local"]);
+    expect(listPendingActions(db, PROJECT).map((a) => a.id)).toEqual(["a-local"]);
+    expect(countPendingActions(db, PROJECT)).toBe(1);
+    expect(workspaceCounts(db).pendingDecisions).toBe(1);
+    expect(listActions(db, remote.runId)).toEqual([
+      expect.objectContaining({ id: "act-1", status: "denied", decidedBy: null, reason: "The run ended before a decision was made.", decidedAt: failed.ts }),
+      expect.objectContaining({ id: "act-2", status: "allowed", decidedBy: "human" }),
+    ]);
+    // This machine's own run is never touched by a link entry.
+    expect(listActions(db, "r2")).toEqual([expect.objectContaining({ id: "a-local", status: "pending" })]);
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  it("rebuild with mirrored entries equals the live tables", () => {
+    mirror(remote.started());
+    mirror(remote.connectionUsed());
+    mirror(remote.requested("act-1"));
+    mirror(remote.decided("act-1", "deny"));
+    mirror(remote.completed("act-1", "denied"));
+    mirror(remote.record("agent.rate_limited", { runId: remote.runId, retryAfterS: 30 }));
+    mirror(remote.requested("act-2"));
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([1, 2, 1, 1]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
+  /** The commit throws and nothing of it stays: no ledger entry, no projection change. */
+  const refused = (fn: () => unknown) => {
+    const before = ledger.headSeq();
+    const tablesBefore = dump();
+    expect(fn).toThrow();
+    expect(ledger.headSeq()).toBe(before);
+    expect(dump()).toEqual(tablesBefore);
+  };
+
+  it("refuses a mirrored entry for a run that was never requested of that machine", async () => {
+    const stranger = await remoteRun("run-not-requested", PROJECT);
+    refused(() => mirror(stranger.started(), stranger.machineId, stranger));
+    const elsewhere = await remoteRun(remote.runId, PROJECT);
+    refused(() => mirror(elsewhere.started(), elsewhere.machineId, elsewhere));
+  });
+
+  it("refuses a mirrored entry in another project than the run's", async () => {
+    const other = await remoteRun(remote.runId, "p2");
+    // Signed by another key, but the projection does not check signatures: it checks the run and project.
+    refused(() => mirror(other.started(), remote.machineId, other));
+  });
+
+  it("refuses a mirrored decision or completion of an action that belongs to another run", () => {
+    script(); // a local run r1 with actions a1 and a2
+    mirror(remote.started());
+    refused(() => mirror(remote.decided("a1")));
+    refused(() => mirror(remote.completed("a2")));
+    refused(() => mirror(remote.requested("a1")));
+    expect(listActions(db, "r1").map((a) => a.status)).toEqual(["completed", "failed"]);
+  });
+
+  it("refuses a mirrored agent.started whose run id already exists here", () => {
+    mirror(remote.started());
+    refused(() => mirror(remote.started()));
+  });
+
+  it("refuses a duplicate run id for link.run_requested and link.run_accepted, and rolls the commit back", () => {
+    const again = { runId: remote.runId, machineId: remote.machineId, adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    refused(() => emit("link.run_requested", again, human, PROJECT));
+    refused(() => emit("link.run_accepted", { runId: remote.runId, machineId: remote.machineId, projectId: PROJECT }, link, PROJECT));
+    emit("link.run_accepted", { runId: "acc-1", machineId: remote.machineId, projectId: PROJECT }, link, PROJECT);
+    refused(() => emit("link.run_accepted", { runId: "acc-1", machineId: remote.machineId, projectId: PROJECT }, link, PROJECT));
+    refused(() => emit("link.run_requested", { ...again, runId: "acc-1" }, human, PROJECT));
+    expect(listLinkRuns(db).map((r) => [r.runId, r.direction])).toEqual([[remote.runId, "requested"], ["acc-1", "accepted"]]);
+  });
+
+  it("refuses link.run_requested without a project: its project comes from the entry", () => {
+    const req = { runId: "no-project", machineId: remote.machineId, adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    refused(() => emit("link.run_requested", req, human, null));
+    expect(getLinkRun(db, "no-project")).toBeNull();
   });
 });
 

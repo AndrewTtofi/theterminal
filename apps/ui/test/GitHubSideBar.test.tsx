@@ -26,16 +26,17 @@ const overview = (over: Partial<GitHubOverview> = {}): GitHubOverview => ({
   ...over,
 });
 
-function renderSideBar(github: Partial<WorkbenchModel["github"]>) {
+function renderSideBar(github: Partial<WorkbenchModel["github"]>, network: "online" | "offline" | "unknown" | null = null) {
   const refresh = vi.fn();
   const nav = { ...shellNav(), showView: vi.fn() };
-  const model = { github: { overview: null, error: null, refresh, ...github } } as unknown as WorkbenchModel;
-  render(
+  const status = network === null ? null : { network: { state: network, basis: "inferred", since: null, lastError: null } };
+  const model = { github: { overview: null, error: null, refresh, ...github }, status } as unknown as WorkbenchModel;
+  const r = render(
     <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...nav }}>
       <GitHubSideBar />
     </ShellContext.Provider>,
   );
-  return { refresh, showView: nav.showView };
+  return { refresh, showView: nav.showView, unmount: r.unmount };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -92,5 +93,32 @@ describe("GitHubSideBar", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
     act(() => void vi.advanceTimersByTime(60_000));
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+  describe("offline", () => {
+    it("adds that the Owner seems to be offline to the stale note", () => {
+      renderSideBar({ overview: overview({ stale: true }) }, "offline");
+      expect(screen.getByText("Showing the last loaded data; GitHub is rate-limiting requests. You seem to be offline.")).toBeTruthy();
+    });
+
+    it("adds it to the error note", () => {
+      renderSideBar({ error: "github_unavailable" }, "offline");
+      expect(screen.getByText("Could not reach GitHub. You seem to be offline.")).toBeTruthy();
+    });
+
+    it("adds nothing when the state is online or unknown, or to a fresh overview", () => {
+      for (const state of ["online", "unknown", null] as const) {
+        const r = renderSideBar({ error: "github_unavailable" }, state);
+        expect(screen.queryByText(/You seem to be offline/)).toBeNull();
+        expect(screen.getByText("Could not reach GitHub")).toBeTruthy();
+        r.unmount();
+      }
+      renderSideBar({ overview: overview() }, "offline");
+      expect(screen.queryByText(/You seem to be offline/)).toBeNull();
+    });
+
+    it("does not add it to the not-connected prompt", () => {
+      renderSideBar({ error: "github_not_connected" }, "offline");
+      expect(screen.queryByText(/You seem to be offline/)).toBeNull();
+    });
   });
 });

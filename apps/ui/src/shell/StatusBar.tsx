@@ -17,6 +17,11 @@ export type LayoutControls = {
   saveAs(name: string): void;
 };
 
+const OFFLINE_TITLE =
+  "No internet connection was reachable the last time The Terminal tried (inferred). Local work, local models and linked machines keep working.";
+const OFFLINE_SAID = "You seem to be offline (inferred). Local work, local models and linked machines keep working.";
+const BACK_SAID = "The internet answered again (inferred).";
+
 const MONTH_TITLE = "Includes estimates: Claude's cost is computed by its SDK, not billed by the provider.";
 
 type Props = {
@@ -42,6 +47,13 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
   const connections = conn
     ? `Connections: ${conn.enabled} connected${conn.failed > 0 ? `, ${conn.failed} failed` : ""}`
     : "Connections: 0 connected";
+  const linked = status?.machines?.linked ?? 0;
+  /** Machines whose address answered with another key: a security signal, said apart from offline and marked. */
+  const keyChanged = status?.machines?.keyChanged ?? 0;
+  const machines = `Machines: ${linked} linked${linked > 0 ? `, ${status?.machines?.online ?? 0} online` : ""}${
+    keyChanged > 0 ? `, ${keyChanged} key changed` : ""
+  }`;
+  const network = status?.network?.state ?? null;
   return (
     <footer className="status-bar" aria-label="Status bar">
       <div className="status-left">
@@ -81,6 +93,20 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
             {connections}
           </button>
         )}
+        <button type="button" className={`status-item${keyChanged > 0 ? " attention" : ""}`} onClick={() => onSelectView("machines")}>
+          {machines}
+        </button>
+        {network === "offline" && (
+          <>
+            <span className="status-item attention" role="note" tabIndex={0} title={OFFLINE_TITLE} aria-describedby="status-offline-basis">
+              Offline (inferred)
+            </span>
+            <span id="status-offline-basis" className="visually-hidden">
+              {OFFLINE_TITLE}
+            </span>
+          </>
+        )}
+        <NetworkAnnouncement state={network} />
         <CiItem ci={status?.ci ?? null} />
         <LayoutItem layout={layout} />
         <button type="button" className="status-item" onClick={onResetLayout}>
@@ -88,6 +114,27 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
         </button>
       </div>
     </footer>
+  );
+}
+
+/**
+ * A polite live region that speaks only when the inferred state changes: going offline, and coming back after being
+ * offline. `unknown` → `online` is not news, and the same state twice is not a change.
+ */
+function NetworkAnnouncement({ state }: { state: Status["network"]["state"] | null }) {
+  const previous = useRef(state);
+  const [said, setSaid] = useState("");
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = state;
+    if (state === before || state === null) return;
+    if (state === "offline") setSaid(OFFLINE_SAID);
+    else if (state === "online" && before === "offline") setSaid(BACK_SAID);
+  }, [state]);
+  return (
+    <span className="visually-hidden" role="status" aria-live="polite" data-testid="network-announcement">
+      {said}
+    </span>
   );
 }
 

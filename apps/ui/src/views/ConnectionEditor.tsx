@@ -1,11 +1,12 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { PROVIDER_MODES } from "@theterminal/shared";
-import type { CatalogEntry, Connection, ConnectionField, Provider } from "@theterminal/shared";
-import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, errorMessage } from "../api";
+import type { CatalogEntry, Connection, ConnectionField, LocalEngine, Provider } from "@theterminal/shared";
+import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, api, errorMessage } from "../api";
 import type { ConnectionPatch, NewConnection } from "../api";
 import { OWN_LABEL, PROVIDER_NAMES, ProviderModeSection } from "../components/ProviderAuthSettings";
 import { SignInPanel } from "./SignInPanel";
 import { useShell } from "../shell/model";
+import { engineText } from "./CapacityPanel";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
 const DETECTED_NOTE = "Filled in by detection. Use Detect this computer in the Capacity view.";
@@ -43,6 +44,54 @@ function StatusLine({ conn }: { conn: Connection | undefined }) {
         </span>
       )}
     </p>
+  );
+}
+
+/**
+ * The model servers found on this computer (from the capacity report), each model with a Use button that fills the
+ * server URL and model fields.
+ */
+function DetectedModels({ onUse }: { onUse: (baseUrl: string, model: string) => void }) {
+  const uid = useId();
+  const [engines, setEngines] = useState<LocalEngine[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api
+      .getCapacity()
+      .then((r) => live && setEngines(r.localModels))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, []);
+  return (
+    <section className="connection-field detected-models" aria-labelledby={`${uid}-found`}>
+      <h3 id={`${uid}-found`}>Detected on this computer</h3>
+      {failed ? (
+        <p className="field-help">Could not look for local model servers</p>
+      ) : engines === null ? (
+        <p className="field-help">Looking…</p>
+      ) : engines.length === 0 ? (
+        <p className="field-help">No local model server detected. Install Ollama or llama.cpp server and detect again.</p>
+      ) : (
+        engines.map((e) => (
+          <div key={e.engine}>
+            <h4>{engineText(e)}</h4>
+            <ul>
+              {e.models.map((m) => (
+                <li key={m.id}>
+                  {m.id}
+                  <button type="button" aria-label={`Use ${m.id}`} onClick={() => onUse(e.baseUrl, m.id)}>
+                    Use
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </section>
   );
 }
 
@@ -242,6 +291,9 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           )}
           <p className="field-help">For "{OWN_LABEL[PROVIDER_MODES[provider][1]]}": sign in with {PROVIDER_NAMES[provider]}'s own login.</p>
         </div>
+      )}
+      {entry.provider === "local_model" && (
+        <DetectedModels onUse={(baseUrl, m) => setValues((v) => ({ ...v, baseUrl, model: m }))} />
       )}
       {entry.fields.map(field)}
       {(entry.provider === "mcp_stdio" || entry.provider === "mcp_http") && (

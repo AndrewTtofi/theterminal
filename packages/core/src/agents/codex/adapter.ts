@@ -6,6 +6,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import { RATE_LIMIT_TEXT, retryAfterSeconds, type AdapterStartOptions, type AgentAdapter, type ProposedAction } from "../adapter.js";
 import { CHILD_ENV_ALLOWLIST, CHILD_ENV_ALLOWLIST_PREFIXES, WIN32_ALLOWLIST, buildChildEnv } from "../child-env.js";
+import { LOCAL_MODEL_ENV_ALLOWLIST } from "../../capacity/local-models.js";
+import type { LocalModelSource } from "../../connections/service.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { heldTailStart, redact } from "../redact.js";
 import { bundledCodex, type BundledCli } from "../bundled.js";
@@ -24,8 +26,15 @@ const HAS_RULES = "Codex has 'always allow' rules that would bypass approvals; r
 const RULES_UNCHECKED = "Codex rules could not be checked; use API-key mode";
 const MCP_ENABLED = "Codex MCP servers could not be disabled; remove them or use API-key mode";
 const NO_HOME = "Codex home folder could not be created";
-/** The adapter-owned, empty Codex home for api_key mode (one per project): no user rules, MCP servers or login. */
+/**
+ * The adapter-owned, empty Codex home for api_key mode and local-model runs (one per project): no user rules, MCP
+ * servers, hooks or login.
+ */
 export const CODEX_HOME_DIR = "codex-home";
+const CHAT_WIRE_API = "Codex no longer supports the chat API style: set the local model connection's API style to responses";
+/** The model provider a local-model thread runs on, and the variable that carries its server's key to Codex. */
+const LOCAL_PROVIDER = "theterminal_local";
+const LOCAL_KEY_VAR = "LOCAL_MODEL_API_KEY";
 /** Project ids are generated names; anything else could climb out of the data directory. */
 const PROJECT_ID = /^[A-Za-z0-9_-]+$/;
 const STOPPED = "run stopped";
@@ -44,12 +53,54 @@ const KILL_GRACE_MS = 5000;
 const MCP_NAME = /^[A-Za-z0-9_-]+$/;
 
 /**
+ * What Codex would otherwise reach out for on its own, switched off for every run, so an offline run (a local model)
+ * talks to nothing but its model server. Checked against the bundled Codex 0.169.0, whose config loader rejects a
+ * wrong type or value for each of these keys (so each one exists): `check_for_update_on_startup` (bool),
+ * `analytics.enabled` and `feedback.enabled` (bool), and `otel.exporter`, `otel.metrics_exporter` and
+ * `otel.trace_exporter` (one of none, statsig, otlp-http, otlp-grpc). An unknown key is silently ignored, so that
+ * check is what shows they are real. They are given at process start (`-c`), where analytics and telemetry are set
+ * up, and again in every thread's config.
+ */
+const QUIET_CONFIG: Readonly<Record<string, boolean | string>> = {
+  check_for_update_on_startup: false,
+  "analytics.enabled": false,
+  "feedback.enabled": false,
+  "otel.exporter": "none",
+  "otel.metrics_exporter": "none",
+  "otel.trace_exporter": "none",
+};
+export const CODEX_QUIET_ARGS: readonly string[] = Object.entries(QUIET_CONFIG).flatMap(([k, v]) => [
+  "-c", `${k}=${typeof v === "string" ? JSON.stringify(v) : String(v)}`,
+]);
+
+/**
+ * The thread settings that put a local-model run on the model server, checked against the bundled Codex 0.169.0 with
+ * an empty CODEX_HOME and no login: `thread/start` accepts these dotted keys and answers `modelProvider:
+ * "theterminal_local"`; with `requires_openai_auth = false` the thread starts and the turn posts to
+ * `<base_url>/responses` with no login at all (`account/read` still reports no account, so it is not asked); with
+ * `env_key` the request carries `Authorization: Bearer <that variable>`, without it no Authorization header.
+ * `wire_api = "chat"` is refused at `thread/start` ("no longer supported"), so the adapter refuses it first.
+ */
+function localModelConfig(m: LocalModelSource): Record<string, unknown> {
+  const p = `model_providers.${LOCAL_PROVIDER}`;
+  return {
+    model: m.model,
+    model_provider: LOCAL_PROVIDER,
+    [`${p}.name`]: "Local model",
+    [`${p}.base_url`]: m.baseUrl,
+    [`${p}.wire_api`]: m.wireApi,
+    [`${p}.requires_openai_auth`]: false,
+    ...(m.apiKey ? { [`${p}.env_key`]: LOCAL_KEY_VAR } : {}),
+  };
+}
+
+/**
  * Thread settings that keep every action behind our gate: `untrusted` asks for every command no exec-policy rule
  * allows and for every file change, approvals go to us rather than an auto-reviewer, and the sandbox may write
  * only the worktree, without network. Tools that would run without an approval request are switched off; any
  * that still appears is caught by the tripwire in `onItem`.
  */
-const threadStartParams = (cwd: string, mcpServers: string[]): P.ThreadStartParams => ({
+const threadStartParams = (cwd: string, mcpServers: string[], localModel?: LocalModelSource): P.ThreadStartParams => ({
   cwd,
   approvalPolicy: "untrusted",
   approvalsReviewer: "user",
@@ -70,6 +121,8 @@ const threadStartParams = (cwd: string, mcpServers: string[]): P.ThreadStartPara
     "features.multi_agent_v2": false,
     "features.hooks": false,
     ...Object.fromEntries(mcpServers.map((name) => [`mcp_servers.${name}.enabled`, false])),
+    ...QUIET_CONFIG,
+    ...(localModel ? localModelConfig(localModel) : {}),
   },
 });
 
@@ -218,6 +271,7 @@ type CommandSpec = { file: string; args: string[] };
  */
 export const CODEX_COMMAND_EXCLUDES: readonly string[] = [
   "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN",
+  "LOCAL_MODEL_*",
 ];
 
 /** The git pins buildChildEnv sets: a command keeps using the empty global git config. */
@@ -232,9 +286,11 @@ const POLICY_CONFLICT =
  * the grant's secrets and tokens, keep only those names, and exclude every provider key anyway.
  */
 export function codexCommandPolicyArgs(grantNames: string[], platform: NodeJS.Platform = process.platform): string[] {
+  // A local model's key is for Codex itself: never let it through, whatever the caller passes.
+  const grants = grantNames.filter((n) => !LOCAL_MODEL_ENV_ALLOWLIST.includes(n));
   const includeOnly = [
     ...CHILD_ENV_ALLOWLIST, ...(platform === "win32" ? WIN32_ALLOWLIST : []), ...CHILD_ENV_ALLOWLIST_PREFIXES.map((p) => `${p}*`),
-    ...GIT_PINS, ...grantNames,
+    ...GIT_PINS, ...grants,
   ];
   return [
     "-c", 'shell_environment_policy.inherit="all"',
@@ -287,9 +343,12 @@ export class CodexAdapter implements AgentAdapter {
 
   async start(o: AdapterStartOptions): Promise<StartResult> {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
-    if (o.authMode !== "api_key" && o.authMode !== "chatgpt") {
+    // Mode "none" is a local model's: there is no login, only the model server on this computer.
+    const localModel = o.authMode === "none" ? o.credentials.localModel : undefined;
+    if (o.authMode !== "api_key" && o.authMode !== "chatgpt" && localModel === undefined) {
       return { status: "failed", error: `Unsupported auth mode for Codex: ${o.authMode}` };
     }
+    if (localModel?.wireApi === "chat") return { status: "failed", error: CHAT_WIRE_API };
     let apiKey: string | undefined;
     if (o.authMode === "api_key") {
       apiKey = o.credentials.apiKey ?? this.apiKey();
@@ -310,15 +369,20 @@ export class CodexAdapter implements AgentAdapter {
         cmd = { file, args: [] };
       }
     }
-    // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
-    const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
+    // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten. A local model
+    // has no login at all.
+    const args = ["app-server", ...CODEX_QUIET_ARGS, ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
     // Codex drops every *KEY*, *SECRET* and *TOKEN* variable from the env of the commands it runs by default, which
     // would drop a cloud grant's secret and token. With a grant, its command env policy is set explicitly instead.
-    const grantNames = Object.keys(o.credentials.env);
-    if (grantNames.length > 0) args.push(...codexCommandPolicyArgs(grantNames));
-    const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv: o.credentials.env });
+    // So it is with a local model's key, which Codex's own process needs (`env_key`) and its commands must never see:
+    // the explicit policy leaves it out of `include_only` and lists it in `exclude`.
+    const grantNames = Object.keys(o.credentials.env).filter((n) => !LOCAL_MODEL_ENV_ALLOWLIST.includes(n));
+    const localKey: Record<string, string> = localModel?.apiKey ? { [LOCAL_KEY_VAR]: localModel.apiKey } : {};
+    if (grantNames.length > 0 || localModel?.apiKey) args.push(...codexCommandPolicyArgs(grantNames));
+    const extraEnv = { ...Object.fromEntries(grantNames.map((n) => [n, o.credentials.env[n]!])), ...localKey };
+    const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv });
     const env = { ...childEnv, ...this.fakeEnv };
-    if (o.authMode === "api_key") {
+    if (o.authMode === "api_key" || localModel !== undefined) {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
       if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: NO_HOME };
       const home = join(this.dataDir, "projects", o.projectId, CODEX_HOME_DIR);
@@ -338,7 +402,7 @@ export class CodexAdapter implements AgentAdapter {
     } catch {
       return { status: "failed", error: NO_CLI };
     }
-    return new CodexSession(o, child, apiKey, this.killGraceMs).run();
+    return new CodexSession(o, child, apiKey, this.killGraceMs, localModel).run();
   }
 }
 
@@ -372,6 +436,7 @@ class CodexSession {
     private readonly child: ChildProcessWithoutNullStreams,
     private readonly apiKey: string | undefined,
     private readonly killGraceMs: number,
+    private readonly localModel: LocalModelSource | undefined,
   ) {
     this.exited = new Promise((r) => {
       if (child.exitCode !== null || child.signalCode !== null) r();
@@ -425,7 +490,7 @@ class CodexSession {
       } catch {
         return this.fail("Codex did not accept the API key login");
       }
-    } else {
+    } else if (this.localModel === undefined) {
       const acct = await this.peer.request<P.GetAccountResponse>(P.ACCOUNT_READ, { refreshToken: false } satisfies P.GetAccountParams);
       if (!isRecord(acct) || !isRecord(acct.account)) return this.fail(NOT_LOGGED_IN);
     }
@@ -445,7 +510,7 @@ class CodexSession {
 
     let thread: P.ThreadStartResponse;
     try {
-      thread = await this.peer.request<P.ThreadStartResponse>(P.THREAD_START, threadStartParams(this.o.cwd, mcpServers));
+      thread = await this.peer.request<P.ThreadStartResponse>(P.THREAD_START, threadStartParams(this.o.cwd, mcpServers, this.localModel));
     } catch (e) {
       // Codex refused our thread settings (an older CLI, or managed requirements forbid them).
       if (/^rpc error:/.test(errorMessage(e))) return this.fail(CANNOT_GATE);

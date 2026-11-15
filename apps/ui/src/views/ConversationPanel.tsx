@@ -2,6 +2,7 @@ import { useId, useMemo } from "react";
 import { plural, visibleControls } from "@theterminal/shared";
 import type { AgentRun, Card, LedgerEntry } from "@theterminal/shared";
 import { runCost } from "../components/cost";
+import { onMachine } from "../components/AgentPanel";
 import { ADAPTER_NAMES, StartRunForm } from "../components/StartRunForm";
 import { stripAnsi } from "../components/text";
 import { useShell } from "../shell/model";
@@ -112,12 +113,14 @@ export function ConversationPanel() {
             const { run, cardTitle } = t;
             const title = cardTitle === null ? null : clean(cardTitle);
             const headingId = `${idBase}-${run.id}`;
+            // A run on a linked machine says so, as the run lists do.
+            const where = onMachine(run, model.narration?.machineName);
             return (
               <li key={run.id} data-key={run.id}>
                 <article aria-labelledby={headingId}>
                   <header>
                     <h3 id={headingId}>
-                      {title === null ? `You asked ${ADAPTER_NAMES[run.adapter]}` : `You asked ${ADAPTER_NAMES[run.adapter]} on "${title}"`}
+                      {title === null ? `You asked ${ADAPTER_NAMES[run.adapter]}${where}` : `You asked ${ADAPTER_NAMES[run.adapter]} on "${title}"${where}`}
                     </h3>
                     <time dateTime={run.startedAt}>{new Date(run.startedAt).toLocaleTimeString()}</time>
                   </header>
@@ -164,9 +167,12 @@ export function ConversationPanel() {
             providers={model.agentsInfo.providers}
             cards={cards}
             connections={model.connections.list}
+            offline={model.status?.network.state === "offline"}
             submitLabel="Ask"
             startedMessage={(name) => `Asked ${name}.`}
             onStart={model.onStartRun}
+            machines={model.machines?.paired ?? []}
+            {...(model.machines?.capacity !== undefined && { machineCapacity: model.machines?.capacity })}
           />
         ) : (
           <p className="empty">Loading agents…</p>

@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
-import { narrate, visibleControls } from "@theterminal/shared";
+import { innerEntry, narrate, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, Narration, NarrationContext } from "@theterminal/shared";
-import { ADAPTER_NAMES } from "../components/AgentPanel";
+import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
 import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
 import { clip, stripAnsiDeep } from "../components/text";
 import { namesRun, useShell } from "../shell/model";
@@ -11,8 +11,8 @@ import { useFollowBottom } from "./use-follow-bottom";
 export const FEED_LIMIT = 500;
 const PROMPT_CLIP = 40;
 
-/** True for what the feed shows: what agents did and said, and the Owner's overrides. */
-const inFeed = (e: LedgerEntry) => e.type.startsWith("agent.") || isOverride(e);
+/** True for what the feed shows: what agents did and said (here or on a linked machine), and the Owner's overrides. */
+const inFeed = (e: LedgerEntry) => innerEntry(e).type.startsWith("agent.") || isOverride(e);
 
 /** The project's agent.* and override.* entries, oldest first, of one run or of every run. */
 export function feedEntries(entries: LedgerEntry[], runId: string | null): LedgerEntry[] {
@@ -51,7 +51,7 @@ export function FollowSelect() {
       <option value="">All runs</option>
       {model.runs.map((r) => (
         <option key={r.id} value={r.id}>
-          {`${ADAPTER_NAMES[r.adapter]} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)}`}
+          {`${ADAPTER_NAMES[r.adapter]}${onMachine(r, model.narration?.machineName)} · ${clip(visibleControls(r.prompt), PROMPT_CLIP)}`}
         </option>
       ))}
     </select>

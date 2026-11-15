@@ -1,11 +1,13 @@
 import {
-  narrate, type AgentAction, type AgentRun, type CardStory, type LedgerEntry, type NarrationContext, type StoryIntegrity,
+  innerEntry, narrate, runIdOf, type AgentAction, type AgentRun, type CardStory, type LedgerEntry, type NarrationContext, type StoryIntegrity,
   type UnreadableEntry,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { MAX_RUN_IDS, type Ledger } from "../ledger/ledger.js";
+import { canonicalJson } from "../ledger/canonical.js";
 import { requireCard } from "../board/board-service.js";
 import { listActions, listGateDecisions, getRun } from "../events/projections.js";
+import { builtInClean, displayEntry, remoteDisplay } from "../link/mirrored.js";
 
 export type { CardStory };
 
@@ -72,13 +74,17 @@ function unreadableRows(db: Db, cardId: string, runIds: string[]): UnreadableEnt
   return rows.filter((r) => needles.some((n) => r.payload.includes(n))).map((r) => ({ seq: r.seq, unreadable: true }));
 }
 
-/** The card, its runs and actions, its gate decisions, and every ledger entry about it, in seq order. */
-export function cardStory(db: Db, ledger: Ledger, cardId: string): CardStory {
+/**
+ * The card, its runs and actions, its gate decisions, and every ledger entry about it, in seq order: a run's entries
+ * include a linked machine's mirrored ones, shown through `clean` (this machine's own redaction).
+ */
+export function cardStory(db: Db, ledger: Ledger, cardId: string, clean: (s: string) => string = builtInClean): CardStory {
   const card = requireCard(db, cardId);
   const runIds = (db.prepare("SELECT id FROM agent_runs WHERE card_id = ? ORDER BY started_at, rowid").all(cardId) as { id: string }[])
     .map((r) => r.id);
   const runs = runIds.map((id) => getRun(db, id)).filter((r): r is AgentRun => r !== null);
   const actions: AgentAction[] = runs.flatMap((r) => listActions(db, r.id));
+  const shown = remoteDisplay(db, clean);
 
   const bySeq = new Map<number, LedgerEntry>();
   // `list` filters by at most MAX_RUN_IDS runs at once; the card's own entries come with the first batch.
@@ -89,7 +95,7 @@ export function cardStory(db: Db, ledger: Ledger, cardId: string): CardStory {
     for (const e of pages(ledger, { cardId, runIds: batch })) bySeq.set(e.seq, e);
   }
   for (const e of entriesAt(ledger, planSeqs(db, cardId).filter((seq) => !bySeq.has(seq)))) bySeq.set(e.seq, e);
-  const entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+  const entries = [...bySeq.values()].sort((a, b) => a.seq - b.seq).map((e) => displayEntry(e, clean));
 
   const verified = ledger.verify();
   const integrity: StoryIntegrity = verified.ok ? { ok: true } : { ok: false, brokenAtSeq: verified.brokenAtSeq };
@@ -98,7 +104,7 @@ export function cardStory(db: Db, ledger: Ledger, cardId: string): CardStory {
 
   const reported = runs.map((r) => r.costUsd).filter((c): c is number => c !== null);
   const costUsd = reported.length === 0 ? null : reported.reduce((sum, c) => sum + c, 0);
-  return { card, runs, actions, entries, gateDecisions: listGateDecisions(db, cardId), costUsd, integrity, unreadable };
+  return { card, runs: runs.map(shown.run), actions: actions.map(shown.action), entries, gateDecisions: listGateDecisions(db, cardId), costUsd, integrity, unreadable };
 }
 
 /** What narration may know beyond an entry: card titles from the board and adapter labels from the runs. */
@@ -129,9 +135,12 @@ function headlineOf(e: LedgerEntry, ctx: NarrationContext): string {
  * own entries plus the `connection.used` entries of its runs, which carry no project. Rows are read a page at a time
  * and are already redacted; the headline is computed here and never written to the ledger. Nothing vanishes
  * silently: a row that cannot be parsed, or a seq with no row, is a `gap` line in every export, and the trailer
- * counts them.
+ * counts them. A linked machine's mirrored entries are shown through `clean`, this machine's own redaction, and an
+ * entry whose payload that changed is marked `cleaned: true` (its payload no longer matches its hash).
  */
-export function* ledgerExportLines(db: Db, ledger: Ledger, projectId: string | null, now: Date = new Date()): Generator<string> {
+export function* ledgerExportLines(
+  db: Db, ledger: Ledger, projectId: string | null, now: Date = new Date(), clean: (s: string) => string = builtInClean,
+): Generator<string> {
   const line = (o: unknown) => `${JSON.stringify(o)}\n`;
   const headSeq = ledger.headSeq();
   const integrity = ledger.verify();
@@ -143,9 +152,10 @@ export function* ledgerExportLines(db: Db, ledger: Ledger, projectId: string | n
   yield line({ kind: "header", exportedAt: now.toISOString(), projectId, headSeq, integrity });
   const belongs = (e: LedgerEntry): boolean => {
     if (projectRuns === null || e.projectId === projectId) return true;
-    if (e.type !== "connection.used") return false;
-    const runId = (e.payload as { runId?: unknown }).runId;
-    return typeof runId === "string" && projectRuns.has(runId);
+    // A connection.used entry carries no project, here or mirrored from a linked machine: its run's project counts.
+    if (innerEntry(e).type !== "connection.used") return false;
+    const runId = runIdOf(e);
+    return runId !== undefined && projectRuns.has(runId);
   };
   let lastSeq = 0;
   let gaps = 0;
@@ -162,7 +172,10 @@ export function* ledgerExportLines(db: Db, ledger: Ledger, projectId: string | n
         gaps++;
         yield line({ kind: "gap", seq: row.seq, reason: "unreadable" });
       } else if (belongs(row)) {
-        yield line({ kind: "entry", ...row, headline: headlineOf(row, ctx) });
+        // A linked machine's text goes through this machine's cleaner; `cleaned` says the payload is not the hashed one.
+        const shown = displayEntry(row, clean);
+        const cleaned = shown !== row && canonicalJson(shown.payload) !== canonicalJson(row.payload);
+        yield line({ kind: "entry", ...shown, headline: headlineOf(shown, ctx), ...(cleaned && { cleaned: true }) });
       }
     }
   }

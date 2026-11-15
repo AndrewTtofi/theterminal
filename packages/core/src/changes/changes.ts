@@ -120,7 +120,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * writing (`settling`) is waited for, up to `settleWaitMs`, polling the flag; still settling after that is
  * RunActiveError too. No git runs on the worktree before the wait is over.
  */
-async function stoppedRunWorktree(deps: ChangesDeps, runId: string): Promise<{ run: AgentRun; abs: string }> {
+export async function stoppedRunWorktree(deps: ChangesDeps, runId: string): Promise<{ run: AgentRun; abs: string }> {
   const run = getRun(deps.db, runId);
   if (!run) throw new NotFoundError("run", runId);
   if (run.status === "running") throw new RunActiveError();

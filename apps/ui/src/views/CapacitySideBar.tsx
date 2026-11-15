@@ -1,8 +1,11 @@
 import { useId, useState } from "react";
-import type { CapacitySource, HardwareInfo } from "@theterminal/shared";
+import type { CapacitySource, HardwareInfo, MachineCapacity } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
 import { useShell } from "../shell/model";
-import { Estimate, planText, providerName, usd, useCapacityRefresh } from "./CapacityPanel";
+import {
+  CheckedAt, Estimate, cpuText, engineText, gpuText, hardwareSummary, memoryText, modelCount, planText, providerName, usd, useCapacityRefresh,
+} from "./CapacityPanel";
+import { machineState, shownName } from "./machine-text";
 
 /** The month's spend: against the budget when both exist, else alone, else `not reported` (never $0). */
 function Spend({ s }: { s: CapacitySource }) {
@@ -38,24 +41,36 @@ function Spend({ s }: { s: CapacitySource }) {
 }
 
 function HardwareLines({ hw }: { hw: HardwareInfo }) {
-  const gb = (n: number) => `${n} GB`;
-  const cpu = hw.cpu === null ? "not detected" : hw.cores === null ? hw.cpu : `${hw.cpu} (${hw.cores} cores)`;
-  let gpu = hw.gpu ?? "not detected";
-  if (hw.gpu !== null && hw.gpuMemoryGb !== null) {
-    // On a Mac the detected GPU memory is the unified memory it shares with the CPU.
-    gpu += hw.platform === "darwin" ? `, ${gb(hw.gpuMemoryGb)} shared with the CPU` : `, ${gb(hw.gpuMemoryGb)}`;
-  }
   return (
     <ul>
-      <li>{`CPU: ${cpu}`}</li>
-      <li>{`Memory: ${hw.memoryGb === null ? "not detected" : gb(hw.memoryGb)}`}</li>
-      <li>{`GPU: ${gpu}`}</li>
+      <li>{`CPU: ${cpuText(hw)}`}</li>
+      <li>{`Memory: ${memoryText(hw)}`}</li>
+      <li>{`GPU: ${gpuText(hw)}`}</li>
       {hw.wsl && <li>Running inside WSL: the GPU is the Windows machine's.</li>}
     </ul>
   );
 }
 
-/** Capacity at a glance: each provider's plan and month's spend, and what this computer can run. */
+/** A linked machine at a glance: its state, a one-line hardware summary and how many local models it serves. */
+function MachineSection({ machine, id }: { machine: MachineCapacity; id: string }) {
+  const n = modelCount(machine);
+  return (
+    <section aria-labelledby={id} className={machine.online ? undefined : "offline"}>
+      <h3 id={id}>{`${shownName(machine.name)} · ${machineState(machine)}`}</h3>
+      <ul>
+        <li>{machine.hardware === null ? "Hardware not reported" : shownName(hardwareSummary(machine.hardware))}</li>
+        <li>{`${n} ${n === 1 ? "local model" : "local models"}`}</li>
+        {!machine.online && machine.problem === null && (
+          <li>
+            <CheckedAt machine={machine} />
+          </li>
+        )}
+      </ul>
+    </section>
+  );
+}
+
+/** Capacity at a glance: each provider's plan and month's spend, what this computer can run, and each linked machine. */
 export function CapacitySideBar() {
   const { model, dock } = useShell();
   const { report, error, refresh } = model.capacity;
@@ -107,6 +122,21 @@ export function CapacitySideBar() {
         </button>
         {detectError && <p className="capacity-error">{detectError}</p>}
       </section>
+      <section aria-labelledby={`${uid}-local`}>
+        <h3 id={`${uid}-local`}>Local models</h3>
+        {report.localModels.length === 0 ? (
+          <p className="empty">No local model server detected. Install Ollama or llama.cpp server and detect again.</p>
+        ) : (
+          <ul>
+            {report.localModels.map((e) => (
+              <li key={e.engine}>{`${engineText(e)} · ${e.models.length} ${e.models.length === 1 ? "model" : "models"}`}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {report.machines.map((m) => (
+        <MachineSection key={m.machineId} machine={m} id={`${uid}-machine-${m.machineId}`} />
+      ))}
     </div>
   );
 }

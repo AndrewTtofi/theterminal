@@ -19,7 +19,7 @@ export const run1: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none",
   prompt: "Write the release notes for the next version of the app", status: "completed",
   worktree: "w/run1", base: BASE, costUsd: null, inputTokens: null, outputTokens: null, error: null,
-  startedAt: "2026-11-15T10:00:00.000Z", finishedAt: null,
+  startedAt: "2026-11-15T10:00:00.000Z", finishedAt: null, machineId: null,
 };
 
 export const changes = (over: Partial<RunChanges> = {}): RunChanges => ({

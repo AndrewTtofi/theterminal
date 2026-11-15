@@ -9,7 +9,7 @@ import { shellNav } from "./connections-harness";
 const card = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "active", createdAt: "", updatedAt: "" } as const;
 const run: AgentRun = {
   id: "r1", projectId: "p1", cardId: "c1", adapter: "fake", authMode: "none", prompt: "check the GPU", status: "completed",
-  worktree: "w/r1", base: null, costUsd: 0.25, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
+  worktree: "w/r1", base: null, costUsd: 0.25, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null,
 };
 const owner = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "r1" } as const;
@@ -64,6 +64,41 @@ function setup(load: () => Promise<CardStory>) {
 }
 
 describe("StoryPanel", () => {
+  it("names the linked machine a run was sent to when this computer knows it, else says a linked machine", async () => {
+    const requested = (): CardStory =>
+      story({
+        entries: [
+          entry("card.created", { cardId: "c1", title: "Login", stage: "plan" }),
+          entry("link.run_requested", { runId: "r1", machineId: "m".repeat(32), adapter: "fake", prompt: "check the GPU", cardId: "c1", connectionIds: [] }),
+        ],
+      });
+    const listeners = new Set<(e: LedgerEntry) => void>();
+    const modelWith = (narration: object) =>
+      ({
+        story: vi.fn(() => Promise.resolve(requested())),
+        subscribeEntries: (cb: (e: LedgerEntry) => void) => {
+          listeners.add(cb);
+          return () => listeners.delete(cb);
+        },
+        narration,
+      }) as unknown as WorkbenchModel;
+    const { unmount } = render(
+      <ShellContext.Provider value={{ model: modelWith({ machineName: (id: string) => (id === "m".repeat(32) ? "GPU box" : undefined) }), dock: () => null, ...shellNav() }}>
+        <StoryPanel id="story:c1" />
+      </ShellContext.Provider>,
+    );
+    const panel = await screen.findByRole("region", { name: "Story: Login" });
+    await waitFor(() => expect(panel.textContent).toContain("asked GPU box to run a Fake agent"));
+    unmount();
+    render(
+      <ShellContext.Provider value={{ model: modelWith({}), dock: () => null, ...shellNav() }}>
+        <StoryPanel id="story:c1" />
+      </ShellContext.Provider>,
+    );
+    const again = await screen.findByRole("region", { name: "Story: Login" });
+    await waitFor(() => expect(again.textContent).toContain("asked a linked machine to run a Fake agent"));
+  });
+
   it("tells what happened in plain language with the raw record under each line, and the cost", async () => {
     const { model } = setup(() => Promise.resolve(story()));
     const panel = await screen.findByRole("region", { name: "Story: Login" });

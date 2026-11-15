@@ -3,15 +3,16 @@ import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import { PROVIDER_ACKS, type AdapterId, type Provider } from "@theterminal/shared";
 import type { AgentAdapter, ProposedAction, RunCredentials } from "../../src/agents/adapter.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
-import { ConnectionService, UnsupportedConnectionError } from "../../src/connections/service.js";
+import { ConflictError, ConnectionService, UnsupportedConnectionError } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
   type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
@@ -22,6 +23,8 @@ import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { openDatabase, type Db } from "../../src/db.js";
 import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
+import { acceptMirroredLine } from "../../src/link/mirrored.js";
+import { pairAndRequest, remoteRun } from "../link/remote-fixtures.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 const EXTRA_SECRET = "extra-secret-value-0001";
@@ -457,6 +460,53 @@ describe("AgentRunner with the FakeAdapter", () => {
       ["agent.action.decided", { kind: "system", id: "policy" }],
       ["agent.finished", { kind: "system", id: "runner" }],
     ]);
+  });
+
+  it("recoverOnStartup and shutdown leave a linked machine's runs and their pending actions alone", async () => {
+    // A run on a linked machine, mirrored here: running, with a pending action, and no session in this process.
+    const remote = await remoteRun("run-on-gpu-box", projectId);
+    pairAndRequest(db, ledger, remote);
+    for (const e of [remote.started(), remote.requested("remote-act-1")]) {
+      expect(acceptMirroredLine(db, ledger, remote.runId, remote.line(e)).ok).toBe(true);
+    }
+    // And a local run of this machine, which a restart does fail.
+    const first = fakeRunner([{ propose: write }]);
+    const local = await first.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilPending(2);
+
+    const restarted = makeRunner({});
+    restarted.recoverOnStartup();
+    expect(getRun(db, local.id)).toMatchObject({ status: "failed", error: "workspace restarted" });
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "running", machineId: remote.machineId, error: null });
+    expect(listActions(db, remote.runId)).toEqual([expect.objectContaining({ id: "remote-act-1", status: "pending" })]);
+    // Nothing was recorded locally about the remote run: only what the worker sent, mirrored.
+    const recordedHere = ledger.list().filter((e) => e.type.startsWith("agent.") && (e.payload as { runId?: string }).runId === remote.runId);
+    expect(recordedHere).toEqual([]);
+
+    const before = ledger.headSeq();
+    await restarted.shutdown();
+    await first.shutdown();
+    expect(ledger.list({ afterSeq: before }).filter((e) => JSON.stringify(e.payload).includes(remote.runId))).toEqual([]);
+    expect(getRun(db, remote.runId)!.status).toBe("running");
+    expect(listActions(db, remote.runId)[0]!.status).toBe("pending");
+  });
+
+  it("refuses to stop or decide for a run on a linked machine, recording nothing", async () => {
+    const remote = await remoteRun("run-on-gpu-box", projectId);
+    pairAndRequest(db, ledger, remote);
+    for (const e of [remote.started(), remote.requested("remote-act-1")]) {
+      expect(acceptMirroredLine(db, ledger, remote.runId, remote.line(e)).ok).toBe(true);
+    }
+    const runner = makeRunner({});
+    const head = ledger.headSeq();
+    expect(() => runner.stop(owner, remote.runId)).toThrow(RemoteRunError);
+    expect(() => runner.decide(owner, "remote-act-1", "allow", "fine")).toThrow(RemoteRunError);
+    expect(ledger.headSeq()).toBe(head);
+    expect(getRun(db, remote.runId)!.status).toBe("running");
+    expect(listActions(db, remote.runId)[0]!.status).toBe("pending");
+    // The last fail-safe: closing it directly records nothing either.
+    (runner as unknown as { close: (id: string, s: string, e: null, r: string) => void }).close(remote.runId, "stopped", null, "run stopped");
+    expect(ledger.headSeq()).toBe(head);
   });
 
   it("recoverOnStartup does nothing when the ledger is read-only", async () => {
@@ -959,6 +1009,40 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
   });
 });
 
+describe("AgentRunner.start with a given run id", () => {
+  it("records the given id, refuses it a second time with ConflictError, and refuses an id that is not an id", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-remote-1" });
+    expect(run.id).toBe("run-remote-1");
+    expect(run.worktree).toBe(`projects/${projectId}/worktrees/run-remote-1`);
+    await untilFinished("run-remote-1");
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-remote-1" })).rejects.toBeInstanceOf(ConflictError);
+    for (const bad of ["../x", "", "a".repeat(101), "a b", "run\u0000x"]) {
+      await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: bad }), bad).rejects.toBeInstanceOf(ZodError);
+    }
+    expect(ledger.list().filter((e) => e.type === "agent.started")).toHaveLength(1);
+  });
+
+  it("refuses the same id for two starts at once, before either creates anything", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    const both = await Promise.allSettled([
+      runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-twice" }),
+      runner.start(owner, { projectId, adapter: "fake", prompt: "p", runId: "run-twice" }),
+    ]);
+    expect(both.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect((both.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+    await untilFinished("run-twice");
+  });
+
+  it("records a card id that names a card on the requesting machine when the start says so", async () => {
+    const runner = fakeRunner([{ message: "hi" }]);
+    await expect(runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "card-elsewhere" })).rejects.toBeInstanceOf(NotFoundError);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "card-elsewhere", runId: "run-c", foreignCard: true });
+    expect(run.cardId).toBe("card-elsewhere");
+    await untilFinished("run-c");
+  });
+});
+
 describe("AgentRunner.settling", () => {
   it("stays true after a stop until the adapter has returned", async () => {
     let release!: () => void;
@@ -982,5 +1066,81 @@ describe("AgentRunner.settling", () => {
     release();
     await vi.waitFor(() => expect(runner.settling(run.id)).toBe(false));
     expect(runner.settling("no-such-run")).toBe(false);
+  });
+});
+
+describe("AgentRunner with a local model", () => {
+  const LOCAL_KEY = "TESTKEY-local-000000";
+  const local = {
+    connectionId: "conn-local-0001", name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b",
+    wireApi: "responses" as const,
+  };
+  const mint = vi.fn(async () => {
+    throw new Error("never minted");
+  });
+  const localRunner = (adapters: Partial<Record<AdapterId, AgentAdapter>>, withKey: boolean, credentials?: (p: Provider) => null | { connectionId: string; name: string; apiKey?: string }) => {
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir, extraSecrets: () => [],
+      selectConnections: () => ({ cloud: [], mcp: [], localModel: withKey ? { ...local, apiKey: LOCAL_KEY } : local }),
+      mintCloud: mint, credentials,
+    });
+    runners.push(runner);
+    return runner;
+  };
+  const used = () => ledger.list().filter((e) => e.type === "connection.used");
+
+  it.each(["claude", "gemini", "fake"] as const)("refuses %s before anything is minted or created", async (id) => {
+    const start = vi.fn(async () => ({ status: "completed" as const }));
+    const runner = localRunner({ [id]: { id, start } }, true);
+    const err = await runner.start(owner, { projectId, adapter: id, prompt: "p", connectionIds: ["conn-local-0001"] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LocalModelUnsupportedError);
+    expect((err as Error).message).toBe("Only Codex can run on a local model in The Terminal yet");
+    expect(mint).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM agent_runs").get()).toEqual({ n: 0 });
+  });
+
+  it("Codex runs with no login: authMode none, one connection.used for the local model, the key outside the agent's env and redacted", async () => {
+    // Codex is set to api_key mode with a connection key: neither is used for a local-model run.
+    new ProviderSettings(db, ledger).setMode(owner, "codex", "api_key");
+    const seen: { authMode: string; credentials: RunCredentials }[] = [];
+    const adapter: AgentAdapter = {
+      id: "codex",
+      async start(o) {
+        seen.push({ authMode: o.authMode, credentials: o.credentials });
+        o.emit({ type: "message", text: `the server key is ${LOCAL_KEY}` });
+        return { status: "failed", error: `refused ${LOCAL_KEY}` };
+      },
+    };
+    const credentials = vi.fn(() => ({ connectionId: "conn-codex-0001", name: "Codex", apiKey: FAKE_KEY }));
+    const runner = localRunner({ codex: adapter }, true, credentials);
+    const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-local-0001"] });
+    await untilFinished(run.id);
+
+    const started = ledger.list().find((e) => e.type === "agent.started")!;
+    expect((started.payload as { authMode: string }).authMode).toBe("none");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.authMode).toBe("none");
+    expect(seen[0]!.credentials.localModel).toEqual({ ...local, apiKey: LOCAL_KEY });
+    expect(seen[0]!.credentials.apiKey).toBeUndefined();
+    // Never a grant variable: Codex hands every env name to the agent's shell commands.
+    expect(seen[0]!.credentials.env).toEqual({});
+    expect(used().map((e) => e.payload)).toEqual([
+      { connectionId: "conn-local-0001", name: "Qwen on Ollama", runId: run.id, purpose: "local_model" },
+    ]);
+    const message = ledger.list().find((e) => e.type === "agent.message")!;
+    expect((message.payload as { text: string }).text).toBe("the server key is [REDACTED]");
+    expect(getRun(db, run.id)!.error).toBe("refused [REDACTED]");
+    expect(JSON.stringify(ledger.list())).not.toContain(LOCAL_KEY);
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("without a stored key the local model carries none", async () => {
+    const seen: RunCredentials[] = [];
+    const adapter: AgentAdapter = { id: "codex", async start(o) { seen.push(o.credentials); return { status: "completed" }; } };
+    const run = await localRunner({ codex: adapter }, false).start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-local-0001"] });
+    await untilFinished(run.id);
+    expect(seen[0]!.localModel).toEqual(local);
+    expect("apiKey" in seen[0]!.localModel!).toBe(false);
   });
 });

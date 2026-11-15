@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
@@ -15,6 +16,7 @@ import {
   type FieldStorage,
   type CapacityHardware,
   type HardwareInfo,
+  type MachineCapacity,
   type NewLedgerEntry,
   type Provider,
 } from "@theterminal/shared";
@@ -23,10 +25,12 @@ import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { NotFoundError } from "../board/board-service.js";
 import { redact, truncate } from "../agents/redact.js";
+import { pathScrubber, usernameScrubber, type Scrub } from "../agents/scrub-paths.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { pairValueSecrets, pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 import { privateKeySecrets } from "./cloud/gcp.js";
 import { hardwareConfig, hardwareFromConfig } from "../capacity/hardware.js";
+import { isLoopbackUrl } from "../capacity/local-models.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -75,8 +79,19 @@ export type CloudSource = {
   config: Record<string, string>;
   secrets: Record<string, string>;
 };
-export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[] };
+/** A model server on this computer (a `local_model` connection), with its key when the server wants one. */
+export type LocalModelSource = {
+  connectionId: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  wireApi: "chat" | "responses";
+  apiKey?: string;
+};
+export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[]; localModel: LocalModelSource | null };
 export type GitHubSource = { connectionId: string; token: string; repo: string } | null;
+/** A connection as another machine may see it (see publicConnections). */
+export type PublicConnection = MachineCapacity["connections"][number];
 export type Budget = { connectionId: string; provider: Provider; name: string; plan: string | null; monthlyBudgetUsd: number | null };
 
 export type ConnectionTester = (
@@ -100,7 +115,34 @@ export type ConnectionServiceDeps = {
   fetch?: typeof fetch;
   newId?: () => string;
   testTimeoutMs?: number;
+  /**
+   * Scrubs local paths and the username from a connection name before it leaves the computer (publicConnections).
+   * Default: this computer's home folder to `~` and the OS username to `<user>`.
+   */
+  scrub?: Scrub;
+  /** Secrets this service does not store (the session token, values minted for runs), redacted from public names. */
+  extraSecrets?: () => string[];
 };
+
+/** The longest connection name another machine is told. */
+export const PUBLIC_NAME_MAX = 60;
+// An address as people write it; replaced whole, so neither the mailbox nor the domain leaves the computer.
+const EMAIL = /[\p{L}\p{N}._%+'-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu;
+
+function osUsername(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return ""; // no passwd entry: nothing to scrub
+  }
+}
+
+function defaultScrub(): Scrub {
+  const paths = pathScrubber([[homedir(), "~"]]);
+  const user = usernameScrubber(osUsername());
+  // Paths first, so the home folder becomes `~` rather than a path ending in `<user>`.
+  return (s) => user(paths(s));
+}
 
 export type AddConnectionInput = {
   kind: ConnectionKind;
@@ -140,7 +182,15 @@ const MANAGED_BY_DETECTION = "this connection is managed by detection";
 /** Kinds whose connections a run may be given. */
 const RUN_KINDS: ReadonlySet<ConnectionKind> = new Set(["cloud", "mcp"]);
 const NUMBER_VALUE = /^\d{1,9}(\.\d{1,2})?$/;
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
+/** URL.hostname keeps the brackets of an IPv6 address. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const LOCAL_MODEL: ConnectionProvider = "local_model";
+const NOT_LOOPBACK = "Only this computer's own address is allowed";
+/**
+ * The API style a local model gets when its connection names none. Codex 0.169.0 refuses `wire_api = "chat"`
+ * ("no longer supported"), and Ollama and llama.cpp server both offer the Responses API.
+ */
+const DEFAULT_WIRE_API = "responses";
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
 
@@ -220,6 +270,8 @@ function urlProblem(value: string): string | null {
  * A "pairs" field is parsed, so a bad line is refused at [field, line] before anything is stored.
  */
 function checkFormat(provider: ConnectionProvider, field: ConnectionField, value: string, path: (string | number)[]): void {
+  // A local model server is this computer's only: another computer's model is used by running the agent there.
+  if (provider === LOCAL_MODEL && field.name === "baseUrl" && !isLoopbackUrl(value)) invalid(path, NOT_LOOPBACK);
   if (field.input === "number" && !NUMBER_VALUE.test(value)) invalid(path, "must be a number with at most 2 decimals");
   const badUrl = field.input === "url" ? urlProblem(value) : null;
   if (badUrl !== null) invalid(path, badUrl);
@@ -242,6 +294,8 @@ export class ConnectionService {
   private readonly fetchImpl: typeof fetch;
   private readonly newId: () => string;
   private readonly testTimeoutMs: number;
+  private readonly scrub: Scrub;
+  private readonly extraSecrets: () => string[];
   /** connectionId → field → value, for secret and private fields. */
   private cache = new Map<string, Record<string, string>>();
   /** Every secret value loaded or set in this process, removed ones included, for redaction. */
@@ -271,6 +325,8 @@ export class ConnectionService {
     this.fetchImpl = deps.fetch ?? fetch;
     this.newId = deps.newId ?? (() => randomUUID());
     this.testTimeoutMs = deps.testTimeoutMs ?? 10_000;
+    this.scrub = deps.scrub ?? defaultScrub();
+    this.extraSecrets = deps.extraSecrets ?? (() => []);
   }
 
   /**
@@ -528,24 +584,34 @@ export class ConnectionService {
 
   /**
    * What a run is given for `ids`, from the cache: cloud accounts with their secrets and MCP server specs, in the order
-   * asked, duplicates collapsed. Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
+   * asked, duplicates collapsed, and at most one local model (more is a ZodError at `connectionIds`). Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
    * not start with half its secrets), before anything is returned.
    */
   selectForRun(ids: string[]): RunSelection {
     const rows = [...new Set(ids)].map((id) => this.requireRow(id));
     for (const row of rows) {
-      if (!RUN_KINDS.has(row.kind)) throw new UnsupportedConnectionError();
+      if (!RUN_KINDS.has(row.kind) && row.provider !== LOCAL_MODEL) throw new UnsupportedConnectionError();
       if (row.enabled !== 1) throw new ConnectionDisabledError();
     }
+    if (rows.filter((r) => r.provider === LOCAL_MODEL).length > 1) invalid(["connectionIds"], "a run can use only one local model");
     if (rows.length > 0 && this.keychainState() !== "ok") throw new SecretStoreUnavailableError();
     // Every field the projection lists must be in the cache: a run never gets an incomplete source.
     for (const row of rows) {
       const values = this.cache.get(row.id) ?? {};
       if (this.storedFields(row).some(([f]) => values[f] === undefined)) throw new SecretStoreUnavailableError();
     }
-    const selection: RunSelection = { cloud: [], mcp: [] };
+    const selection: RunSelection = { cloud: [], mcp: [], localModel: null };
     for (const row of rows) {
       const values = this.cache.get(row.id) ?? {};
+      if (row.provider === LOCAL_MODEL) {
+        const config = JSON.parse(row.config) as Record<string, string>;
+        const wireApi = config.wireApi === "chat" || config.wireApi === "responses" ? config.wireApi : DEFAULT_WIRE_API;
+        selection.localModel = {
+          connectionId: row.id, name: row.name, baseUrl: config.baseUrl ?? "", model: config.model ?? "", wireApi,
+          ...(values.apiKey ? { apiKey: values.apiKey } : {}),
+        };
+        continue;
+      }
       if (row.kind === "mcp") {
         selection.mcp.push(toMcpSpec(this.toConnection(row), values));
         continue;
@@ -614,6 +680,37 @@ export class ConnectionService {
     const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
     const info = row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
     return row && info ? { ...info, enabled: row.enabled === 1 } : null;
+  }
+
+  /**
+   * What a linked machine may name when it asks this one to run: the enabled cloud, MCP and local model connections,
+   * by id, kind, provider and name only. Never config, private or secret fields, their names, or status: this list
+   * leaves the computer.
+   */
+  publicConnections(): PublicConnection[] {
+    return this.rows()
+      .filter((r) => r.enabled === 1 && (r.kind === "cloud" || r.kind === "mcp" || (r.kind === "llm" && r.provider === "local_model")))
+      .map((r) => ({ id: r.id, kind: r.kind, provider: r.provider, name: this.publicName(r.name) }));
+  }
+
+  /**
+   * A name fit to leave the computer. Names were checked for secrets when given, but a secret stored or minted later
+   * may sit in one, and a path, the username or an email address never belongs on another machine: redacted (before
+   * and after scrubbing, as the runner does), scrubbed, emails replaced, and capped.
+   */
+  private publicName(name: string): string {
+    const cleaned = this.publicText(name);
+    return cleaned === "" ? "Connection" : cleaned;
+  }
+
+  /**
+   * Any text the Owner typed (a name, a plan) fit to leave the computer, cleaned as publicName cleans a connection's
+   * name; "" when nothing is left.
+   */
+  publicText(text: string): string {
+    const secrets = [...this.secretValues(), ...this.extraSecrets()];
+    const cleaned = redact(this.scrub(redact(text, secrets)), secrets).replace(EMAIL, "<email>").trim();
+    return cleaned === "" ? "" : truncate(cleaned, PUBLIC_NAME_MAX);
   }
 
   /** The plan and monthly budget of each enabled model connection. */

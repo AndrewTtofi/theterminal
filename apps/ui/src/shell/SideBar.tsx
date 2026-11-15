@@ -5,6 +5,7 @@ import { ChangesSideBar } from "../views/ChangesSideBar";
 import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
 import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
+import { MachinesSideBar } from "../views/MachinesSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
 import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
@@ -26,6 +27,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   connections: ConnectionsSideBar,
   github: GitHubSideBar,
   capacity: CapacitySideBar,
+  machines: MachinesSideBar,
   share: ShareSideBar,
   learn: LearnSideBar,
 };

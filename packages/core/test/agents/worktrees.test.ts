@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
 import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 import {
-  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GIT_INCLUDES_REFUSED, GitOutputTooLargeError, GitScope, GitTimeoutError,
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GIT_INCLUDES_REFUSED, GitEnvRefusedError, GitOutputTooLargeError, GitScope, GitTimeoutError,
   SharedGitconfigModifiedError, UnsafeGitConfigError,
   WorktreeManager,
   ensureEmptyGitconfig, gitEnv,
@@ -372,6 +372,61 @@ describe("WorktreeManager", () => {
           "core.sparseCheckout=false", "index.sparse=false", "core.splitIndex=false", "core.untrackedCache=false", "core.ignoreStat=false",
         ]),
       );
+    });
+
+    it("adds the named git variables for one call over the allowlisted environment", async () => {
+      const calls: { args: string[]; opts: Parameters<GitRunner>[2] }[] = [];
+      const fake: GitRunner = async (args, _cwd, opts) => {
+        calls.push({ args, opts });
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      const indexFile = join(outside, "scratch", "index");
+      process.env.TT_TEST_PLANTED_VAR = "planted-value";
+      try {
+        await m.runGit(outside, ["write-tree"], {
+          env: {
+            GIT_INDEX_FILE: indexFile, GIT_AUTHOR_NAME: "The Terminal", GIT_AUTHOR_EMAIL: "theterminal@localhost",
+            GIT_COMMITTER_NAME: "The Terminal", GIT_COMMITTER_EMAIL: "theterminal@localhost",
+          },
+        });
+      } finally {
+        delete process.env.TT_TEST_PLANTED_VAR;
+      }
+      const env = calls.at(-1)!.opts!.env!;
+      expect(env).toMatchObject({
+        GIT_INDEX_FILE: indexFile, GIT_AUTHOR_NAME: "The Terminal", GIT_AUTHOR_EMAIL: "theterminal@localhost",
+        GIT_COMMITTER_NAME: "The Terminal", GIT_COMMITTER_EMAIL: "theterminal@localhost",
+        GIT_CONFIG_GLOBAL: join(dataDir, EMPTY_GITCONFIG), GIT_CONFIG_NOSYSTEM: "1",
+      });
+      expect(env.TT_TEST_PLANTED_VAR).toBeUndefined();
+      // The next call without the option has none of them.
+      await m.runGit(outside, ["status"]);
+      expect(calls.at(-1)!.opts!.env!.GIT_AUTHOR_NAME).toBeUndefined();
+      expect(calls.at(-1)!.opts!.env!.GIT_INDEX_FILE).toBeUndefined();
+    });
+
+    it("refuses any other variable, an unusable value, a relative index file or two index files, before git runs", async () => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        return "";
+      };
+      const m = new WorktreeManager(dataDir, fake);
+      const abs = join(outside, "index");
+      const refused: Record<string, string>[] = [
+        { GIT_DIR: outside }, { GIT_EXEC_PATH: outside }, { GIT_SSH_COMMAND: "x" }, { GIT_CONFIG_GLOBAL: abs },
+        { GIT_CONFIG_COUNT: "1" }, { PATH: outside }, { LD_PRELOAD: abs }, { git_index_file: abs },
+        { GIT_AUTHOR_NAME: "a\nb" }, { GIT_AUTHOR_NAME: "a\0b" }, { GIT_AUTHOR_NAME: "" }, { GIT_AUTHOR_NAME: "x".repeat(1025) },
+        { GIT_INDEX_FILE: "relative/index" },
+      ];
+      for (const env of refused) {
+        await expect(m.runGit(outside, ["status"], { env: env as never })).rejects.toBeInstanceOf(GitEnvRefusedError);
+      }
+      await expect(m.runGit(outside, ["status"], { indexFile: abs, env: { GIT_INDEX_FILE: abs } })).rejects.toBeInstanceOf(
+        GitEnvRefusedError,
+      );
+      expect(calls).toEqual([]);
     });
 
     it("neutralises every filter driver the repository configures", async () => {

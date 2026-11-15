@@ -65,6 +65,8 @@ Agent programs get an allowlisted environment only. The Terminal builds it from 
 - In API key mode, the one key for that provider. In sign-in mode, no key at all.
 - The variables of the cloud accounts you ticked for that run, and nothing from any other cloud account (see [Cloud accounts](#cloud-accounts)).
 
+A run on a linked machine gets the environment of that machine only (built there the same way, from its own connections). Nothing from this computer's connections or environment is sent to it: this computer names the connections it wants used, and the other machine decides what they mean. The names of connections that cross are cleaned first, and the run's prompt is cleaned before it is sent. The run is approved on that machine, by its own approval gate. See [Linked machines](linked-machines.md).
+
 Nothing else is passed. Other secrets in your shell, such as cloud keys, npm tokens or GitHub tokens, are not passed to agents, and one provider's key is never given to another provider's agent.
 
 `HTTP_PROXY` and `HTTPS_PROXY` are passed because agents often need them to reach the internet. Credentials in a proxy URL (the `user:password@` part) are redacted from anything the agent reports back.
@@ -240,3 +242,19 @@ Rate limits are inferred: The Terminal counts the runs that hit a rate-limit err
 - Inside WSL, the GPU is the Windows machine's, and the view says so.
 
 Detection writes a `This computer` connection with the results. You can turn it off or remove it in the Connections view; the next detection writes it again.
+
+## Local models
+
+A **Local model** connection points an agent at a model server on this computer, such as Ollama or llama.cpp server. It is for open-weight models you run yourself. See [Linked machines](linked-machines.md#local-models) for the rest of the picture.
+
+| Field | What it is | Where it lives |
+| --- | --- | --- |
+| Server URL | For example `http://127.0.0.1:11434/v1` (Ollama) or `http://127.0.0.1:8080/v1` (llama.cpp server). Only this computer's own address is accepted: `127.0.0.1`, `localhost` or `[::1]`. | The ledger and the API |
+| Model | The model name the server lists, for example `qwen2.5-coder:14b`. | The ledger and the API |
+| API style | `responses` (the default) or `chat`. The bundled Codex does not accept `chat`, so keep `responses`. | The ledger and the API |
+| API key | Only if the server asks for one. | The OS keychain only |
+
+- **Only Codex** can run on a local model. Starting a Claude or Gemini run with one is refused.
+- **The tester** asks the server for its list of models (with the key, if there is one) and reports what it found. It does not run the model.
+- **`LOCAL_MODEL_API_KEY`.** When a key is set, the Codex agent gets it as this one environment variable, and no other variable can carry it. The key is not in the agent's commands or prompt, is redacted from everything the agent reports, and is never written to the ledger. A run on a local model records that the model was used, never the key.
+- The detected engines also appear in the Capacity view, with the models each one serves.

@@ -142,6 +142,29 @@ const MIGRATIONS = [
   CREATE INDEX share_snapshots_project ON share_snapshots (project_id);
   CREATE TABLE share_links (id TEXT PRIMARY KEY, share_id TEXT NOT NULL, project_id TEXT NOT NULL, scope TEXT NOT NULL, port INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT);
   CREATE INDEX share_links_state ON share_links (state);`,
+  // Linked machines: paired machines, runs that cross a link, and the machine a mirrored run executes on.
+  `CREATE TABLE machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    address TEXT NOT NULL,
+    role TEXT NOT NULL,
+    paired_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE link_runs (
+    run_id TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX link_runs_machine ON link_runs (machine_id);
+  ALTER TABLE agent_runs ADD COLUMN machine_id TEXT;`,
 ];
 
 export type Db = Database.Database;

@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacityPanel } from "../src/views/CapacityPanel";
-import { report } from "./capacity-fixtures";
+import { localEngines, machines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -67,5 +67,87 @@ describe("CapacityPanel", () => {
   it("says when the report is loading or failed", () => {
     renderPanel({ error: "request_failed" });
     expect(screen.getByText("Could not load capacity")).toBeTruthy();
+  });
+
+  it("adds a Local models table with one row per model, and nothing when none was detected", () => {
+    renderPanel({ report: report({ localModels: localEngines }) });
+    const table = screen.getByRole("table", { name: "Local models" });
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Engine", "Model", "Size", "Parameters", "Quantization"]);
+    const rows = within(table).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["Ollama 0.12.3", "qwen2.5-coder:14b", "9.0 GB", "14.8B", "Q4_K_M"],
+      ["Ollama 0.12.3", "llama3.2:3b", "not reported", "not reported", "not reported"],
+      ["llama.cpp", "gpt-oss-20b", "not reported", "not reported", "not reported"],
+    ]);
+  });
+
+  it("has no Local models table without a detected server", () => {
+    renderPanel({ report: report() });
+    expect(screen.queryByRole("table", { name: "Local models" })).toBeNull();
+  });
+
+  it("adds a Machines table: one row per linked machine, the offline one greyed with when it was last seen", () => {
+    renderPanel({ report: report({ machines }) });
+    const table = screen.getByRole("table", { name: "Machines" });
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+      "Machine", "State", "CPU", "Memory", "GPU", "Local models", "Checked",
+    ]);
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell").map((c) => c.textContent))).toEqual([
+      ["GPU box", "online", "AMD Ryzen 9 7950X (16 cores)", "64 GB", "NVIDIA RTX 4090, 24 GB", "3", new Date("2026-11-15T12:00:00.000Z").toLocaleString()],
+      [
+        "<img src=x onerror=alert(1)>", "offline", "Apple M1 (8 cores)", "16 GB", "not detected", "0",
+        `last seen ${new Date("2026-11-15T08:45:00.000Z").toLocaleString()}`,
+      ],
+    ]);
+    expect(rows[0]!.className).not.toContain("offline");
+    expect(rows[1]!.className).toContain("offline");
+    expect(within(rows[1]!).getByText(/^last seen/).querySelector("time")!.getAttribute("dateTime")).toBe("2026-11-15T08:45:00.000Z");
+    // A machine's name is text, never markup.
+    expect(table.querySelector("img")).toBeNull();
+  });
+
+  it("says not reported for a machine that sent no hardware, and has no Machines table without linked machines", () => {
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, hardware: null, localModels: [] }] }) });
+    const cellsText = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!.textContent;
+    expect(cellsText).toContain("not reported");
+    cleanup();
+    renderPanel({ report: report() });
+    expect(screen.queryByRole("table", { name: "Machines" })).toBeNull();
+  });
+
+  it("says never seen for an offline machine that has not answered yet", () => {
+    renderPanel({ report: report({ machines: [{ ...machines[1]!, lastSeenAt: null, hardware: null }] }) });
+    const row = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    expect(within(row).getAllByRole("cell").at(-1)!.textContent).toBe("never seen");
+    expect(row.querySelector("time")).toBeNull();
+  });
+
+  it("says key changed for a machine whose address presented another key, with no last seen", () => {
+    const flagged = { ...machines[1]!, problem: "key_mismatch" as const, lastSeenAt: null, hardware: null };
+    renderPanel({ report: report({ machines: [flagged] }) });
+    const row = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    const cells = within(row).getAllByRole("cell").map((c) => c.textContent);
+    expect(cells[1]).toBe("key changed");
+    expect(cells.at(-1)).toBe(new Date(flagged.checkedAt).toLocaleString());
+    expect(row.textContent).not.toMatch(/last seen|never seen/);
+    expect(row.className).toContain("key-changed");
+  });
+
+  it("shows a remote machine's hardware with hidden characters made visible", () => {
+    const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9", gpu: "RTX\u200B4090" };
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });
+    const cells = within(within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!).getAllByRole("cell");
+    expect(cells[2]!.textContent).toBe("Ryzen\\u202e9 (16 cores)");
+    expect(cells[4]!.textContent).toBe("RTX\\u200b4090, 24 GB");
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+
+  it("shows a remote machine's name with hidden characters made visible", () => {
+    const name = "GPU\u202Eexe.bat\u200Bbox";
+    renderPanel({ report: report({ machines: [{ ...machines[0]!, name }] }) });
+    const first = within(screen.getByRole("table", { name: "Machines" })).getAllByRole("row")[1]!;
+    expect(within(first).getAllByRole("cell")[0]!.textContent).toBe("GPU\\u202eexe.bat\\u200bbox");
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
   });
 });

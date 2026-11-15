@@ -247,7 +247,8 @@ function handleRequest(msg) {
       const cfg = p.config ?? {};
       threadConfig = cfg;
       return reply({
-        thread: { id: THREAD, cwd: p.cwd, turns: [] }, model: "fake-model", modelProvider: "openai", serviceTier: null,
+        // A thread on a custom provider (a local model) answers as before, naming that provider and model.
+        thread: { id: THREAD, cwd: p.cwd, turns: [] }, model: cfg.model ?? "fake-model", modelProvider: cfg.model_provider ?? "openai", serviceTier: null,
         disabledPluginIds: [], cwd: p.cwd, instructionSources: [],
         approvalPolicy: script.threadStartPolicy ?? p.approvalPolicy ?? "on-request",
         approvalsReviewer: p.approvalsReviewer ?? "user",

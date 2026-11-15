@@ -10,13 +10,27 @@ import { createServer, selectFetch, selectSecretStore, selectSts, type RunningSe
 import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ChunkedSecretStore } from "../../src/secrets/store.js";
+import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
+import { openDatabase } from "../../src/db.js";
+import { Ledger } from "../../src/ledger/ledger.js";
+import { LinkService } from "../../src/link/service.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
+import { LinkListener } from "../../src/link/listener.js";
+import { LinkClient, RemoteRefusedError } from "../../src/link/client.js";
+import { commitEvent } from "../../src/events/commit.js";
+import { getSetting } from "../../src/events/projections.js";
+import { LinkIdentity } from "../../src/link/identity.js";
+import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
+import { rawTlsGet, tcpAccepts } from "../link/helpers.js";
 
 const running: RunningServer[] = [];
 afterEach(async () => {
   while (running.length) await running.pop()!.close().catch(() => undefined);
 });
+// A memory store unless the test brings its own: a server loads its link identity from the store at start, and a
+// test must never write one into the real keychain. The in-process discovery, so linking never sends multicast.
 const start = async (o: Parameters<typeof createServer>[0]) => {
-  const s = await createServer(o);
+  const s = await createServer({ secrets: new MemorySecretStore(), discovery: fakeDiscovery(), ...o });
   running.push(s);
   return s;
 };
@@ -147,7 +161,13 @@ describe("createServer", { timeout: 30_000 }, () => {
     const project = await (await post(a, "/api/projects", { name: "P", pitch: "x" })).json();
     const card = await (await post(a, `/api/projects/${project.id}/cards`, { title: "C", stage: "plan" })).json();
     await stop(a);
-    return { projectId: project.id as string, cardId: card.id as string };
+    // The server records this computer's link identity first, so the project's entries do not start at seq 1.
+    const db = new Database(join(dataDir, "ledger.db"), { readonly: true });
+    const seqOf = (type: string) => (db.prepare("SELECT seq FROM ledger WHERE type = ?").get(type) as { seq: number }).seq;
+    const projectSeq = seqOf("project.created");
+    const cardSeq = seqOf("card.created");
+    db.close();
+    return { projectId: project.id as string, cardId: card.id as string, projectSeq, cardSeq };
   };
   const getBoard = async (s: RunningServer, projectId: string) =>
     (await fetch(`${base(s)}/api/projects/${projectId}/board`, { headers: auth(s) })).json();
@@ -193,29 +213,30 @@ describe("createServer", { timeout: 30_000 }, () => {
 
   it("on a broken chain, projects only the entries before the break", async () => {
     const dataDir = tmp();
-    const { projectId } = await seedProjectWithCard(dataDir);
+    const { projectId, cardSeq } = await seedProjectWithCard(dataDir);
     tamper(dataDir, (db) =>
-      db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run(
+      db.prepare("UPDATE ledger SET payload = ? WHERE seq = ?").run(
         JSON.stringify({ cardId: "evil", title: "Evil", stage: "ship" }),
+        cardSeq,
       ),
     );
 
     const b = await start({ dataDir, port: 0 });
-    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: 2 });
+    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: cardSeq });
     const board = await getBoard(b, projectId);
     expect(Object.values(board.columns).flat()).toEqual([]);
   });
 
   it("serves entries before an unparseable payload over HTTP and WS", async () => {
     const dataDir = tmp();
-    const { projectId } = await seedProjectWithCard(dataDir);
-    tamper(dataDir, (db) => db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run("{not json"));
+    const { projectId, projectSeq, cardSeq } = await seedProjectWithCard(dataDir);
+    tamper(dataDir, (db) => db.prepare("UPDATE ledger SET payload = ? WHERE seq = ?").run("{not json", cardSeq));
 
     const b = await start({ dataDir, port: 0 });
-    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: 2 });
+    expect(b.integrity).toEqual({ ok: false, brokenAtSeq: cardSeq });
     const res = await fetch(`${base(b)}/api/ledger?projectId=${projectId}`, { headers: auth(b) });
     expect(res.status).toBe(200);
-    expect((await res.json()).map((e: { seq: number }) => e.seq)).toEqual([1]);
+    expect((await res.json()).map((e: { seq: number }) => e.seq)).toEqual([projectSeq]);
     expect((await getBoard(b, projectId)).project.name).toBe("P");
 
     const ws = new WebSocket(`ws://127.0.0.1:${b.port}/api/events`, { headers: auth(b) });
@@ -231,10 +252,10 @@ describe("createServer", { timeout: 30_000 }, () => {
   it("refuses to start when dataDir is inside or equal to uiDir", async () => {
     const root = tmp();
     writeFileSync(join(root, "index.html"), "<html>ui</html>");
-    await expect(createServer({ dataDir: join(root, "data"), uiDir: root, port: 0 })).rejects.toThrow(
+    await expect(createServer({ dataDir: join(root, "data"), uiDir: root, port: 0, secrets: new MemorySecretStore() })).rejects.toThrow(
       /data directory .* inside the UI directory/i,
     );
-    await expect(createServer({ dataDir: root, uiDir: root, port: 0 })).rejects.toThrow(
+    await expect(createServer({ dataDir: root, uiDir: root, port: 0, secrets: new MemorySecretStore() })).rejects.toThrow(
       /data directory .* inside the UI directory/i,
     );
     expect(existsSync(join(root, "data", "token"))).toBe(false);
@@ -364,6 +385,14 @@ describe("test doubles for connections", () => {
     expect(selectSecretStore({}, injected)).toBe(injected);
   });
 
+  it("refuses to fall back to the real keychain under vitest: a test server must inject its store or set the flags", () => {
+    expect(() => selectSecretStore({ VITEST: "true" })).toThrow(/keychain/);
+    expect(() => selectSecretStore({ VITEST: "true", THETERMINAL_SECRET_STORE: "memory" })).toThrow(/keychain/);
+    expect(selectSecretStore({ VITEST: "true", ...FAKE, THETERMINAL_SECRET_STORE: "memory" })).toBeInstanceOf(MemorySecretStore);
+    const injected = new MemorySecretStore();
+    expect(selectSecretStore({ VITEST: "true" }, injected)).toBe(injected);
+  });
+
   it("uses the fake HTTP stub only when THETERMINAL_FAKE_AGENT=1 and THETERMINAL_FAKE_HTTP=1", async () => {
     expect(selectFetch({ THETERMINAL_FAKE_HTTP: "1" })).toBe(globalThis.fetch);
     expect(selectFetch(FAKE)).toBe(globalThis.fetch);
@@ -458,5 +487,93 @@ describe("test doubles for cloud connections", () => {
         else process.env[k] = v;
       }
     }
+  });
+});
+
+describe("createServer link listener", { timeout: 30_000 }, () => {
+  it("starts with linkBind on loopback, and listens for links only after the opt-in", async () => {
+    const dataDir = tmp();
+    const secrets = new MemorySecretStore();
+    const s = await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" });
+    const health = await fetch(`${base(s)}/api/health`, { headers: auth(s) });
+    expect(health.status).toBe(200);
+    expect(await tcpAccepts(LINK_DEFAULT_PORT)).toBe(false);
+    await stop(s);
+
+    // The opt-in is recorded in this data folder (as POST /api/link/enable will), on a port of the test's own.
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    const ledger = new Ledger(db);
+    const link: LinkService = new LinkService({
+      db, ledger, secrets, bind: "127.0.0.1", discovery: fakeDiscovery(),
+      listener: (deps) => new LinkListener(deps),
+      client: (identity) => new LinkClient({ identity }),
+      registerProtocol: (app) => registerLinkProtocolRoutes(app, { link }),
+    });
+    await link.load();
+    const port = await link.enableLinking({ kind: "human", id: "owner" }, LINKING_ACK, 0);
+    await link.shutdown();
+    db.close();
+    expect(await tcpAccepts(port)).toBe(false);
+
+    // A restart with the recorded opt-in starts the listener once every dependency exists.
+    const again = await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" });
+    expect(await tcpAccepts(port)).toBe(true);
+    expect(again.loopbackUrl).toBe(`http://127.0.0.1:${again.port}/`);
+    expect((await fetch(`${base(again)}/api/health`, { headers: auth(again) })).status).toBe(200);
+    // The link listener serves no workspace route, and the workspace server no link route.
+    const stranger = await LinkIdentity.load({ secrets: new MemorySecretStore(), onCreated: () => undefined });
+    expect((await rawTlsGet(port, "/api/health", stranger)).kind).toBe("closed");
+    expect((await fetch(`${base(again)}/link/v1/hello`, { headers: auth(again) })).status).toBe(404);
+    await stop(again);
+    expect(await tcpAccepts(port)).toBe(false);
+  });
+
+  it("serves the remote-run routes to a paired machine once the listener starts", async () => {
+    const dataDir = tmp();
+    const secrets = new MemorySecretStore();
+    await stop(await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" }));
+    const requester = await LinkIdentity.load({ secrets: new MemorySecretStore(), onCreated: () => undefined });
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    const ledger = new Ledger(db);
+    const link: LinkService = new LinkService({
+      db, ledger, secrets, bind: "127.0.0.1", discovery: fakeDiscovery(),
+      listener: (deps) => new LinkListener(deps),
+      client: (identity) => new LinkClient({ identity }),
+      registerProtocol: (app) => registerLinkProtocolRoutes(app, { link }),
+    });
+    await link.load();
+    const port = await link.enableLinking({ kind: "human", id: "owner" }, LINKING_ACK, 0);
+    await link.shutdown();
+    commitEvent(db, ledger, () => ({
+      event: {
+        projectId: null, actor: { kind: "human", id: "owner" }, type: "machine.paired",
+        payload: {
+          machineId: requester.machineId, name: "Laptop", publicKey: requester.publicKeyBase64, fingerprint: requester.fingerprint,
+          address: "127.0.0.1:1", role: "showed_code",
+        },
+      },
+      result: () => undefined,
+    }));
+    const peer = { machineId: getSetting(db, "link.machineId")!, address: `127.0.0.1:${port}`, publicKeyDer: Buffer.from(getSetting(db, "link.publicKey")!, "base64") };
+    db.close();
+
+    const s = await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" });
+    const body = { v: 1, projectId: "p1", projectName: "Demo", adapter: "fake", prompt: "p", cardId: null, connectionIds: [] };
+    const err = await new LinkClient({ identity: requester }).request(peer, "POST", "/link/v1/runs/run-1/start", body).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RemoteRefusedError);
+    expect((err as RemoteRefusedError).code).toBe("no_repo");
+    await stop(s);
+  });
+
+  it("records this computer's identity once in the ledger", async () => {
+    const dataDir = tmp();
+    const secrets = new MemorySecretStore();
+    await stop(await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" }));
+    await stop(await start({ dataDir, port: 0, secrets, linkBind: "127.0.0.1" }));
+    const db = new Database(join(dataDir, "ledger.db"), { readonly: true });
+    const rows = db.prepare("SELECT payload FROM ledger WHERE type = 'machine.identity_created'").all() as { payload: string }[];
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.payload).not.toContain("PRIVATE");
   });
 });

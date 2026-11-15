@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GATES, type LedgerEntry } from "@theterminal/shared";
+import { GATES, narrate, type LedgerEntry } from "@theterminal/shared";
 import { NotFoundError } from "../../src/board/board-service.js";
 import { cardStory, ledgerExportLines, narrationContext } from "../../src/story/story.js";
 import { commitEvents } from "../../src/events/commit.js";
 import { completeIntake, emit, finishedRun, human, world, type World } from "../gates/setup.js";
+import { acceptMirroredLine } from "../../src/link/mirrored.js";
+import { pairAndRequest, remoteRun, type RemoteRun } from "../link/remote-fixtures.js";
 
 let w: World;
 let cardId: string;
@@ -281,5 +283,55 @@ describe("cardStory with many runs", () => {
     expect(new Set(seqs).size).toBe(seqs.length);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(story.costUsd).toBeCloseTo(2.05);
+  });
+});
+
+describe("a run on a linked machine in the story and the export", () => {
+  const SECRET = "sk-ant-TESTKEY-0000000000";
+  let remote: RemoteRun;
+
+  beforeEach(async () => {
+    remote = await remoteRun("run-on-gpu-box", w.planned);
+    pairAndRequest(w.db, w.ledger, remote, "GPU box", cardId);
+    for (const e of [
+      remote.started(cardId),
+      remote.connectionUsed(),
+      remote.message(`I found the key ${SECRET} in the config`),
+      remote.requested("remote-act-1", `curl -H "x-api-key: ${SECRET}" https://example.com`),
+    ]) {
+      expect(acceptMirroredLine(w.db, w.ledger, remote.runId, remote.line(e)).ok).toBe(true);
+    }
+  });
+
+  const mirroredTypes = (entries: LedgerEntry[]) =>
+    entries.filter((e) => e.type === "link.mirrored").map((e) => (payload(e).origin as { type: string }).type);
+
+  it("the card's story has the worker's entries, mirrored, and the run", () => {
+    const story = cardStory(w.db, w.ledger, cardId);
+    expect(story.runs.map((r) => [r.id, r.machineId])).toEqual([[remote.runId, remote.machineId]]);
+    expect(mirroredTypes(story.entries)).toEqual(["agent.started", "connection.used", "agent.message", "agent.action.requested"]);
+    expect(story.actions.map((a) => [a.id, a.status])).toEqual([["remote-act-1", "pending"]]);
+  });
+
+  it("the story shows mirrored text through this machine's own cleaner, and the ledger keeps what was signed", () => {
+    const story = cardStory(w.db, w.ledger, cardId);
+    expect(JSON.stringify(story.entries)).not.toContain("TESTKEY");
+    for (const e of story.entries) expect(narrate(e).headline + (narrate(e).detail ?? "")).not.toContain("TESTKEY");
+    const custom = cardStory(w.db, w.ledger, cardId, (t) => t.replaceAll("config", "[CLEANED]"));
+    expect(JSON.stringify(custom.entries)).toContain("[CLEANED]");
+    expect(JSON.stringify(all())).toContain("TESTKEY");
+  });
+
+  it("the project export has every mirrored entry, the null-project connection.used too, redacted and marked as cleaned", () => {
+    const out = [...ledgerExportLines(w.db, w.ledger, w.planned)].map((l) => JSON.parse(l) as Record<string, unknown>);
+    const entries = out.filter((l) => l.kind === "entry") as unknown as (LedgerEntry & { headline: string; cleaned?: true })[];
+    expect(mirroredTypes(entries)).toEqual(["agent.started", "connection.used", "agent.message", "agent.action.requested"]);
+    expect(out.map((l) => JSON.stringify(l)).join("\n")).not.toContain("TESTKEY");
+    const message = entries.find((e) => e.type === "link.mirrored" && (payload(e).origin as { type: string }).type === "agent.message")!;
+    expect(message.headline).toMatch(/^On a linked machine: The Fake agent said: "I found the key \[REDACTED\]/);
+    expect(message.cleaned).toBe(true);
+    const started = entries.find((e) => e.type === "link.mirrored")!;
+    expect(started.cleaned).toBeUndefined();
+    expect(out.at(-1)).toMatchObject({ kind: "end", gaps: 0 });
   });
 });

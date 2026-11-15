@@ -206,4 +206,23 @@ describe("DecisionCard", () => {
     expect(screen.getByText("Decide in the strip above")).toBeTruthy();
     expect(screen.getByText("Details")).toBeTruthy();
   });
+
+  it("a remote action says where it runs and that the decision is sent there; unreachable is fixed text", async () => {
+    const onDecide = vi.fn().mockRejectedValue(new ApiError(502, "machine_unreachable"));
+    render(<DecisionCard action={action} machineName="GPU box" onDecide={onDecide} />);
+    // Plain text: a live region on a note that never changes would be announced on every mount.
+    expect(screen.getByText("This agent runs on GPU box. Your decision is sent there.").getAttribute("role")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /Allow/ }));
+    expect(await screen.findByText("Could not reach GPU box. Your decision was not sent.")).toBeTruthy();
+  });
+
+  it("a remote refusal never shows the machine's own message, and a local action names no machine", async () => {
+    const onDecide = vi.fn().mockRejectedValue(new ApiError(400, "remote_refused", { code: "invalid_input", machine: "GPU box", message: "<b>rm -rf</b>" }));
+    const { container, rerender } = render(<DecisionCard action={action} machineName="GPU box" onDecide={onDecide} />);
+    await userEvent.click(screen.getByRole("button", { name: /Allow/ }));
+    expect(await screen.findByText("Something went wrong")).toBeTruthy();
+    expect(container.textContent).not.toContain("rm -rf");
+    rerender(<DecisionCard action={action} onDecide={vi.fn()} />);
+    expect(container.textContent).not.toContain("This agent runs on");
+  });
 });

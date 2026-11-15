@@ -40,7 +40,7 @@ const board: Board = {
 };
 const run: AgentRun = {
   id: "run1", projectId: "p1", cardId: null, adapter: "fake", authMode: "none", prompt: "Detect GPU",
-  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null,
+  status: "running", worktree: "w/run1", base: null, costUsd: null, inputTokens: null, outputTokens: null, error: null, startedAt: "", finishedAt: null, machineId: null,
 };
 const pendingAction: PendingAgentAction = {
   id: "p1a", runId: "run1", kind: "shell", tool: "Bash", summary: "Run: nvidia-smi", input: {}, status: "pending",
@@ -53,7 +53,8 @@ const entry: LedgerEntry = {
 
 const STATUS: Status = {
   runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
-  connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], shareLinks: 0,
+  connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [],
+  machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
 };
 
 function model(over: Partial<AppModel> = {}): AppModel {
@@ -94,13 +95,14 @@ function model(over: Partial<AppModel> = {}): AppModel {
     onLoadOlderProject: vi.fn(async () => {}),
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
-    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
+    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "machine", "other"],
     onLedgerTopicsChange: vi.fn(),
     narration: {},
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
     github: { overview: null, error: null, refresh: vi.fn() },
     capacity: { report: null, error: null, refresh: vi.fn() },
+    machines: { overview: null, error: null, refresh: vi.fn() },
     share: shareModel(),
     digests: digestsModel(),
     intake: null,
@@ -303,7 +305,7 @@ describe("Workbench", () => {
   });
 
   it("loads the Capacity view when it is selected, and opens the Capacity tab from it", async () => {
-    const capacity = { report: { sources: [], hardware: null, generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
+    const capacity = { report: { sources: [], hardware: null, localModels: [], machines: [], generatedAt: "2026-11-15T12:00:00.000Z" }, error: null, refresh: vi.fn() };
     const { container } = render(<Workbench model={model({ capacity })} />);
     expect(container.querySelector('[data-panel="capacity"]')).toBeNull();
     await userEvent.click(view("Capacity"));
@@ -656,7 +658,7 @@ describe("Workbench", () => {
     const statusWith = (intakeProjects: Status["intakeProjects"]): Status => ({
       runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
       connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
-      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, shareLinks: 0,
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects, machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0,
     });
 
     it("opens the Plan intake tab from the Projects side bar", async () => {

@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_SHARE_OPTIONS } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, DailyDigest, DigestDays, GateEvaluation, GitHubOverview, IntakeView,
-  LedgerEntry, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, ShareLink, ShareOptions,
+  LedgerEntry, MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, ShareLink, ShareOptions,
   ShareSnapshotRecord, Stage,
 } from "@theterminal/shared";
+import { innerEntry } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
-import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, subscribeLedger } from "./api";
-import type { AgentsInfo, Health, ShareAddress, SharePreview, Status } from "./api";
+import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, subscribeLedger } from "./api";
+import type { AgentsInfo, Health, LinkOverview, ShareAddress, SharePreview, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
 import { LEDGER_TOPICS, namesRun, runIsLive } from "./shell/model";
 import type { OverrideOutcome } from "./shell/model";
@@ -19,6 +20,11 @@ import { useConnections } from "./use-connections";
 const GATE_REFRESHED = "Something changed: a condition is no longer met. The checklist was refreshed.";
 
 /** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
+/**
+ * Whether an entry changes a run or its pending actions: an agent entry, here or carried from a linked machine, or a
+ * run on a linked machine that ended without one (unlinked, refused, a failed check).
+ */
+const touchesRuns = (e: LedgerEntry) => innerEntry(e).type.startsWith("agent.") || e.type === "link.run_failed";
 const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
 
 /** How many ledger entries one request loads: the newest page first, then older pages on request. */
@@ -117,6 +123,10 @@ export function App() {
   /** Set once the Capacity view or tab has asked for the report: from then on, usage changes refresh it too. */
   const capacityWanted = useRef(false);
   const refreshCapacityRef = useRef<() => void>(() => {});
+  const [machines, setMachines] = useState<{ overview: LinkOverview | null; error: string | null }>({ overview: null, error: null });
+  /** Set once the Machines view or the Link a machine tab has asked: from then on, machine.* entries refresh it too. */
+  const machinesWanted = useRef(false);
+  const refreshMachinesRef = useRef<() => void>(() => {});
   /** The gated move waiting on the Owner, with the project of its card. */
   const [gate, setGate] = useState<(GatePrompt & { projectId: string }) | null>(null);
   const gateRef = useRef(gate);
@@ -189,12 +199,15 @@ export function App() {
       setHealth(h);
       unsubscribe = subscribeLedger(h.headSeq, (e) => {
         refreshStatus();
-        if (e.type.startsWith("agent.")) refresh();
+        if (touchesRuns(e)) refresh();
         // Tests, enables and removals change a connection's status: reread the list from the server.
         if (e.type.startsWith("connection.")) refreshConnections.current();
         // Spend, rate limits, budgets and hardware change the Capacity report.
         const usage = e.type === "agent.finished" || e.type === "agent.rate_limited" || e.type.startsWith("connection.");
         if (usage && capacityWanted.current) refreshCapacityRef.current();
+        // Names, the linking switch, pairings and unlinks change the Machines view.
+        if (e.type.startsWith("machine.") && machinesWanted.current) refreshMachinesRef.current();
+        if (e.type.startsWith("machine.") && pairedWanted.current) refreshPairedRef.current();
         const g = gateRef.current;
         if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
         for (const listener of [...entryListeners.current]) listener(e);
@@ -241,6 +254,49 @@ export function App() {
     };
   });
   refreshCapacityRef.current = refreshCapacity;
+  // The Machines view and the Link a machine tab ask for this when they open and while open; made once, likewise.
+  const [refreshMachines] = useState(() => {
+    const load = coalesced(async () => {
+      try {
+        const overview = await api.getLink();
+        if (mounted.current) setMachines({ overview, error: null });
+      } catch (e) {
+        if (mounted.current) setMachines((prev) => ({ overview: prev.overview, error: e instanceof ApiError ? e.code : "request_failed" }));
+      }
+    }, () => !mounted.current);
+    return () => {
+      machinesWanted.current = true;
+      load();
+    };
+  });
+  refreshMachinesRef.current = refreshMachines;
+  // What a linked machine offers a run, for the Run on picker: the server's 30 s cache is enough to choose.
+  const [machineCapacity] = useState(() => (machineId: string) => api.getMachineCapacity(machineId, true));
+  // With any machine paired, its name is wanted wherever its runs show (narration, run lists, decision cards) and in
+  // the Run on picker: the paired list only, which asks no machine and browses nothing (the Machines view does that).
+  const [paired, setPaired] = useState<MachinePresence[]>([]);
+  const pairedWanted = useRef(false);
+  const refreshPairedRef = useRef<() => void>(() => {});
+  const [refreshPaired] = useState(() => {
+    const load = coalesced(async () => {
+      try {
+        const list = await api.getMachines();
+        if (mounted.current) setPaired(list);
+      } catch {
+        // Names fall back to "a linked machine"; the picker keeps what it had.
+      }
+    }, () => !mounted.current);
+    return () => {
+      pairedWanted.current = true;
+      load();
+    };
+  });
+  refreshPairedRef.current = refreshPaired;
+  const anyLinked = (status?.machines?.linked ?? 0) > 0;
+  useEffect(() => {
+    if (anyLinked) refreshPaired();
+  }, [anyLinked, refreshPaired]);
+  const machineNames = useMemo(() => new Map(paired.map((m) => [m.id, m.name] as const)), [paired]);
   // The open gate's checklist, read again; made once, like refreshGitHub.
   const [refreshGate] = useState(() =>
     coalesced(async () => {
@@ -318,7 +374,7 @@ export function App() {
         if (e.projectId !== selectedId) return;
         stream.push(e);
         refresh();
-        if (e.type.startsWith("agent.")) refreshAgents.current();
+        if (touchesRuns(e)) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
         if (e.type.startsWith("share.")) refreshShare.current();
         if (digestWatchers.current > 0) refreshDigests.current();
@@ -543,6 +599,16 @@ export function App() {
 
   /** True while the Changes run is live: the server refuses its changes, so none are asked for until it ends. */
   const changesLive = runIsLive(runs, changesRunId);
+  /** The linked machine the Changes run ran on (its name), or null for a run of this computer. */
+  const changesRun = runs.find((r) => r.id === changesRunId);
+  const changesMachine = changesRun?.machineId ? (machineNames.get(changesRun.machineId) ?? "a linked machine") : null;
+  // This computer refused the run's returned changes: why, from the project's stream (null when it did not).
+  const changesRefused = useMemo(() => {
+    if (changesMachine === null) return null;
+    const refused = entries.findLast((e) => e.type === "link.changes_refused" && (e.payload as { runId?: unknown }).runId === changesRunId);
+    const reason = (refused?.payload as { reason?: unknown } | undefined)?.reason;
+    return typeof reason === "string" ? reason : null;
+  }, [entries, changesRunId, changesMachine]);
   useEffect(() => {
     if (changesRunId === null) {
       setChanges(null);
@@ -551,7 +617,7 @@ export function App() {
     const runId = changesRunId;
     if (changesLive) {
       // The runs list says when it ends, and this effect then reads the changes.
-      setChanges({ runId, changes: null, error: LIVE_RUN_CHANGES });
+      setChanges({ runId, changes: null, error: changesMachine === null ? LIVE_RUN_CHANGES : remoteChangesNote(changesMachine) });
       return;
     }
     let cancelled = false;
@@ -564,18 +630,24 @@ export function App() {
         const c = await runChanges(runId, read);
         if (!cancelled) setChanges({ runId, changes: c, error: null });
       } catch (e) {
-        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error: errorMessage(e, "changes") }));
+        // A run on a linked machine has no working copy here until its changes arrive.
+        const pending = changesMachine !== null && e instanceof ApiError && e.code === "worktree_missing";
+        const error = !pending ? errorMessage(e, "changes")
+          : changesRefused !== null ? refusedChangesNote(changesMachine, changesRefused) : remoteChangesNote(changesMachine);
+        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error }));
       }
     }, () => cancelled);
     refresh();
     const unsubscribe = subscribeEntries((e) => {
-      if (namesRun(e, runId)) refresh();
+      // The imported changes of a run on a linked machine arrive after its last entry.
+      const imported = e.type === "link.changes_imported" && (e.payload as { runId?: unknown }).runId === runId;
+      if (namesRun(e, runId) || imported) refresh();
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [changesRunId, changesLive, runChanges, subscribeEntries]);
+  }, [changesRunId, changesLive, changesMachine, changesRefused, runChanges, subscribeEntries]);
 
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
@@ -590,8 +662,8 @@ export function App() {
   // Kept stable while the board and runs are unchanged, so the ledger's narration is not redone every render.
   const narration = useMemo<NarrationContext>(() => {
     const adapters = new Map(runs.map((r) => [r.id, ADAPTER_NAMES[r.adapter]] as const));
-    return { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id) };
-  }, [titles, runs]);
+    return { cardTitle: (id) => titles.get(id), adapterName: (id) => adapters.get(id), machineName: (id) => machineNames.get(id) };
+  }, [titles, runs, machineNames]);
 
   /** Applies `change` to the open gate when it is still the move for `cardId` and `to`. */
   const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>
@@ -678,7 +750,7 @@ export function App() {
     runs,
     selectedRunId,
     runActions,
-    onStartRun: async (adapter, prompt, connectionIds, cardId) => {
+    onStartRun: async (adapter, prompt, connectionIds, cardId, machineId) => {
       if (!selectedId) return false;
       try {
         setError(null);
@@ -687,6 +759,7 @@ export function App() {
           prompt,
           ...(cardId && { cardId }),
           ...(connectionIds.length > 0 && { connectionIds }),
+          ...(machineId && { machineId }),
         });
         setSelectedRunId(started.id);
         setFeedRunId(started.id);
@@ -757,6 +830,7 @@ export function App() {
     status,
     github: { ...github, refresh: refreshGitHub },
     capacity: { ...capacity, refresh: refreshCapacity },
+    machines: { ...machines, refresh: refreshMachines, capacity: machineCapacity, paired, refreshPaired },
     share: {
       options: shareOptions,
       onOptionsChange: (o) => {

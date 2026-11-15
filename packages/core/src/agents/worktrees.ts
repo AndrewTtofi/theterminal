@@ -19,6 +19,48 @@ export class GitOutputTooLargeError extends Error {
   }
 }
 
+/**
+ * The only variables a runGit caller may add to git's environment, each for that one call: a scratch index and the
+ * identity of a commit The Terminal writes itself. Nothing else may set a GIT_* variable (GIT_DIR, GIT_EXEC_PATH,
+ * GIT_SSH_COMMAND, GIT_CONFIG_* and the rest could redirect git or make it run a program).
+ */
+export const GIT_ENV_NAMES = [
+  "GIT_INDEX_FILE", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+] as const;
+export type GitEnvName = (typeof GIT_ENV_NAMES)[number];
+const MAX_GIT_ENV_VALUE = 1024;
+
+/** A runGit caller asked for an environment variable runGit does not allow, or gave one a value it refuses. */
+export class GitEnvRefusedError extends Error {
+  constructor(message = "git was asked to run with an environment variable The Terminal does not allow") {
+    super(message);
+    this.name = "GitEnvRefusedError";
+  }
+}
+
+/**
+ * The extra variables for one runGit call, checked: only GIT_ENV_NAMES (exact case), each a string of 1 to 1024
+ * characters with no NUL or line break, GIT_INDEX_FILE an absolute path, and GIT_INDEX_FILE not given both here and
+ * as `indexFile`. Anything else throws GitEnvRefusedError before git runs.
+ */
+function checkedGitEnv(env: Record<string, string> | undefined, indexFile: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (indexFile !== undefined) out.GIT_INDEX_FILE = indexFile;
+  if (env === undefined) return out;
+  for (const [name, value] of Object.entries(env)) {
+    if (!(GIT_ENV_NAMES as readonly string[]).includes(name)) throw new GitEnvRefusedError();
+    if (typeof value !== "string" || value.length === 0 || value.length > MAX_GIT_ENV_VALUE || /[\0\r\n]/.test(value)) {
+      throw new GitEnvRefusedError(`git was given an unusable value for ${name}`);
+    }
+    if (name === "GIT_INDEX_FILE") {
+      if (indexFile !== undefined) throw new GitEnvRefusedError("git was given two index files");
+      if (!isAbsolute(value)) throw new GitEnvRefusedError("git was given an index file that is not an absolute path");
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
 /** A git call ran past its timeout and was killed. */
 export class GitTimeoutError extends Error {
   constructor() {
@@ -318,6 +360,13 @@ function stamp(file: string): string {
 /** A call runGit has checked and may make: its snapshot, location arguments, directory and bounds. */
 type Prepared = { snapshot: Snapshot; location: string[]; cwd: string; top: string; run: GitRunOptions; check: GitRunOptions };
 
+/** The options of one runGit call; see runGit. */
+export type RunGitOptions = {
+  timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string;
+  env?: Partial<Record<GitEnvName, string>>;
+  scope?: GitScope;
+};
+
 /** What runGit's scan of one repository found: the probe, the hardened base arguments, the filter neutralisations. */
 type Snapshot = {
   repo: { gitDir: string; common: string; format: string } | null;
@@ -400,16 +449,15 @@ export class WorktreeManager {
    * (safeGitEnv), never the server's. Diff callers add `--no-ext-diff --no-textconv`. `gitDir` and `workTree`, when
    * given, are passed as `--git-dir`/`--work-tree`, so a planted `core.worktree` or `.git` file cannot redirect the
    * call. `indexFile`, when given, is passed as `GIT_INDEX_FILE`, so the call reads and writes that index instead of
-   * the repository's own. Every call this manager makes goes through here, repository setup included. Bounded by
-   * `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError). With `scope`
-   * (one per operation, see GitScope), the scan of the repository is reused from an earlier call in the same scope
-   * while the configuration files it read are unchanged; without one, every call scans.
+   * the repository's own. `env` adds only the variables GIT_ENV_NAMES lists, checked (GitEnvRefusedError otherwise),
+   * over the allowlisted environment for this one call. Every call this manager makes goes through here, repository
+   * setup included. Bounded by `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB,
+   * GitOutputTooLargeError). With `scope` (one per operation, see GitScope), the scan of the repository is reused from
+   * an earlier call in the same scope while the configuration files it read are unchanged; without one, every call
+   * scans. The scan reads only the repository, never the caller's `env`, so a reused snapshot is valid under any
+   * checked `env`.
    */
-  async runGit(
-    cwd: string,
-    args: string[],
-    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string; scope?: GitScope } = {},
-  ): Promise<string> {
+  async runGit(cwd: string, args: string[], opts: RunGitOptions = {}): Promise<string> {
     return this.execute(await this.prepare(cwd, opts), args);
   }
 
@@ -420,22 +468,20 @@ export class WorktreeManager {
   }
 
   /**
-   * Everything runGit checks before a call: the shared config, hooks directory and attributes file are still empty
-   * (every call), then the repository's snapshot, from `opts.scope` when it holds one whose fingerprints still match
-   * and from a fresh scan otherwise, then info/attributes (every call). A snapshot of "no repository here" is never
-   * kept: the next call looks again (after `git init` there is one).
+   * Everything runGit checks before a call: the caller's `env` (checkedGitEnv), the shared config, hooks directory and
+   * attributes file are still empty (every call), then the repository's snapshot, from `opts.scope` when it holds one
+   * whose fingerprints still match and from a fresh scan otherwise, then info/attributes (every call). A snapshot of
+   * "no repository here" is never kept: the next call looks again (after `git init` there is one).
    */
-  private async prepare(
-    cwd: string,
-    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string; scope?: GitScope },
-  ): Promise<Prepared> {
+  private async prepare(cwd: string, opts: RunGitOptions): Promise<Prepared> {
+    const extra = checkedGitEnv(opts.env as Record<string, string> | undefined, opts.indexFile);
     assertEmptyGitconfig(this.dataDir);
     this.assertEmptyHooks();
     this.assertEmptyAttributes();
     const run: GitRunOptions = {
       timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
       maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
-      env: { ...safeGitEnv(cwd, this.emptyGlobalConfig), ...(opts.indexFile !== undefined && { GIT_INDEX_FILE: opts.indexFile }) },
+      env: { ...safeGitEnv(cwd, this.emptyGlobalConfig), ...extra },
     };
     // The checks before the call have their own fixed bounds; the caller's bounds apply to its call only.
     const check: GitRunOptions = { ...run, timeoutMs: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER };

@@ -12,7 +12,7 @@ import { api } from "../src/api";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacitySideBar } from "../src/views/CapacitySideBar";
-import { hardware, report } from "./capacity-fixtures";
+import { hardware, localEngines, machines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const m = vi.mocked(api);
@@ -108,8 +108,70 @@ describe("CapacitySideBar", () => {
     expect(section.textContent).not.toContain("CPU:");
   });
 
+  it("lists each local model server with its version and model count", () => {
+    renderSideBar({ report: report({ localModels: localEngines }) });
+    const section = screen.getByRole("region", { name: "Local models" });
+    expect(within(section).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ollama 0.12.3 · 2 models", "llama.cpp · 1 model"]);
+  });
+
+  it("says how to get a local model server when none was detected", () => {
+    renderSideBar({ report: report() });
+    const section = screen.getByRole("region", { name: "Local models" });
+    expect(section.textContent).toContain("No local model server detected. Install Ollama or llama.cpp server and detect again.");
+  });
+
   it("says when the report could not be loaded", () => {
     renderSideBar({ error: "request_failed" });
     expect(screen.getByText("Could not load capacity")).toBeTruthy();
+  });
+
+  it("adds a section per linked machine: its state, a one-line hardware summary and its local model count", () => {
+    renderSideBar({ report: report({ machines }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("AMD Ryzen 9 7950X · 64 GB · NVIDIA RTX 4090")).toBeTruthy();
+    expect(within(box).getByText("3 local models")).toBeTruthy();
+    expect(box.className).not.toContain("offline");
+
+    const off = screen.getByRole("region", { name: "<img src=x onerror=alert(1)> · offline" });
+    expect(off.className).toContain("offline");
+    expect(within(off).getByText("Apple M1 · 16 GB · GPU not detected")).toBeTruthy();
+    expect(within(off).getByText("0 local models")).toBeTruthy();
+    expect(within(off).getByText(/^last seen/).textContent).toBe(`last seen ${new Date("2026-11-15T08:45:00.000Z").toLocaleString()}`);
+    expect(within(box).queryByText(/^last seen/)).toBeNull();
+    expect(document.querySelector(".capacity-side img")).toBeNull();
+  });
+
+  it("says one local model, and hardware not reported, for a machine that sent none", () => {
+    const one = { ...localEngines[1]! };
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, hardware: null, localModels: [one] }] }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("Hardware not reported")).toBeTruthy();
+    expect(within(box).getByText("1 local model")).toBeTruthy();
+  });
+
+  it("has no machine sections without linked machines", () => {
+    renderSideBar({ report: report() });
+    expect(screen.queryByRole("region", { name: / · (online|offline)$/ })).toBeNull();
+  });
+
+  it("says key changed for a machine whose address presented another key, with no last seen", () => {
+    renderSideBar({ report: report({ machines: [{ ...machines[1]!, name: "Laptop", problem: "key_mismatch", lastSeenAt: null, hardware: null }] }) });
+    const section = screen.getByRole("region", { name: "Laptop · key changed" });
+    expect(section.textContent).not.toMatch(/last seen|never seen/);
+  });
+
+  it("shows a remote machine's hardware summary with hidden characters made visible", () => {
+    const hardware = { ...machines[0]!.hardware!, cpu: "Ryzen\u202E9" };
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, hardware }] }) });
+    const box = screen.getByRole("region", { name: "GPU box · online" });
+    expect(within(box).getByText("Ryzen\\u202e9 · 64 GB · NVIDIA RTX 4090")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+
+  it("shows a remote machine's name with hidden characters made visible", () => {
+    const name = "GPU\u202Eexe.bat\u200Bbox";
+    renderSideBar({ report: report({ machines: [{ ...machines[0]!, name }] }) });
+    expect(screen.getByRole("region", { name: "GPU\\u202eexe.bat\\u200bbox · online" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
   });
 });

@@ -19,6 +19,8 @@ import type {
   IntakeAnswer,
   IntakeView,
   LedgerEntry,
+  MachineCapacity,
+  MachinePresence,
   NarrationContext,
   NarrationTopic,
   PendingAgentAction,
@@ -31,7 +33,8 @@ import type {
   ShareSnapshotRecord,
   Stage,
 } from "@theterminal/shared";
-import type { AgentsInfo, ShareAddress, SharePreview, Status } from "../api";
+import { innerEntry, runIdOf } from "@theterminal/shared";
+import type { AgentsInfo, LinkOverview, ShareAddress, SharePreview, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
 import type { ViewId } from "./views";
@@ -54,13 +57,16 @@ export type GatePrompt = {
 };
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "other"];
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "other"];
 
-/** True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. */
+/**
+ * True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. A
+ * linked machine's mirrored entry counts as the worker entry it carries.
+ */
 export function namesRun(e: LedgerEntry, runId: string): boolean {
-  if (!e.type.startsWith("agent.") && !e.type.startsWith("override.")) return false;
-  const p = e.payload;
-  return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
+  const inner = innerEntry(e);
+  if (!inner.type.startsWith("agent.") && !inner.type.startsWith("override.")) return false;
+  return runIdOf(inner) === runId;
 }
 
 /**
@@ -105,8 +111,11 @@ export type WorkbenchModel = {
   runs: AgentRun[];
   selectedRunId: string | null;
   runActions: AgentAction[];
-  /** Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card. */
-  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null) => Promise<boolean>;
+  /**
+   * Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card; `machineId` sends the
+   * run to that linked machine.
+   */
+  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null, machineId?: string) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 
@@ -139,7 +148,10 @@ export type WorkbenchModel = {
   /** Which narration topics the ledger shows; every topic by default. */
   ledgerTopics: NarrationTopic[];
   onLedgerTopicsChange: (topics: NarrationTopic[]) => void;
-  /** What narration may know beyond an entry: card titles from the board, adapter names from the runs. */
+  /**
+   * What narration may know beyond an entry: card titles from the board, adapter names from the runs, the names of
+   * linked machines (what the run lists, the feed and the decision cards show for a run on one, too).
+   */
   narration: NarrationContext;
 
   /** Resolves true when the server accepted the change. */
@@ -155,6 +167,24 @@ export type WorkbenchModel = {
 
   /** The Capacity view's data: the last report, or the error code of the last failed load. */
   capacity: { report: CapacityReport | null; error: string | null; refresh: () => void };
+
+  /**
+   * The Machines view's data: this computer, the linked machines and those found on the network, or the error code of
+   * the last failed load. The view and the Link a machine tab ask for it; any machine.* entry reloads it once asked.
+   */
+  machines: {
+    overview: LinkOverview | null;
+    error: string | null;
+    refresh: () => void;
+    /** What one linked machine offers a run (its agents and connections), from the server's 30 s cache. */
+    capacity?: (machineId: string) => Promise<MachineCapacity>;
+    /**
+     * The paired machines as last seen, loaded while any is paired without asking them or browsing the network (names
+     * and the Run on picker); `refreshPaired` reads them again.
+     */
+    paired?: MachinePresence[];
+    refreshPaired?: () => void;
+  };
 
   /**
    * The Share view's data for the selected project. Snapshots and links reload on any share.* entry of the project;

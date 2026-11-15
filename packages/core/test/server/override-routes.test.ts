@@ -2,6 +2,8 @@ import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { fakeDiscovery } from "../../src/link/discovery.js";
 import type { AgentRun, LedgerEntry } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { commitEvent } from "../../src/events/commit.js";
@@ -47,7 +49,7 @@ async function start(script: unknown[] = [{ message: "done" }], dataDir?: string
     dataDir = realpathSync(mkdtempSync(join(tmpdir(), "tt-override-")));
     dirs.push(dataDir);
   }
-  const s = await createServer({ dataDir, port: 0, which, bundled: NO_BUNDLED });
+  const s = await createServer({ dataDir, port: 0, which, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
   running.push(s);
   const project = (await (await post(s, "/api/projects", { name: "P" })).json()) as { id: string };
   const run = (await (await post(s, `/api/projects/${project.id}/runs`, { adapter: "fake", prompt: "go" })).json()) as AgentRun;

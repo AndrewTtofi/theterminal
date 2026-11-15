@@ -53,13 +53,13 @@ export { registerStoryRoutes } from "./server/story-routes.js";
 export type { StoryRouteDeps } from "./server/story-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
-export { workspaceCounts } from "./events/projections.js";
+export { workspaceCounts, listMachines, getMachine, getLinkRun, listLinkRuns, applyMirrored, mirroredIds } from "./events/projections.js";
 export type { WorkspaceCounts } from "./events/projections.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
 export { FakeAdapter } from "./agents/fake-adapter.js";
 export type { FakeStep } from "./agents/fake-adapter.js";
-export { AgentRunner, AdapterUnavailableError, ShuttingDownError } from "./agents/runner.js";
+export { AgentRunner, AdapterUnavailableError, RemoteRunError, ShuttingDownError } from "./agents/runner.js";
 export type { AgentRunnerDeps } from "./agents/runner.js";
 export { ClaudeAdapter, toolToAction } from "./agents/claude-adapter.js";
 export { GeminiAdapter } from "./agents/gemini/adapter.js";
@@ -80,4 +80,33 @@ export type {
   AddConnectionInput, ConnectionServiceDeps, ConnectionTester, Credentials, UpdateConnectionPatch,
 } from "./connections/service.js";
 export { CONNECTION_TESTERS } from "./connections/testers.js";
+export { base32Encode, base32Decode } from "./link/base32.js";
+export { selfSignedCertificate, derToPem, CERT_NOT_BEFORE, CERT_NOT_AFTER } from "./link/x509.js";
+export { LinkIdentity, IDENTITY_ACCOUNT, machineIdOf, fingerprintOf, verifySignature } from "./link/identity.js";
+export type { IdentityCreated } from "./link/identity.js";
+export { LinkListener, PAIR_PATH, LINK_BODY_LIMIT } from "./link/listener.js";
+export type { ListenerDeps, PeerCheck } from "./link/listener.js";
+export {
+  LinkClient, MachineUnreachableError, MachineKeyMismatchError, RemoteRefusedError, LinkProtocolError, ClosedBeforeReplyError, MAX_JSON_BYTES,
+  MAX_FRAME_BYTES, parseAddress,
+} from "./link/client.js";
+export type { Peer } from "./link/client.js";
+export {
+  LinkService, LinkingDisabledError, IdentityUnavailableError, PairingCodeMismatchError, PairingRejectedError, NoPairingError,
+  SelfPairingError,
+} from "./link/service.js";
+export type { LinkServiceDeps, PairReply } from "./link/service.js";
+export { PairingWindow, pairingProof } from "./link/pairing.js";
+export type { PairingProofLabel } from "./link/pairing.js";
+export { mdnsDiscovery, fakeDiscovery, selectDiscovery, adaptBonjour } from "./link/discovery.js";
+export type { Discovered, Discovery, PublishInfo } from "./link/discovery.js";
+export { registerLinkRoutes } from "./server/link-routes.js";
+export type { LinkRouteDeps } from "./server/link-routes.js";
+export { registerLinkProtocolRoutes } from "./link/protocol-routes.js";
+export type { LinkProtocolDeps } from "./link/protocol-routes.js";
+export { acceptMirroredLine, displayEntry, remoteDisplay, builtInClean, FATAL_REFUSALS } from "./link/mirrored.js";
+export { LinkCapacity } from "./link/capacity.js";
+export type { LinkCapacityDeps } from "./link/capacity.js";
+export { capacityBody } from "./link/protocol/capacity.js";
+export type { CapacityProtocolDeps } from "./link/protocol/capacity.js";
 export * from "./share/index.js";

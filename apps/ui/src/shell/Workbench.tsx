@@ -13,6 +13,7 @@ import { ConnectionEditor } from "../views/ConnectionEditor";
 import { DiffPanel } from "../views/DiffPanel";
 import { FilePanel } from "../views/FilePanel";
 import { IntakePanel } from "../views/IntakePanel";
+import { LinkMachinePanel } from "../views/LinkMachinePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { NeedsYouPanel } from "../views/NeedsYouPanel";
 import { StoryPanel } from "../views/StoryPanel";
@@ -35,6 +36,7 @@ const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
+  link_machine: LinkMachinePanel,
   share: SharePanel, digest: DigestPanel,
 };
 
@@ -237,7 +239,7 @@ export function Workbench({ model }: Props) {
                 )}
                 <IntakeNotices notices={notices} />
                 {model.pending.map((a) => (
-                  <DecisionCard key={a.id} action={a} projectName={a.projectName} onDecide={model.onDecide} onMore={moreContext} />
+                  <DecisionCard key={a.id} action={a} projectName={a.projectName} {...(a.machineName !== undefined && { machineName: a.machineName })} onDecide={model.onDecide} onMore={moreContext} />
                 ))}
               </section>
             )}

@@ -11,5 +11,6 @@ export * from "./narration.js";
 export * from "./changes.js";
 export * from "./override.js";
 export * from "./learn.js";
+export * from "./link.js";
 export * from "./share.js";
 export * from "./digest.js";
