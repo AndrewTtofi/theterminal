@@ -26,6 +26,7 @@ import { registerIntakeRoutes } from "./intake-routes.js";
 import { registerStoryRoutes } from "./story-routes.js";
 import { registerChangesRoutes } from "./changes-routes.js";
 import { registerOverrideRoutes } from "./override-routes.js";
+import { registerPeopleRoutes } from "./people-routes.js";
 import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
@@ -678,6 +679,7 @@ export async function createServer(opts: {
       registerStoryRoutes(app, { db, ledger, clean: cleanMirrored });
       registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id) });
       registerOverrideRoutes(app, { overrides });
+      registerPeopleRoutes(app, { db, ledger, ...people, recorded, port: () => boundPort, remote: () => null });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".

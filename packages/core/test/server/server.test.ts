@@ -326,6 +326,20 @@ describe("createServer", { timeout: 30_000 }, () => {
     ws.terminate();
   });
 
+  it("serves the people routes: the Owner by token reads Me and invites, the join page is public", async () => {
+    const s = await start({ dataDir: tmp(), port: 0 });
+    const me = await fetch(base(s) + "/api/me", { headers: auth(s) });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({ personId: "owner", role: "owner", method: "token", listener: "local" });
+    const created = await post(s, "/api/people/invites", { role: "viewer" });
+    expect(created.status).toBe(201);
+    const { url, fingerprint } = (await created.json()) as { url: string; fingerprint: string | null };
+    expect(url).toMatch(new RegExp(`^http://theterminal\\.localhost:${s.port}/join/[A-Za-z0-9_-]{22}$`));
+    expect(fingerprint).toBeNull();
+    const join = await fetch(base(s) + "/api/join/" + url.split("/join/")[1]);
+    expect(await join.json()).toMatchObject({ role: "viewer", passkeys: false });
+  });
+
   it("closes promptly with a WebSocket client connected", async () => {
     const s = await start({ dataDir: tmp(), port: 0 });
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events`, { headers: auth(s) });
