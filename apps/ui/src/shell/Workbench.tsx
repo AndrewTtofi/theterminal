@@ -85,7 +85,7 @@ export function Workbench({ model }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const ctx = { model, dock: () => dockRef.current };
+  const ctx = { model, dock: () => dockRef.current, selectView };
 
   return (
     <ShellContext.Provider value={ctx}>

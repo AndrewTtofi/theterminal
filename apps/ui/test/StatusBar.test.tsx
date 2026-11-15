@@ -54,6 +54,21 @@ describe("StatusBar", () => {
     expect(screen.queryByText(/Connections:/)).toBeNull();
   });
 
+  it("shows the CI state as a link, marking a failing one", () => {
+    const url = "https://github.com/octo-org/example/actions/runs/1";
+    render(<StatusBar status={{ ...status(), ci: { state: "failing", url, branch: "main", updatedAt: null } }} running={0} pending={0} {...noop} />);
+    const link = screen.getByRole("link", { name: "CI: failing" });
+    expect(link.getAttribute("href")).toBe(url);
+    expect(link.className).toContain("attention");
+    expect(screen.queryByText("CI: not connected")).toBeNull();
+  });
+
+  it("shows the CI state without a link when there is no run", () => {
+    render(<StatusBar status={{ ...status(), ci: { state: "unknown", url: null, branch: null, updatedAt: null } }} running={0} pending={0} {...noop} />);
+    expect(screen.getByText("CI: unknown")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
   it("selects the Needs you and Connections views when clicked", async () => {
     const onSelectView = vi.fn();
     render(<StatusBar status={status()} running={0} pending={0} {...noop} onSelectView={onSelectView} />);

@@ -59,7 +59,7 @@ export function renderWithConnections(
       onProviderAuthChange: opts.onProviderAuthChange ?? vi.fn().mockResolvedValue(true),
       connections,
     } as unknown as WorkbenchModel;
-    return <ShellContext.Provider value={{ model, dock: () => dock }}>{children}</ShellContext.Provider>;
+    return <ShellContext.Provider value={{ model, dock: () => dock, selectView: vi.fn() }}>{children}</ShellContext.Provider>;
   }
   const { container } = render(<Harness />);
   return { container, dock };

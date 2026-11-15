@@ -12,6 +12,8 @@ import { registerStaticUi } from "./static-ui.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
+import { registerGitHubRoutes } from "./github-routes.js";
+import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
@@ -229,10 +231,42 @@ async function bodyText(input: Parameters<typeof fetch>[0], init?: RequestInit):
   return input instanceof Request ? input.text() : "";
 }
 
+const GITHUB_REPO_URL = /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(\/[^?]*)?(\?.*)?$/;
+
+/** Canned GitHub bodies for `owner/name`, with fields the client must drop (logins, bodies). */
+function fakeGitHub(owner: string, name: string, path: string): unknown {
+  const fullName = `${owner}/${name}`;
+  const html = `https://github.com/${fullName}`;
+  const user = { login: "example-user", id: 1 };
+  switch (path) {
+    case "":
+      return { full_name: fullName, default_branch: "main", html_url: html, private: false, owner: user };
+    case "/branches":
+      return [{ name: "main", protected: true }, { name: "feature/e2e", protected: false }];
+    case "/pulls":
+      return [{
+        number: 7, title: "Add the thing", draft: false, html_url: `${html}/pull/7`, updated_at: "2026-11-15T10:00:00Z",
+        head: { ref: "feature/e2e", user }, base: { ref: "main", user }, user, body: "Fake pull request.",
+      }];
+    case "/actions/runs":
+      return {
+        total_count: 2,
+        workflow_runs: [
+          { id: 101, name: "CI", status: "completed", conclusion: "success", head_branch: "main", html_url: `${html}/actions/runs/101`, updated_at: "2026-11-15T09:00:00Z", actor: user },
+          { id: 102, name: "CI", status: "in_progress", conclusion: null, head_branch: "feature/e2e", html_url: `${html}/actions/runs/102`, updated_at: "2026-11-15T09:30:00Z", actor: user },
+        ],
+      };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Tests only. Never performs network I/O. In this order:
  * - a POST to the Google or Azure token endpoint answers a fake token when the form holds `grant_type` (and, for
  *   Azure, a `client_secret` containing `TESTKEY`), and 401 otherwise;
+ * - a GET to `https://api.github.com/repos/<owner>/<name>…` answers canned bodies for that repository when the
+ *   Bearer token contains `TESTKEY` (401 otherwise), and 404 when `<name>` is `missing`;
  * - anything else answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise.
  */
 const fakeHttp: typeof fetch = async (input, init) => {
@@ -247,6 +281,13 @@ const fakeHttp: typeof fetch = async (input, init) => {
   }
   const headers = new Headers(input instanceof Request ? input.headers : undefined);
   new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+  const repo = method === "GET" ? GITHUB_REPO_URL.exec(url) : null;
+  if (repo) {
+    const [, owner = "", name = "", path = ""] = repo;
+    if (!/^Bearer \S*TESTKEY/.test(headers.get("authorization") ?? "")) return jsonResponse(401, { message: "Bad credentials" });
+    const body = name === "missing" ? undefined : fakeGitHub(owner, name, path);
+    return body === undefined ? jsonResponse(404, { message: "Not Found" }) : jsonResponse(200, body);
+  }
   let accepted = false;
   headers.forEach((value) => {
     if (value.includes("TESTKEY")) accepted = true;
@@ -367,6 +408,8 @@ export async function createServer(opts: {
     ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
   });
 
+  const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
+
   const app = Fastify();
   let boundPort = 0;
   try {
@@ -383,7 +426,12 @@ export async function createServer(opts: {
       available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
       apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
     });
-    registerConnectionRoutes(app, { db, connections, signin, ledger });
+    registerConnectionRoutes(app, {
+      db, connections, signin, ledger,
+      // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
+      ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
+    });
+    registerGitHubRoutes(app, { github });
     if (opts.uiDir) registerStaticUi(app, opts.uiDir);
     await app.ready();
 

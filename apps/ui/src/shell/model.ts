@@ -5,6 +5,7 @@ import type {
   AgentRun,
   AuthMode,
   Board,
+  GitHubOverview,
   LedgerEntry,
   PendingAgentAction,
   Project,
@@ -14,6 +15,7 @@ import type {
 import type { AgentsInfo, Status } from "../api";
 import type { ConnectionsModel } from "../use-connections";
 import type { DockApi } from "./Dock";
+import type { ViewId } from "./views";
 
 export type LedgerScope = "project" | "all";
 
@@ -51,9 +53,12 @@ export type WorkbenchModel = {
 
   /** The server's status counts for the status bar; null until the first answer. */
   status: Status | null;
+
+  /** The GitHub view's data: the last overview, or the error code of the last failed load. */
+  github: { overview: GitHubOverview | null; error: string | null; refresh: () => void };
 };
 
-export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null };
+export type ShellContextValue = { model: WorkbenchModel; dock: () => DockApi | null; selectView: (view: ViewId) => void };
 
 /** Dock panels render through portals, so they read the model from context rather than props. */
 export const ShellContext = createContext<ShellContextValue | null>(null);

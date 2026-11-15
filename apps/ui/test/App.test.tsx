@@ -38,6 +38,12 @@ vi.mock("../src/api", () => ({
     updateConnection: vi.fn(),
     removeConnection: vi.fn(),
     testConnection: vi.fn(),
+    getGitHubOverview: vi.fn(),
+  },
+  ApiError: class ApiError extends Error {
+    constructor(readonly status: number, readonly code: string) {
+      super(code);
+    }
   },
   errorMessage: () => "err",
   subscribeLedger: (after: number, cb: (e: LedgerEntry) => void) => {
@@ -52,7 +58,7 @@ vi.mock("../src/api", () => ({
 
 vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
-import { api } from "../src/api";
+import { ApiError, api } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
 
@@ -328,5 +334,28 @@ describe("App ledger scope", () => {
 
     await userEvent.click(screen.getByRole("radio", { name: "This project" }));
     await waitFor(() => expect(within(ledger()).getAllByRole("listitem")).toHaveLength(1));
+  });
+});
+
+describe("App GitHub view", () => {
+  const views = () => screen.getByRole("navigation", { name: "Views" });
+
+  it("loads the overview when the view opens and shows the error copy for a failed load", async () => {
+    m.getGitHubOverview.mockRejectedValueOnce(new ApiError(404, "github_not_connected"));
+    render(<App />);
+    await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
+    expect(await screen.findByText("Connect GitHub and set a repository in Connections.")).toBeTruthy();
+    expect(m.getGitHubOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the overview it loaded", async () => {
+    m.getGitHubOverview.mockResolvedValue({
+      repo: { fullName: "octo-org/example", defaultBranch: "main", htmlUrl: "https://github.com/octo-org/example", private: false },
+      branches: [{ name: "main", isDefault: true }], pulls: [], ciRuns: [],
+      ci: { state: "unknown", url: null, branch: null, updatedAt: null }, fetchedAt: "2026-11-15T12:00:00Z", stale: false,
+    });
+    render(<App />);
+    await userEvent.click(within(views()).getByRole("button", { name: "GitHub" }));
+    expect(await screen.findByRole("link", { name: "octo-org/example" })).toBeTruthy();
   });
 });

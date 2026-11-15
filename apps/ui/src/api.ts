@@ -6,9 +6,11 @@ import type {
   Board,
   Card,
   CatalogEntry,
+  CiStatus,
   Connection,
   ConnectionKind,
   ConnectionProvider,
+  GitHubOverview,
   LedgerEntry,
   PendingAgentAction,
   Project,
@@ -95,7 +97,8 @@ export type Status = {
   pendingDecisions: number;
   todayCostUsd: number;
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
-  ci: null;
+  /** null when GitHub is not connected. */
+  ci: CiStatus | null;
 };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
@@ -144,6 +147,7 @@ export const api = {
   testConnection: (id: string) =>
     request<{ ok: boolean; message: string }>(`/api/connections/${enc(id)}/test`, { method: "POST" }),
   getStatus: () => request<Status>("/api/status"),
+  getGitHubOverview: () => request<GitHubOverview>("/api/github/overview"),
   startSignIn: (provider: Provider) =>
     request<{ id: string }>(`/api/connections/signin/${enc(provider)}`, { method: "POST" }),
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
