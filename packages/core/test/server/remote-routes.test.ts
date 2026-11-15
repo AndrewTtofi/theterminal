@@ -172,7 +172,7 @@ describe("PUT /api/remote", () => {
 });
 
 describe("remote status for /api/status", () => {
-  const base = { ...DEFAULT_REMOTE, bind: "127.0.0.1", listening: false, addresses: [] as string[] };
+  const base = { ...DEFAULT_REMOTE, bind: "127.0.0.1", listening: false, addresses: [] as string[], acme: { lastError: null } };
 
   it("labels for the Owner: off, then the first address with the port, the domain when set, IPv6 bracketed", () => {
     expect(remoteLabel(base)).toBe("off");

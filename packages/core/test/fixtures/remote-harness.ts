@@ -8,6 +8,7 @@ import type { Principal, Role } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
+import { AcmeManager, type AcmeClientLike } from "../../src/server/acme.js";
 import { RemoteListener, checkRemoteHost, listenerOf } from "../../src/server/remote.js";
 import { registerRemoteRoutes } from "../../src/server/remote-routes.js";
 
@@ -31,6 +32,8 @@ export type Harness = {
   ledger: Ledger;
   secrets: MemorySecretStore;
   remote: RemoteListener;
+  /** Present when the harness was given an ACME client. */
+  acme: AcmeManager | null;
   dataDir: string;
   uiDir: string;
   root: string;
@@ -56,7 +59,14 @@ export async function closeAll(): Promise<void> {
  * The principal comes from an `x-test-as: <role>` header, so the routes' own checks can be exercised.
  */
 export async function harness(
-  opts: { root?: string; secrets?: MemorySecretStore; owner?: { has: boolean }; now?: () => Date } = {},
+  opts: {
+    root?: string;
+    secrets?: MemorySecretStore;
+    owner?: { has: boolean };
+    now?: () => Date;
+    /** Gives the listener an AcmeManager over this client (never the real Let's Encrypt in tests). */
+    acmeClient?: AcmeClientLike;
+  } = {},
 ): Promise<Harness> {
   const root = opts.root ?? mkdtempSync(join(tmpdir(), "tt-remote-"));
   if (!opts.root) roots.push(root);
@@ -86,6 +96,7 @@ export async function harness(
   app.get("/whoami", async (request) => ({ listener: listenerOf(request), ip: request.ip }));
   await app.listen({ port: 0, host: "127.0.0.1" });
 
+  const acme = opts.acmeClient ? new AcmeManager({ secrets, dataDir, client: opts.acmeClient, now: opts.now }) : null;
   remote = new RemoteListener({
     http: app.server,
     db,
@@ -96,6 +107,7 @@ export async function harness(
     uiDir,
     now: opts.now,
     localAddresses: () => TEST_ADDRESSES,
+    ...(acme ? { acme, acmePort: 0 } : {}),
   });
   const h: Harness = {
     app,
@@ -103,6 +115,7 @@ export async function harness(
     ledger,
     secrets,
     remote,
+    acme,
     dataDir,
     uiDir,
     root,
@@ -111,7 +124,7 @@ export async function harness(
     async restart() {
       await h.close();
       open.splice(open.indexOf(h), 1);
-      return harness({ root, secrets, owner, now: opts.now });
+      return harness({ root, secrets, owner, now: opts.now, acmeClient: opts.acmeClient });
     },
     async close() {
       await remote!.close();

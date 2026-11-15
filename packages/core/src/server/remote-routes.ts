@@ -3,6 +3,7 @@ import { z } from "zod";
 import { domainSchema, type Actor, type Listener, type Principal, type RemoteState } from "@theterminal/shared";
 import { LedgerReadOnlyError } from "../ledger/ledger.js";
 import { PUBLIC_ROUTE } from "./auth.js";
+import { AcmeError } from "./acme.js";
 import { CertificateError } from "./certs.js";
 import {
   HEALTHZ_PATH,
@@ -56,12 +57,14 @@ const putSchema = z
     tls: z.enum(["self_signed", "acme", "provided"]).optional(),
     certFile: z.string().min(1).max(MAX_PATH).optional(),
     keyFile: z.string().min(1).max(MAX_PATH).optional(),
+    /** The plain ACME challenge listener's port; a test knob (Let's Encrypt connects to port 80 only). */
+    acmePort: z.number().int().min(0).max(65535).optional(),
   })
   .strict();
 
 /**
  * `GET /healthz` (public; the auth hook exempts it from the Host check), `GET /api/remote` (viewer; non-owners get
- * `{ enabled, listening }` only) and `PUT /api/remote` (owner; enabling only from the local listener). Task 2b/4's
+ * `{ enabled, listening }` only; the Owner also gets `acme.lastError`) and `PUT /api/remote` (owner; enabling only from the local listener). Task 2b/4's
  * role table enforces the roles too; the checks here keep the Owner's address and switch the Owner's alone.
  */
 export function registerRemoteRoutes(app: FastifyInstance, deps: RemoteRoutesDeps): void {
@@ -95,6 +98,8 @@ export function registerRemoteRoutes(app: FastifyInstance, deps: RemoteRoutesDep
     } catch (err) {
       if (err instanceof OwnerCredentialRequiredError) return reply.code(409).send({ error: "owner_credential_required" });
       if (err instanceof RemoteStartError) return reply.code(502).send({ error: "remote_start_failed" });
+      // `type` is AcmeError's allowlisted URN or "unknown": never the ACME server's detail text.
+      if (err instanceof AcmeError) return reply.code(502).send({ error: "acme_failed", type: err.type });
       if (err instanceof RemoteInputError) return reply.code(400).send({ error: "invalid_input", code: err.code });
       if (err instanceof CertificateError) return reply.code(400).send({ error: "certificate_invalid", code: err.code });
       if (err instanceof LedgerReadOnlyError) return reply.code(423).send({ error: "ledger_read_only" });

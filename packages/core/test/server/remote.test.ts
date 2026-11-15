@@ -117,7 +117,7 @@ describe("remoteHostAllowed", () => {
 describe("RemoteListener", () => {
   it("is off before anything is enabled, with the shared default bind", async () => {
     const h = await harness();
-    expect(h.remote.state()).toEqual({ ...DEFAULT_REMOTE, listening: false, addresses: [] });
+    expect(h.remote.state()).toEqual({ ...DEFAULT_REMOTE, listening: false, addresses: [], acme: { lastError: null } });
   });
 
   it("commits certificate_changed then enabled, keeps the key in the secret store, and serves the recorded fingerprint", async () => {

@@ -1,6 +1,6 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import type { Server as HttpServer } from "node:http";
+import http, { type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import net, { isIP, isIPv6, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import tls, { type TLSSocket } from "node:tls";
@@ -18,6 +18,7 @@ import type { Db } from "../db.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import { commitEvents } from "../events/commit.js";
 import type { SecretStore } from "../secrets/store.js";
+import { AcmeError, type AcmeManager } from "./acme.js";
 import { localAddresses as machineAddresses, loadProvided, selfSignedTlsCertificate, type CertMaterial } from "./certs.js";
 
 /** Secret-store account holding the self-signed certificate's private key (PKCS#8 PEM). */
@@ -38,6 +39,16 @@ const RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 const MAX_CERT_BYTES = 64 * 1024;
 const MAX_PATH_LENGTH = 4096;
 const SYSTEM: Actor = { kind: "system", id: "remote" };
+/** The port Let's Encrypt validates HTTP-01 on. Privileged outside Docker on Linux; see acme.ts. */
+export const ACME_CHALLENGE_PORT = 80;
+/** How often the ACME certificate is checked for renewal. */
+export const ACME_RENEW_CHECK_MS = 12 * 60 * 60 * 1000;
+/** After n consecutive renewal failures, the next min(2^n - 1, this) checks are skipped. */
+const ACME_MAX_SKIPPED_CHECKS = 3;
+const CHALLENGE_PATH = /^\/\.well-known\/acme-challenge\/([A-Za-z0-9_-]{1,128})$/;
+const CHALLENGE_MAX_CONNECTIONS = 64;
+const PROBE_TIMEOUT_MS = 5_000;
+const PROBE_MAX_BYTES = 1024;
 const REMOTE_TYPES = new Set(["remote.enabled", "remote.disabled", "remote.certificate_changed"]);
 
 /** The listener could not bind its port. The message is fixed. → 502 remote_start_failed */
@@ -67,6 +78,7 @@ export type RemoteInputCode =
   | "invalid_tls"
   | "certificate_files_required"
   | "certificate_domain_mismatch"
+  | "acme_domain_required"
   | "acme_unavailable";
 
 const INPUT_MESSAGES: Record<RemoteInputCode, string> = {
@@ -76,6 +88,7 @@ const INPUT_MESSAGES: Record<RemoteInputCode, string> = {
   invalid_tls: "The certificate mode is not known.",
   certificate_files_required: "Both a certificate file and a key file are needed.",
   certificate_domain_mismatch: "The certificate does not cover the domain.",
+  acme_domain_required: "Certificates from Let's Encrypt need a domain.",
   acme_unavailable: "Certificates from Let's Encrypt are not available.",
 };
 
@@ -102,6 +115,10 @@ export type RemoteDeps = {
   now?: () => Date;
   /** The machine's names and addresses for the certificate and the wildcard bind; tests inject fixed ones. */
   localAddresses?: () => { hostnames: string[]; addresses: string[] };
+  /** Certificates from Let's Encrypt for `tls: "acme"`; without it that mode is refused (`acme_unavailable`). */
+  acme?: AcmeManager;
+  /** The plain challenge listener's port when the input names none: 80, except in tests. */
+  acmePort?: number;
 };
 
 export type EnableInput = {
@@ -111,11 +128,12 @@ export type EnableInput = {
   tls?: TlsMode;
   certFile?: string;
   keyFile?: string;
-  /** Task 7 (ACME): the plain challenge server's port. */
+  /** The plain ACME challenge listener's port (default 80). A test knob: Let's Encrypt connects to port 80 only. */
   acmePort?: number;
 };
 
-export type RemoteView = RemoteState & { listening: boolean; addresses: string[] };
+/** `acme.lastError` is the last ACME error type (an allowlisted URN or "unknown"), for the Owner only. */
+export type RemoteView = RemoteState & { listening: boolean; addresses: string[]; acme: { lastError: string | null } };
 
 /**
  * Remote state before any entry: off, with the shared default bind. Remote access is off by default and turning it
@@ -214,7 +232,7 @@ export function checkRemoteHost(
   return isHealthz(request) || remoteHostAllowed(request.headers.host ?? "", rule);
 }
 
-type Config = { port: number; bind: string; domain: string | null; tls: TlsMode };
+type Config = { port: number; bind: string; domain: string | null; tls: TlsMode; acmePort?: number };
 
 /**
  * The network listener: off by default, TLS only, every change in the ledger. It owns a `tls.Server` whose
@@ -227,6 +245,13 @@ export class RemoteListener {
   private current: RemoteState;
   private server: tls.Server | null = null;
   private readonly sockets = new Set<net.Socket>();
+  /** The material the TLS listener serves right now. */
+  private served: CertMaterial | null = null;
+  private challenge: { server: http.Server; bind: string; port: number; sockets: Set<net.Socket> } | null = null;
+  private renewTimer: NodeJS.Timeout | null = null;
+  private renewFailures = 0;
+  private skipChecks = 0;
+  private lastAcmeError: string | null = null;
   private chain: Promise<unknown> = Promise.resolve();
   private readonly unsubscribe: () => void;
 
@@ -241,7 +266,18 @@ export class RemoteListener {
 
   state(): RemoteView {
     const listening = this.server !== null;
-    return { ...this.current, listening, addresses: listening ? this.addressesFor(this.current.bind) : [] };
+    return {
+      ...this.current,
+      listening,
+      addresses: listening ? this.addressesFor(this.current.bind) : [],
+      acme: { lastError: this.lastAcmeError },
+    };
+  }
+
+  /** The plain ACME challenge listener's port while it is up, else null. */
+  challengePort(): number | null {
+    const a = this.challenge?.server.address();
+    return a && typeof a === "object" ? a.port : null;
   }
 
   /** The Host rule for requests over this listener, from the current state (see `remoteHostAllowed`). */
@@ -262,13 +298,14 @@ export class RemoteListener {
       if (!this.deps.people.hasOwnerCredential()) throw new OwnerCredentialRequiredError();
       if (this.deps.ledger.readOnly) throw new LedgerReadOnlyError();
       const cfg = this.resolve(i);
-      const material = await this.material(cfg, i);
+      const material = await this.enableMaterial(cfg, i);
       await this.stopServer();
       let port = cfg.port;
       if (port === 0) {
         try {
           port = await probePort(cfg.bind);
         } catch {
+          await this.stopAcme();
           if (this.current.enabled) this.commitDisabled(SYSTEM);
           throw new RemoteStartError();
         }
@@ -287,9 +324,12 @@ export class RemoteListener {
       try {
         await this.listen(material, port, cfg.bind);
       } catch {
+        await this.stopAcme();
         this.commitDisabled(SYSTEM);
         throw new RemoteStartError();
       }
+      if (cfg.tls === "acme") this.startRenewals();
+      else await this.stopAcme();
       return this.publicState();
     });
   }
@@ -302,6 +342,7 @@ export class RemoteListener {
   disable(actor: Actor, opts: { spare?: unknown } = {}): Promise<void> {
     return this.serial(async () => {
       await this.stopServer(opts.spare);
+      await this.stopAcme();
       if (this.current.enabled) this.commitDisabled(actor);
     });
   }
@@ -313,7 +354,14 @@ export class RemoteListener {
       if (!s.enabled || this.server !== null) return;
       const cfg: Config = { port: s.port, bind: s.bind, domain: s.domain, tls: s.tls };
       try {
-        const material = await this.material(cfg, {});
+        if (cfg.tls === "acme") {
+          try {
+            await this.ensureChallenge(cfg.bind, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
+          } catch {
+            console.error("the ACME challenge listener could not start, so the certificate cannot be renewed");
+          }
+        }
+        const material = cfg.tls === "acme" ? await this.acmeMaterial(cfg, { reuseDue: true }) : await this.material(cfg, {});
         if (material.fingerprint !== s.fingerprint) {
           commitEvents(this.deps.db, this.deps.ledger, () => ({
             events: [this.certificateChanged(SYSTEM, cfg, material)],
@@ -321,7 +369,12 @@ export class RemoteListener {
           }));
         }
         await this.listen(material, cfg.port, cfg.bind);
+        if (cfg.tls === "acme") {
+          this.startRenewals();
+          if (this.deps.acme!.isDue(material)) setTimeout(() => void this.renewalTick().catch(() => undefined), 0).unref();
+        }
       } catch {
+        await this.stopAcme();
         console.error("remote access could not start, so it is now off");
         try {
           this.commitDisabled(SYSTEM);
@@ -337,6 +390,7 @@ export class RemoteListener {
     return this.serial(async () => {
       this.unsubscribe();
       await this.stopServer();
+      await this.stopAcme();
     });
   }
 
@@ -347,7 +401,7 @@ export class RemoteListener {
   }
 
   private publicState(): RemoteState {
-    const { listening: _l, addresses: _a, ...rest } = this.state();
+    const { listening: _l, addresses: _a, acme: _m, ...rest } = this.state();
     return rest;
   }
 
@@ -363,14 +417,207 @@ export class RemoteListener {
     if (domain !== null && !domainSchema.safeParse(domain).success) throw new RemoteInputError("invalid_domain");
     const mode = i.tls ?? prev.tls;
     if (mode !== "self_signed" && mode !== "provided" && mode !== "acme") throw new RemoteInputError("invalid_tls");
-    if (mode === "acme") throw new RemoteInputError("acme_unavailable");
+    if (mode === "acme" && this.deps.acme === undefined) throw new RemoteInputError("acme_unavailable");
+    if (mode === "acme" && domain === null) throw new RemoteInputError("acme_domain_required");
+    const acmePort = i.acmePort ?? this.deps.acmePort ?? ACME_CHALLENGE_PORT;
+    if (!Number.isInteger(acmePort) || acmePort < 0 || acmePort > 65535) throw new RemoteInputError("invalid_port");
     for (const p of [i.certFile, i.keyFile]) {
       if (p !== undefined && (typeof p !== "string" || p.length === 0 || p.length > MAX_PATH_LENGTH)) {
         throw new RemoteInputError("certificate_files_required");
       }
     }
     if ((i.certFile === undefined) !== (i.keyFile === undefined)) throw new RemoteInputError("certificate_files_required");
-    return { port, bind, domain: domain === null ? null : domain.toLowerCase(), tls: mode };
+    return { port, bind, domain: domain === null ? null : domain.toLowerCase(), tls: mode, acmePort };
+  }
+
+  /**
+   * `enable`'s material. For ACME the plain challenge listener comes up first; a failure (port 80 in use or not
+   * permitted, the order refused) is an AcmeError, records nothing, and leaves the listeners as they were (the
+   * challenge listener stays only while an ACME certificate is being served, for its renewals).
+   */
+  private async enableMaterial(cfg: Config, i: EnableInput): Promise<CertMaterial> {
+    if (cfg.tls !== "acme") return this.material(cfg, i);
+    const keep = () => this.server !== null && this.current.enabled && this.current.tls === "acme";
+    try {
+      await this.ensureChallenge(cfg.bind, cfg.acmePort ?? ACME_CHALLENGE_PORT);
+      const m = await this.acmeMaterial(cfg, { reuseDue: false });
+      this.lastAcmeError = null;
+      return m;
+    } catch (err) {
+      const e = err instanceof AcmeError ? err : new AcmeError("unknown");
+      this.lastAcmeError = e.type;
+      if (!keep()) await this.stopChallenge();
+      throw e;
+    }
+  }
+
+  /** The stored ACME certificate while it covers the domain (and, unless `reuseDue`, is not due), else a new order. */
+  private async acmeMaterial(cfg: Config, opts: { reuseDue: boolean }): Promise<CertMaterial> {
+    const acme = this.deps.acme;
+    if (acme === undefined || cfg.domain === null) throw new AcmeError("unknown");
+    const stored = await acme.load(cfg.domain);
+    if (stored !== null && (opts.reuseDue || !acme.isDue(stored))) return stored;
+    if (this.challenge === null) throw new AcmeError("unknown");
+    return acme.obtain(cfg.domain, { probe: (token) => this.probe(token) });
+  }
+
+  /**
+   * One renewal check (every ACME_RENEW_CHECK_MS): a new certificate is committed as `remote.certificate_changed`
+   * first, then swapped into the TLS listener with setSecureContext. A failure keeps the current certificate, keeps
+   * the error type for the Owner and skips the next min(2^n - 1, 3) checks after n failures in a row.
+   */
+  renewalTick(): Promise<void> {
+    return this.serial(async () => {
+      const s = this.current;
+      const acme = this.deps.acme;
+      const server = this.server;
+      const current = this.served;
+      if (!s.enabled || s.tls !== "acme" || s.domain === null || acme === undefined || server === null || current === null) return;
+      if (this.skipChecks > 0) {
+        this.skipChecks--;
+        return;
+      }
+      let next: CertMaterial | null;
+      try {
+        if (this.challenge === null) await this.ensureChallenge(s.bind, this.deps.acmePort ?? ACME_CHALLENGE_PORT);
+        next = await acme.renewIfDue(s.domain, current, { probe: (token) => this.probe(token) });
+      } catch (err) {
+        this.renewFailures++;
+        this.skipChecks = Math.min(2 ** this.renewFailures - 1, ACME_MAX_SKIPPED_CHECKS);
+        this.lastAcmeError = err instanceof AcmeError ? err.type : "unknown";
+        console.error("the remote certificate could not be renewed; trying again later");
+        return;
+      }
+      if (next === null) return;
+      const cfg: Config = { port: s.port, bind: s.bind, domain: s.domain, tls: s.tls };
+      try {
+        commitEvents(this.deps.db, this.deps.ledger, () => ({
+          events: [this.certificateChanged(SYSTEM, cfg, next)],
+          result: () => undefined,
+        }));
+      } catch {
+        // A read-only ledger: the served certificate stays the one the ledger names.
+        console.error("the remote certificate could not be renewed; trying again later");
+        return;
+      }
+      server.setSecureContext({ cert: next.certPem, key: next.keyPem, minVersion: "TLSv1.2" });
+      this.served = next;
+      this.renewFailures = 0;
+      this.skipChecks = 0;
+      this.lastAcmeError = null;
+    });
+  }
+
+  private startRenewals(): void {
+    if (this.renewTimer !== null) return;
+    this.renewTimer = setInterval(() => void this.renewalTick().catch(() => undefined), ACME_RENEW_CHECK_MS);
+    this.renewTimer.unref();
+  }
+
+  /** Stops the renewal checks and the plain challenge listener. */
+  private async stopAcme(): Promise<void> {
+    if (this.renewTimer !== null) {
+      clearInterval(this.renewTimer);
+      this.renewTimer = null;
+    }
+    this.renewFailures = 0;
+    this.skipChecks = 0;
+    await this.stopChallenge();
+  }
+
+  /**
+   * The plain HTTP listener for HTTP-01 on `bind`:`port`. It answers GET/HEAD
+   * `/.well-known/acme-challenge/<token>` with the key authorization while that token's order is open, and 404 to
+   * everything else: no other routes, no redirect, nothing from the app. A port that cannot be bound is an AcmeError.
+   */
+  private async ensureChallenge(bind: string, port: number): Promise<void> {
+    const c = this.challenge;
+    if (c !== null && c.bind === bind && (port === 0 || c.port === port)) return;
+    await this.stopChallenge();
+    const sockets = new Set<net.Socket>();
+    const server = http.createServer(
+      { requestTimeout: 10_000, headersTimeout: 5_000, keepAliveTimeout: 1_000, maxHeaderSize: 8 * 1024 },
+      (req, res) => this.answerChallenge(req, res),
+    );
+    server.maxConnections = CHALLENGE_MAX_CONNECTIONS;
+    server.on("connection", (socket: net.Socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    server.on("clientError", (_err, socket) => socket.destroy());
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          server.close();
+          reject(new Error("listen timeout"));
+        }, LISTEN_TIMEOUT_MS);
+        server.once("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        server.listen({ port, host: bind, exclusive: true }, () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    } catch {
+      throw new AcmeError("unknown");
+    }
+    server.on("error", () => undefined);
+    this.challenge = { server, bind, port: (server.address() as AddressInfo).port, sockets };
+  }
+
+  private answerChallenge(req: IncomingMessage, res: ServerResponse): void {
+    const m = CHALLENGE_PATH.exec(req.url ?? "");
+    const body = m && (req.method === "GET" || req.method === "HEAD") ? (this.deps.acme?.challengeResponse(m[1]!) ?? null) : null;
+    const headers = { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" };
+    if (body === null) {
+      res.writeHead(404, { ...headers, "content-length": "9", connection: "close" });
+      res.end(req.method === "HEAD" ? undefined : "not found");
+      return;
+    }
+    res.writeHead(200, { ...headers, "content-length": String(Buffer.byteLength(body)) });
+    res.end(req.method === "HEAD" ? undefined : body);
+  }
+
+  private async stopChallenge(): Promise<void> {
+    const c = this.challenge;
+    if (c === null) return;
+    this.challenge = null;
+    const closed = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+      c.server.close(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    for (const s of c.sockets) s.destroy();
+    c.sockets.clear();
+    await closed;
+  }
+
+  /** What the challenge listener serves for `token`, fetched over loopback (fakeAcme's "validation"). */
+  private probe(token: string): Promise<string | null> {
+    const c = this.challenge;
+    if (c === null) return Promise.resolve(null);
+    const host = c.bind === "0.0.0.0" ? "127.0.0.1" : c.bind === "::" ? "::1" : c.bind;
+    return new Promise((resolve) => {
+      const req = http.get(
+        { host, port: c.port, path: `/.well-known/acme-challenge/${encodeURIComponent(token)}`, agent: false, timeout: PROBE_TIMEOUT_MS },
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            body += chunk;
+            if (body.length > PROBE_MAX_BYTES) req.destroy();
+          });
+          res.on("end", () => resolve(res.statusCode === 200 ? body : null));
+          res.on("error", () => resolve(null));
+        },
+      );
+      req.on("timeout", () => req.destroy());
+      req.on("error", () => resolve(null));
+    });
   }
 
   private async material(cfg: Config, i: EnableInput): Promise<CertMaterial> {
@@ -489,6 +736,7 @@ export class RemoteListener {
     });
     server.on("error", () => undefined);
     this.server = server;
+    this.served = m;
   }
 
   private track(socket: net.Socket): void {
@@ -501,6 +749,7 @@ export class RemoteListener {
     const server = this.server;
     if (server === null) return;
     this.server = null;
+    this.served = null;
     // close() stops accepting at once; its callback waits for the open connections, which are destroyed below.
     const closed = new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
