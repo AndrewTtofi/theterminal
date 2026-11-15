@@ -9,7 +9,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && vitest run",
+    "test": "tsc -p tsconfig.json && tsc -p smoke/tsconfig.json && vitest run",
     "dev": "tsc -p tsconfig.json && electron .",
     "deploy:core": "node scripts/stage.mjs --clean && pnpm --dir ../.. --filter @theterminal/core deploy --prod --node-linker hoisted --frozen-lockfile apps/desktop/stage/core",
     "stage": "node scripts/stage.mjs",

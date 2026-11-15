@@ -6,9 +6,9 @@
  * from that folder and is never printed.
  */
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { _electron, expect, test as base } from "@playwright/test";
 import { resourcesDir } from "./paths.js";
@@ -41,10 +41,17 @@ type Fixtures = {
 };
 
 const test = base.extend<Fixtures>({
-  dir: async ({}, use) => {
+  dir: async ({}, use, testInfo) => {
     const d = mkdtempSync(join(tmpdir(), "tt smoke ü-"));
     await use(d);
-    rmSync(d, { recursive: true, force: true, maxRetries: 5 });
+    try {
+      removeDir(d);
+    } catch (e) {
+      // A file still busy at teardown (Windows) is worth a warning, not a failed test: the folder is throwaway.
+      const description = `could not remove the data folder: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`;
+      testInfo.annotations.push({ type: "warning", description });
+      console.warn(`warning: ${description}`);
+    }
   },
   start: async ({ dir }, use) => {
     const procs: Proc[] = [];
@@ -67,6 +74,16 @@ const test = base.extend<Fixtures>({
     await waitFor(() => !existsSync(join(dir, "server.lock")), 15_000).catch(() => undefined);
   },
 });
+
+/** Removes a data folder, retrying while a process that is going away still holds a file in it. */
+const removeDir = (d: string) => rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+
+/** Every file under `dir` (symlinks included) whose name is `claude` or `claude.exe`, relative to `dir`. */
+function claudeFiles(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => !e.isDirectory() && (e.name === "claude" || e.name === "claude.exe"))
+    .map((e) => relative(dir, join(e.parentPath, e.name)));
+}
 
 /** Polls `check` every 100 ms until it is true; rejects after `ms`. */
 async function waitFor(check: () => boolean | Promise<boolean>, ms: number, what = "condition"): Promise<void> {
@@ -145,6 +162,7 @@ test("headless: the server answers, serves the UI and the bundled CLIs run", asy
 
   // Claude Code is not shipped in these builds: the app uses the user's own install.
   expect(bundled.bundledClaude({ coreDir: CORE_DIR }), "bundled Claude").toBeNull();
+  expect(claudeFiles(RESOURCES), "Claude binaries in the app").toEqual([]);
 
   const gemini = bundled.bundledGemini({ coreDir: CORE_DIR });
   expect(gemini, "bundled Gemini").not.toBeNull();
@@ -178,6 +196,7 @@ test("the app refuses a data folder held by a running CLI server", async ({ dir,
 
 test("killing the app stops its server", async ({ dir, start }) => {
   const a = await headless(start, dir, join(dir, "ready.json"));
+  // The server's own pid (from its lock), so the test sees the server child itself, not just its port.
   const pid = serverPid(dir);
   expect(alive(pid)).toBe(true);
 
@@ -197,10 +216,17 @@ test("killing the app stops its server", async ({ dir, start }) => {
   );
   await waitFor(() => !existsSync(join(dir, "server.lock")), 15_000, "the lock to be released");
   await waitFor(() => !alive(pid), 15_000, "the server process to exit");
+  // No process (server, agent or Electron helper) still holds a file in the data folder.
+  removeDir(dir);
+  expect(existsSync(dir)).toBe(false);
 });
 
 test("window: opens the workspace on theterminal.localhost with the session cookie", async ({ dir }) => {
-  const app = await _electron.launch({ executablePath: APP, args: ["--data-dir", dir, "--port", "0"] });
+  // The Chromium profile stores its cookie key in a mock keychain and a basic password store: never the real ones.
+  const app = await _electron.launch({
+    executablePath: APP,
+    args: ["--data-dir", dir, "--port", "0", "--use-mock-keychain", "--password-store=basic"],
+  });
   let closed = false;
   try {
     const page = await app.firstWindow();
