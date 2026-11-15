@@ -520,6 +520,8 @@ export async function createServer(opts: {
       // Read when the listener starts (link.load(), last), when the runner and the rest below exist.
       runs: () => ({
         runner, worktrees, dataDir: opts.dataDir,
+        // A paired machine's project name is cleaned like any text that crosses the link (6a's publicText).
+        cleanText: (t: string) => connections.publicText(t),
         changes: { db, dataDir: opts.dataDir, worktrees, clean, settling: (id: string) => runner.settling(id) },
       }),
     });

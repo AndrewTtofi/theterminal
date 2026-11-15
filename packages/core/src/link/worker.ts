@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
 import { Transform, type Readable } from "node:stream";
@@ -12,13 +12,13 @@ import { commitEvent, commitEvents } from "../events/commit.js";
 import { getRun } from "../events/projections.js";
 import { NotFoundError } from "../board/board-service.js";
 import { ConflictError } from "../connections/service.js";
-import { SecretInTextError } from "../intake/recorded-text.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
 import { redact } from "../agents/redact.js";
 import { RUN_ID_PATTERN, type AgentRunner } from "../agents/runner.js";
 import type { WorktreeManager } from "../agents/worktrees.js";
 import { stoppedRunWorktree, type ChangesDeps } from "../changes/changes.js";
-import { MAX_BUNDLE_BYTES, NoRepoError, RepoTooLargeError, importRepoBundle, snapshotBundle } from "./bundles.js";
+import { MAX_BUNDLE_BYTES, NoRepoError, RepoTooLargeError, UploadLimitError, importRepoBundle, snapshotBundle } from "./bundles.js";
+import { sendError } from "../server/routes.js";
 import { MirrorFrameError, mirrorable, signFrame } from "./mirror.js";
 import { IdentityUnavailableError, type LinkService } from "./service.js";
 
@@ -45,7 +45,29 @@ export type LinkWorkerDeps = {
   dataDir: string;
   /** How often a blank line is written on a quiet event stream; well under the link's 120 s idle timeout. */
   heartbeatMs?: number;
+  /**
+   * Cleans text another machine sent before it is recorded (the project name): the connections' publicText in the
+   * server (redaction with every known secret, paths, the username, email addresses). Default: built-in redaction.
+   */
+  cleanText?: (s: string) => string;
+  /** Milliseconds since the epoch; test-only. */
+  now?: () => number;
 };
+
+/** Uploads one machine may leave waiting (stored and in flight), and their bytes together with a new declared length. */
+export const MAX_UPLOADS_PER_MACHINE = 4;
+export const MAX_UPLOAD_BYTES_PER_MACHINE = 1024 ** 3;
+/** An upload never started within this long is removed. */
+export const UPLOAD_TTL_MS = 60 * 60 * 1000;
+const RECORD_NAME = /^([A-Za-z0-9_-]{1,100})\.json$/;
+const BUNDLE_NAME = /^([A-Za-z0-9_-]{1,100})\.bundle$/;
+const recordSchema = z.object({
+  machineId: z.string().regex(/^[0-9a-f]{32}$/),
+  bytes: z.number().int().nonnegative(),
+  ts: z.iso.datetime(),
+}).strict();
+type UploadRecord = z.infer<typeof recordSchema>;
+type InFlight = { peer: string; runId: string; reserve: number };
 
 /** The Owner: the human who asked, through the requester, owns the run here too. */
 const OWNER = { kind: "human", id: "owner" } as const;
@@ -54,15 +76,20 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
 const PAGE = 500;
 const runIdSchema = z.string().regex(RUN_ID_PATTERN);
 const actionIdSchema = z.string().min(1).max(200);
+const projectNameSchema = z.string().min(1).max(120);
 const afterSeqSchema = z.string().regex(/^\d{1,15}$/).transform(Number);
 
 export class LinkWorker {
   private readonly heartbeatMs: number;
-  /** Who uploaded each run's repository; a start must come from the same machine. Lost on restart, like the upload. */
-  private readonly uploader = new Map<string, string>();
+  private readonly now: () => number;
+  private readonly cleanText: (s: string) => string;
+  /** Uploads being received, by their `.part` file name; any other `.part` file is left from a crash. */
+  private readonly inFlight = new Map<string, InFlight>();
 
   constructor(private readonly deps: LinkWorkerDeps) {
     this.heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+    this.now = deps.now ?? Date.now;
+    this.cleanText = deps.cleanText ?? ((t) => redact(t));
   }
 
   /** A run id as the runner accepts it, checked before it is used in any path. ZodError otherwise. */
@@ -76,6 +103,77 @@ export class LinkWorker {
 
   private incoming(runId: string): string {
     return join(this.incomingDir(), `${runIdSchema.parse(runId)}.bundle`);
+  }
+
+  private recordPath(runId: string): string {
+    return join(this.incomingDir(), `${runIdSchema.parse(runId)}.json`);
+  }
+
+  /** The owner record of a waiting upload, or null when it is missing, unreadable or past UPLOAD_TTL_MS. */
+  private readRecord(runId: string): UploadRecord | null {
+    try {
+      const record = recordSchema.parse(JSON.parse(readFileSync(this.recordPath(runId), "utf8")));
+      return this.now() - Date.parse(record.ts) > UPLOAD_TTL_MS ? null : record;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Removes a waiting upload: its bundle and its record. */
+  private dropUpload(runId: string): void {
+    rmSync(this.incoming(runId), { force: true, maxRetries: 5, retryDelay: 50 });
+    rmSync(this.recordPath(runId), { force: true, maxRetries: 5, retryDelay: 50 });
+  }
+
+  /**
+   * Removes from `link/incoming` every upload never started within UPLOAD_TTL_MS, every bundle without a valid owner
+   * record and every record without its bundle, and any other file (a `.part` left by a crash) that no upload in
+   * progress is writing. Run when the listener starts and before each upload.
+   */
+  sweep(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.incomingDir());
+    } catch {
+      return; // no folder yet: nothing to sweep
+    }
+    for (const name of names) {
+      const bundle = BUNDLE_NAME.exec(name);
+      const record = RECORD_NAME.exec(name);
+      const id = bundle?.[1] ?? record?.[1];
+      if (id !== undefined) {
+        const keep = this.readRecord(id) !== null && existsSync(this.incoming(id));
+        if (!keep) this.dropUpload(id);
+        continue;
+      }
+      if (!this.inFlight.has(name)) rmSync(join(this.incomingDir(), name), { force: true, recursive: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }
+
+  /** What `peer` has waiting: its stored uploads (by their records) and the ones it is sending now. */
+  private usageOf(peer: string): { count: number; bytes: number } {
+    let count = 0;
+    let bytes = 0;
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.incomingDir());
+    } catch {
+      // nothing stored
+    }
+    for (const name of names) {
+      const id = RECORD_NAME.exec(name)?.[1];
+      if (id === undefined) continue;
+      const record = this.readRecord(id);
+      if (record === null || record.machineId !== peer) continue;
+      count++;
+      bytes += record.bytes;
+    }
+    for (const f of this.inFlight.values()) {
+      if (f.peer !== peer) continue;
+      count++;
+      bytes += f.reserve;
+    }
+    return { count, bytes };
   }
 
   /** ConflictError when this computer already has a run, or a link record of one, under `runId`. */
@@ -97,15 +195,30 @@ export class LinkWorker {
 
   /**
    * Receives a run's repository bundle, streamed to `<dataDir>/link/incoming/<runId>.bundle` and counted as it
-   * arrives: a declared length over MAX_BUNDLE_BYTES is refused before a byte is read, and a body that passes it is
-   * cut off, its partial file removed (RepoTooLargeError). A run id already in use is ConflictError.
+   * arrives, with an owner record `<runId>.json` (`{ machineId, bytes, ts }`) written atomically beside it. Before a
+   * byte is read: expired and stray uploads are swept; a run id in use, or one whose repository is already waiting or
+   * arriving, is ConflictError; a declared length over MAX_BUNDLE_BYTES is RepoTooLargeError; and a machine with
+   * MAX_UPLOADS_PER_MACHINE uploads waiting, or whose waiting bytes plus this one's (declared, else MAX_BUNDLE_BYTES)
+   * would pass MAX_UPLOAD_BYTES_PER_MACHINE, gets UploadLimitError. A body that passes the cap is cut off and its
+   * partial file removed (RepoTooLargeError).
    */
   async receiveRepo(peer: string, runId: string, body: Readable, declaredLength: string | undefined): Promise<void> {
     const file = this.incoming(runId);
+    this.sweep();
     this.assertFree(runId);
-    if (declaredLength !== undefined && !(Number(declaredLength) <= MAX_BUNDLE_BYTES)) throw new RepoTooLargeError();
+    if (existsSync(file) || [...this.inFlight.values()].some((f) => f.runId === runId)) {
+      throw new ConflictError("the repository for this run is already waiting");
+    }
+    const declared = declaredLength === undefined ? null : Number(declaredLength);
+    if (declared !== null && !(declared >= 0 && declared <= MAX_BUNDLE_BYTES)) throw new RepoTooLargeError();
+    const reserve = declared ?? MAX_BUNDLE_BYTES;
+    const usage = this.usageOf(peer);
+    if (usage.count >= MAX_UPLOADS_PER_MACHINE || usage.bytes + reserve > MAX_UPLOAD_BYTES_PER_MACHINE) throw new UploadLimitError();
     mkdirSync(this.incomingDir(), { recursive: true });
-    const part = join(this.incomingDir(), `${runId}.${randomUUID()}.part`);
+    const partName = `${runId}.${peer}.${randomUUID()}.part`;
+    const part = join(this.incomingDir(), partName);
+    // Reserved before the first await, so two uploads can never both pass the checks above.
+    this.inFlight.set(partName, { peer, runId, reserve });
     let size = 0;
     const counter = new Transform({
       transform(chunk: Buffer, _enc, done) {
@@ -119,10 +232,21 @@ export class LinkWorker {
       // Uploaded while the start of the same id was running: refused, so a live run's bundle is never replaced.
       this.assertFree(runId);
       renameSync(part, file);
-      this.uploader.set(runId, peer);
+      const record: UploadRecord = { machineId: peer, bytes: size, ts: new Date(this.now()).toISOString() };
+      const tmp = join(this.incomingDir(), `${runId}.${randomUUID()}.tmp`);
+      try {
+        writeFileSync(tmp, JSON.stringify(record), { flag: "wx" });
+        renameSync(tmp, this.recordPath(runId));
+      } catch (err) {
+        rmSync(tmp, { force: true });
+        this.dropUpload(runId);
+        throw err;
+      }
     } catch (err) {
       rmSync(part, { force: true, maxRetries: 5, retryDelay: 50 });
       throw err;
+    } finally {
+      this.inFlight.delete(partName);
     }
   }
 
@@ -138,11 +262,18 @@ export class LinkWorker {
     const id = runIdSchema.parse(runId);
     const input = remoteStartSchema.parse(body);
     const projectId = runIdSchema.parse(input.projectId);
-    if (redact(input.projectName) !== input.projectName) throw new SecretInTextError();
+    // Text from another machine: cleaned as anything this computer records, never trusted as sent.
+    const projectName = projectNameSchema.parse(this.cleanText(input.projectName).trim() || "Project");
     this.assertFree(id);
     const file = this.incoming(id);
-    if (!existsSync(file) || this.uploader.get(id) !== peer) throw new NoRepoError();
-    this.uploader.delete(id);
+    const record = this.readRecord(id);
+    if (record === null) {
+      // No owner (or an expired one): whatever is there is nobody's upload.
+      this.dropUpload(id);
+      throw new NoRepoError();
+    }
+    if (record.machineId !== peer || !existsSync(file)) throw new NoRepoError();
+    rmSync(this.recordPath(id), { force: true });
     try {
       this.assertProjectOf(peer, projectId);
     } catch (err) {
@@ -157,23 +288,36 @@ export class LinkWorker {
       const events: NewLedgerEntry[] = [];
       if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
         events.push(
-          { projectId, actor: SYSTEM, type: "project.created", payload: { projectId, name: input.projectName, pitch: "" } },
-          { projectId, actor: SYSTEM, type: "link.project_received", payload: { projectId, machineId: peer, name: input.projectName } },
+          { projectId, actor: SYSTEM, type: "project.created", payload: { projectId, name: projectName, pitch: "" } },
+          { projectId, actor: SYSTEM, type: "link.project_received", payload: { projectId, machineId: peer, name: projectName } },
         );
       }
       events.push({ projectId, actor: SYSTEM, type: "link.run_accepted", payload: { runId: id, machineId: peer, projectId } });
       return { events, result: () => undefined };
     });
-    return this.deps.runner.start(OWNER, {
-      projectId,
-      adapter: input.adapter,
-      prompt: input.prompt,
-      cardId: input.cardId,
-      connectionIds: input.connectionIds,
-      runId: id,
-      // The card is the requester's: this computer has none of its cards.
-      foreignCard: true,
-    });
+    try {
+      return await this.deps.runner.start(OWNER, {
+        projectId,
+        adapter: input.adapter,
+        prompt: input.prompt,
+        cardId: input.cardId,
+        connectionIds: input.connectionIds,
+        runId: id,
+        // The card is the requester's: this computer has none of its cards.
+        foreignCard: true,
+      });
+    } catch (err) {
+      // The accepted run did not start: recorded with the code the requester is answered, then answered as it is.
+      try {
+        commitEvent(db, ledger, () => ({
+          event: { projectId, actor: SYSTEM, type: "link.run_failed", payload: { runId: id, machineId: peer, error: errorCode(err) } },
+          result: () => undefined,
+        }));
+      } catch {
+        // A ledger that cannot record (read-only) must not hide the start's own error.
+      }
+      throw err;
+    }
   }
 
   /** A project this computer has must be one it received from `peer` (a run of it accepted from `peer`). */
@@ -346,4 +490,21 @@ export class LinkWorker {
       throw err;
     }
   }
+}
+
+/** The code the listener's error handler answers for `err` (`invalid_input`, `not_found`, ...), as recorded. */
+function errorCode(err: unknown): string {
+  let code = "internal";
+  const reply = {
+    code: () => reply,
+    header: () => reply,
+    send: (body: unknown) => {
+      const e = (body as { error?: unknown } | undefined)?.error;
+      if (typeof e === "string" && /^[a-z0-9_]{1,100}$/.test(e)) code = e;
+      return reply;
+    },
+  };
+  const quiet = { error: () => undefined };
+  sendError(err, reply as never, quiet as never);
+  return code;
 }

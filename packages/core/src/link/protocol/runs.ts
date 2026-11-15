@@ -24,6 +24,8 @@ function peerOf(request: FastifyRequest, reply: FastifyReply): string | null {
 export function registerRuns(app: FastifyInstance, deps: LinkProtocolDeps): void {
   const worker = deps.worker;
   if (worker === undefined) return;
+  // Each listener start: uploads left from before (expired, without an owner, or cut off by a crash) are removed.
+  worker.sweep();
 
   app.register(async (scope) => {
     // The repository arrives as a raw body: the route streams it to a file itself, counting bytes (no body limit

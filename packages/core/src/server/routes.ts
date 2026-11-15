@@ -13,7 +13,7 @@ import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigErr
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
 import { LinkProtocolError, MachineKeyMismatchError, MachineUnreachableError, RemoteRefusedError } from "../link/client.js";
-import { BundleGitLimitError, BundleInvalidError, NoRepoError, RepoTooLargeError } from "../link/bundles.js";
+import { BundleGitLimitError, BundleInvalidError, NoRepoError, RepoTooLargeError, UploadLimitError } from "../link/bundles.js";
 import {
   IdentityUnavailableError, LinkingDisabledError, NoPairingError, PairingCodeMismatchError, PairingRejectedError, SelfPairingError,
 } from "../link/service.js";
@@ -154,6 +154,7 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof BundleInvalidError) return reply.code(400).send({ error: "bundle_invalid" });
   if (err instanceof BundleGitLimitError) return reply.code(503).send({ error: "bundle_git_limit" });
   if (err instanceof NoRepoError) return reply.code(409).send({ error: "no_repo" });
+  if (err instanceof UploadLimitError) return reply.code(409).send({ error: "upload_limit" });
   if (err instanceof LedgerReadOnlyError) {
     return reply.code(423).send({ error: "ledger_read_only" });
   }

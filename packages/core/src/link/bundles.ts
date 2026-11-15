@@ -34,6 +34,14 @@ export class RepoTooLargeError extends Error {
   }
 }
 
+/** A machine already has as many repository uploads waiting here, or as many bytes, as it may. */
+export class UploadLimitError extends Error {
+  constructor() {
+    super("too many repositories are waiting from that machine");
+    this.name = "UploadLimitError";
+  }
+}
+
 /**
  * Git ran past its time or output limit while reading a bundle: not proof the bundle is bad (a slow disk, a busy
  * machine), so it is reported apart from BundleInvalidError and may be tried again.

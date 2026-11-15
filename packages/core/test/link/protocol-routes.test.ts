@@ -1,5 +1,5 @@
 import https from "node:https";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { LINKING_ACK, mirrorFrameSchema, type AgentAction, type AgentRun, type L
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { commitEvent } from "../../src/events/commit.js";
-import { getRun, getSetting, listPendingActions } from "../../src/events/projections.js";
+import { getLinkRun, getRun, getSetting, listPendingActions } from "../../src/events/projections.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
@@ -54,7 +54,7 @@ beforeEach(async () => {
 });
 
 /** The worker machine: linking on (loopback, any port), the requester paired, the fake agent running `script`. */
-async function startWorker(script: FakeStep[], o: { heartbeatMs?: number } = {}): Promise<Worker> {
+async function startWorker(script: FakeStep[], o: { heartbeatMs?: number; now?: () => number } = {}): Promise<Worker> {
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "proto-worker-")));
   const db = openDatabase(":memory:");
   const ledger = new Ledger(db);
@@ -81,6 +81,8 @@ async function startWorker(script: FakeStep[], o: { heartbeatMs?: number } = {})
     link, db, ledger, runner, worktrees, dataDir,
     changes: { db, dataDir, worktrees, clean: (id, s, max) => runner.cleanFor(id)(s, max), settling: (id) => runner.settling(id) },
     ...(o.heartbeatMs !== undefined && { heartbeatMs: o.heartbeatMs }),
+    ...(o.now !== undefined && { now: o.now }),
+    cleanText: (t) => connections.publicText(t),
   });
   holder.worker = worker;
   await link.load();
@@ -207,6 +209,73 @@ describe("link protocol: runs from a paired machine", () => {
     expect(w.ledger.list().some((e) => e.type === "link.run_accepted")).toBe(false);
   });
 
+  it("records the requester's project name cleaned as any text from another machine", { timeout: T }, async () => {
+    const w = await startWorker([{ message: "hello" }]);
+    await uploadRepo(w, "run-name");
+    await startRun(w, "run-name", { projectName: "Demo sk-ant-TESTKEY0123456789abcdef mail me@example.com" });
+    const received = w.ledger.list().find((e) => e.type === "link.project_received")!;
+    const name = (received.payload as { name: string }).name;
+    expect(name).not.toContain("TESTKEY");
+    expect(name).not.toContain("me@example.com");
+    expect(name.startsWith("Demo")).toBe(true);
+  });
+
+  it("keeps an owner record beside each upload, and refuses a start whose record is missing", { timeout: T }, async () => {
+    const w = await startWorker([{ message: "hello" }]);
+    await uploadRepo(w, "run-rec");
+    const incoming = join(w.dataDir, "link", "incoming");
+    const record = JSON.parse(readFileSync(join(incoming, "run-rec.json"), "utf8"));
+    expect(record).toMatchObject({ machineId: requester.machineId });
+    expect(record.bytes).toBeGreaterThan(0);
+    expect(typeof record.ts).toBe("string");
+    rmSync(join(incoming, "run-rec.json"));
+    expect(await refusal(startRun(w, "run-rec"))).toEqual({ status: 409, code: "no_repo" });
+    expect(readdirSync(incoming)).toEqual([]);
+  });
+
+  it("refuses a second upload for a run id whose repository is already waiting", { timeout: T }, async () => {
+    const w = await startWorker([{ message: "hello" }]);
+    await uploadRepo(w, "run-twice");
+    expect(await refusal(uploadRepo(w, "run-twice"))).toEqual({ status: 409, code: "conflict" });
+  });
+
+  it("caps a machine's waiting uploads at four, and at 1 GiB with the declared length", { timeout: T }, async () => {
+    const w = await startWorker([{ message: "hello" }]);
+    for (const id of ["u1", "u2", "u3", "u4"]) await uploadRepo(w, id);
+    expect(await refusal(uploadRepo(w, "u5"))).toEqual({ status: 409, code: "upload_limit" });
+    // Starting one frees a place.
+    await startRun(w, "u1");
+    // Bytes: with 800 MiB waiting (u2 stands for it here), a declared 256 MiB, or an undeclared body that may be as
+    // large, passes 1 GiB; a small declared one still fits.
+    const incoming = join(w.dataDir, "link", "incoming");
+    const record = JSON.parse(readFileSync(join(incoming, "u2.json"), "utf8"));
+    writeFileSync(join(incoming, "u2.json"), JSON.stringify({ ...record, bytes: 800 * 1024 * 1024 }));
+    const { port } = parseHostPort(w.peer.address);
+    const declared = await rawPost(port, "/link/v1/runs/u6/repo", { "content-length": String(MAX_BUNDLE_BYTES) }, null);
+    expect(declared).toEqual({ status: 409, body: { error: "upload_limit" } });
+    const chunked = await rawPost(port, "/link/v1/runs/u6/repo", { "transfer-encoding": "chunked" }, 10);
+    expect(chunked).toEqual({ status: 409, body: { error: "upload_limit" } });
+    await uploadRepo(w, "u6");
+  });
+
+  it("removes uploads never started after an hour, and stray files, before the next upload and when the listener starts", { timeout: T }, async () => {
+    let now = Date.parse("2026-11-15T10:00:00Z");
+    const w = await startWorker([{ message: "hello" }], { now: () => now });
+    await uploadRepo(w, "old");
+    const incoming = join(w.dataDir, "link", "incoming");
+    now += 60 * 60 * 1000 + 1;
+    await uploadRepo(w, "fresh");
+    expect(readdirSync(incoming).sort()).toEqual(["fresh.bundle", "fresh.json"]);
+    expect(await refusal(startRun(w, "old"))).toEqual({ status: 409, code: "no_repo" });
+    // Left by a crash: a partial upload, a bundle without its record, a record without its bundle.
+    writeFileSync(join(incoming, `x.${requester.machineId}.0000.part`), "partial");
+    writeFileSync(join(incoming, "orphan.bundle"), "b");
+    writeFileSync(join(incoming, "lonely.json"), JSON.stringify({ machineId: requester.machineId, bytes: 1, ts: new Date(now).toISOString() }));
+    await w.link.disableLinking(owner);
+    await w.link.enableLinking(owner, LINKING_ACK, 0);
+    expect(readdirSync(incoming).sort()).toEqual(["fresh.bundle", "fresh.json"]);
+  });
+
   it("refuses a body over the limit with 413, leaving no file behind", { timeout: T }, async () => {
     const w = await startWorker([{ message: "hello" }]);
     const { port } = parseHostPort(w.peer.address);
@@ -227,6 +296,10 @@ describe("link protocol: runs from a paired machine", () => {
     expect(await refusal(startRun(w, "run-c", { connectionIds: ["conn-on-the-requester"] }))).toEqual({ status: 404, code: "not_found" });
     expect(w.ledger.list().some((e) => e.type === "connection.used")).toBe(false);
     expect(getRun(w.db, "run-c")).toBeNull();
+    // The accepted run that could not start is recorded as failed, with the code the requester was answered.
+    const failed = w.ledger.list().filter((e) => e.type === "link.run_failed");
+    expect(failed.map((e) => e.payload)).toEqual([{ runId: "run-c", machineId: requester.machineId, error: "not_found" }]);
+    expect(getLinkRun(w.db, "run-c")).toMatchObject({ state: "failed", error: "not_found" });
   });
 
   it("streams the run's agent entries in order, each signed with the worker's key, and ends after agent.finished", { timeout: T }, async () => {
@@ -268,6 +341,8 @@ describe("link protocol: runs from a paired machine", () => {
     await startRun(w, "run-d");
     await until(() => expect(listPendingActions(w.db, "p1")).toHaveLength(1));
     const [pending] = listPendingActions(w.db, "p1");
+    // The worker's own copy of an accepted run is a local run: its runner decides it (only a requester's mirror has a machine).
+    expect(getRun(w.db, "run-d")!.machineId).toBeNull();
     // The worker gated the action itself: nothing ran before a decision.
     expect(w.ledger.list().some((e) => e.type === "agent.action.completed")).toBe(false);
     const decided = await client().request<AgentAction>(w.peer, "POST", `/link/v1/runs/run-d/actions/${pending!.id}/decision`, {
@@ -278,6 +353,8 @@ describe("link protocol: runs from a paired machine", () => {
     const received = entries.findIndex((e) => e.type === "link.decision_received");
     expect(entries[received]!.payload).toEqual({ runId: "run-d", actionId: pending!.id, machineId: requester.machineId, decision: "allow" });
     expect(entries[received + 1]).toMatchObject({ type: "agent.action.decided", payload: { by: "human", decision: "allow" } });
+    await until(() => expect(getRun(w.db, "run-d")!.status).toBe("completed"));
+    expect(w.ledger.list().filter((e) => e.type === "agent.action.completed")).toHaveLength(1);
     expect(await refusal(client().request(w.peer, "POST", `/link/v1/runs/run-d/actions/${pending!.id}/decision`, { v: 1, decision: "deny", reason: "" })))
       .toEqual({ status: 409, code: "already_decided" });
     const frames = await readStream(w, "run-d");
