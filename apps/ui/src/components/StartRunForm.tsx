@@ -89,9 +89,12 @@ export function StartRunForm({
     ...offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id),
     ...(localUsable ? locals.filter((c) => picked.includes(c.id)).map((c) => c.id) : []),
   ];
-  // Offline, a cloud model will not answer: say so unless the run goes to the fake agent or a local model.
+  // Offline, a cloud model will not answer: say so unless the run goes to the fake agent or a local model. The state
+  // is this computer's own inference; nothing is known of a linked machine's internet, so the note is for runs here.
   const localChosen = localUsable && locals.some((c) => picked.includes(c.id));
-  const offlineNote = offline && chosen !== "" && chosen !== "fake" && !localChosen;
+  const offlineNote = target === null && offline && chosen !== "" && chosen !== "fake" && !localChosen;
+  /** The linked machine answered, and none of the agent programs is available there: nothing can start. */
+  const noAgentThere = target !== null && caps !== null && !adapters.some(available);
 
   return (
     <form
@@ -212,6 +215,7 @@ export function StartRunForm({
         <p className="note" role="status">Could not ask {targetName} what it offers.</p>
       )}
       {offlineNote && <p className="note offline-note">{OFFLINE_NOTE}</p>}
+      {noAgentThere && <p className="note" role="status">{`${targetName} reports no agent program available, so nothing can start there.`}</p>}
       <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
         {submitLabel}
       </button>

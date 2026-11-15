@@ -97,9 +97,14 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
           {machines}
         </button>
         {network === "offline" && (
-          <span className="status-item attention" title={OFFLINE_TITLE}>
-            Offline (inferred)
-          </span>
+          <>
+            <span className="status-item attention" role="note" tabIndex={0} title={OFFLINE_TITLE} aria-describedby="status-offline-basis">
+              Offline (inferred)
+            </span>
+            <span id="status-offline-basis" className="visually-hidden">
+              {OFFLINE_TITLE}
+            </span>
+          </>
         )}
         <NetworkAnnouncement state={network} />
         <CiItem ci={status?.ci ?? null} />

@@ -58,6 +58,23 @@ function renderPanel(over: Partial<WorkbenchModel> = {}) {
 const panel = () => screen.getByRole("region", { name: "Conversation" });
 const articles = () => within(panel()).getAllByRole("article");
 
+describe("ConversationPanel: runs on linked machines", () => {
+  it("says which machine a run ran on, by the name this computer gave it, with or without a card", () => {
+    const remote = [
+      feedRun("run3", { prompt: "Check the GPU", machineId: "m1", startedAt: "2026-11-15T12:00:00.000Z" }),
+      feedRun("run4", { prompt: "Check it again", machineId: "m2", cardId: "c1", startedAt: "2026-11-15T12:30:00.000Z" }),
+    ];
+    renderPanel({ runs: [...remote, ...runs], narration: { machineName: (id: string) => (id === "m1" ? "GPU box" : undefined) } });
+    const headings = articles().map((a) => within(a).getByRole("heading").textContent);
+    expect(headings).toEqual([
+      'You asked Fake on "Login"',
+      "You asked Fake",
+      "You asked Fake on GPU box",
+      'You asked Fake on "Login" on a linked machine',
+    ]);
+  });
+});
+
 describe("conversationThread", () => {
   it("lists runs oldest first with their card, messages and action counts", () => {
     const thread = conversationThread(runs, entries, [{ ...login }]);

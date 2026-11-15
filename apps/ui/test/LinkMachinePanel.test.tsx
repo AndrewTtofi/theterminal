@@ -99,6 +99,22 @@ describe("LinkMachinePanel", () => {
     await waitFor(() => expect(screen.queryByLabelText("Pairing code")).toBeNull());
   });
 
+  it("keeps a shown code while the Owner looks at Enter a code, and shows it again on return", async () => {
+    m.showPairingCode.mockResolvedValue({ code: OWN_CODE, expiresAt: new Date(Date.now() + 600_000).toISOString(), addresses: [] });
+    m.cancelPairingCode.mockResolvedValue(undefined);
+    renderPanel(on);
+    await userEvent.click(screen.getByRole("button", { name: "Show a code" }));
+    await screen.findByLabelText("Pairing code");
+    await userEvent.click(tab("Enter a code"));
+    expect(screen.getByRole("tabpanel", { name: "Enter a code" })).toBeTruthy();
+    const showPanel = () => screen.getByLabelText("Pairing code").closest("[role='tabpanel']")!;
+    expect(showPanel().hasAttribute("hidden")).toBe(true);
+    expect(m.cancelPairingCode).not.toHaveBeenCalled();
+    await userEvent.click(tab("Show a code"));
+    expect(showPanel().hasAttribute("hidden")).toBe(false);
+    expect(screen.getByRole("tabpanel", { name: "Show a code" })).toBe(showPanel());
+  });
+
   it("withdraws a code still shown when the tab closes", async () => {
     m.showPairingCode.mockResolvedValue({ code: OWN_CODE, expiresAt: new Date(Date.now() + 600_000).toISOString(), addresses: [] });
     m.cancelPairingCode.mockResolvedValue(undefined);

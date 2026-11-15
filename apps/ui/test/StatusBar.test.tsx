@@ -249,6 +249,10 @@ describe("StatusBar", () => {
       expect(item.classList.contains("status-item")).toBe(true);
       expect(item.classList.contains("attention")).toBe(true);
       expect(item.getAttribute("title")).toBe(OFFLINE_TITLE);
+      // Reachable by keyboard, with the same explanation for a screen reader, not only in the title.
+      expect(item.getAttribute("tabindex")).toBe("0");
+      const basis = document.getElementById(item.getAttribute("aria-describedby")!);
+      expect(basis?.textContent).toBe(OFFLINE_TITLE);
     });
 
     it("shows nothing about the network when the state is unknown or online, or before the first answer", () => {

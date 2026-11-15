@@ -442,6 +442,8 @@ function remoteRefusal(e: ApiError): string {
 export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair"): string {
   if (e instanceof ApiError) {
     if (e.code === "remote_refused") return remoteRefusal(e);
+    // The machine a run is on refused a decision or a stop (502): fixed words, nothing of its reply.
+    if (e.code === "machine_refused") return "The linked machine refused the request. Nothing was changed.";
     if (context === "run" && e.code === "machine_unreachable") return "Could not reach that machine. Nothing was started.";
     if (e.code === "identity_unavailable") return "Your keychain is unavailable, so this computer has no identity for linking.";
     if (e.code === "linking_disabled") return "Turn on linking first (Machines view)";

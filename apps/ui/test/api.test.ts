@@ -52,6 +52,7 @@ describe("error detail", () => {
     );
     expect(errorMessage(new ApiError(400, "remote_refused", { code: "connection_disabled", machine: "GPU\u202Ebox" }), "run")).not.toContain("\u202E");
     expect(errorMessage(new ApiError(400, "remote_refused", { code: "conflict" }), "run")).toBe("A linked machine refused: it already has a project or run with that id.");
+    expect(errorMessage(new ApiError(502, "machine_refused"))).toBe("The linked machine refused the request. Nothing was changed.");
   });
 
   it("words refused changes of a run on a linked machine in fixed words", () => {

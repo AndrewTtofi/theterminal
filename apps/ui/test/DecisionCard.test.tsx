@@ -210,7 +210,8 @@ describe("DecisionCard", () => {
   it("a remote action says where it runs and that the decision is sent there; unreachable is fixed text", async () => {
     const onDecide = vi.fn().mockRejectedValue(new ApiError(502, "machine_unreachable"));
     render(<DecisionCard action={action} machineName="GPU box" onDecide={onDecide} />);
-    expect(screen.getByText("This agent runs on GPU box. Your decision is sent there.").getAttribute("role")).toBe("status");
+    // Plain text: a live region on a note that never changes would be announced on every mount.
+    expect(screen.getByText("This agent runs on GPU box. Your decision is sent there.").getAttribute("role")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: /Allow/ }));
     expect(await screen.findByText("Could not reach GPU box. Your decision was not sent.")).toBeTruthy();
   });

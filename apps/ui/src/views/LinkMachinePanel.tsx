@@ -64,7 +64,8 @@ function ShowCode({ fingerprint, enabled, onLinked }: { fingerprint: string; ena
   }, [shown, left]);
 
   // The other computer entered the code: this one records machine.paired as the side that showed it.
-  const { subscribeEntries, machines } = model;
+  const { subscribeEntries } = model;
+  const refreshMachines = model.machines.refresh;
   const onLinkedRef = useRef(onLinked);
   onLinkedRef.current = onLinked;
   useEffect(
@@ -75,9 +76,9 @@ function ShowCode({ fingerprint, enabled, onLinked }: { fingerprint: string; ena
         if (p.role !== "showed_code" || typeof p.name !== "string" || typeof p.fingerprint !== "string") return;
         setShown(null);
         onLinkedRef.current({ name: p.name, fingerprint: p.fingerprint });
-        machines.refresh();
+        refreshMachines();
       }),
-    [subscribeEntries, machines],
+    [subscribeEntries, refreshMachines],
   );
 
   // Closing the tab withdraws a code still shown, so no window stays open unseen.
@@ -310,11 +311,13 @@ export function LinkMachinePanel(_props: { id: string }) {
     tabRefs.current[next]?.focus();
   };
 
+  // The Show a code panel stays mounted while the Owner looks at the other tab, so a shown code is not withdrawn by a
+  // peek (only by closing the tab, cancelling, expiry or a pairing); Enter a code polls, so it is mounted only when shown.
+  const ready = overview !== null && overview.identity !== "unavailable" && overview.self !== null;
   let body;
   if (overview === null) body = <p className="empty">{error !== null ? "Could not load machines" : "Loading…"}</p>;
-  else if (overview.identity === "unavailable" || overview.self === null) body = <p className="empty">{NO_IDENTITY}</p>;
-  else if (tab === "show") body = <ShowCode fingerprint={overview.self.fingerprint} enabled={overview.self.linking.enabled} onLinked={setLinked} />;
-  else body = <EnterCode onLinked={setLinked} />;
+  else if (!ready) body = <p className="empty">{NO_IDENTITY}</p>;
+  else body = tab === "enter" ? <EnterCode onLinked={setLinked} /> : null;
 
   return (
     <section className="link-machine" aria-labelledby={`${uid}-title`}>
@@ -330,7 +333,7 @@ export function LinkMachinePanel(_props: { id: string }) {
             role="tab"
             id={`${uid}-tab-${t.id}`}
             aria-selected={tab === t.id}
-            aria-controls={`${uid}-panel`}
+            aria-controls={`${uid}-panel-${t.id}`}
             tabIndex={tab === t.id ? 0 : -1}
             onClick={() => select(t.id)}
             onKeyDown={onTabKey}
@@ -339,9 +342,16 @@ export function LinkMachinePanel(_props: { id: string }) {
           </button>
         ))}
       </div>
-      <div role="tabpanel" id={`${uid}-panel`} aria-labelledby={`${uid}-tab-${tab}`}>
-        {body}
-      </div>
+      {ready && overview.self !== null && (
+        <div role="tabpanel" id={`${uid}-panel-show`} aria-labelledby={`${uid}-tab-show`} hidden={tab !== "show"}>
+          <ShowCode fingerprint={overview.self.fingerprint} enabled={overview.self.linking.enabled} onLinked={setLinked} />
+        </div>
+      )}
+      {(!ready || tab === "enter") && (
+        <div role="tabpanel" id={`${uid}-panel-enter`} aria-labelledby={`${uid}-tab-${ready ? "enter" : tab}`}>
+          {body}
+        </div>
+      )}
       <p role="status" className="link-result">
         {linked !== null && <LinkedNote linked={linked} />}
       </p>

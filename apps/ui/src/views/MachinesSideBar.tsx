@@ -18,7 +18,6 @@ export function fingerprintGroups(fingerprint: string): string {
   return (fingerprint.slice(0, 16).match(/.{1,4}/g) ?? []).join(" ");
 }
 
-
 /** Asks for the overview at once and every `ms` while mounted. */
 export function useMachinesRefresh(refresh: () => void, ms = REFRESH_MS): void {
   const ref = useRef(refresh);
@@ -157,7 +156,9 @@ function ThisComputer({ self, refresh }: { self: LinkSelf; refresh: () => void }
         </button>
         <span aria-hidden="true">Allow linking</span>
       </p>
-      {self.linking.enabled && <p className="machine-linking">{`Linking on · port ${self.linking.port ?? "?"}`}</p>}
+      {self.linking.enabled && (
+        <p className="machine-linking">{self.linking.port === null ? "Linking on · no port bound yet" : `Linking on · port ${self.linking.port}`}</p>
+      )}
       {asking && (
         <div
           className="warning machine-ack"
