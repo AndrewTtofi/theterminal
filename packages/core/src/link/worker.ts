@@ -85,6 +85,8 @@ export class LinkWorker {
   private readonly cleanText: (s: string) => string;
   /** Uploads being received, by their `.part` file name; any other `.part` file is left from a crash. */
   private readonly inFlight = new Map<string, InFlight>();
+  /** Imports into a project's repository run one at a time per project id (see acceptRun). */
+  private readonly importing = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: LinkWorkerDeps) {
     this.heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
@@ -283,8 +285,10 @@ export class LinkWorker {
    * project's repository (BundleInvalidError → nothing recorded); one transaction then records `project.created` and
    * `link.project_received` for a project this computer does not have yet, and always `link.run_accepted`; then the
    * runner starts the run under `runId` for the Owner. A project id this computer already has must be one it received
-   * from `peer` (ConflictError otherwise), so a paired machine can never overwrite a local project's repository. A
-   * start that fails leaves `link.run_accepted` in place, and the error is answered as the runner threw it.
+   * from `peer` (ConflictError otherwise), so a paired machine can never overwrite a local project's repository; the
+   * ownership check, the import and the transaction run one at a time per project id, so two machines racing a new id
+   * never both import into the one repository (the second finds the first's project and is refused). A start that
+   * fails leaves `link.run_accepted` in place, and the error is answered as the runner threw it.
    */
   async acceptRun(peer: string, runId: string, body: unknown): Promise<AgentRun> {
     const id = runIdSchema.parse(runId);
@@ -302,26 +306,28 @@ export class LinkWorker {
     }
     if (record.machineId !== peer || !existsSync(file)) throw new NoRepoError();
     rmSync(this.recordPath(id), { force: true });
-    try {
-      this.assertProjectOf(peer, projectId);
-    } catch (err) {
-      rmSync(file, { force: true });
-      throw err;
-    }
-    await importRepoBundle(this.deps.worktrees, projectId, file); // deletes the file in every case
     const { db, ledger } = this.deps;
-    commitEvents(db, ledger, () => {
-      this.assertFree(id);
-      this.assertProjectOf(peer, projectId);
-      const events: NewLedgerEntry[] = [];
-      if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
-        events.push(
-          { projectId, actor: SYSTEM, type: "project.created", payload: { projectId, name: projectName, pitch: "" } },
-          { projectId, actor: SYSTEM, type: "link.project_received", payload: { projectId, machineId: peer, name: projectName } },
-        );
+    await this.oneImportAtATime(projectId, async () => {
+      try {
+        this.assertProjectOf(peer, projectId);
+      } catch (err) {
+        rmSync(file, { force: true });
+        throw err;
       }
-      events.push({ projectId, actor: SYSTEM, type: "link.run_accepted", payload: { runId: id, machineId: peer, projectId } });
-      return { events, result: () => undefined };
+      await importRepoBundle(this.deps.worktrees, projectId, file); // deletes the file in every case
+      commitEvents(db, ledger, () => {
+        this.assertFree(id);
+        this.assertProjectOf(peer, projectId);
+        const events: NewLedgerEntry[] = [];
+        if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId)) {
+          events.push(
+            { projectId, actor: SYSTEM, type: "project.created", payload: { projectId, name: projectName, pitch: "" } },
+            { projectId, actor: SYSTEM, type: "link.project_received", payload: { projectId, machineId: peer, name: projectName } },
+          );
+        }
+        events.push({ projectId, actor: SYSTEM, type: "link.run_accepted", payload: { runId: id, machineId: peer, projectId } });
+        return { events, result: () => undefined };
+      });
     });
     try {
       return await this.deps.runner.start(OWNER, {
@@ -348,6 +354,19 @@ export class LinkWorker {
     }
   }
 
+  /** Runs `fn` after every earlier import into `projectId` has settled, whatever their outcome. */
+  private async oneImportAtATime<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.importing.get(projectId) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const settled = run.then(() => undefined, () => undefined);
+    this.importing.set(projectId, settled);
+    try {
+      return await run;
+    } finally {
+      if (this.importing.get(projectId) === settled) this.importing.delete(projectId);
+    }
+  }
+
   /** A project this computer has must be one it received from `peer` (a run of it accepted from `peer`). */
   private assertProjectOf(peer: string, projectId: string): void {
     const { db } = this.deps;
@@ -359,9 +378,10 @@ export class LinkWorker {
   }
 
   /**
-   * A decision relayed from `peer` on an action of a run accepted from it: `link.decision_received` names the machine
-   * it came through, then the runner records the Owner's decision as for one made here. NotFoundError for an action of
-   * any other run; AlreadyDecidedError (and nothing recorded) for an action no longer pending.
+   * A decision relayed from `peer` on an action of a run accepted from it: the runner records the Owner's decision as
+   * for one made here, then `link.decision_received` names the machine it came through. NotFoundError for an action of
+   * any other run; AlreadyDecidedError for an action no longer pending. A decision the runner refuses (the action is
+   * no longer waiting) records nothing, so the relay is never recorded without the decision it relayed.
    */
   decide(peer: string, runId: string, actionId: string, body: unknown): AgentAction {
     const id = runIdSchema.parse(runId);
@@ -369,18 +389,15 @@ export class LinkWorker {
     const { decision, reason } = remoteDecisionSchema.parse(body);
     const { projectId } = this.acceptedRun(peer, id);
     const { db, ledger, runner } = this.deps;
-    commitEvent(db, ledger, () => {
-      const row = db.prepare("SELECT run_id, status FROM agent_actions WHERE id = ?").get(action) as
-        | { run_id: string; status: string }
-        | undefined;
-      if (!row || row.run_id !== id) throw new NotFoundError("action", action);
-      if (row.status !== "pending") throw new AlreadyDecidedError(action);
-      return {
-        event: { projectId, actor: SYSTEM, type: "link.decision_received", payload: { runId: id, actionId: action, machineId: peer, decision } },
-        result: () => undefined,
-      };
-    });
-    return runner.decide(OWNER, action, decision, reason);
+    const row = db.prepare("SELECT run_id, status FROM agent_actions WHERE id = ?").get(action) as { run_id: string; status: string } | undefined;
+    if (!row || row.run_id !== id) throw new NotFoundError("action", action);
+    if (row.status !== "pending") throw new AlreadyDecidedError(action);
+    const decided = runner.decide(OWNER, action, decision, reason);
+    commitEvent(db, ledger, () => ({
+      event: { projectId, actor: SYSTEM, type: "link.decision_received", payload: { runId: id, actionId: action, machineId: peer, decision } },
+      result: () => undefined,
+    }));
+    return decided;
   }
 
   /** Stops a run accepted from `peer`, as the Owner would here. */

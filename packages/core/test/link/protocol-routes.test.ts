@@ -31,7 +31,7 @@ const owner = { kind: "human", id: "owner" } as const;
 const shell = { tool: "Bash", kind: "shell" as const, summary: "run the tests", input: { command: "npm test" }, paths: [] };
 
 type Worker = {
-  dataDir: string; db: Db; ledger: Ledger; runner: AgentRunner; link: LinkService; worker: LinkWorker; peer: Peer;
+  dataDir: string; db: Db; ledger: Ledger; runner: AgentRunner; link: LinkService; worker: LinkWorker; peer: Peer; worktrees: WorktreeManager;
 };
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -107,7 +107,7 @@ async function startWorker(script: FakeStep[], o: { heartbeatMs?: number; now?: 
     address: `127.0.0.1:${port}`,
     publicKeyDer: Buffer.from(getSetting(db, "link.publicKey")!, "base64"),
   };
-  return { dataDir, db, ledger, runner, link, worker, peer };
+  return { dataDir, db, ledger, runner, link, worker, peer, worktrees };
 }
 
 const client = () => new LinkClient({ identity: requester, timeoutMs: 60_000 });
@@ -207,6 +207,48 @@ describe("link protocol: runs from a paired machine", () => {
     await uploadRepo(w, "run-own");
     expect(await refusal(startRun(w, "run-own"))).toEqual({ status: 409, code: "conflict" });
     expect(w.ledger.list().some((e) => e.type === "link.run_accepted")).toBe(false);
+  });
+
+  it("two machines racing a brand-new project id: one import lands, the other is refused before it touches the repository", { timeout: T }, async () => {
+    const w = await startWorker([{ message: "hello" }]);
+    // A second paired requester with its own copy of "p1", one commit further on, so the two bundles differ.
+    const other = await newIdentity();
+    commitEvent(w.db, w.ledger, () => ({
+      event: {
+        projectId: null, actor: owner, type: "machine.paired",
+        payload: { machineId: other.machineId, name: "Other", publicKey: other.publicKeyBase64, fingerprint: other.fingerprint, address: "127.0.0.1:2", role: "showed_code" },
+      },
+      result: () => undefined,
+    }));
+    const otherData = realpathSync(mkdtempSync(join(tmpdir(), "proto-other-")));
+    cleanups.push(() => rmSync(otherData, { recursive: true, force: true, maxRetries: 5 }));
+    const otherWt = new WorktreeManager(otherData);
+    const otherRepo = await otherWt.ensureProjectRepo("p1");
+    await otherWt.runGit(otherRepo, ["commit", "--allow-empty", "--no-verify", "-m", "second"]);
+    const head = async (wt: WorktreeManager, repo: string) => (await wt.runGit(repo, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    const heads = { mine: await head(reqWt, await reqWt.ensureProjectRepo("p1")), other: await head(otherWt, otherRepo) };
+    expect(heads.mine).not.toBe(heads.other);
+    const otherClient = new LinkClient({ identity: other, timeoutMs: 60_000 });
+    await uploadRepo(w, "run-race-a");
+    const otherBundle = join(scratch, "other.bundle");
+    await exportRepoBundle(otherWt, "p1", otherBundle);
+    await otherClient.upload(w.peer, "/link/v1/runs/run-race-b/repo", otherBundle, MAX_BUNDLE_BYTES);
+
+    const [a, b] = await Promise.all([
+      startRun(w, "run-race-a").then(() => "ok" as const, (e: unknown) => e),
+      otherClient.request<AgentRun>(w.peer, "POST", "/link/v1/runs/run-race-b/start", startBody()).then(() => "ok" as const, (e: unknown) => e),
+    ]);
+    const outcomes = [a, b];
+    expect(outcomes.filter((o) => o === "ok")).toHaveLength(1);
+    const loser = outcomes.find((o) => o !== "ok");
+    expect(loser).toBeInstanceOf(RemoteRefusedError);
+    expect((loser as RemoteRefusedError).code).toBe("conflict");
+    // The repository holds the winner's commit, untouched by the loser's bundle.
+    const winner = a === "ok" ? heads.mine : heads.other;
+    expect(await head(w.worktrees, join(w.dataDir, "projects", "p1", "repo"))).toBe(winner);
+    expect(w.ledger.list().filter((e) => e.type === "project.created")).toHaveLength(1);
+    expect(w.ledger.list().filter((e) => e.type === "link.run_accepted")).toHaveLength(1);
+    expect(readdirSync(join(w.dataDir, "link", "incoming"))).toEqual([]);
   });
 
   it("records the requester's project name cleaned as any text from another machine", { timeout: T }, async () => {
@@ -352,11 +394,14 @@ describe("link protocol: runs from a paired machine", () => {
     const entries = w.ledger.list();
     const received = entries.findIndex((e) => e.type === "link.decision_received");
     expect(entries[received]!.payload).toEqual({ runId: "run-d", actionId: pending!.id, machineId: requester.machineId, decision: "allow" });
-    expect(entries[received + 1]).toMatchObject({ type: "agent.action.decided", payload: { by: "human", decision: "allow" } });
+    // The relay is recorded only once the worker's own gate took the decision, right after it.
+    expect(entries[received - 1]).toMatchObject({ type: "agent.action.decided", payload: { by: "human", decision: "allow" } });
     await until(() => expect(getRun(w.db, "run-d")!.status).toBe("completed"));
     expect(w.ledger.list().filter((e) => e.type === "agent.action.completed")).toHaveLength(1);
     expect(await refusal(client().request(w.peer, "POST", `/link/v1/runs/run-d/actions/${pending!.id}/decision`, { v: 1, decision: "deny", reason: "" })))
       .toEqual({ status: 409, code: "already_decided" });
+    // A decision the runner refused is no relay: nothing of it is recorded.
+    expect(w.ledger.list().filter((e) => e.type === "link.decision_received")).toHaveLength(1);
     const frames = await readStream(w, "run-d");
     const streamed = frames.map((f) => f.origin.type);
     expect(streamed).toContain("agent.action.decided");
