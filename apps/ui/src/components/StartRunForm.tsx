@@ -3,6 +3,8 @@ import { KIND_LABELS, visibleControls } from "@theterminal/shared";
 import type { AdapterId, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
 import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, LOCAL_MODEL_NOTE } from "../api";
 
+export const OFFLINE_NOTE = "You seem to be offline. Cloud models will not answer; a local model will.";
+
 export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
 
 type Props = {
@@ -15,6 +17,8 @@ type Props = {
   connections: Connection[];
   /** The card chosen when the form opens; one no longer in `cards` is not sent. */
   defaultCardId?: string | null;
+  /** True when the server inferred that the internet is unreachable; adds a note for cloud runs, never blocks one. */
+  offline?: boolean;
   /** The submit button's label; `Start agent` by default. */
   submitLabel?: string;
   /** What a polite status announces once a run started (`Asked Claude.`), given the adapter's name; nothing when absent. */
@@ -25,7 +29,7 @@ type Props = {
 
 /** Starts an agent run: the agent, an optional card, the prompt and the connections the run may use. */
 export function StartRunForm({
-  adapters, providers, cards, connections, defaultCardId, submitLabel = "Start agent", startedMessage, onStart,
+  adapters, providers, cards, connections, defaultCardId, offline = false, submitLabel = "Start agent", startedMessage, onStart,
 }: Props) {
   const [adapter, setAdapter] = useState<AdapterId | "">("");
   const [prompt, setPrompt] = useState("");
@@ -51,6 +55,9 @@ export function StartRunForm({
     ...offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id),
     ...(localUsable ? locals.filter((c) => picked.includes(c.id)).map((c) => c.id) : []),
   ];
+  // Offline, a cloud model will not answer: say so unless the run goes to the fake agent or a local model.
+  const localChosen = localUsable && locals.some((c) => picked.includes(c.id));
+  const offlineNote = offline && chosen !== "" && chosen !== "fake" && !localChosen;
 
   return (
     <form
@@ -143,6 +150,7 @@ export function StartRunForm({
           {!localUsable && <p className="note">{LOCAL_MODEL_NOTE}</p>}
         </fieldset>
       )}
+      {offlineNote && <p className="note offline-note">{OFFLINE_NOTE}</p>}
       <button type="submit" disabled={!chosen || !prompt.trim() || starting}>
         {submitLabel}
       </button>

@@ -222,4 +222,8 @@ describe("AgentPanel", () => {
       expect(screen.queryByRole("group", { name: "Give this run access to" })).toBeNull();
     });
   });
+  it("passes offline to its start form", () => {
+    render(<AgentPanel adapters={["claude"]} runs={[]} selectedRunId={null} offline onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />);
+    expect(screen.getByText("You seem to be offline. Cloud models will not answer; a local model will.")).toBeTruthy();
+  });
 });

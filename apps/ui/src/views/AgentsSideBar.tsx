@@ -14,6 +14,7 @@ export function AgentsSideBar() {
       cards={model.board ? Object.values(model.board.columns).flat() : []}
       runs={model.runs}
       selectedRunId={model.selectedRunId}
+      offline={model.status?.network.state === "offline"}
       onStart={model.onStartRun}
       onSelectRun={(runId) => {
         model.onSelectRun(runId);

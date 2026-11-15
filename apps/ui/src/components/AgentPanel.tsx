@@ -27,6 +27,8 @@ type Props = {
   selectedRunId: string | null;
   /** The selected run's actions; omit them when another panel (the Agent feed) shows them. */
   actions?: AgentAction[];
+  /** True when the server inferred that the internet is unreachable; passed to the start form. */
+  offline?: boolean;
   /** Resolve false (or reject) when starting failed, so the prompt is kept. `cardId` is passed only when a card is chosen. */
   onStart: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string) => Promise<boolean | void> | void;
   onSelectRun: (runId: string | null) => void;
@@ -37,13 +39,13 @@ type Props = {
 export const cost = (r: AgentRun) => (r.costUsd == null ? "" : ` · ${runCost(r)}`);
 export const decidedBy = (a: AgentAction) => (a.decidedBy ? ` · decided by ${a.decidedBy}` : "");
 
-export function AgentPanel({ adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, onStart, onSelectRun, onStop }: Props) {
+export function AgentPanel({ adapters, providers, connections = [], cards = [], runs, selectedRunId, actions, offline, onStart, onSelectRun, onStop }: Props) {
   const selected = runs.find((r) => r.id === selectedRunId);
 
   return (
     <section className="agent-panel" aria-label="Agents">
       <h2>Agents</h2>
-      <StartRunForm adapters={adapters} providers={providers} cards={cards} connections={connections} onStart={onStart} />
+      <StartRunForm adapters={adapters} providers={providers} cards={cards} connections={connections} offline={offline} onStart={onStart} />
       <ul className="runs">
         {runs.map((r) => (
           <li key={r.id}>

@@ -10,6 +10,9 @@ const ERROR_COPY: Record<string, string> = {
   github_unavailable: "Could not reach GitHub",
 };
 
+/** Added to a stale or failed overview's note when the server inferred that the internet is unreachable. */
+const OFFLINE_SUFFIX = " You seem to be offline.";
+
 const RUNNING = new Set(["queued", "in_progress", "waiting", "pending"]);
 const FAILING = new Set(["failure", "timed_out", "startup_failure", "action_required"]);
 
@@ -27,6 +30,7 @@ const external = { target: "_blank", rel: "noopener noreferrer" } as const;
 export function GitHubSideBar() {
   const { model, showView } = useShell();
   const { overview, error, refresh } = model.github;
+  const offline = model.status?.network.state === "offline" ? OFFLINE_SUFFIX : "";
   const uid = useId();
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
@@ -48,7 +52,10 @@ export function GitHubSideBar() {
       </div>
     );
   }
-  if (error) return <p className="empty">{ERROR_COPY[error] ?? ERROR_COPY.github_unavailable}</p>;
+  if (error) {
+    const copy = ERROR_COPY[error] ?? ERROR_COPY.github_unavailable;
+    return <p className="empty">{offline ? `${copy}.${offline}` : copy}</p>;
+  }
   if (!overview) return <p className="empty">Loading…</p>;
 
   return (
@@ -59,7 +66,7 @@ export function GitHubSideBar() {
         </a>
         <p>{`Default branch: ${overview.repo.defaultBranch}`}</p>
       </header>
-      {overview.stale && <p className="github-stale">Showing the last loaded data; GitHub is rate-limiting requests.</p>}
+      {overview.stale && <p className="github-stale">{`Showing the last loaded data; GitHub is rate-limiting requests.${offline}`}</p>}
       <section aria-labelledby={`${uid}-branches`}>
         <h3 id={`${uid}-branches`}>Branches</h3>
         <ul>

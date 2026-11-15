@@ -164,6 +164,7 @@ export function ConversationPanel() {
             providers={model.agentsInfo.providers}
             cards={cards}
             connections={model.connections.list}
+            offline={model.status?.network.state === "offline"}
             submitLabel="Ask"
             startedMessage={(name) => `Asked ${name}.`}
             onStart={model.onStartRun}

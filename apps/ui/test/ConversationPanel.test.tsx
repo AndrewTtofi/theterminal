@@ -215,4 +215,10 @@ describe("ConversationPanel", () => {
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(status.textContent).toBe("Asked Fake.");
   });
+  it("passes the inferred offline state to the ask form", () => {
+    const network = { state: "offline", basis: "inferred", since: null, lastError: "ENOTFOUND" };
+    renderPanel({ agentsInfo: { adapters: ["claude"], providers: {} }, status: { network } } as unknown as Partial<WorkbenchModel>);
+    const ask = within(panel()).getByRole("region", { name: "Ask an agent" });
+    expect(within(ask).getByText("You seem to be offline. Cloud models will not answer; a local model will.")).toBeTruthy();
+  });
 });

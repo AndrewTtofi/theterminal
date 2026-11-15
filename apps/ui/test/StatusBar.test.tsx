@@ -204,4 +204,59 @@ describe("StatusBar", () => {
       expect(screen.getByLabelText("Layout name")).toBeTruthy();
     });
   });
+  describe("offline", () => {
+    const OFFLINE_TITLE =
+      "No internet connection was reachable the last time The Terminal tried (inferred). Local work, local models and linked machines keep working.";
+    const net = (state: Status["network"]["state"]): Status => ({
+      ...status(),
+      network: {
+        state,
+        basis: "inferred",
+        since: state === "unknown" ? null : "2026-11-15T12:00:00.000Z",
+        lastError: state === "offline" ? "ENOTFOUND" : null,
+      },
+    });
+
+    it("shows Offline, marked for attention and with its basis in the title, when the inferred state is offline", () => {
+      render(<StatusBar status={net("offline")} running={0} pending={0} {...noop} />);
+      const bar = screen.getByRole("contentinfo", { name: "Status bar" });
+      const item = within(bar).getByText("Offline");
+      expect(item.classList.contains("status-item")).toBe(true);
+      expect(item.classList.contains("attention")).toBe(true);
+      expect(item.getAttribute("title")).toBe(OFFLINE_TITLE);
+    });
+
+    it("shows nothing about the network when the state is unknown or online, or before the first answer", () => {
+      for (const s of [net("unknown"), net("online"), null]) {
+        const { unmount } = render(<StatusBar status={s} running={0} pending={0} {...noop} />);
+        expect(screen.queryByText("Offline")).toBeNull();
+        expect(screen.getByRole("contentinfo").textContent).not.toMatch(/online/i);
+        unmount();
+      }
+    });
+
+    it("announces a change of the inferred state in a polite live region, and says nothing at first when unknown", () => {
+      const { rerender } = render(<StatusBar status={net("unknown")} running={0} pending={0} {...noop} />);
+      const live = screen.getByTestId("network-announcement");
+      expect(live.getAttribute("role")).toBe("status");
+      expect(live.getAttribute("aria-live")).toBe("polite");
+      expect(live.textContent).toBe("");
+
+      rerender(<StatusBar status={net("offline")} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("You seem to be offline (inferred). Local work, local models and linked machines keep working.");
+
+      // A later status with the same state is not a change: the announcement stays as it was.
+      rerender(<StatusBar status={{ ...net("offline"), runningAgents: 5 }} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("You seem to be offline (inferred). Local work, local models and linked machines keep working.");
+
+      rerender(<StatusBar status={net("online")} running={0} pending={0} {...noop} />);
+      expect(live.textContent).toBe("The internet answered again (inferred).");
+    });
+
+    it("does not announce being online when it was never offline", () => {
+      const { rerender } = render(<StatusBar status={net("unknown")} running={0} pending={0} {...noop} />);
+      rerender(<StatusBar status={net("online")} running={0} pending={0} {...noop} />);
+      expect(screen.getByTestId("network-announcement").textContent).toBe("");
+    });
+  });
 });

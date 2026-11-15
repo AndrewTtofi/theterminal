@@ -104,4 +104,44 @@ describe("StartRunForm", () => {
       expect(onStart).toHaveBeenCalledWith("claude", "go", []);
     });
   });
+  describe("offline", () => {
+    const NOTE = "You seem to be offline. Cloud models will not answer; a local model will.";
+    const qwen = { id: "lm1", kind: "llm", provider: "local_model", name: "Qwen on Ollama", enabled: true } as unknown as Connection;
+
+    it("notes that cloud models will not answer, and still starts the run", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(<StartRunForm adapters={["claude"]} cards={[]} connections={[]} offline onStart={onStart} />);
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      const start = screen.getByRole("button", { name: "Start agent" }) as HTMLButtonElement;
+      expect(start.disabled).toBe(false);
+      await userEvent.click(start);
+      expect(onStart).toHaveBeenCalledWith("claude", "go", []);
+    });
+
+    it("drops the note once a local model is ticked with Codex, and brings it back when the tick is cleared", async () => {
+      render(<StartRunForm adapters={["codex"]} cards={[]} connections={[qwen]} offline onStart={vi.fn()} />);
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      await userEvent.click(screen.getByLabelText("Qwen on Ollama"));
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await userEvent.click(screen.getByLabelText("Qwen on Ollama"));
+      expect(screen.getByText(NOTE)).toBeTruthy();
+    });
+
+    it("keeps the note for an agent that cannot use the ticked local model", async () => {
+      render(<StartRunForm adapters={["codex", "claude"]} cards={[]} connections={[qwen]} offline onStart={vi.fn()} />);
+      await userEvent.click(screen.getByLabelText("Qwen on Ollama"));
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await userEvent.selectOptions(screen.getByLabelText("Agent"), "claude");
+      expect(screen.getByText(NOTE)).toBeTruthy();
+    });
+
+    it("says nothing for the fake agent, or when not offline", () => {
+      const { unmount } = render(<StartRunForm adapters={["fake"]} cards={[]} connections={[]} offline onStart={vi.fn()} />);
+      expect(screen.queryByText(NOTE)).toBeNull();
+      unmount();
+      render(<StartRunForm adapters={["claude"]} cards={[]} connections={[]} onStart={vi.fn()} />);
+      expect(screen.queryByText(NOTE)).toBeNull();
+    });
+  });
 });
