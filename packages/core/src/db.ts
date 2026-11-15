@@ -137,6 +137,29 @@ const MIGRATIONS = [
   CREATE INDEX gate_decisions_card ON gate_decisions (card_id);`,
   // The commit a run's worktree was created at; NULL for runs recorded before it was kept.
   `ALTER TABLE agent_runs ADD COLUMN base TEXT;`,
+  // Linked machines: paired machines, runs that cross a link, and the machine a mirrored run executes on.
+  `CREATE TABLE machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    address TEXT NOT NULL,
+    role TEXT NOT NULL,
+    paired_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE link_runs (
+    run_id TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX link_runs_machine ON link_runs (machine_id);
+  ALTER TABLE agent_runs ADD COLUMN machine_id TEXT;`,
 ];
 
 export type Db = Database.Database;

@@ -1,5 +1,6 @@
 import type {
-  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, PendingAgentAction, QuestionId,
+  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, LinkRun, LinkRunState, Machine,
+  PendingAgentAction, QuestionId,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
@@ -134,7 +135,45 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       );
       break;
     }
-    default: // gate.blocked and conversation entries project nothing
+    case "machine.identity_created":
+      setSetting(db, "link.machineId", p.machineId);
+      setSetting(db, "link.publicKey", p.publicKey);
+      setSetting(db, "link.fingerprint", p.fingerprint);
+      break;
+    case "machine.named":
+      setSetting(db, "link.name", p.name);
+      break;
+    case "machine.linking_enabled":
+      setSetting(db, "link.enabled", "1");
+      setSetting(db, "link.port", String(p.port));
+      break;
+    case "machine.linking_disabled":
+      setSetting(db, "link.enabled", "0");
+      break;
+    case "machine.paired":
+      db.prepare(
+        `INSERT OR REPLACE INTO machines (id, name, public_key, fingerprint, address, role, paired_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(p.machineId, p.name, p.publicKey, p.fingerprint, p.address, p.role, e.ts, e.ts);
+      break;
+    case "machine.unpaired":
+      db.prepare("DELETE FROM machines WHERE id = ?").run(p.machineId);
+      break;
+    case "link.run_requested":
+      // The payload carries no projectId: the entry's is the run's project (a NULL one fails the NOT NULL column).
+      insertLinkRun(db, p.runId, p.machineId, "requested", e.projectId, "requested", e.ts);
+      break;
+    case "link.run_accepted":
+      insertLinkRun(db, p.runId, p.machineId, "accepted", p.projectId, "running", e.ts);
+      break;
+    case "link.run_failed":
+      db.prepare("UPDATE link_runs SET state = 'failed', error = ?, updated_at = ? WHERE run_id = ?").run(p.error, e.ts, p.runId);
+      break;
+    case "link.changes_imported":
+      db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);
+      break;
+    // link.mirrored is applied by Task 8's applyMirrored; until then it projects nothing.
+    default: // gate.blocked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
 }
@@ -174,13 +213,22 @@ function updateConnection(db: Db, p: Payload, ts: string): void {
   );
 }
 
+function insertLinkRun(
+  db: Db, runId: string, machineId: string, direction: LinkRun["direction"], projectId: string | null, state: LinkRunState, ts: string,
+): void {
+  db.prepare(
+    `INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, last_seq, error, updated_at)
+     VALUES (?, ?, ?, ?, ?, 0, NULL, ?)`,
+  ).run(runId, machineId, direction, projectId, state, ts);
+}
+
 function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
 const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
-  "intakes", "intake_answers", "intake_decisions", "gate_decisions",
+  "intakes", "intake_answers", "intake_decisions", "gate_decisions", "machines", "link_runs",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -207,9 +255,7 @@ type RunRow = {
   id: string; project_id: string; card_id: string | null; adapter: AgentRun["adapter"];
   auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
-  started_at: string; finished_at: string | null;
-  /** Absent until the linked-machines migration adds the column. */
-  machine_id?: string | null;
+  started_at: string; finished_at: string | null; machine_id: string | null;
 };
 type ActionRow = {
   id: string; run_id: string; kind: AgentAction["kind"]; tool: string; summary: string; input: string;
@@ -221,7 +267,7 @@ const toRun = (r: RunRow): AgentRun => ({
   id: r.id, projectId: r.project_id, cardId: r.card_id, adapter: r.adapter, authMode: r.auth_mode,
   prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
-  startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id ?? null,
+  startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id,
 });
 const toAction = (r: ActionRow): AgentAction => ({
   id: r.id, runId: r.run_id, kind: r.kind, tool: r.tool, summary: r.summary, input: JSON.parse(r.input),
@@ -383,4 +429,45 @@ export function countPendingActions(db: Db, projectId: string): number {
 /** Runs on the card that are still running. */
 export function countRunningRuns(db: Db, cardId: string): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE card_id = ? AND status = 'running'").get(cardId) as { n: number }).n;
+}
+
+type MachineRow = {
+  id: string; name: string; public_key: string; fingerprint: string; address: string; role: Machine["role"];
+  paired_at: string; updated_at: string;
+};
+const toMachine = (r: MachineRow): Machine => ({
+  id: r.id, name: r.name, publicKey: r.public_key, fingerprint: r.fingerprint, address: r.address, role: r.role,
+  pairedAt: r.paired_at, updatedAt: r.updated_at,
+});
+
+/** Paired machines, by name then id. */
+export function listMachines(db: Db): Machine[] {
+  return (db.prepare("SELECT * FROM machines ORDER BY name, id").all() as MachineRow[]).map(toMachine);
+}
+
+export function getMachine(db: Db, id: string): Machine | null {
+  const r = db.prepare("SELECT * FROM machines WHERE id = ?").get(id) as MachineRow | undefined;
+  return r ? toMachine(r) : null;
+}
+
+type LinkRunRow = {
+  run_id: string; machine_id: string; direction: LinkRun["direction"]; project_id: string; state: LinkRunState;
+  last_seq: number; error: string | null; updated_at: string;
+};
+const toLinkRun = (r: LinkRunRow): LinkRun => ({
+  runId: r.run_id, machineId: r.machine_id, direction: r.direction, projectId: r.project_id, state: r.state,
+  lastSeq: r.last_seq, error: r.error, updatedAt: r.updated_at,
+});
+
+export function getLinkRun(db: Db, runId: string): LinkRun | null {
+  const r = db.prepare("SELECT * FROM link_runs WHERE run_id = ?").get(runId) as LinkRunRow | undefined;
+  return r ? toLinkRun(r) : null;
+}
+
+/** Runs that cross a link, in the order they were first recorded; with `state`, only those in it. */
+export function listLinkRuns(db: Db, state?: LinkRunState): LinkRun[] {
+  const rows = (state === undefined
+    ? db.prepare("SELECT * FROM link_runs ORDER BY rowid").all()
+    : db.prepare("SELECT * FROM link_runs WHERE state = ? ORDER BY rowid").all(state)) as LinkRunRow[];
+  return rows.map(toLinkRun);
 }

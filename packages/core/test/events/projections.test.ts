@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, type GateId } from "@theterminal/shared";
+import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, LINKING_ACK, type GateId } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
@@ -9,8 +9,9 @@ import { commitEvent, commitEvents } from "../../src/events/commit.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  countPendingActions, countRunningRuns, getIntake, getRun, getSetting, listActions, listAllPendingActions, listGateDecisions,
-  listOpenIntakes, listPendingActions, listRuns, projectSpendUsd, rebuildAllProjections, workspaceCounts,
+  countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting, listActions, listAllPendingActions,
+  listGateDecisions, listLinkRuns, listMachines, listOpenIntakes, listPendingActions, listRuns, projectSpendUsd,
+  rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
 
 describe("workspaceCounts", () => {
@@ -51,6 +52,7 @@ describe("workspaceCounts", () => {
 
 const human = { kind: "human", id: "owner" } as const;
 const agent = { kind: "agent", id: "claude" } as const;
+const link = { kind: "system", id: "link" } as const;
 let db: Db;
 let ledger: Ledger;
 
@@ -59,7 +61,7 @@ beforeEach(() => {
   ledger = new Ledger(db);
 });
 
-const emit = (type: string, payload: Record<string, unknown>, actor: typeof human | typeof agent = agent, projectId: string | null = "p1") =>
+const emit = (type: string, payload: Record<string, unknown>, actor: { kind: "human" | "agent" | "system"; id: string } = agent, projectId: string | null = "p1") =>
   commitEvent(db, ledger, () => ({ event: { projectId, actor, type, payload }, result: (e) => e }));
 
 function script() {
@@ -409,5 +411,120 @@ describe("gate fact queries", () => {
     expect(countPendingActions(db, "p1")).toBe(1);
     expect(countPendingActions(db, "p2")).toBe(1);
     expect(countPendingActions(db, "p3")).toBe(0);
+  });
+});
+
+describe("linked-machine projections", () => {
+  const mA = "a".repeat(32);
+  const mB = "b".repeat(32);
+  const own = { machineId: "c".repeat(32), publicKey: `${"A".repeat(59)}=`, fingerprint: "c".repeat(64) };
+  const peer = (id: string, name: string) => ({
+    machineId: id, name, publicKey: `${"B".repeat(59)}=`, fingerprint: id.repeat(2), address: "studio.local:4418",
+    role: "entered_code",
+  });
+  const runRequested = (runId: string, machineId: string) => ({
+    runId, machineId, adapter: "fake", prompt: "do it", cardId: null, connectionIds: [],
+  });
+
+  it("migrates to user_version 9 with the machines and link_runs tables and agent_runs.machine_id", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(9);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("machines")).toEqual(["id", "name", "public_key", "fingerprint", "address", "role", "paired_at", "updated_at"]);
+    expect(columns("link_runs")).toEqual(["run_id", "machine_id", "direction", "project_id", "state", "last_seq", "error", "updated_at"]);
+    expect(columns("agent_runs")).toContain("machine_id");
+  });
+
+  it("projects this machine's identity, name and linking switch into settings", () => {
+    emit("machine.identity_created", own, link, null);
+    expect(getSetting(db, "link.machineId")).toBe(own.machineId);
+    expect(getSetting(db, "link.publicKey")).toBe(own.publicKey);
+    expect(getSetting(db, "link.fingerprint")).toBe(own.fingerprint);
+    emit("machine.named", { name: "Studio" }, human, null);
+    expect(getSetting(db, "link.name")).toBe("Studio");
+    emit("machine.named", { name: "Studio Mac" }, human, null);
+    expect(getSetting(db, "link.name")).toBe("Studio Mac");
+    expect(getSetting(db, "link.enabled")).toBeNull();
+    emit("machine.linking_enabled", { port: 4419, acknowledgement: LINKING_ACK }, human, null);
+    expect(getSetting(db, "link.enabled")).toBe("1");
+    expect(getSetting(db, "link.port")).toBe("4419");
+    emit("machine.linking_disabled", {}, human, null);
+    expect(getSetting(db, "link.enabled")).toBe("0");
+    expect(getSetting(db, "link.port")).toBe("4419");
+  });
+
+  it("projects paired machines, re-pairing replaces the row, and unpairing deletes it", () => {
+    expect(listMachines(db)).toEqual([]);
+    const paired = emit("machine.paired", peer(mA, "Laptop"), human, null);
+    emit("machine.paired", { ...peer(mB, "Desktop"), role: "showed_code" }, human, null);
+    expect(getMachine(db, mA)).toEqual({
+      id: mA, name: "Laptop", publicKey: `${"B".repeat(59)}=`, fingerprint: mA.repeat(2), address: "studio.local:4418",
+      role: "entered_code", pairedAt: paired.ts, updatedAt: paired.ts,
+    });
+    expect(listMachines(db).map((m) => [m.name, m.role])).toEqual([["Desktop", "showed_code"], ["Laptop", "entered_code"]]);
+    const again = emit("machine.paired", { ...peer(mA, "Laptop 2"), address: "10.0.0.5:4420" }, human, null);
+    expect(getMachine(db, mA)).toMatchObject({ name: "Laptop 2", address: "10.0.0.5:4420", updatedAt: again.ts });
+    expect(listMachines(db)).toHaveLength(2);
+    emit("machine.unpaired", { machineId: mA, name: "Laptop 2" }, human, null);
+    expect(getMachine(db, mA)).toBeNull();
+    expect(listMachines(db).map((m) => m.id)).toEqual([mB]);
+  });
+
+  it("projects link runs on both sides through their states", () => {
+    const requested = emit("link.run_requested", runRequested("r1", mA), human, "p1");
+    expect(getLinkRun(db, "r1")).toEqual({
+      runId: "r1", machineId: mA, direction: "requested", projectId: "p1", state: "requested", lastSeq: 0, error: null,
+      updatedAt: requested.ts,
+    });
+    const accepted = emit("link.run_accepted", { runId: "r2", machineId: mB, projectId: "p2" }, link, "p2");
+    expect(getLinkRun(db, "r2")).toEqual({
+      runId: "r2", machineId: mB, direction: "accepted", projectId: "p2", state: "running", lastSeq: 0, error: null,
+      updatedAt: accepted.ts,
+    });
+    emit("link.run_requested", runRequested("r3", mA), human, "p1");
+    const failed = emit("link.run_failed", { runId: "r3", machineId: mA, error: "unreachable" }, link, "p1");
+    expect(getLinkRun(db, "r3")).toMatchObject({ state: "failed", error: "unreachable", updatedAt: failed.ts });
+    const imported = emit(
+      "link.changes_imported", { runId: "r1", machineId: mA, commit: "f".repeat(40) }, link, "p1",
+    );
+    expect(getLinkRun(db, "r1")).toMatchObject({ state: "imported", updatedAt: imported.ts });
+    expect(getLinkRun(db, "nope")).toBeNull();
+    expect(listLinkRuns(db).map((r) => r.runId)).toEqual(["r1", "r2", "r3"]);
+    expect(listLinkRuns(db, "running").map((r) => r.runId)).toEqual(["r2"]);
+    expect(listLinkRuns(db, "failed").map((r) => r.runId)).toEqual(["r3"]);
+    expect(listLinkRuns(db, "finished")).toEqual([]);
+  });
+
+  it("maps agent_runs.machine_id to machineId in getRun and listRuns", () => {
+    script();
+    expect(getRun(db, "r1")!.machineId).toBeNull();
+    db.prepare("UPDATE agent_runs SET machine_id = ? WHERE id = 'r1'").run(mA);
+    expect(getRun(db, "r1")!.machineId).toBe(mA);
+    expect(listRuns(db, "p1").map((r) => r.machineId)).toEqual([mA]);
+  });
+
+  it("rebuild after identity, naming, linking, pairing and link runs equals the live tables", () => {
+    emit("machine.identity_created", own, link, null);
+    emit("machine.named", { name: "Studio" }, human, null);
+    emit("machine.linking_enabled", { port: 4418, acknowledgement: LINKING_ACK }, human, null);
+    emit("machine.paired", peer(mA, "Laptop"), human, null);
+    emit("machine.paired", peer(mB, "Desktop"), human, null);
+    emit("machine.unpaired", { machineId: mB, name: "Desktop" }, human, null);
+    emit("link.run_requested", runRequested("r1", mA), human, "p1");
+    emit("link.run_requested", runRequested("r2", mA), human, "p1");
+    emit("link.run_failed", { runId: "r2", machineId: mA, error: "repo_too_large" }, link, "p1");
+    emit("link.run_accepted", { runId: "r3", machineId: mA, projectId: "p3" }, link, "p3");
+    emit("link.changes_imported", { runId: "r1", machineId: mA, commit: "e".repeat(40) }, link, "p1");
+    emit("machine.linking_disabled", {}, human, null);
+    const tables = ["settings", "machines", "link_runs"];
+    const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1`).all());
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([6, 1, 3]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+    // A rebuild clears the link tables first: rows not backed by the ledger disappear.
+    db.prepare("INSERT INTO machines VALUES ('x', 'n', 'k', 'f', 'a:1', 'showed_code', 't', 't')").run();
+    db.prepare("INSERT INTO link_runs (run_id, machine_id, direction, project_id, state, updated_at) VALUES ('x', 'm', 'requested', 'p', 'requested', 't')").run();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
   });
 });

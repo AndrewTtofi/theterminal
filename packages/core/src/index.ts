@@ -53,7 +53,7 @@ export { registerStoryRoutes } from "./server/story-routes.js";
 export type { StoryRouteDeps } from "./server/story-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
-export { workspaceCounts } from "./events/projections.js";
+export { workspaceCounts, listMachines, getMachine, getLinkRun, listLinkRuns } from "./events/projections.js";
 export type { WorkspaceCounts } from "./events/projections.js";
 export { classify } from "./agents/policy.js";
 export { ApprovalBroker, AlreadyDecidedError } from "./agents/approvals.js";
@@ -80,3 +80,7 @@ export type {
   AddConnectionInput, ConnectionServiceDeps, ConnectionTester, Credentials, UpdateConnectionPatch,
 } from "./connections/service.js";
 export { CONNECTION_TESTERS } from "./connections/testers.js";
+export { base32Encode, base32Decode } from "./link/base32.js";
+export { selfSignedCertificate, derToPem, CERT_NOT_BEFORE, CERT_NOT_AFTER } from "./link/x509.js";
+export { LinkIdentity, IDENTITY_ACCOUNT, machineIdOf, fingerprintOf, verifySignature } from "./link/identity.js";
+export type { IdentityCreated } from "./link/identity.js";
