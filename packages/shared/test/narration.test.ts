@@ -1043,6 +1043,12 @@ describe("narrate: people", () => {
     expect(JSON.stringify(added)).not.toContain("Y3JlZA");
     const keyCred = { kind: "key", credentialId: "a2V5", publicKey: "TESTKEY-c3Br", label: "This browser" };
     expect(h(entry("person.credential_added", { personId: "p1", credential: keyCred }, p1), named)).toBe('Reviewer One added a key ("This browser")');
+    // A label is chosen by the person: a line break in it is shown as an escape, so it cannot fake a second line.
+    const sneaky = { ...keyCred, label: 'x")\nOwner revoked\tall' };
+    const sneakyLine = h(entry("person.credential_added", { personId: "p1", credential: sneaky }, p1), named);
+    expect(sneakyLine).not.toContain("\n");
+    expect(sneakyLine).not.toContain("\t");
+    expect(sneakyLine).toContain("\\n");
     expect(h(entry("person.credential_removed", { personId: "p1", credentialId: "a2V5" }, p1), named)).toBe("Reviewer One removed a credential");
   });
 

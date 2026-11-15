@@ -617,7 +617,7 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     case "person.credential_added": {
       const c = isRecord(p.credential) ? p.credential : {};
       const kind = c.kind === "passkey" ? "passkey" : c.kind === "key" ? "key" : "credential";
-      return { headline: `${who} added a ${kind} ("${show(c.label, 60, true)}")` };
+      return { headline: `${who} added a ${kind} ("${clipVisible(str(c.label), 60, true, true)}")` };
     }
     case "person.credential_removed":
       return { headline: `${who} removed a credential` };
