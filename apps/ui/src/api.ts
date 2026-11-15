@@ -14,6 +14,9 @@ import type {
   ConnectionProvider,
   GitHubOverview,
   DecisionId,
+  DirListing,
+  FileContent,
+  FileDiff,
   GateDecisionInput,
   GateEvaluation,
   HardwareInfo,
@@ -24,6 +27,7 @@ import type {
   Project,
   Provider,
   QuestionId,
+  RunChanges,
   Stage,
 } from "@theterminal/shared";
 
@@ -157,6 +161,14 @@ export const api = {
       return !(e instanceof ApiError && e.status === 404);
     }
   },
+  /** What the run changed against its starting point; 404 `worktree_missing`, 409 `no_base`. */
+  getRunChanges: (runId: string) => request<RunChanges>(`/api/runs/${enc(runId)}/changes`),
+  /** One file's diff, relative to the run's working copy. */
+  getRunDiff: (runId: string, path: string) => request<FileDiff>(`/api/runs/${enc(runId)}/diff?path=${enc(path)}`),
+  /** One directory of the run's working copy; `""` is its top. */
+  listRunDir: (runId: string, path: string) => request<DirListing>(`/api/runs/${enc(runId)}/files?path=${enc(path)}`),
+  /** One file's text from the run's working copy. */
+  getRunFile: (runId: string, path: string) => request<FileContent>(`/api/runs/${enc(runId)}/file?path=${enc(path)}`),
   stopRun: (runId: string) => request<AgentRun>(`/api/runs/${enc(runId)}/stop`, { method: "POST", body: {} }),
   listPendingActions: (projectId: string) =>
     request<AgentAction[]>(`/api/projects/${enc(projectId)}/pending-actions`),
@@ -281,6 +293,8 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"):
     if (e.status === 503 && e.code === "keychain_unavailable") return "Your keychain is unavailable. Nothing was saved.";
     if (e.status === 422 && e.code === "terminal_required") return "This provider signs in inside its own terminal. Run the command shown, then check again.";
     if (e.status === 422 && e.code === "invalid_cli_home") return "The CLI home folder must be an absolute path";
+    if (e.code === "worktree_missing") return "This run's working copy no longer exists on this computer";
+    if (e.code === "no_base") return "Could not work out what this run changed";
     if (e.status === 401 || e.status === 403) return "Not authorised";
     if (e.status === 400) return "That input was not accepted";
     if (e.status === 404) return "Not found";

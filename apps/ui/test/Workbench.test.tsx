@@ -8,7 +8,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 
 import { Workbench } from "../src/shell/Workbench";
 import type { DockPanelId } from "../src/shell/Dock";
-import type { WorkbenchModel } from "../src/shell/model";
+import type { AppModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
 import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked } from "./gate-fixtures";
@@ -54,7 +54,7 @@ const entry: LedgerEntry = {
   type: "project.created", payload: { name: "Local Model Hub" }, prevHash: "", hash: "",
 };
 
-function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
+function model(over: Partial<AppModel> = {}): AppModel {
   return {
     projects: [board.project],
     selectedId: "p1",
@@ -103,6 +103,14 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     story: vi.fn().mockReturnValue(new Promise(() => {})),
     subscribeEntries: () => () => {},
     runExists: vi.fn().mockResolvedValue(true),
+    changesRunId: null,
+    onSelectChangesRun: vi.fn(),
+    changes: null,
+    changesError: null,
+    runChanges: vi.fn().mockReturnValue(new Promise(() => {})),
+    dir: vi.fn().mockReturnValue(new Promise(() => {})),
+    file: vi.fn().mockReturnValue(new Promise(() => {})),
+    diff: vi.fn().mockReturnValue(new Promise(() => {})),
     ...over,
   };
 }
@@ -485,6 +493,14 @@ describe("Workbench", () => {
       await userEvent.click(screen.getByRole("button", { name: "Needs you: 0" }));
       expect(view("Needs you").getAttribute("aria-pressed")).toBe("true");
       expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
+    });
+
+    it("opens a run's diff and file tabs in the main area, named after the file", () => {
+      const { container } = render(<Workbench model={model()} />);
+      act(() => testDock.shell!.model.onOpenDiff("run1", "src/a.ts"));
+      act(() => testDock.shell!.model.onOpenFile("run1", "src/a.ts"));
+      expect(panels(container)).toEqual(["board", "conversation", "diff:run1:src%2Fa.ts", "file:run1:src%2Fa.ts"]);
+      expect(container.querySelector('[data-panel="file:run1:src%2Fa.ts"]')?.getAttribute("data-active")).toBe("true");
     });
 
     it("closes restored diff and file tabs whose run the server no longer knows, keeping the rest", async () => {

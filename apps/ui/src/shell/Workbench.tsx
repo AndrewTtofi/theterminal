@@ -2,20 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DecisionCard } from "../components/DecisionCard";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
+import { basename } from "../components/text";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
 import { BoardView } from "../views/BoardView";
 import { CapacityPanel } from "../views/CapacityPanel";
 import { ConnectionEditor } from "../views/ConnectionEditor";
+import { DiffPanel } from "../views/DiffPanel";
+import { FilePanel } from "../views/FilePanel";
 import { IntakePanel } from "../views/IntakePanel";
 import { LedgerBottomPanel } from "../views/LedgerBottomPanel";
 import { StoryPanel } from "../views/StoryPanel";
 import { ActivityBar } from "./ActivityBar";
-import { runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
+import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
 import type { DockApi, DockPanelId } from "./Dock";
 import { LAYOUT_KEY } from "./layout-store";
 import { ShellContext } from "./model";
-import type { ShellContextValue, WorkbenchModel } from "./model";
+import type { AppModel, ShellContextValue, WorkbenchModel } from "./model";
 import { PlaceholderPanel } from "./placeholders";
 import { SIDE_BAR_DEFAULT, SideBar } from "./SideBar";
 import { StatusBar } from "./StatusBar";
@@ -26,10 +29,10 @@ import type { ViewId } from "./views";
 const PANELS = {
   board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
-  conversation: PlaceholderPanel, needs_you: PlaceholderPanel, terminal: PlaceholderPanel, diff: PlaceholderPanel, file: PlaceholderPanel,
+  conversation: PlaceholderPanel, needs_you: PlaceholderPanel, terminal: PlaceholderPanel, diff: DiffPanel, file: FilePanel,
 };
 
-type Props = { model: WorkbenchModel };
+type Props = { model: AppModel };
 
 /** True for text inputs, textareas, selects and contenteditable elements. */
 function isTyping(target: EventTarget | null): boolean {
@@ -146,8 +149,13 @@ export function Workbench({ model }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const shellModel: WorkbenchModel = {
+    ...model,
+    onOpenDiff: (runId, path) => dockRef.current?.open(diffPanelId(runId, path), basename(path), "main"),
+    onOpenFile: (runId, path) => dockRef.current?.open(filePanelId(runId, path), basename(path), "main"),
+  };
   const ctx: ShellContextValue = {
-    model,
+    model: shellModel,
     dock: () => dockRef.current,
     selectView,
     showView,

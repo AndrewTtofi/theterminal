@@ -255,3 +255,24 @@ describe("runExists", () => {
     expect(await api.runExists("r1")).toBe(true);
   });
 });
+
+describe("run changes", () => {
+  it("reads the changes, a diff, a directory and a file, with the path encoded", async () => {
+    const f = respond(200, {});
+    await api.getRunChanges("run 1");
+    await api.getRunDiff("run1", "src/a b.ts");
+    await api.listRunDir("run1", "");
+    await api.getRunFile("run1", "src/a&b.ts");
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/runs/run%201/changes",
+      "/api/runs/run1/diff?path=src%2Fa%20b.ts",
+      "/api/runs/run1/files?path=",
+      "/api/runs/run1/file?path=src%2Fa%26b.ts",
+    ]);
+  });
+
+  it("words a missing working copy and an unknown starting point", () => {
+    expect(errorMessage(new ApiError(404, "worktree_missing"))).toBe("This run's working copy no longer exists on this computer");
+    expect(errorMessage(new ApiError(409, "no_base"))).toBe("Could not work out what this run changed");
+  });
+});

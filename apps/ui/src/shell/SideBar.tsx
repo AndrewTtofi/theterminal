@@ -1,6 +1,7 @@
 import type { ComponentType, KeyboardEvent, PointerEvent } from "react";
 import { AgentsSideBar } from "../views/AgentsSideBar";
 import { CapacitySideBar } from "../views/CapacitySideBar";
+import { ChangesSideBar } from "../views/ChangesSideBar";
 import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
 import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
@@ -18,7 +19,7 @@ const KEY_STEP = 20;
 const CONTENT: Record<ViewId, ComponentType> = {
   board: ProjectsSideBar,
   agents: AgentsSideBar,
-  changes: PlaceholderSideBar,
+  changes: ChangesSideBar,
   needs_you: NeedsYouSideBar,
   ledger: LedgerSideBar,
   connections: ConnectionsSideBar,

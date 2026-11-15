@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
-  NarrationContext, NarrationTopic, PendingAgentAction, Project, Stage,
+  NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
 } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, api, blockedGates, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
-import { LEDGER_TOPICS } from "./shell/model";
-import type { GatePrompt, LedgerScope, WorkbenchModel } from "./shell/model";
+import { LEDGER_TOPICS, namesRun } from "./shell/model";
+import type { AppModel, GatePrompt, LedgerScope } from "./shell/model";
 import { useConnections } from "./use-connections";
 
 /** Shown in the strip when the server refused the gate decisions because the conditions changed. */
@@ -16,6 +16,9 @@ const GATE_REFRESHED = "Something changed: a condition is no longer met. The che
 
 /** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
 const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
+
+/** How long a run's changes are reused before they are read again. */
+const CHANGES_MEMO_MS = 10_000;
 
 /** Coalesced runner: at most one task in flight plus one trailing; stops once cancelled. */
 function coalesced(task: () => Promise<void>, isCancelled: () => boolean): () => void {
@@ -81,6 +84,11 @@ export function App() {
   const refreshGateRef = useRef<() => void>(() => {});
   /** Listeners for every new ledger entry (the story tabs), fed by the stream from the ledger head. */
   const entryListeners = useRef(new Set<(e: LedgerEntry) => void>());
+  /** The run picked in the Changes view; null follows the selected run. */
+  const [pickedChangesRun, setPickedChangesRun] = useState<string | null>(null);
+  const [changes, setChanges] = useState<{ runId: string; changes: RunChanges | null; error: string | null } | null>(null);
+  /** Each run's changes as last asked for, and when, so callers within 10 s share one request. */
+  const changesMemo = useRef(new Map<string, { at: number; result: Promise<RunChanges> }>());
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -330,6 +338,58 @@ export function App() {
       entryListeners.current.delete(onEntry);
     };
   }, []);
+
+  // The Changes view's run: the one picked there, else the selected run, else the project's newest.
+  const newestRunId = useMemo(
+    () => runs.reduce<AgentRun | null>((n, r) => (n === null || r.startedAt > n.startedAt ? r : n), null)?.id ?? null,
+    [runs],
+  );
+  const changesRunId = selectedId ? (pickedChangesRun ?? selectedRunId ?? newestRunId) : null;
+  useEffect(() => setPickedChangesRun(null), [selectedId]);
+
+  /** A run's changes, from memory when asked for under 10 s ago (unless `fresh`); a failed read is not kept. */
+  const [runChanges] = useState(() => (runId: string, fresh = false): Promise<RunChanges> => {
+    const now = Date.now();
+    const kept = changesMemo.current.get(runId);
+    if (!fresh && kept && now - kept.at < CHANGES_MEMO_MS) return kept.result;
+    const result = api.getRunChanges(runId);
+    const memo = { at: now, result };
+    changesMemo.current.set(runId, memo);
+    result.catch(() => {
+      if (changesMemo.current.get(runId) === memo) changesMemo.current.delete(runId);
+    });
+    return result;
+  });
+
+  useEffect(() => {
+    if (changesRunId === null) {
+      setChanges(null);
+      return;
+    }
+    const runId = changesRunId;
+    let cancelled = false;
+    setChanges({ runId, changes: null, error: null });
+    let fresh = false;
+    const refresh = coalesced(async () => {
+      const read = fresh;
+      fresh = true;
+      try {
+        const c = await runChanges(runId, read);
+        if (!cancelled) setChanges({ runId, changes: c, error: null });
+      } catch (e) {
+        if (!cancelled) setChanges((prev) => ({ runId, changes: prev?.runId === runId ? prev.changes : null, error: errorMessage(e) }));
+      }
+    }, () => cancelled);
+    refresh();
+    const unsubscribe = subscribeEntries((e) => {
+      if (namesRun(e, runId)) refresh();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [changesRunId, runChanges, subscribeEntries]);
+
   const gatePrompt = useMemo(() => {
     if (!gate) return null;
     const { projectId: _projectId, ...prompt } = gate;
@@ -350,7 +410,7 @@ export function App() {
   const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>
     setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change(prev) } : prev));
 
-  const model: WorkbenchModel = {
+  const model: AppModel = {
     projects,
     selectedId,
     onSelectProject: setSelectedId,
@@ -496,6 +556,14 @@ export function App() {
     onCompleteIntake: () => intakeAction((id) => api.completeIntake(id)),
     onReopenIntake: (reason) => intakeAction((id) => api.reopenIntake(id, reason), "reopen"),
     runExists: api.runExists,
+    changesRunId,
+    onSelectChangesRun: setPickedChangesRun,
+    changes: changes?.runId === changesRunId ? changes.changes : null,
+    changesError: changes?.runId === changesRunId ? changes.error : null,
+    runChanges,
+    dir: api.listRunDir,
+    file: api.getRunFile,
+    diff: api.getRunDiff,
   };
 
   return (

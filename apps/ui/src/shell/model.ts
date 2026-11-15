@@ -8,6 +8,9 @@ import type {
   CapacityReport,
   CardStory,
   DecisionId,
+  DirListing,
+  FileContent,
+  FileDiff,
   GateDecisionInput,
   GateEvaluation,
   GitHubOverview,
@@ -20,6 +23,7 @@ import type {
   Project,
   Provider,
   QuestionId,
+  RunChanges,
   Stage,
 } from "@theterminal/shared";
 import type { AgentsInfo, Status } from "../api";
@@ -47,6 +51,13 @@ export type GatePrompt = {
 /** Every narration topic, in the order the ledger's filter lists them. */
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
 export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
+
+/** True for an agent.* or override.* entry whose payload names `runId`: what can change that run's working copy. */
+export function namesRun(e: LedgerEntry, runId: string): boolean {
+  if (!e.type.startsWith("agent.") && !e.type.startsWith("override.")) return false;
+  const p = e.payload;
+  return typeof p === "object" && p !== null && (p as Record<string, unknown>).runId === runId;
+}
 
 /** Everything the shell shows and every action it can take; App owns the data and the API calls. */
 export type WorkbenchModel = {
@@ -123,7 +134,28 @@ export type WorkbenchModel = {
 
   /** False when the server answers 404 for the run; used to close restored diff and file tabs of deleted runs. */
   runExists: (runId: string) => Promise<boolean>;
+
+  /** The run the Changes view shows: the one picked there, else the selected run, else the project's newest. */
+  changesRunId: string | null;
+  /** Picks the Changes view's run; null goes back to following the selected run. */
+  onSelectChangesRun: (runId: string | null) => void;
+  /** What `changesRunId` changed; reloaded on any agent.* or override.* entry naming it. Null while loading. */
+  changes: RunChanges | null;
+  /** Why the changes could not load, worded for the Owner; null otherwise. */
+  changesError: string | null;
+  /** A run's changes, remembered for 10 s per run. */
+  runChanges: (runId: string) => Promise<RunChanges>;
+  dir: (runId: string, path: string) => Promise<DirListing>;
+  file: (runId: string, path: string) => Promise<FileContent>;
+  diff: (runId: string, path: string) => Promise<FileDiff>;
+  /** Opens (or shows) the diff tab of one file of a run. */
+  onOpenDiff: (runId: string, path: string) => void;
+  /** Opens (or shows) the read-only tab of one file of a run. */
+  onOpenFile: (runId: string, path: string) => void;
 };
+
+/** What App provides: the shell adds the actions that open tabs, since it owns the dock. */
+export type AppModel = Omit<WorkbenchModel, "onOpenDiff" | "onOpenFile">;
 
 export type ShellContextValue = {
   model: WorkbenchModel;

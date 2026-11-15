@@ -48,6 +48,10 @@ vi.mock("../src/api", () => ({
     reopenIntake: vi.fn(),
     getCardGates: vi.fn(),
     getCardStory: vi.fn(),
+    getRunChanges: vi.fn(),
+    getRunDiff: vi.fn(),
+    listRunDir: vi.fn(),
+    getRunFile: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     constructor(readonly status: number, readonly code: string, readonly detail?: unknown) {
@@ -76,6 +80,7 @@ import { App } from "../src/App";
 import { testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
+import { changes, fileDiff, listing, run1, runEntry } from "./changes-fixtures";
 
 const mk = (id: string): Board => ({
   project: { id, name: `Project ${id}`, pitch: "", createdAt: "" },
@@ -654,5 +659,65 @@ describe("App readiness gates", () => {
     m.getBoard.mockResolvedValue(mk("B"));
     await userEvent.click(screen.getByRole("button", { name: "Project B" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+  });
+});
+
+describe("App Changes view", () => {
+  const run2 = { ...run1, id: "run2", startedAt: "2026-11-15T11:00:00.000Z", prompt: "Newer" };
+
+  async function openChanges() {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1, run2]);
+    m.getRunChanges.mockImplementation(async (runId) => changes({ runId }));
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    m.getRunDiff.mockImplementation(async () => fileDiff({ status: "added", added: 1, deleted: 0 }));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+  }
+
+  it("shows the newest run's changes until a run is picked, then the picked one's", async () => {
+    await openChanges();
+    expect(await screen.findByText("1 file changed · +1 −0")).toBeTruthy();
+    expect(m.getRunChanges).toHaveBeenCalledWith("run2");
+    expect(m.listRunDir).toHaveBeenCalledWith("run2", "");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Run" }), "run1");
+    await waitFor(() => expect(m.getRunChanges).toHaveBeenCalledWith("run1"));
+  });
+
+  it("opens a changed file's diff in a tab, reusing the run's changes it already has", async () => {
+    await openChanges();
+    const list = await screen.findByRole("list", { name: "Changed files" });
+    await userEvent.click(within(list).getByRole("button", { name: /notes\.txt/ }));
+    expect(await screen.findByRole("region", { name: "Diff: notes.txt" })).toBeTruthy();
+    expect(m.getRunDiff).toHaveBeenCalledWith("run2", "notes.txt");
+    expect(testDock.api!.panelIds()).toContain("diff:run2:notes.txt");
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads the changes on an agent or override entry naming the run, and not for another run", async () => {
+    await openChanges();
+    await screen.findByText("1 file changed · +1 −0");
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+    act(() => h.onEntry!(runEntry("agent.finished", "run1")));
+    act(() => h.onEntry!(runEntry("card.created", "run2")));
+    await act(async () => {});
+    expect(m.getRunChanges).toHaveBeenCalledTimes(1);
+    m.getRunChanges.mockResolvedValueOnce(changes({ runId: "run2", files: [] }));
+    act(() => h.onEntry!(runEntry("override.completed", "run2")));
+    expect(await screen.findByText("0 files changed · +0 −0")).toBeTruthy();
+  });
+
+  it("words a failed load", async () => {
+    vi.mocked(errorMessage).mockImplementation(() => "This run's working copy no longer exists on this computer");
+    m.getRunChanges.mockRejectedValue(new ApiError(404, "worktree_missing"));
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    m.listRuns.mockResolvedValue([run1]);
+    m.listRunDir.mockImplementation(async (_runId, path) => listing(path, []));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Views" })).getByRole("button", { name: "Changes" }));
+    expect(await screen.findByText("This run's working copy no longer exists on this computer")).toBeTruthy();
   });
 });

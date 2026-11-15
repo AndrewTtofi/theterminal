@@ -288,3 +288,38 @@ abbr[title] { text-decoration: underline dotted; cursor: help; }
 .story .reason { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
 .story time { font-size: 12px; color: var(--muted); }
 .ledger > .note { margin: 2px 0 4px; font-size: 12px; color: var(--attention); }
+
+/* The Changes view: run picker, changed files and the read-only file tree */
+.changes select { width: 100%; margin-bottom: 6px; }
+.changes p { margin: 4px 0; }
+.changes .note { font-size: 12px; color: var(--muted); }
+.changes h2 { margin-top: 12px; }
+.changes ul { list-style: none; margin: 0; padding: 0; }
+.changes ul.tree ul.tree { padding-left: 12px; }
+.changes button.row { display: block; width: 100%; text-align: left; background: none; color: inherit; padding: 2px 4px; border-radius: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.changes button.row:hover:not(:disabled) { background: var(--hover); }
+.changes summary { padding: 2px 4px; cursor: pointer; }
+.changes summary:hover { background: var(--hover); }
+.changes li.other { padding: 2px 4px 2px 16px; color: var(--muted); font-style: italic; }
+.changes .status { display: inline-block; width: 1em; font-weight: 600; color: var(--muted); }
+.changes .status-added, .changes .status-untracked { color: var(--ok); }
+.changes .status-deleted { color: var(--danger); }
+button.link { background: none; color: var(--accent); padding: 0; border-radius: 0; }
+button.link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.added { color: var(--ok); }
+.deleted { color: var(--danger); }
+
+/* Diff and file tabs: plain text, read-only */
+.file-view { display: flex; flex-direction: column; min-height: 100%; }
+.file-head { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.file-head .file-path { color: var(--fg-strong); font-weight: 600; }
+.file-view > .note { margin: 0 0 8px; font-size: 12px; color: var(--attention); }
+.file-view > .empty button { margin-top: 8px; }
+pre.diff, pre.file { margin: 0; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; tab-size: 4; }
+pre.diff .line, pre.file .line { display: flex; white-space: pre; }
+pre.diff .ln, pre.file .ln { flex: none; width: 4.5em; padding-right: 8px; text-align: right; color: var(--muted); user-select: none; }
+pre.diff .text, pre.file .text { flex: 1; }
+pre.diff .add { background: rgba(46, 160, 67, 0.15); }
+pre.diff .del { background: rgba(199, 78, 57, 0.15); }
+pre.diff .hunk { color: var(--accent); background: rgba(0, 120, 212, 0.08); }
+pre.diff .meta { color: var(--muted); }
