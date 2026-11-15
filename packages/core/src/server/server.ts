@@ -309,9 +309,6 @@ export function selectSecretStore(
   return { store: new ChunkedSecretStore(new KeychainSecretStore()), kind: "keychain" };
 }
 
-/** The account the startup read asks for; nothing is ever stored under it. */
-const STARTUP_PROBE = "theterminal/startup";
-
 /** The file store's ciphertext, inside the data folder (its key is not). */
 export const SECRETS_FILE = "secrets.enc.json";
 
@@ -589,10 +586,11 @@ export async function createServer(opts: {
       dataDir: opts.dataDir,
       allowKeyInDataDir: opts.allowKeyInDataDir,
     });
-    // One read at startup creates the file store's key, so it exists before the first secret is saved. The operator
-    // chose this store explicitly: a key (or ciphertext file) it cannot use refuses the start with
+    // The file store is verified at startup: its key is created when missing, so it exists before the first secret is
+    // saved, and every existing entry must open with it. The operator chose this store explicitly: a key (or
+    // ciphertext file) it cannot use, including a right-sized key that does not open the file, refuses the start with
     // SecretStoreUnavailableError, unlike the keychain, which is reported and lets the server start.
-    if (secretStoreKind === "file") await secrets.get(STARTUP_PROBE);
+    if (secrets instanceof FileSecretStore) secrets.verify();
     const connections = new ConnectionService({
       db,
       ledger,

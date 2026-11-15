@@ -71,6 +71,7 @@ interface FileContents {
 
 const KEY_UNAVAILABLE = "secret key file unavailable";
 const FILE_UNAVAILABLE = "secret store file unavailable";
+const KEY_MISMATCH = "the secret key does not open the secrets file";
 
 /** Decodes canonical base64 only: Node's decoder silently skips junk, so re-encode and compare. */
 function strictBase64(value: unknown, bytes?: number): Buffer | null {
@@ -93,7 +94,7 @@ const aad = (account: string): Buffer => Buffer.from(`theterminal-secrets:v${VER
  * - Fails closed: a missing, unreadable or wrong-size key, a corrupt or unknown-format file, or any entry that
  *   does not authenticate throws `SecretStoreUnavailableError`. A write first checks that every existing entry
  *   authenticates with this key, so a wrong key never mixes into the file, and a corrupt file is never replaced.
- *   Only a missing data file reads as empty.
+ *   Only a missing data file reads as empty. `verify()` runs that check on its own, for the server's start.
  * - Writes go to a temp file in the same folder (mode 0o600, fsynced) that is renamed over the data file.
  * - Errors carry fixed messages and no cause: never an account name, a value or key material.
  *
@@ -142,6 +143,24 @@ export class FileSecretStore implements SecretStore {
     if (contents.entries[account] === undefined) return;
     delete contents.entries[account];
     this.write(contents);
+  }
+
+  /**
+   * The startup check: the key is read (and created, with `createKey`) and every entry in the data file is
+   * authenticated with it. A key or data file that cannot be read fails with their messages; a key of the right size
+   * that does not open the existing ciphertext fails with "the secret key does not open the secrets file", so a
+   * swapped or restored key never lets the server start as if it had no secrets. Nothing is written.
+   */
+  verify(): void {
+    const key = this.loadKey();
+    const contents = this.read();
+    for (const [account, entry] of Object.entries(contents.entries)) {
+      try {
+        this.decrypt(key, account, entry);
+      } catch {
+        throw new SecretStoreUnavailableError(KEY_MISMATCH);
+      }
+    }
   }
 
   /** The key, read once and cached; created first (32 random bytes, 0o600, never replacing) with `createKey`. */

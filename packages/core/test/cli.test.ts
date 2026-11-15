@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, type RunningServer } from "../src/server/server.js";
 import { MemorySecretStore } from "../src/secrets/memory-store.js";
+import { FileSecretStore } from "../src/secrets/file-store.js";
 import { fakeDiscovery } from "../src/link/discovery.js";
 import type { ReadyMessage } from "../src/host.js";
 import { USAGE } from "../src/cli-support.js";
@@ -204,6 +206,17 @@ describe("theterminal start as a host's child process", () => {
     const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
     expect(await exit).toBe(1);
     expect(stderr()).toBe("The Terminal could not start: secret key file unavailable\n");
+    expect(stdout()).toBe("");
+  });
+
+  it("a 32-byte key that does not open the existing secrets file exits 1 with a fixed line", { timeout: TIMEOUT }, async () => {
+    const dir = tmp();
+    const keyFile = join(tmp(), "secret.key");
+    await new FileSecretStore({ file: join(dir, "secrets.enc.json"), keyFile, createKey: true }).set("connection/x", "sk-TESTKEY-0000000000");
+    writeFileSync(keyFile, randomBytes(32));
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", dir, "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("The Terminal could not start: the secret key does not open the secrets file\n");
     expect(stdout()).toBe("");
   });
 

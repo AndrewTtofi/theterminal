@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -493,6 +494,20 @@ describe("the file secret store", () => {
     expect(err).toBeInstanceOf(SecretStoreUnavailableError);
     expect((err as Error).message).toBe("secret key file unavailable");
     expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+  });
+
+  it("a server refuses to start when a 32-byte key does not open the existing secrets file, and releases the lock", async () => {
+    const { dataDir, keyFile } = dirs();
+    const first = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile });
+    await first.close();
+    // Ciphertext under the first key; a restored or swapped key of the right size must not pass the start.
+    await new FileSecretStore({ file: join(dataDir, "secrets.enc.json"), keyFile }).set("connection/x", "sk-TESTKEY-0000000000");
+    writeFileSync(keyFile, randomBytes(32));
+    const err = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect((err as Error).message).toBe("the secret key does not open the secrets file");
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
+    openReleased(dataDir).close();
   });
 
   it("a server refuses to start with the key file inside its data folder, and releases the lock", async () => {

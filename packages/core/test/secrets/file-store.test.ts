@@ -233,6 +233,41 @@ describe("FileSecretStore", () => {
     });
   });
 
+  describe("verify", () => {
+    it("passes with no data file, with an empty file and when every entry opens with this key", async () => {
+      const { store, keyFile, file } = setup();
+      expect(() => store.verify()).not.toThrow();
+      expect(existsSync(file)).toBe(false);
+      await store.set(ACCOUNT, KEY);
+      await store.set("another/account", OTHER);
+      expect(() => store.verify()).not.toThrow();
+      expect(() => new FileSecretStore({ file, keyFile }).verify()).not.toThrow();
+    });
+
+    it("a different 32-byte key with existing ciphertext fails with the key message, and leaves the file as it was", async () => {
+      const { store, file } = setup();
+      await store.set(ACCOUNT, KEY);
+      const before = readFileSync(file);
+      const otherKey = join(tmp(), "other.key");
+      writeFileSync(otherKey, randomBytes(32));
+      const wrong = new FileSecretStore({ file, keyFile: otherKey });
+      expect(() => wrong.verify()).toThrow(SecretStoreUnavailableError);
+      expect(() => wrong.verify()).toThrow("the secret key does not open the secrets file");
+      expect(readFileSync(file)).toEqual(before);
+    });
+
+    it("a wrong-size or missing key and a corrupt data file fail with their own fixed messages", async () => {
+      const { store, file, keyFile } = setup();
+      await store.set(ACCOUNT, KEY);
+      writeFileSync(keyFile, randomBytes(31));
+      expect(() => new FileSecretStore({ file, keyFile }).verify()).toThrow("secret key file unavailable");
+      expect(() => new FileSecretStore({ file, keyFile: join(tmp(), "none.key") }).verify()).toThrow("secret key file unavailable");
+      const { file: f2, keyFile: k2 } = setup();
+      writeFileSync(f2, "{ not json");
+      expect(() => new FileSecretStore({ file: f2, keyFile: k2 }).verify()).toThrow("secret store file unavailable");
+    });
+  });
+
   describe("createKey", () => {
     it("writes a 32-byte 0600 key file (and its folder) when missing, and uses it", async () => {
       const data = tmp();
