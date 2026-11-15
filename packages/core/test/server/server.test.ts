@@ -11,7 +11,6 @@ import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ChunkedSecretStore, SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { FileSecretStore, KeyInsideDataDirError } from "../../src/secrets/file-store.js";
-import { RemoteStartError } from "../../src/server/remote.js";
 import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
@@ -417,6 +416,26 @@ describe("createServer", { timeout: 30_000 }, () => {
       expect((await rawGet(s.port, "/")).status).toBe(200);
     });
 
+    it("refuses the encrypted secrets file and the configured key file inside uiDir, whatever they are named", async () => {
+      const root = tmp();
+      const uiDir = join(root, "ui");
+      mkdirSync(join(uiDir, "keys"), { recursive: true });
+      writeFileSync(join(uiDir, "index.html"), "<html>ui</html>");
+      writeFileSync(join(uiDir, "secrets.enc.json"), "secret");
+      writeFileSync(join(uiDir, "keys", "a.txt"), "public");
+      // A key file placed inside the UI folder by mistake: the store creates it there, and it must still never be served.
+      const keyFile = join(uiDir, "keys", "k.txt");
+      const s = await start({ dataDir: join(root, "data"), uiDir, port: 0, secrets: undefined, secretStore: "file", secretKeyFile: keyFile });
+      expect(existsSync(keyFile)).toBe(true);
+      for (const path of ["/secrets.enc.json", "/SECRETS.ENC.JSON", "/keys/k.txt"]) {
+        const res = await rawGet(s.port, path);
+        expect(res.status, path).toBe(404);
+        expect(res.body, path).not.toContain("secret");
+      }
+      expect((await rawGet(s.port, "/keys/a.txt")).status).toBe(200);
+      expect((await rawGet(s.port, "/")).status).toBe(200);
+    });
+
     it("registers nothing for / without uiDir", async () => {
       const s = await start({ dataDir: tmp(), port: 0 });
       expect((await fetch(base(s) + "/")).status).toBe(401);
@@ -493,12 +512,6 @@ describe("the Owner bootstrap invite at startup", () => {
     await start({ dataDir, port: 0, bootstrapInvite: (u) => seen.push(u) });
     expect(seen).toEqual([]);
     expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
-  });
-
-  it("refuses --remote until the remote listener is wired, before taking the data folder", async () => {
-    const dataDir = tmp();
-    await expect(start({ dataDir, port: 0, remote: { enabled: true, port: 0, bind: "127.0.0.1" } })).rejects.toBeInstanceOf(RemoteStartError);
-    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
   });
 
   it("a leftover bootstrap file is removed at startup once the Owner has a credential", async () => {

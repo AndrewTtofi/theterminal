@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -309,6 +309,62 @@ describe("the remote listener on the real server", { timeout: 30_000 }, () => {
 
     expect((await localJson(s, "DELETE", "/api/people/p-maintainer", owner(s))).status).toBe(204);
     expect((await maintainer.closed).code).toBe(1008);
+  });
+
+  it("the bootstrap link: issued once per unclaimed start on the remote address, replaced at the next start, gone once the Owner has a credential", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-srv-remote-"));
+    dirs.push(dataDir);
+    const secrets = new MemorySecretStore();
+    const seen: string[] = [];
+    const a = await start(dataDir, { remote: ON, bootstrapInvite: (u) => seen.push(u) }, secrets);
+    expect(seen).toHaveLength(1);
+    const port = remotePort(a);
+    expect(seen[0]).toMatch(new RegExp(`^https://127\\.0\\.0\\.1:${port}/join/[A-Za-z0-9_-]+#fp=${a.fingerprint!.replace(/:/g, "\\:")}$`));
+    expect(readFileSync(join(dataDir, "bootstrap-invite"), "utf8").trim()).toBe(seen[0]);
+    const code = /\/join\/([^#]+)#/.exec(seen[0]!)![1]!;
+    const over = await pinnedRequest(port, a.fingerprint!, { path: `/api/join/${code}` });
+    expect(JSON.parse(over.body)).toMatchObject({ role: "owner", fingerprint: a.fingerprint });
+    await stop(a);
+
+    const b = await start(dataDir, { remote: ON, bootstrapInvite: (u) => seen.push(u) }, secrets);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).not.toBe(seen[0]);
+    const types = ((await (await local(b, "/api/ledger?limit=500", { headers: owner(b) })).json()) as LedgerEntry[]).map((e) => e.type);
+    expect(types.filter((t) => t === "person.invite_revoked")).toHaveLength(1);
+    const dead = await pinnedRequest(remotePort(b), b.fingerprint!, { path: `/api/join/${code}` });
+    expect(dead.status).toBe(404);
+    await stop(b);
+
+    // The Owner claims the identity (as the join route would record it): no link is printed again, and the file goes.
+    const db = openDatabase(join(dataDir, "ledger.db"));
+    commitEvent(db, new Ledger(db), () => ({
+      event: {
+        projectId: null, actor: { kind: "human", id: OWNER_ID }, type: "person.credential_added",
+        payload: { personId: OWNER_ID, credential: { kind: "key", credentialId: "key-owner", publicKey: "TESTKEY-owner", label: "CLI" } },
+      },
+      result: () => undefined,
+    }));
+    db.close();
+    const c = await start(dataDir, { remote: ON, bootstrapInvite: (u) => seen.push(u) }, secrets);
+    expect(seen).toHaveLength(2);
+    expect(existsSync(join(dataDir, "bootstrap-invite"))).toBe(false);
+    expect(c.remoteUrl).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/$/); // the flag's port 0 picks a free port at each start
+  });
+
+  it("/api/status.connections.secretStore names the store for the Owner only", async () => {
+    const { dataDir, cookies } = seed();
+    const s = await start(dataDir);
+    const owners = (await (await local(s, "/api/status", { headers: owner(s) })).json()) as { connections: Record<string, unknown> };
+    expect(owners.connections).toEqual({ enabled: 0, failed: 0, keychain: "ok", secretStore: "memory" });
+    const viewers = (await (await local(s, "/api/status", { headers: { cookie: cookies.localViewer } })).json()) as { connections: unknown };
+    expect(viewers.connections).toEqual({ enabled: 0, failed: 0 });
+    await stop(s);
+
+    const keyFile = join(mkdtempSync(join(tmpdir(), "tt-srv-key-")), "secret.key");
+    dirs.push(join(keyFile, ".."));
+    const f = await start(dataDir, { secrets: undefined, secretStore: "file", secretKeyFile: keyFile });
+    const onFile = (await (await local(f, "/api/status", { headers: owner(f) })).json()) as { connections: Record<string, unknown> };
+    expect(onFile.connections).toMatchObject({ secretStore: "file" });
   });
 
   it("a bad flag fails the start; a busy port leaves the server up with remote off and a fixed line", async () => {

@@ -121,6 +121,8 @@ export type RemoteDeps = {
   localAddresses?: () => { hostnames: string[]; addresses: string[] };
   /** Tests only: a shorter idle timeout for TLS connections. Default REMOTE_IDLE_TIMEOUT_MS. */
   idleTimeoutMs?: number;
+  /** The file secret store's key file, when there is one: denied to provided certificate files. */
+  secretKeyFile?: string;
   /** Certificates from Let's Encrypt for `tls: "acme"`; without it that mode is refused (`acme_unavailable`). */
   acme?: AcmeManager;
   /** The plain challenge listener's port when the input names none: 80, except in tests. */
@@ -684,7 +686,8 @@ export class RemoteListener {
     if (given) files = { certFile: i.certFile!, keyFile: i.keyFile! };
     else files = parseFiles(await this.deps.secrets.get(REMOTE_FILES_SECRET));
     if (files === null) throw new RemoteInputError("certificate_files_required");
-    const m = loadProvided(files.certFile, files.keyFile, { uiDir: this.deps.uiDir, dataDir: this.deps.dataDir }, { now: this.now });
+    const deny = { uiDir: this.deps.uiDir, dataDir: this.deps.dataDir, keyFile: this.deps.secretKeyFile ?? null };
+    const m = loadProvided(files.certFile, files.keyFile, deny, { now: this.now });
     if (cfg.domain !== null && new X509Certificate(m.certPem).checkHost(cfg.domain) === undefined) {
       throw new RemoteInputError("certificate_domain_mismatch");
     }

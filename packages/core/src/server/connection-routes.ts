@@ -14,6 +14,7 @@ import type { NetworkState } from "../network.js";
 import { actorOf, needs } from "./auth.js";
 import { remoteStatus } from "./remote-routes.js";
 import type { RemoteView } from "./remote.js";
+import type { SecretStoreKind } from "../secrets/file-store.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -31,6 +32,8 @@ export type ConnectionRouteDeps = {
   shareLinks: () => number;
   /** The remote listener's state; the Owner's status carries `remote` from it, nobody else's does. */
   remote: () => RemoteView;
+  /** Where secrets live (the keychain, the encrypted file, or memory under the test flags); the Owner's status says. */
+  secretStore: () => SecretStoreKind;
 };
 
 // Shapes only: the service checks fields, values and config against the catalog.
@@ -57,7 +60,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks, remote } = deps;
+  const { db, connections, signin, ledger, ci, intake, machines, network, shareLinks, remote, secretStore } = deps;
 
   app.get("/api/connections/catalog", needs("owner"), async () => CONNECTION_CATALOG);
 
@@ -160,6 +163,10 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     };
     if (req.principal?.personId !== OWNER_ID) return shared;
     // The address is the Owner's: `remote` (with its label) is on their copy only, by the fixed list above.
-    return { ...shared, connections: { ...shared.connections, keychain: connections.keychainState() }, remote: remoteStatus(remote(), req.principal) };
+    return {
+      ...shared,
+      connections: { ...shared.connections, keychain: connections.keychainState(), secretStore: secretStore() },
+      remote: remoteStatus(remote(), req.principal),
+    };
   });
 }

@@ -234,7 +234,7 @@ describe("connections API", { timeout: 15000 }, () => {
     });
     expect(stub).toHaveBeenCalledOnce();
     const st = await json<{ connections: unknown }>(get(s, "/api/status"));
-    expect(st.connections).toEqual({ enabled: 1, failed: 1, keychain: "ok" });
+    expect(st.connections).toEqual({ enabled: 1, failed: 1, keychain: "ok", secretStore: "memory" });
   });
 
   it("starts with an unavailable keychain, refuses writes with 503 and reports it in /api/status", async () => {
@@ -247,7 +247,7 @@ describe("connections API", { timeout: 15000 }, () => {
     expect(await json(get(s, "/api/connections"))).toEqual([]);
     expect(await (await get(s, "/api/ledger")).text()).not.toContain("connection.added");
     const st = await json<{ connections: unknown }>(get(s, "/api/status"));
-    expect(st.connections).toEqual({ enabled: 0, failed: 0, keychain: "unavailable" });
+    expect(st.connections).toEqual({ enabled: 0, failed: 0, keychain: "unavailable", secretStore: "memory" });
   });
 
   it("GET /api/agents reports where each provider's API key comes from", async () => {
@@ -275,7 +275,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok", secretStore: "memory" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -294,7 +294,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25, monthCostUsd: 0.25 });
 
     await addClaude(s);
-    expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+    expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
   });
 });
 
@@ -514,7 +514,7 @@ describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
     const { s, theirs } = await startSeeded();
     await addClaude(s);
     const owners = await json<Record<string, unknown>>(get(s, "/api/status"));
-    expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok" });
+    expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
     expect(owners.remote).toEqual({ enabled: false, listening: false, label: "off" });
     for (const role of ["viewer", "reviewer", "maintainer"] as const) {
       const res = await theirs(role, "GET", "/api/status");

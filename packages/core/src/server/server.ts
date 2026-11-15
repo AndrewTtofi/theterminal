@@ -748,6 +748,7 @@ export async function createServer(opts: {
     const acme = new AcmeManager({ secrets, dataDir: opts.dataDir });
     const remoteListener = new RemoteListener({
       http: app.server, db, ledger, secrets, people: people.service, dataDir: opts.dataDir, uiDir: opts.uiDir ?? null, acme,
+      ...(opts.secretKeyFile !== undefined && { secretKeyFile: opts.secretKeyFile }),
     });
     const remoteView = () => remoteListener.state();
     try {
@@ -792,6 +793,7 @@ export async function createServer(opts: {
         network: () => network.state(),
         shareLinks,
         remote: remoteView,
+        secretStore: () => secretStoreKind,
       });
       registerGitHubRoutes(app, { github });
       registerShareRoutes(app, { db, ledger, share });
@@ -801,7 +803,7 @@ export async function createServer(opts: {
         localEngines: selectLocalEngines(process.env, opts.localEngines), machines: () => wired.capacity.all(),
       }).report;
       registerLinkRoutes(app, { link: linkService, capacity: wired.capacity, db, ...(opts.linkPort !== undefined && { port: opts.linkPort }) });
-      if (opts.uiDir) registerStaticUi(app, opts.uiDir);
+      if (opts.uiDir) registerStaticUi(app, opts.uiDir, { deny: opts.secretKeyFile === undefined ? [] : [opts.secretKeyFile] });
       // Last: a recorded opt-in starts the link listener, whose routes may use everything constructed above.
       await linkService.load(); // never throws: an unavailable keychain or a failed bind is reported
       // Runs on linked machines survive a restart: the runner left them alone; follow each from its cursor again.

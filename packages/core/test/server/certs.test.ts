@@ -367,6 +367,19 @@ describe("loadProvided", () => {
       expect(refusal(() => loadProvided(w.uiDir, outside.keyFile, w.deny)).code).toBe("path_denied");
     });
 
+    it("refuses the data dir's encrypted secrets file and the configured key file, wherever that is, before reading them", async () => {
+      const w = workspace();
+      const { certFile, keyFile } = await writePair(w.certs);
+      for (const name of ["secrets.enc.json", "SECRETS.ENC.JSON"]) {
+        expect(refusal(() => loadProvided(certFile, join(w.dataDir, name), w.deny)).code).toBe("path_denied");
+      }
+      const secretKey = join(w.certs, "keys", "secret.key"); // outside the data dir, as the CLI requires; never written here
+      const deny = { ...w.deny, keyFile: secretKey };
+      expect(refusal(() => loadProvided(certFile, secretKey, deny)).code).toBe("path_denied");
+      expect(refusal(() => loadProvided(secretKey, keyFile, deny)).code).toBe("path_denied");
+      expect(loadProvided(certFile, keyFile, deny).fingerprint).toBeTruthy(); // the real pair is still fine
+    });
+
     it("refuses the data dir's ledger.db (and its journal files) and token, in any letter case, before reading them", async () => {
       const w = workspace();
       const { certFile, keyFile } = await writePair(w.certs);

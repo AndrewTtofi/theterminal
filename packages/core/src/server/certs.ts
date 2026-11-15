@@ -197,7 +197,13 @@ export function certFingerprint(certPem: string): string {
 
 /** Lower-cased so the check holds on case-insensitive file systems; over-denying on Linux is harmless. */
 const fold = (p: string) => p.toLowerCase();
-const DENIED_DATA_FILES = ["ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "token"];
+const DENIED_DATA_FILES = ["ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.db-journal", "token", "secrets.enc.json"];
+
+/**
+ * What a provided certificate or key path may never name: anything under the UI folder (served without a sign-in),
+ * the data folder's ledger, token and encrypted secrets, and the file store's key file wherever the CLI put it.
+ */
+export type CertDenyList = { uiDir: string | null; dataDir: string; keyFile?: string | null };
 
 function forms(p: string): string[] {
   const lexical = resolve(p);
@@ -208,14 +214,17 @@ function forms(p: string): string[] {
   }
 }
 
-function isDenied(candidates: string[], deny: { uiDir: string | null; dataDir: string }): boolean {
+function isDenied(candidates: string[], deny: CertDenyList): boolean {
   const uiRoots = deny.uiDir === null ? [] : forms(deny.uiDir).map(fold);
-  const dataFiles = forms(deny.dataDir).flatMap((d) => DENIED_DATA_FILES.map((f) => fold(join(d, f))));
+  const dataFiles = [
+    ...forms(deny.dataDir).flatMap((d) => DENIED_DATA_FILES.map((f) => fold(join(d, f)))),
+    ...(deny.keyFile ? forms(deny.keyFile).map(fold) : []),
+  ];
   return candidates.map(fold).some((c) => dataFiles.includes(c) || uiRoots.some((u) => c === u || c.startsWith(u.endsWith(sep) ? u : u + sep)));
 }
 
 /** Deny-list check on the path as given and as resolved through links, both before anything is read. */
-function readBounded(file: string, deny: { uiDir: string | null; dataDir: string }): string {
+function readBounded(file: string, deny: CertDenyList): string {
   if (typeof file !== "string" || file.length === 0 || file.includes("\0")) throw new CertificateError("unreadable");
   const lexical = resolve(file);
   if (isDenied([lexical], deny)) throw new CertificateError("path_denied");
@@ -332,7 +341,7 @@ function sanList(x: X509Certificate): string[] {
 export function loadProvided(
   certFile: string,
   keyFile: string,
-  deny: { uiDir: string | null; dataDir: string },
+  deny: CertDenyList,
   opts: { now?: () => Date } = {},
 ): CertMaterial {
   const certText = readBounded(certFile, deny);
