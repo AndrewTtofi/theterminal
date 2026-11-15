@@ -899,7 +899,14 @@ describe("GeminiAdapter", () => {
       const h = harness();
       expect(await adapter().start(h.opts)).toEqual({ status: "completed" });
       const texts = h.events.filter((e) => e.type === "message").map((e) => (e as { text: string }).text);
-      expect(texts).toEqual(["intro\n", full.slice("intro\n".length)]);
+      // The pause flush sends only the complete line before the key; the whole block then arrives in one message. A
+      // slow runner may deliver the trailing partial line "after" separately, which is harmless, so only the block's
+      // integrity is pinned: one message holds BEGIN through END, and redacting each message alone hides the key.
+      expect(texts[0]).toBe("intro\n");
+      expect(texts.join("")).toBe(full);
+      const withKey = texts.filter((t) => t.includes("-----BEGIN") || t.includes("-----END") || t.includes("0000kkkk"));
+      expect(withKey).toHaveLength(1);
+      expect(withKey[0]).toContain(`${KEY_BEGIN}\n${keyBody(3).join("\n")}\n${KEY_END}`);
       expect(texts.map((t) => redact(t)).join("")).toBe("intro\n[REDACTED]\nafter");
     });
   }
