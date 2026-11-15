@@ -5,7 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction } from "../adapter.js";
-import { buildChildEnv } from "../child-env.js";
+import { CHILD_ENV_ALLOWLIST, CHILD_ENV_ALLOWLIST_PREFIXES, WIN32_ALLOWLIST, buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { heldTailStart, redact } from "../redact.js";
 import { bundledCodex, type BundledCli } from "../bundled.js";
@@ -212,10 +212,37 @@ type CommandSpec = { file: string; args: string[] };
 
 /** Drives `codex app-server` (the bundled Codex CLI by default). Every command and file change waits for our gate. */
 /**
- * The provider keys a Codex command never sees once a cloud grant turns off Codex's default KEY/SECRET/TOKEN filter
- * (`shell_environment_policy.exclude`, matched case-insensitively). The run's env holds at most the first two.
+ * What a Codex command never sees once a cloud grant turns off Codex's default *KEY*, *SECRET*, *TOKEN* filter
+ * (`shell_environment_policy.exclude`: case-insensitive globs, the same syntax as those defaults). Defence in depth:
+ * `include_only` already admits none of them.
  */
-export const CODEX_COMMAND_EXCLUDES: readonly string[] = ["OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+export const CODEX_COMMAND_EXCLUDES: readonly string[] = [
+  "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN",
+];
+
+/** The git pins buildChildEnv sets: a command keeps using the empty global git config. */
+const GIT_PINS = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT"];
+
+const POLICY_CONFLICT =
+  "Your Codex configuration's shell_environment_policy conflicts with The Terminal's credential passing; remove `filters` from it";
+
+/**
+ * `-c` overrides that make a Codex command's env exactly the allowlisted variables, the git pins and the grant's own
+ * variables: inherit everything (the CLI's env is already allowlisted), skip the default excludes that would drop
+ * the grant's secrets and tokens, keep only those names, and exclude every provider key anyway.
+ */
+export function codexCommandPolicyArgs(grantNames: string[], platform: NodeJS.Platform = process.platform): string[] {
+  const includeOnly = [
+    ...CHILD_ENV_ALLOWLIST, ...(platform === "win32" ? WIN32_ALLOWLIST : []), ...CHILD_ENV_ALLOWLIST_PREFIXES.map((p) => `${p}*`),
+    ...GIT_PINS, ...grantNames,
+  ];
+  return [
+    "-c", 'shell_environment_policy.inherit="all"',
+    "-c", "shell_environment_policy.ignore_default_excludes=true",
+    "-c", `shell_environment_policy.include_only=${JSON.stringify(includeOnly)}`,
+    "-c", `shell_environment_policy.exclude=${JSON.stringify(CODEX_COMMAND_EXCLUDES)}`,
+  ];
+}
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = "codex" as const;
@@ -286,13 +313,9 @@ export class CodexAdapter implements AgentAdapter {
     // api_key mode: keep the login in memory, so the user's own stored Codex login is never overwritten.
     const args = ["app-server", ...(apiKey === undefined ? [] : ["-c", "cli_auth_credentials_store=ephemeral"])];
     // Codex drops every *KEY*, *SECRET* and *TOKEN* variable from the env of the commands it runs by default, which
-    // would drop a cloud grant's secret and token. With a grant, keep them, and exclude every provider key by name.
-    if (Object.keys(o.credentials.env).length > 0) {
-      args.push(
-        "-c", "shell_environment_policy.ignore_default_excludes=true",
-        "-c", `shell_environment_policy.exclude=${JSON.stringify(CODEX_COMMAND_EXCLUDES)}`,
-      );
-    }
+    // would drop a cloud grant's secret and token. With a grant, its command env policy is set explicitly instead.
+    const grantNames = Object.keys(o.credentials.env);
+    if (grantNames.length > 0) args.push(...codexCommandPolicyArgs(grantNames));
     const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv: o.credentials.env });
     const env = { ...childEnv, ...this.fakeEnv };
     if (o.authMode === "api_key") {
@@ -376,7 +399,13 @@ class CodexSession {
   async run(): Promise<StartResult> {
     const onAbort = () => this.end({ status: "failed", error: STOPPED });
     this.o.signal.addEventListener("abort", onAbort, { once: true });
-    void this.handshake().catch((e: unknown) => this.fail(redact(errorMessage(e))));
+    void this.handshake().catch(async (e: unknown) => {
+      // A Codex that exits at startup closes the pipe first: let its stderr arrive, so a known refusal is explained.
+      if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.stdout.readable) {
+        await Promise.race([this.exited, sleep(EXIT_WAIT_MS)]);
+      }
+      this.fail(this.policyConflict() ? POLICY_CONFLICT : redact(errorMessage(e)));
+    });
     const result = await this.outcome;
     this.o.signal.removeEventListener("abort", onAbort);
     await this.shutdown(this.o.signal.aborted);
@@ -643,7 +672,13 @@ class CodexSession {
     }
   }
 
+  /** Codex refused to start: the user's own policy uses `filters`, and ours sets `exclude` and `include_only`. */
+  private policyConflict(): boolean {
+    return (this.stderr + this.stderrHeld).includes("cannot mix `filters` with legacy");
+  }
+
   private withStderr(msg: string): string {
+    if (this.policyConflict()) return POLICY_CONFLICT;
     // Cleaned whole (the held tail too) before the tail is cut, so the cut never leaves part of a secret behind; no
     // tail if that fails.
     let tail = "";

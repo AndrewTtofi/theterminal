@@ -342,7 +342,8 @@ export async function createServer(opts: {
     program: (p) => signinProgram(p, fakeCli, bundled, which),
     cliHome: (p) => connections.credentialsFor(p)?.cliHome,
     extraEnv: fakeLoginEnv(),
-    secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
+    // Minted cloud values too: the runner keeps every one for the life of the process (declared below; read lazily).
+    secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
     record: (provider, ok) =>
       commitEvent(db, ledger, () => ({
         event: { projectId: null, actor: { kind: "human", id: "owner" }, type: "connection.signin", payload: { provider, ok } },
@@ -357,7 +358,7 @@ export async function createServer(opts: {
     broker: new ApprovalBroker(),
     adapters,
     // Read on every clean: secrets added later (a key stored through the API) are redacted at once, and a removed
-    // connection's values stay in secretValues() until the process exits.
+    // connection's values stay in secretValues() until the process exits. The runner adds every value it mints.
     extraSecrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues()],
     credentials: (p) => connections.credentialsFor(p),
     selectConnections: (ids) => connections.selectForRun(ids),

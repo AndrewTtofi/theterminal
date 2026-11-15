@@ -11,7 +11,8 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, McpUnsupportedError, ShuttingDownError, type AgentRunnerDeps,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, McpUnsupportedError, ShuttingDownError,
+  type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
 import type { McpServerSpec } from "../../src/connections/mcp.js";
@@ -747,6 +748,52 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
     expect(getRun(db, run.id)!.error).toBe("failed with [REDACTED]");
     const all = JSON.stringify(ledger.list());
     for (const v of [SESSION_TOKEN, STATIC_SECRET, HEADER_VALUE, AZURE_SECRET]) expect(all).not.toContain(v);
+  });
+
+  it("redacts a minted value from every later run for the life of the process, even one given no grant", async () => {
+    let echo = "";
+    const adapter: AgentAdapter = {
+      id: "claude",
+      async start(o) {
+        o.emit({ type: "message", text: echo });
+        return { status: "completed" };
+      },
+    };
+    const runner = cloudRunner({ claude: adapter });
+    echo = "first";
+    const a = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001"] });
+    await untilFinished(a.id);
+    echo = `B saw ${SESSION_TOKEN}`;
+    const b = await runner.start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(b.id);
+    const texts = ledger.list().filter((e) => e.type === "agent.message").map((e) => (e.payload as { text: string }).text);
+    expect(texts).toEqual(["first", "B saw [REDACTED]"]);
+    expect(runner.mintedSecrets()).toEqual(expect.arrayContaining([SESSION_TOKEN, STATIC_SECRET]));
+  });
+
+  it("refuses two cloud connections of the same provider before anything is minted", async () => {
+    const second: CloudSource = { ...aws, connectionId: "conn-aws-0002", name: "AWS prod" };
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      selectConnections: () => ({ cloud: [aws, second], mcp: [] }),
+    });
+    const err = await runner.start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["a", "b"] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateCloudProviderError);
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses grants that would set the same variable, before a worktree exists", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } }, {
+      mintCloud: async (s) =>
+        s.provider === "azure"
+          ? { ...grants["conn-azure-0001"]!, env: { ...grants["conn-azure-0001"]!.env, AWS_SESSION_TOKEN: "x" } }
+          : grants[s.connectionId]!,
+    });
+    const err = await runner
+      .start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-azure-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateCloudProviderError);
+    noRun();
   });
 
   it("starts nothing when minting fails: no run, no worktree, no connection.used", async () => {
