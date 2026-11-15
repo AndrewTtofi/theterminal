@@ -263,6 +263,60 @@ function assertId(kind: string, id: string): void {
 
 const isWindows = process.platform === "win32";
 const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
+/** One spelling of a path for comparing locations: its real path when it exists, folded on Windows. */
+function canonical(p: string): string {
+  try {
+    return fold(realpathSync.native(p));
+  } catch {
+    return fold(normalize(resolve(p)));
+  }
+}
+
+/**
+ * A fingerprint of a configuration file for noticing a change without reading it: inode, size, modification and
+ * status-change time ("-" when missing). A file that cannot be inspected never fingerprints the same twice, so the
+ * next call scans again.
+ */
+let unstamped = 0;
+function stamp(file: string): string {
+  try {
+    const st = lstatSync(file);
+    return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+  } catch (e) {
+    if (errCode(e) === "ENOENT" || errCode(e) === "ENOTDIR") return "-";
+    return `?${++unstamped}`;
+  }
+}
+
+/** A call runGit has checked and may make: its snapshot, location arguments, directory and bounds. */
+type Prepared = { snapshot: Snapshot; location: string[]; cwd: string; top: string; run: GitRunOptions; check: GitRunOptions };
+
+/** What runGit's scan of one repository found: the probe, the hardened base arguments, the filter neutralisations. */
+type Snapshot = {
+  repo: { gitDir: string; common: string; format: string } | null;
+  hardened: string[];
+  filters: string[];
+  /** Fingerprints of the configuration files the scan read, taken before reading them. */
+  stamps: string;
+  /** The shared configuration's keys and values (lower-cased key, every value), from the include scan. */
+  config: Map<string, string[]>;
+};
+
+/**
+ * One operation's git calls (one run start, one view of a run's changes, one discard) share a GitScope: runGit's scan
+ * of a repository (the probe, the include scan of the shared and worktree configuration, the filter scan, the
+ * `.gitattributes` scan of HEAD's tree) is done once per repository and worktree within it and reused, instead of
+ * before every call. Before each reuse the fingerprints (inode, size, mtime, ctime) of the configuration files the scan
+ * read are compared with those taken at the scan; any difference, or anything that cannot be fingerprinted, scans
+ * again. A scope is held for one operation on a repository whose agent is not live and dropped with it: never kept
+ * across operations, never while the run's agent could be writing. Without a scope every call scans.
+ */
+export class GitScope {
+  /** @internal `cwd\0gitDir\0workTree` of a call to the identity of the snapshot that answered it. */
+  readonly byLocation = new Map<string, string>();
+  /** @internal `gitDir\0top` of a repository and worktree to its snapshot. */
+  readonly snapshots = new Map<string, Snapshot>();
+}
 
 export class WorktreeManager {
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -320,13 +374,34 @@ export class WorktreeManager {
    * given, are passed as `--git-dir`/`--work-tree`, so a planted `core.worktree` or `.git` file cannot redirect the
    * call. `indexFile`, when given, is passed as `GIT_INDEX_FILE`, so the call reads and writes that index instead of
    * the repository's own. Every call this manager makes goes through here, repository setup included. Bounded by
-   * `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError).
+   * `timeoutMs` (default 30 s, GitTimeoutError) and `maxBuffer` (default 2 MiB, GitOutputTooLargeError). With `scope`
+   * (one per operation, see GitScope), the scan of the repository is reused from an earlier call in the same scope
+   * while the configuration files it read are unchanged; without one, every call scans.
    */
   async runGit(
     cwd: string,
     args: string[],
-    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string } = {},
+    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string; scope?: GitScope } = {},
   ): Promise<string> {
+    return this.execute(await this.prepare(cwd, opts), args);
+  }
+
+  /** The call runGit makes once `prepare` has checked everything: the hardened arguments, the filters, then `args`. */
+  private execute(prepared: Prepared, args: string[]): Promise<string> {
+    const { snapshot, location, cwd, run } = prepared;
+    return this.git([...snapshot.hardened, ...snapshot.filters, ...location, ...args], cwd, run);
+  }
+
+  /**
+   * Everything runGit checks before a call: the shared config, hooks directory and attributes file are still empty
+   * (every call), then the repository's snapshot, from `opts.scope` when it holds one whose fingerprints still match
+   * and from a fresh scan otherwise, then info/attributes (every call). A snapshot of "no repository here" is never
+   * kept: the next call looks again (after `git init` there is one).
+   */
+  private async prepare(
+    cwd: string,
+    opts: { timeoutMs?: number; maxBuffer?: number; gitDir?: string; workTree?: string; indexFile?: string; scope?: GitScope },
+  ): Promise<Prepared> {
     assertEmptyGitconfig(this.dataDir);
     this.assertEmptyHooks();
     this.assertEmptyAttributes();
@@ -351,6 +426,67 @@ export class WorktreeManager {
       ...(opts.gitDir !== undefined ? [`--git-dir=${opts.gitDir}`] : []),
       ...(opts.workTree !== undefined ? [`--work-tree=${opts.workTree}`] : []),
     ];
+    const top = opts.workTree ?? cwd;
+    const { scope } = opts;
+    const locationKey = `${canonical(cwd)}\0${opts.gitDir === undefined ? "" : canonical(opts.gitDir)}\0${opts.workTree === undefined ? "" : canonical(opts.workTree)}`;
+    /** The scope's snapshot under `identity`, only while the files it read fingerprint as they did when it was taken. */
+    const current = (identity: string | undefined): Snapshot | undefined => {
+      const s = identity === undefined ? undefined : scope?.snapshots.get(identity);
+      return s !== undefined && s.repo !== null && this.stamps(s.repo, top) === s.stamps ? s : undefined;
+    };
+    // The same location was answered before; or the caller pins `--git-dir` and `--work-tree`, under which git does
+    // no discovery, to a repository and worktree already scanned (the view's first call, which found them, was not pinned).
+    let snapshot =
+      current(scope?.byLocation.get(locationKey)) ??
+      (opts.gitDir !== undefined ? current(`${canonical(opts.gitDir)}\0${canonical(top)}`) : undefined);
+    if (snapshot === undefined) {
+      snapshot = await this.scan(cwd, base, location, top, check);
+      if (scope !== undefined && snapshot.repo !== null) {
+        const identity = `${canonical(snapshot.repo.gitDir)}\0${canonical(top)}`;
+        scope.snapshots.set(identity, snapshot);
+        scope.byLocation.set(locationKey, identity);
+      }
+    } else if (snapshot.repo !== null) {
+      this.assertSafeRepository(snapshot.repo);
+    }
+    return { snapshot, location, cwd, top, run, check };
+  }
+
+  /**
+   * Writes one key of the shared configuration (`git config key value`) and keeps `prepared`'s snapshot current for the
+   * rest of its scope: the file is listed again (one process, with `--file`, so includes are not followed) and the
+   * snapshot keeps its fingerprints only if the listing is exactly what it held before plus this key; anything else
+   * leaves the fingerprints stale, so the next call in the scope scans the repository again.
+   */
+  private async setSharedConfig(prepared: Prepared, key: string, value: string): Promise<void> {
+    const { snapshot, location, cwd, top, check } = prepared;
+    await this.execute(prepared, ["config", key, value]);
+    if (snapshot.repo === null) return;
+    const stamps = this.stamps(snapshot.repo, top); // before the listing, as in a scan
+    const listed = await this.configWithoutIncludes(snapshot.repo, [...snapshot.hardened, ...location], cwd, check);
+    const expected = new Map(snapshot.config).set(key.toLowerCase(), [value]);
+    const same =
+      listed.size === expected.size &&
+      [...expected].every(([k, v]) => {
+        const l = listed.get(k);
+        return l !== undefined && l.length === v.length && l.every((x, i) => x === v[i]);
+      });
+    if (!same) return;
+    snapshot.config = listed;
+    snapshot.stamps = stamps;
+  }
+
+  /** The fingerprints of the files a scan reads: the shared configuration, the worktree's own, and the top-level .gitattributes. */
+  private stamps(repo: { gitDir: string; common: string }, top: string): string {
+    return [join(repo.common, "config"), join(repo.gitDir, "config.worktree"), join(top, ".gitattributes")].map(stamp).join("|");
+  }
+
+  /**
+   * The scan runGit does before a call in a repository it has not verified: the probe, the empty-tree attribute source
+   * for the repository's object format, info/attributes, the include scan and the filter scan. The fingerprints are
+   * taken before anything is read, so a file changed during the scan reads as changed afterwards.
+   */
+  private async scan(cwd: string, base: string[], location: string[], top: string, check: GitRunOptions): Promise<Snapshot> {
     const repo = await this.probeRepository([...base, ...location], cwd, check);
     let attrSource: string[] = [];
     if (repo !== null && this.attrSourceSupported) {
@@ -359,13 +495,14 @@ export class WorktreeManager {
       attrSource = [`--attr-source=${tree}`];
     }
     const hardened = [...base, ...attrSource];
+    const stamps = repo === null ? "" : this.stamps(repo, top);
     if (repo !== null) this.assertSafeRepository(repo);
-    await this.assertNoIncludes(repo, [...hardened, ...location], cwd, check);
-    const names = await this.filterDrivers(opts.workTree ?? cwd, [...hardened, ...location], cwd, check);
+    const config = await this.configWithoutIncludes(repo, [...hardened, ...location], cwd, check);
+    const names = await this.filterDrivers(top, [...hardened, ...location], cwd, check);
     const filters = names.flatMap((n) =>
       [`filter.${n}.clean=`, `filter.${n}.smudge=`, `filter.${n}.process=`, `filter.${n}.required=false`].flatMap((kv) => ["-c", kv]),
     );
-    return this.git([...hardened, ...filters, ...location, ...args], cwd, run);
+    return { repo, hardened, filters, stamps, config };
   }
 
   /**
@@ -405,26 +542,36 @@ export class WorktreeManager {
    * Refuses (UnsafeGitConfigError) a repository whose shared configuration or worktree configuration has any
    * `include.*` or `includeIf.*` key: an included file, possibly conditional on the branch or git directory, could
    * define a filter this manager never sees. The files are listed with `--file`, which does not follow includes.
+   * Returns the shared configuration's entries (lower-cased key to its values), so a key already set is not set again.
    */
-  private async assertNoIncludes(
+  private async configWithoutIncludes(
     repo: { gitDir: string; common: string } | null,
     hardened: string[],
     cwd: string,
     run: GitRunOptions,
-  ): Promise<void> {
-    if (repo === null) return;
-    for (const file of [join(repo.common, "config"), join(repo.gitDir, "config.worktree")]) {
+  ): Promise<Map<string, string[]>> {
+    const shared = new Map<string, string[]>();
+    if (repo === null) return shared;
+    for (const [i, file] of [join(repo.common, "config"), join(repo.gitDir, "config.worktree")].entries()) {
       try {
         lstatSync(file);
       } catch (e) {
         if (errCode(e) === "ENOENT" || errCode(e) === "ENOTDIR") continue;
         throw new UnsafeGitConfigError(CHECK_FAILED);
       }
-      const keys = await this.git([...hardened, "config", "--file", file, "--null", "--name-only", "--list"], cwd, run).catch(() => {
+      const listing = await this.git([...hardened, "config", "--file", file, "--null", "--list"], cwd, run).catch(() => {
         throw new UnsafeGitConfigError(CHECK_FAILED);
       });
-      if (keys.split("\0").some((k) => /^include(if)?\./i.test(k.trim()))) throw new UnsafeGitConfigError(GIT_INCLUDES_REFUSED);
+      // Each record is `key\nvalue` (`key` alone when the entry has no value), records separated by NUL.
+      for (const record of listing.split("\0")) {
+        const nl = record.indexOf("\n");
+        const key = (nl < 0 ? record : record.slice(0, nl)).trim();
+        if (key === "") continue;
+        if (/^include(if)?\./i.test(key)) throw new UnsafeGitConfigError(GIT_INCLUDES_REFUSED);
+        if (i === 0) shared.set(key.toLowerCase(), [...(shared.get(key.toLowerCase()) ?? []), nl < 0 ? "" : record.slice(nl + 1)]);
+      }
     }
+    return shared;
   }
 
   /**
@@ -498,27 +645,37 @@ export class WorktreeManager {
 
   async ensureProjectRepo(projectId: string): Promise<string> {
     assertId("projectId", projectId);
-    return this.serialize(projectId, () => this.initRepo(projectId));
+    return this.serialize(projectId, () => this.initRepo(projectId, new GitScope()));
   }
 
-  private async initRepo(projectId: string): Promise<string> {
+  /** Sets up the project repository within one operation's `scope` (the run start's, or its own). */
+  private async initRepo(projectId: string, scope: GitScope): Promise<string> {
     const repo = join(this.dataDir, "projects", projectId, "repo");
     mkdirSync(repo, { recursive: true });
     // Before any git call: recreated if it was deleted, and never used once something was written to it.
     ensureEmptyGitconfig(this.dataDir);
     assertEmptyGitconfig(this.dataDir);
-    await this.runGit(repo, ["init"]); // idempotent; also repairs an empty .git
-    const gitDir = (await this.runGit(repo, ["rev-parse", "--absolute-git-dir"])).trim();
+    // `git init` only where the probe finds no repository (none yet, or an empty .git to repair): on an existing one it
+    // would only rewrite the configuration file, which every later call in this scope checks for changes.
+    const probed = await this.prepare(repo, { scope });
+    if (probed.snapshot.repo === null) await this.execute(probed, ["init"]);
+    const gitDir = (await this.runGit(repo, ["rev-parse", "--absolute-git-dir"], { scope })).trim();
     if (fold(normalize(gitDir)) !== fold(join(realpathSync.native(repo), ".git"))) {
       throw new Error("project repo is not its own git repository");
     }
-    for (const [key, value] of REPO_CONFIG) await this.runGit(repo, ["config", key, value]);
-    const hasHead = await this.runGit(repo, ["rev-parse", "--verify", "HEAD"]).then(
+    // Only the keys not already set to their value are written; the scan's listing of the shared configuration says which.
+    for (const [key, value] of REPO_CONFIG) {
+      const prepared = await this.prepare(repo, { scope }); // the scope's snapshot, or a scan if a write left it stale
+      const have = prepared.snapshot.config.get(key.toLowerCase());
+      if (have !== undefined && have.length === 1 && have[0] === value) continue;
+      await this.setSharedConfig(prepared, key, value);
+    }
+    const hasHead = await this.runGit(repo, ["rev-parse", "--verify", "HEAD"], { scope }).then(
       () => true,
       () => false,
     );
     if (!hasHead) {
-      await this.runGit(repo, ["commit", "--allow-empty", "--no-verify", "-m", "Initial commit"]);
+      await this.runGit(repo, ["commit", "--allow-empty", "--no-verify", "-m", "Initial commit"], { scope });
     }
     return repo;
   }
@@ -532,11 +689,12 @@ export class WorktreeManager {
     assertId("projectId", projectId);
     assertId("runId", runId);
     return this.serialize(projectId, async () => {
-      const repo = await this.initRepo(projectId);
+      const scope = new GitScope(); // this start's: the run's agent does not exist yet
+      const repo = await this.initRepo(projectId, scope);
       const absPath = join(this.dataDir, "projects", projectId, "worktrees", runId);
       mkdirSync(dirname(absPath), { recursive: true });
-      await this.runGit(repo, ["worktree", "add", "-b", `run/${runId}`, absPath]);
-      const base = (await this.runGit(absPath, ["rev-parse", "--verify", "HEAD"])).trim();
+      await this.runGit(repo, ["worktree", "add", "-b", `run/${runId}`, absPath], { scope });
+      const base = (await this.runGit(absPath, ["rev-parse", "--verify", "HEAD"], { scope })).trim();
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) throw new Error("the new worktree has no commit to fork from");
       const relPath = relative(this.dataDir, absPath).split(sep).join("/");
       return { absPath, relPath, base };

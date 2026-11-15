@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
 import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 import {
-  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, GitTimeoutError, SharedGitconfigModifiedError, UnsafeGitConfigError,
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GIT_INCLUDES_REFUSED, GitOutputTooLargeError, GitScope, GitTimeoutError,
+  SharedGitconfigModifiedError, UnsafeGitConfigError,
   WorktreeManager,
   ensureEmptyGitconfig, gitEnv,
   type GitRunner,
@@ -659,6 +660,106 @@ describe("WorktreeManager", () => {
       await plainGit(wt.absPath, "reset", "--hard", "HEAD");
       expect(trap.ran()).toBe(true);
       expect(existsSync(trap.inner)).toBe(true);
+    });
+  });
+
+  describe("one scan per operation (GitScope)", () => {
+    /** A manager over real git that records every process it starts. */
+    const recording = () => {
+      const calls: string[][] = [];
+      const runner: GitRunner = async (args, cwd, opts) => {
+        calls.push(args);
+        return (await run("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+      };
+      return { calls, m: new WorktreeManager(dataDir, runner) };
+    };
+    /** The processes started since `from`, by subcommand. */
+    const since = (calls: string[][], from: number) =>
+      calls.slice(from).map((a) => a.find((x, i) => !x.startsWith("-") && a[i - 1] !== "-c" && a[i - 1] !== "--file"));
+
+    it("scans a repository once per scope, scans again when its configuration changes, and never shares a scan across scopes", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const { calls, m } = recording();
+      const scope = new GitScope();
+      await m.runGit(repo, ["status"], { scope });
+      // `git version` once per manager; the probe, the include listing, the filter scan and the tree scan; the call.
+      expect(since(calls, 0)).toEqual(["version", "rev-parse", "config", "config", "ls-tree", "status"]);
+      let n = calls.length;
+      await m.runGit(repo, ["status", "--short"], { scope });
+      expect(since(calls, n)).toEqual(["status"]);
+
+      // The agent (another run's, through the shared common dir) configures a filter driver mid-operation: the next
+      // call scans again and neutralises it.
+      n = calls.length;
+      await git(repo, "config", "filter.evil.smudge", "cat");
+      await m.runGit(repo, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status"]);
+      expect(calls.at(-1)).toContain("filter.evil.smudge=");
+      n = calls.length;
+      await m.runGit(repo, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["status"]);
+      expect(calls.at(-1)).toContain("filter.evil.smudge=");
+
+      // An include planted mid-operation is refused by the next call.
+      await git(repo, "config", "include.path", join(outside, "x.cfg"));
+      await expect(m.runGit(repo, ["status"], { scope })).rejects.toThrow(GIT_INCLUDES_REFUSED);
+      await git(repo, "config", "--unset", "include.path");
+
+      // Another scope, and a call without one, each scan for themselves.
+      n = calls.length;
+      await m.runGit(repo, ["status"], { scope: new GitScope() });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status"]);
+      n = calls.length;
+      await m.runGit(repo, ["status"]);
+      await m.runGit(repo, ["status"]);
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status", "rev-parse", "config", "config", "ls-tree", "status"]);
+    });
+
+    it("a scan pinned to a worktree's verified git directory reuses the scan that found it, and a scan of another worktree does not", async () => {
+      const a = await mgr.createRunWorktree("proj1", "run-a");
+      const b = await mgr.createRunWorktree("proj1", "run-b");
+      const { calls, m } = recording();
+      const scope = new GitScope();
+      const gitDir = (await m.runGit(a.absPath, ["rev-parse", "--absolute-git-dir"], { scope })).trim();
+      let n = calls.length;
+      await m.runGit(a.absPath, ["status"], { scope, gitDir, workTree: a.absPath });
+      expect(since(calls, n)).toEqual(["status"]);
+      n = calls.length;
+      await m.runGit(b.absPath, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status"]);
+    });
+
+    it("a repository that appears during the operation (git init) is scanned: nothing is kept about an empty directory", async () => {
+      const { calls, m } = recording();
+      const repo = await m.ensureProjectRepo("proj1");
+      const init = calls.findIndex((a) => a.includes("init"));
+      expect(init).toBeGreaterThan(0);
+      // After `init`: a scan of the new repository before anything else runs in it.
+      expect(since(calls, init + 1).slice(0, 4)).toEqual(["rev-parse", "config", "config", "ls-tree"]);
+      expect(await git(repo, "rev-list", "--count", "HEAD")).toBe("1");
+    });
+
+    it("a configuration that changes under a write of ours is caught by the listing that follows the write", async () => {
+      // The agent of another run plants an include at the moment the start writes the identity: the start is refused.
+      const runner: GitRunner = async (args, cwd, opts) => {
+        const out = (await run("git", args, { cwd, env: opts?.env, maxBuffer: opts?.maxBuffer, timeout: opts?.timeoutMs })).stdout;
+        if (args.includes("config") && args.includes("user.name")) await git(cwd, "config", "include.path", join(outside, "x.cfg"));
+        return out;
+      };
+      const m = new WorktreeManager(dataDir, runner);
+      await expect(m.ensureProjectRepo("proj1")).rejects.toThrow(GIT_INCLUDES_REFUSED);
+    });
+
+    it("sets the identity keys only when they are not already set, and resets one the agent changed", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const { calls, m } = recording();
+      await m.ensureProjectRepo("proj1");
+      expect(calls.some((a) => a.includes("config") && a.includes("user.name"))).toBe(false);
+      await git(repo, "config", "user.email", "someone@example.com");
+      await m.ensureProjectRepo("proj1");
+      const writes = calls.filter((a) => a.includes("config") && !a.includes("--file") && !a.includes("--get-regexp"));
+      expect(writes.map((a) => a.slice(-2))).toEqual([["user.email", "agent@theterminal.localhost"]]);
+      expect(await git(repo, "config", "user.email")).toBe("agent@theterminal.localhost");
     });
   });
 });
