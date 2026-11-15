@@ -3,7 +3,7 @@ import { chmodSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, read
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
 import { plainGit, plantSubmoduleTrap } from "../fixtures/submodule-trap.js";
 import {
@@ -22,14 +22,21 @@ let dataDir: string;
 let outside: string;
 let mgr: WorktreeManager;
 
+// Every runGit call is five or six git processes (its hardening checks, then the call) and a repository or worktree
+// is set up with eight or nine of them: seconds on Windows CI, where a process start is slow and the suite shares two
+// cores; the default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 beforeEach(() => {
   dataDir = realpathSync(mkdtempSync(join(tmpdir(), "wt-data-")));
   outside = realpathSync(mkdtempSync(join(tmpdir(), "wt-out-")));
   mgr = new WorktreeManager(dataDir);
 });
 afterEach(() => {
-  rmSync(dataDir, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  // Retried: on Windows a git process that was just killed can still hold its working directory (EBUSY).
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe("WorktreeManager", () => {

@@ -29,6 +29,12 @@ const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
 const REASON = "the agent left the build broken";
 const posix = process.platform !== "win32";
 
+// Every git call here runs through runGit's hardening, five or six git processes each: a run start is about fifty, a
+// discard about thirty. Seconds on Windows CI, where a process start is slow and the suite shares two cores; the
+// default 5 s cut these tests off mid-git.
+const GIT_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 15_000;
+vi.setConfig({ testTimeout: GIT_TEST_TIMEOUT_MS, hookTimeout: GIT_TEST_TIMEOUT_MS });
+
 let dataDir: string;
 let outside: string;
 let db: Db;
@@ -67,8 +73,10 @@ beforeEach(async () => {
 afterEach(async () => {
   await service.shutdown();
   await runner.shutdown();
-  rmSync(dataDir, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  // Retried: on Windows a program the override just killed (taskkill is asynchronous) or a git process can still hold
+  // the worktree it ran in (EBUSY) for a moment.
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 const entries = (type: string): LedgerEntry[] => ledger.list({ limit: 1000 }).filter((e) => e.type === type);
