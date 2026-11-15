@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFile
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
 import Fastify from "fastify";
-import { openDatabase } from "../db.js";
+import { openDatabase, type Db } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
 import { registerRoutes } from "./routes.js";
@@ -290,8 +290,10 @@ export async function createServer(opts: {
   if (opts.uiDir) assertDataDirOutsideUiDir(opts.dataDir, opts.uiDir);
   // Before the ledger opens: the CLI and the desktop app share one data folder, and only one server may use it.
   const lock = acquireDataDirLock(opts.dataDir);
+  let openedDb: Db | undefined; // closed here when the start fails
   try {
     const db = openDatabase(join(opts.dataDir, "ledger.db"));
+    openedDb = db;
     const ledger = new Ledger(db);
     const board = new BoardService(db, ledger);
     const token = loadToken(opts.dataDir, opts.token);
@@ -383,7 +385,6 @@ export async function createServer(opts: {
     } catch (err) {
       await signin.shutdown();
       await app.close().catch(() => undefined);
-      db.close();
       throw err;
     }
 
@@ -400,15 +401,19 @@ export async function createServer(opts: {
           for (const client of app.websocketServer.clients) client.terminate();
           await app.close();
         } finally {
-          // Always: a db left open keeps its files locked, and a restart in this process could not take them; a lock
-          // left behind would refuse the next server on this folder.
+          // Always: a db left open keeps its files locked, and a restart in this process could not take them. The
+          // lock release only ever removes our own lock, so a second close() is harmless.
           db.close();
           lock.release();
         }
       },
     };
   } catch (err) {
-    lock.release();
+    try {
+      openedDb?.close();
+    } finally {
+      lock.release();
+    }
     throw err;
   }
 }
