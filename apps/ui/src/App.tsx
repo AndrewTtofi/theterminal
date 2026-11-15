@@ -3,6 +3,7 @@ import type {
   AgentAction, AgentRun, Board as BoardData, CapacityReport, GateEvaluation, GitHubOverview, IntakeView, LedgerEntry,
   MachinePresence, NarrationContext, NarrationTopic, PendingAgentAction, Project, RunChanges, Stage,
 } from "@theterminal/shared";
+import { innerEntry } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import { ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, LinkOverview, Status } from "./api";
@@ -17,6 +18,11 @@ import { useConnections } from "./use-connections";
 const GATE_REFRESHED = "Something changed: a condition is no longer met. The checklist was refreshed.";
 
 /** The ledger entry types that can change a gate's checklist while the Owner looks at it. */
+/**
+ * Whether an entry changes a run or its pending actions: an agent entry, here or carried from a linked machine, or a
+ * run on a linked machine that ended without one (unlinked, refused, a failed check).
+ */
+const touchesRuns = (e: LedgerEntry) => innerEntry(e).type.startsWith("agent.") || e.type === "link.run_failed";
 const changesGates = (type: string) => ["agent.", "card.", "intake.", "gate."].some((p) => type.startsWith(p));
 
 /** How many ledger entries one request loads: the newest page first, then older pages on request. */
@@ -170,7 +176,7 @@ export function App() {
       setHealth(h);
       unsubscribe = subscribeLedger(h.headSeq, (e) => {
         refreshStatus();
-        if (e.type.startsWith("agent.")) refresh();
+        if (touchesRuns(e)) refresh();
         // Tests, enables and removals change a connection's status: reread the list from the server.
         if (e.type.startsWith("connection.")) refreshConnections.current();
         // Spend, rate limits, budgets and hardware change the Capacity report.
@@ -345,7 +351,7 @@ export function App() {
         if (e.projectId !== selectedId) return;
         stream.push(e);
         refresh();
-        if (e.type.startsWith("agent.")) refreshAgents.current();
+        if (touchesRuns(e)) refreshAgents.current();
         if (e.type.startsWith("intake.") || e.type.startsWith("card.")) refreshIntake.current();
       });
     });

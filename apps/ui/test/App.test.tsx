@@ -313,6 +313,58 @@ describe("App needs-you strip", () => {
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Project B");
   });
 
+  it("refreshes the strip on an agent entry a linked machine sent, and when a run on one ends", async () => {
+    m.listAllPendingActions
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([pendingAction("b1", "B", "run make")])
+      .mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(h.subs.size).toBe(1));
+    await waitFor(() => expect(m.listAllPendingActions).toHaveBeenCalledTimes(1));
+    const inner = { ...agentEntry(3, "B"), actor: { kind: "agent", id: "r1" }, payload: { runId: "r1", actionId: "b1" } } as LedgerEntry;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(8, "B"), type: "link.mirrored", actor: { kind: "system", id: "link" },
+        payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
+      } as LedgerEntry),
+    );
+    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(9, "B"), type: "link.run_failed", actor: { kind: "system", id: "link" },
+        payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(screen.queryByText('Agent wants to run the command "run make"')).toBeNull());
+    expect(m.listAllPendingActions).toHaveBeenCalledTimes(3);
+  });
+
+  it("rereads the project's runs on an agent entry a linked machine sent, and when a run on one ends", async () => {
+    m.getBoard.mockImplementation((id) => Promise.resolve(mk(id)));
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await screen.findByRole("heading", { name: "Project A" });
+    await waitFor(() => expect(m.listRuns).toHaveBeenCalledWith("A"));
+    await waitFor(() => expect(h.subs.size).toBe(2));
+    const before = m.listRuns.mock.calls.length;
+    const inner = { ...agentEntry(3, "A"), type: "agent.finished", payload: { runId: "r1", status: "completed" } } as LedgerEntry;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(8, "A"), type: "link.mirrored", actor: { kind: "system", id: "link" },
+        payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(m.listRuns.mock.calls.length).toBeGreaterThan(before));
+    const after = m.listRuns.mock.calls.length;
+    act(() =>
+      h.onEntry?.({
+        ...agentEntry(9, "A"), type: "link.run_failed", actor: { kind: "system", id: "link" },
+        payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
+      } as LedgerEntry),
+    );
+    await waitFor(() => expect(m.listRuns.mock.calls.length).toBeGreaterThan(after));
+  });
+
   it("does not refresh the strip for non-agent entries", async () => {
     render(<App />);
     await waitFor(() => expect(h.subs.size).toBe(1));
