@@ -184,7 +184,7 @@ describe("Workbench", () => {
     }
     const aws = within(side).getByText("AWS").closest("li")!;
     expect(aws.getAttribute("aria-disabled")).toBe("true");
-    expect(aws.textContent).toContain("Arrives with Plan 5B");
+    expect(aws.textContent).toContain("Arrives in a later release");
 
     await userEvent.click(within(side).getByRole("button", { name: "GitHub" }));
     const tab = container.querySelector('[data-panel="connection:new:github"]')!;
