@@ -103,7 +103,7 @@ describe("OverrideSection", () => {
     fireEvent.click(within(discardForm()).getByRole("button", { name: "Discard 1 file" }));
     const confirm = within(discardForm()).getByRole("group", { name: "Confirm the discard" });
     expect(document.activeElement).toBe(confirm);
-    expect(confirm.textContent).toContain("This runs git reset --hard and git clean -fd in the run's folder");
+    expect(confirm.textContent).toContain("This runs git read-tree HEAD, git reset --hard --no-recurse-submodules HEAD, then git clean -fd in the run's folder");
     expect(model.onOverrideDiscard).not.toHaveBeenCalled();
     fireEvent.click(within(confirm).getByRole("button", { name: "Confirm discard" }));
     await waitFor(() => expect(model.onOverrideDiscard).toHaveBeenCalledWith("run1", REASON));

@@ -9,7 +9,7 @@ const SCOPE =
 const COMMAND_NOTE =
   "The program is started directly, not through a shell, with no connection keys in its environment. Anything you can reach, including files in your home folder, stays reachable to the program. Output is recorded in the ledger.";
 const DISCARD_NOTE =
-  "Drops every change in this working copy that is not committed (git reset --hard HEAD, then git clean -fd). Commits the agent made are kept.";
+  "Drops every change in this working copy that is not committed (git read-tree HEAD, git reset --hard --no-recurse-submodules HEAD, then git clean -fd). Commits the agent made are kept.";
 const WHY = "Why? (required, at least 10 characters)";
 const RECORDED = "Recorded. Watch the Ledger or the Terminal for the result.";
 const REASON_MIN = 10;
@@ -157,7 +157,7 @@ function DiscardForm({ run, disabled }: { run: AgentRun; disabled: boolean }) {
             </div>
           ) : (
             <div role="group" aria-label="Confirm the discard" className="override-confirm" tabIndex={-1} ref={confirmRef}>
-              <p>This runs git reset --hard and git clean -fd in the run's folder. Commits the agent made are kept.</p>
+              <p>This runs git read-tree HEAD, git reset --hard --no-recurse-submodules HEAD, then git clean -fd in the run's folder. Commits the agent made are kept.</p>
               <ConfirmActions
                 confirm="Confirm discard"
                 busy={busy}

@@ -129,7 +129,8 @@ export function Workbench({ model }: Props) {
     if (active instanceof HTMLElement && active !== document.body && active.isConnected) return;
     const topic = [...document.querySelectorAll<HTMLElement>(".learn-side details[data-topic]")].find((d) => d.dataset.topic === topicId);
     (topic?.querySelector<HTMLElement>("summary") ?? document.querySelector<HTMLElement>(".learn-side input[type='search']"))?.focus();
-  });
+    // After the render that shows Learn on the topic: openLearn sets all three before this ref.
+  }, [view, sideOpen, learnTopic]);
 
   const [dockReady, setDockReady] = useState(false);
   const [layoutName, setLayoutName] = useState("Guided");

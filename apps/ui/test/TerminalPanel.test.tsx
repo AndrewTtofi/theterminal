@@ -54,7 +54,7 @@ describe("terminalItems", () => {
   it("shows a discard override as a line saying what ran, then its output", () => {
     const discard = ev(1, "override.discard", { overrideId: "o1", runId: "run1", reason: "The agent broke the build", files: 2 });
     expect(view([discard, overrideCompleted(2, "run1", "HEAD is now at 0123456 start")])).toEqual([
-      ["override", "# OVERRIDE discard: git reset --hard HEAD, then git clean -fd"],
+      ["override", "# OVERRIDE discard: git read-tree HEAD, git reset --hard --no-recurse-submodules HEAD, then git clean -fd"],
       ["override_output", "HEAD is now at 0123456 start"],
     ]);
   });

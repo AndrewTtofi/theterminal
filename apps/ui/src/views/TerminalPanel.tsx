@@ -64,7 +64,7 @@ export function terminalItems(entries: LedgerEntry[], runId: string | null): Ter
       }
       case "override.discard":
         // What a discard runs is fixed, so the line says it; its git output follows with override.completed.
-        push("override", "# OVERRIDE discard: git reset --hard HEAD, then git clean -fd");
+        push("override", "# OVERRIDE discard: git read-tree HEAD, git reset --hard --no-recurse-submodules HEAD, then git clean -fd");
         break;
       case "override.completed": {
         const output = str(p.output);
