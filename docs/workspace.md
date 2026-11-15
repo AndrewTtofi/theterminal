@@ -41,7 +41,7 @@ A run recorded before The Terminal kept the commit it started from has no Change
 
 ### While a run is in progress
 
-You see "Changes show when the run is stopped or finished." Reading a working copy while an agent is changing it could be misleading, and it is not safe to do while the agent can still alter git's settings, so The Terminal refuses to read it until the run has stopped or finished. This applies to the changed-files list, the file tree, diff tabs and file tabs: none of them asks for anything while the run is live, and they load on their own once it ends. The agent feed and the Terminal tab still show what the agent is doing.
+You see "Changes show when the run is stopped or finished." Reading a working copy while an agent is changing it could be misleading, and it is not safe to do while the agent can still alter git's settings, so The Terminal refuses to read it until the run has stopped or finished. This applies to the changed-files list, the file tree, diff tabs and file tabs: none of them asks for anything while the run is live, and they load on their own once it ends. When you stop a run, the agent's program can take a few seconds more to end; the views wait for it (up to 10 seconds) and then load. The agent feed and the Terminal tab still show what the agent is doing.
 
 ### Limits
 
@@ -57,9 +57,11 @@ Large changes are cut off rather than slowing the app down.
 
 When something is over a limit, the view says so and tells you what was left out.
 
+Two things the view does not catch yet, and accepts for now: a change that only alters line endings or a file's executable bit is not listed if the agent set `core.autocrlf=true` or `core.fileMode=false` in the shared repository's settings; and the commit a run starts from is read from its working copy just after it is created, so an agent of another live run in the same project could, in that moment, move the new run's branch.
+
 ### Viewing never runs the repository's code
 
-A repository can contain settings that make git run programs. Looking at changes does not allow that. Git hooks, filters, attributes and included git settings are all switched off while The Terminal reads a run's files. A repository whose git settings include other files is refused, with a message, rather than read. Git never goes into submodules (a nested repository's own settings are never checked, so it is never entered), and replacement objects (`git replace`) are ignored.
+A repository can contain settings that make git run programs. Looking at changes does not allow that. Git hooks, filters, attributes and included git settings are all switched off while The Terminal reads a run's files. A repository whose git settings include other files is refused, with a message, rather than read. Git never goes into submodules (a nested repository's own settings are never checked, so it is never entered), and replacement objects (`git replace`) are ignored. The view also never reads the run's own git index, which the agent controls: marks in it (`skip-worktree`, `assume-unchanged`, a sparse checkout) would make git call a changed file unchanged. The changes are read through a fresh index built from the run's last commit and thrown away afterwards; a file the agent staged but did not commit is therefore listed as new, like any other file not in a commit.
 
 The Terminal also gives git an empty configuration file and an empty hooks folder of its own. If something has written to either, git is not run at all and you see a message: "The Terminal's shared git configuration was modified…" (restart The Terminal to repair it) or "The Terminal's empty hooks folder was modified…" (empty it and try again).
 
@@ -124,7 +126,7 @@ Every override is recorded in the ledger in two phases, when it starts and when 
 
 ### Discard
 
-**Discard** throws away a run's uncommitted work. It runs `git reset --hard` and `git clean -fd` in the working copy. Commits the agent already made are kept. Discard has its own confirm step and its own required reason, and it is recorded in the same way.
+**Discard** throws away a run's uncommitted work. It runs `git read-tree HEAD`, `git reset --hard --no-recurse-submodules HEAD` and `git clean -fd` in the working copy; the first rebuilds the index, so a file the agent marked skip-worktree or assume-unchanged (which `reset --hard` alone would leave as it is) is reset too. Commits the agent already made are kept. Discard has its own confirm step and its own required reason, and it is recorded in the same way.
 
 ### What it does not protect you from
 
