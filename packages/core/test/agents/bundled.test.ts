@@ -163,6 +163,15 @@ describe("bundled resolution stays inside core's own install", () => {
     expect(bundledClaude({ coreDir: core, platform: "win32", arch: "x64" })).toBe(join(root, SDK_WIN, "claude.exe"));
   });
 
+  it.each([
+    ["darwin", "arm64", "claude"],
+    ["win32", "x64", "claude.exe"],
+  ] as const)("Claude on %s-%s in a staged desktop tree without the SDK's platform package is null, so PATH is used", (platform, arch, exe) => {
+    // The desktop app's staged core keeps the SDK's JS but not its native Claude Code (not redistributed in 9A).
+    write({ [`${SDK}/package.json`]: "{}", [`${SDK}/sdk.mjs`]: "", [`${SDK}/${exe}`]: "", "app/core/node_modules/@anthropic-ai/sdk/package.json": "{}" });
+    expect(bundledClaude({ coreDir: core, platform, arch })).toBeNull();
+  });
+
   it.skipIf(process.platform === "win32")("Claude: a binary that is a symlink escaping the SDK's platform package is null", () => {
     write({ [`${SDK}/package.json`]: "{}", [`${SDK_WIN}/package.json`]: "{}", "outside/claude.exe": "" });
     symlinkSync(join(root, "outside/claude.exe"), join(root, SDK_WIN, "claude.exe"));

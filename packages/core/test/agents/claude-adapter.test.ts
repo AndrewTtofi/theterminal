@@ -324,9 +324,24 @@ describe("ClaudeAdapter", () => {
   it("api_key mode keeps the bundled Claude Code and never looks for one on PATH", async () => {
     const q = fakeQuery([success(0)]);
     const findClaude = vi.fn(() => CLAUDE_BIN);
-    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, findClaude }).start(harness().opts);
+    const bundled = "node_modules/@anthropic-ai/claude-agent-sdk-x/claude";
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => bundled, findClaude }).start(harness().opts);
     expect(q.calls[0]!.options).not.toHaveProperty("pathToClaudeCodeExecutable");
     expect(findClaude).not.toHaveBeenCalled();
+  });
+
+  it("api_key mode falls back to Claude Code on PATH when the bundled one is missing (the desktop app does not ship it)", async () => {
+    const q = fakeQuery([success(0)]);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => null, findClaude: () => CLAUDE_BIN }).start(harness().opts);
+    expect(q.calls[0]!.options.pathToClaudeCodeExecutable).toBe(CLAUDE_BIN);
+    expect(q.calls[0]!.options.env!.ANTHROPIC_API_KEY).toBe(FAKE_KEY);
+  });
+
+  it("api_key mode fails without starting Claude when there is no bundled Claude Code and none on PATH", async () => {
+    const q = fakeQuery([success(0)]);
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY, bundled: () => null, findClaude: () => null }).start(harness().opts);
+    expect(r).toEqual({ status: "failed", error: "Claude Code is unavailable: its bundled program is missing and none is on PATH" });
+    expect(q.calls).toHaveLength(0);
   });
 
   it("subscription mode runs the Claude Code bundled with the Agent SDK and never looks on PATH", async () => {

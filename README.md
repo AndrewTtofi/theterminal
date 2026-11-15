@@ -38,6 +38,29 @@ For development with live reload:
 pnpm dev
 ```
 
+## Desktop app (unsigned test builds)
+
+The desktop app is a macOS dmg (Apple Silicon and Intel) and a Windows installer. Opening it starts the local server and shows the workspace in its own window.
+
+**Where to get it.** Download the installers from the artifacts of a run of the "Release builds" workflow (Actions tab, kept for 7 days), or from a draft release.
+
+**These builds are unsigned.** Code signing and notarization come later, so your system warns you the first time you open the app:
+
+- **macOS:** open the dmg and drag The Terminal to Applications. The first time you open it, macOS says it cannot verify the app. Go to System Settings → Privacy & Security and click **Open Anyway**. Or run this once in Terminal:
+
+  ```sh
+  xattr -dr com.apple.quarantine "/Applications/The Terminal.app"
+  ```
+
+  On first launch macOS asks whether The Terminal may use your keychain: click **Allow** within a minute, or the app gives up starting and you have to open it again. It may ask again after you install each new build.
+- **Windows:** when SmartScreen warns you, click **More info**, then **Run anyway**. The installer is per-user, so it does not need admin rights.
+
+**Claude Code is not included in these test builds yet.** Install Claude Code yourself to use Claude in the desktop app; Codex and Gemini CLI are included.
+
+**Your data.** The app uses the same data folder as `theterminal start` (`~/Library/Application Support/TheTerminal` on macOS, `%APPDATA%\TheTerminal` on Windows), so projects and connections are shared. Only one of the two can run at a time: whichever starts second refuses with a message saying the data folder is in use.
+
+The app id (`org.theterminal.desktop`) is still to be confirmed before signed builds ship. Changing it later resets macOS permissions and keychain access.
+
 ## Tests
 
 ```sh
