@@ -940,16 +940,21 @@ describe("collaborators run agents on API keys and are named on what they do", {
     expect(narrate(entry, { personName: (id) => names[id] }).headline).toBe("Reviewer One allowed it");
   });
 
-  it("GET /api/agents tells a collaborator the adapters and modes, never where the Owner's keys come from or the acknowledgements", async () => {
+  it("GET /api/agents tells a collaborator the adapters and which are available, never how the Owner signs in, where their keys come from or the acknowledgements", async () => {
     const { send } = await startSeeded(script);
-    const theirs = (await (await send("maintainer", "GET", "/api/agents")).json()) as { providers: Record<string, Record<string, unknown>>; acks?: unknown };
+    expect((await send("owner", "POST", "/api/settings/provider-auth", { provider: "codex", mode: "chatgpt", acknowledgement: PROVIDER_ACKS.codex })).status).toBe(200);
+    const theirs = (await (await send("maintainer", "GET", "/api/agents")).json()) as { adapters: string[]; providers: Record<string, Record<string, unknown>>; acks?: unknown };
     expect(theirs.acks).toBeUndefined();
+    expect(theirs.adapters).toContain("fake");
+    expect(Object.keys(theirs.providers).sort()).toEqual(["claude", "codex", "gemini"]);
     for (const p of Object.values(theirs.providers)) {
-      expect(Object.keys(p).sort()).toEqual(["available", "mode"]);
+      expect(Object.keys(p)).toEqual(["available"]);
     }
+    expect(JSON.stringify(theirs)).not.toContain("chatgpt");
     const owners = (await (await send("owner", "GET", "/api/agents")).json()) as { providers: Record<string, Record<string, unknown>>; acks: unknown };
     expect(owners.acks).toEqual(PROVIDER_ACKS);
-    expect(owners.providers.claude).toMatchObject({ apiKey: "none" });
+    expect(owners.providers.claude).toMatchObject({ mode: "api_key", apiKey: "none" });
+    expect(owners.providers.codex).toMatchObject({ mode: "chatgpt" });
   });
 
   it("runs on a linked machine: a maintainer's start reaches remoteRuns.start on API keys only, decisions and stops carry the person", async () => {

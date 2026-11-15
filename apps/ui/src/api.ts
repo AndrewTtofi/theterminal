@@ -109,10 +109,11 @@ async function request<T>(
 export type AgentsInfo = {
   adapters: AdapterId[];
   /**
-   * apiKey: where a run's API key comes from; "environment" is the server's own variable (development fallback). The
-   * Owner alone is told; a collaborator's copy has no `apiKey` and no `acks`.
+   * mode: how the Owner signs in to the provider; apiKey: where a run's API key comes from ("environment" is the
+   * server's own variable, a development fallback). The Owner alone is told; a collaborator's copy has `available`
+   * only, and no `acks`.
    */
-  providers: Record<Provider, { mode: AuthMode; available: boolean; apiKey?: "connection" | "environment" | "none" }>;
+  providers: Record<Provider, { available: boolean; mode?: AuthMode; apiKey?: "connection" | "environment" | "none" }>;
   acks?: Record<Provider, string>;
 };
 
@@ -143,8 +144,8 @@ export type Status = {
   todayCostUsd: number;
   /** Over runs started this calendar month (the server's local time). */
   monthCostUsd: number;
-  /** The summed monthly budgets of the enabled model connections; null when none has one. */
-  monthlyBudgetUsd: number | null;
+  /** The summed monthly budgets of the enabled model connections; null when none has one. The Owner's copy only. */
+  monthlyBudgetUsd?: number | null;
   /** `secretStore` is where the server keeps connection secrets: the OS keychain, or its own encrypted file (a server install). */
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable"; secretStore?: "keychain" | "file" | "memory" };
   /** null when GitHub is not connected. */

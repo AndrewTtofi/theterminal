@@ -136,21 +136,18 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     signin.cancel(req.params.id) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" }),
   );
 
-  // The status bar. A collaborator gets the counts and states only: the keychain, and anything added for the Owner
-  // later (remote access, say), stays out of their copy, which is built from this fixed list of fields.
+  // The status bar. A collaborator gets the counts and states only: the budget, the keychain, and anything added for
+  // the Owner later (remote access, say), stays out of their copy, which is built from this fixed list of fields.
   app.get("/api/status", needs("viewer"), async (req) => {
     // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
     void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
     const intakeProjects = intake.openDecisionsByProject();
-    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
     const shared = {
       runningAgents: counts.runningAgents,
       pendingDecisions: counts.pendingDecisions,
       todayCostUsd: counts.todayCostUsd,
       monthCostUsd: counts.monthCostUsd,
-      // The sum of the enabled model connections' budgets; null when none has one.
-      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
       connections: { enabled: counts.connections.enabled, failed: counts.connections.failed },
       ci: ci(),
       // Undecided plan decisions over every open intake, and the projects they belong to.
@@ -162,9 +159,13 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       shareLinks: shareLinks(),
     };
     if (req.principal?.personId !== OWNER_ID) return shared;
-    // The address is the Owner's: `remote` (with its label) is on their copy only, by the fixed list above.
+    // What the Owner pays for is theirs alone (as each source's budget is in capacity), and so is the address: the
+    // summed budget and `remote` (with its label) are on their copy only, by the fixed list above.
+    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
     return {
       ...shared,
+      // The sum of the enabled model connections' budgets; null when none has one.
+      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
       connections: { ...shared.connections, keychain: connections.keychainState(), secretStore: secretStore() },
       remote: remoteStatus(remote(), req.principal),
     };

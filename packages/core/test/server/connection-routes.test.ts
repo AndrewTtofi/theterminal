@@ -511,21 +511,25 @@ describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
     expect((await json<Connection[]>(get(s, "/api/connections")))[0]).toMatchObject({ enabled: true });
   });
 
-  it("GET /api/status for a collaborator is trimmed: counts only, no keychain state and nothing about remote access", async () => {
+  it("GET /api/status for a collaborator is trimmed: counts only, no budget, no keychain state and nothing about remote access", async () => {
     const { s, theirs } = await startSeeded();
-    await addClaude(s);
+    await send(s, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Claude", secrets: { apiKey: KEY }, config: { monthlyBudgetUsd: "40" } });
     const owners = await json<Record<string, unknown>>(get(s, "/api/status"));
     expect(owners.connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
     expect(owners.remote).toEqual({ enabled: false, listening: false, label: "off" });
+    expect(owners.monthlyBudgetUsd).toBe(40);
     for (const role of ["viewer", "reviewer", "maintainer"] as const) {
       const res = await theirs(role, "GET", "/api/status");
       expect(res.status).toBe(200);
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.connections).toEqual({ enabled: 1, failed: 0 });
       expect(body).not.toHaveProperty("remote");
+      // What the Owner pays for is theirs alone: the summed budget goes the way of each source's budget in capacity.
+      expect(body).not.toHaveProperty("monthlyBudgetUsd");
       expect(JSON.stringify(body)).not.toContain("keychain");
+      expect(JSON.stringify(body)).not.toContain("40");
       expect(Object.keys(body).sort()).toEqual(
-        ["ci", "connections", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "monthlyBudgetUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
+        ["ci", "connections", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
       );
     }
   });

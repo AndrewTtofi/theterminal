@@ -279,7 +279,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
           onChange={(e) => setName(e.target.value)}
         />
       </div>
-      {provider && info && info.acks && (
+      {provider && info && info.acks && info.providers[provider].mode !== undefined && (
         <ProviderModeSection
           key={`${provider}:${info.providers[provider].mode}`}
           provider={provider}

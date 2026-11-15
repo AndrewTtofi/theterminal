@@ -22,7 +22,7 @@ export { ADAPTER_NAMES } from "./StartRunForm";
 type Props = {
   adapters: AdapterId[];
   /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
-  providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
+  providers?: Partial<Record<Provider, { available: boolean; mode?: AuthMode }>>;
   /** Every connection, in full or as summaries; the enabled cloud accounts and MCP servers are offered to the run. */
   connections?: ConnectionSummary[];
   /** Who is at the panel; the Owner when absent. Below the Owner, the start form says runs use the Owner's API key. */

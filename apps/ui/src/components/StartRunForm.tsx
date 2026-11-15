@@ -11,7 +11,7 @@ export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", code
 type Props = {
   adapters: AdapterId[];
   /** Per-provider availability of its bundled program; a missing entry means the adapter is always available. */
-  providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
+  providers?: Partial<Record<Provider, { available: boolean; mode?: AuthMode }>>;
   /** The project's cards; the run can be tied to one of them. */
   cards: Card[];
   /** Every connection (in full or as summaries); the enabled cloud accounts, MCP servers and local models are offered to the run. */
