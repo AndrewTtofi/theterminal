@@ -1,4 +1,4 @@
-import { generateKeyPairSync, X509Certificate, type KeyObject } from "node:crypto";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, X509Certificate, type KeyObject } from "node:crypto";
 import { connect, createServer, type TLSSocket } from "node:tls";
 import type { AddressInfo } from "node:net";
 import { describe, it, expect } from "vitest";
@@ -28,16 +28,40 @@ describe("selfSignedCertificate", () => {
     expect(CERT_NOT_AFTER).toBe("99991231235959Z");
   });
 
-  it("derives a positive serial from the key and is deterministic", () => {
-    const { privateKey, publicKey } = pair();
-    const a = new X509Certificate(selfSignedCertificate(privateKey, publicKey, "tt-a"));
-    const b = new X509Certificate(selfSignedCertificate(privateKey, publicKey, "tt-a"));
-    expect(a.serialNumber).toBe(b.serialNumber);
-    expect(a.serialNumber.length).toBeLessThanOrEqual(32);
-    expect(Number.parseInt(a.serialNumber.slice(0, 1), 16)).toBeLessThan(8);
-    // Ed25519 signatures are deterministic, so the whole certificate is.
-    expect(a.raw.equals(b.raw)).toBe(true);
-  });
+  /** An Ed25519 key from a fixed seed whose SHA-256 SPKI digest starts 00 eb: the serial's first byte is zero. */
+  const zeroLedSerialKey = (): { privateKey: KeyObject; publicKey: KeyObject } => {
+    const seed = Buffer.alloc(32);
+    seed.writeUInt32BE(384, 28);
+    const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]), format: "der", type: "pkcs8" });
+    return { privateKey, publicKey: createPublicKey(privateKey) };
+  };
+  /** The serial INTEGER's DER content, read right after the v3 version field ([0] INTEGER 2). */
+  const serialDer = (der: Buffer): Buffer => {
+    const version = Buffer.from("a003020102", "hex");
+    const at = der.indexOf(version) + version.length;
+    expect(der[at]).toBe(0x02);
+    return der.subarray(at + 2, at + 2 + der[at + 1]!);
+  };
+
+  for (const [label, keys] of [["a random key", pair], ["a key whose serial starts with a zero byte", zeroLedSerialKey]] as const) {
+    it(`derives a positive serial from the key and is deterministic (${label})`, () => {
+      const { privateKey, publicKey } = keys();
+      const a = new X509Certificate(selfSignedCertificate(privateKey, publicKey, "tt-a"));
+      const b = new X509Certificate(selfSignedCertificate(privateKey, publicKey, "tt-a"));
+      expect(a.serialNumber).toBe(b.serialNumber);
+      // Node prints the serial's magnitude in hex, without leading zero bytes and with "-" were it negative.
+      expect(a.serialNumber).toMatch(/^[0-9A-F]{1,32}$/i);
+      const serial = BigInt(`0x${a.serialNumber}`);
+      expect(serial > 0n && serial < 1n << 127n).toBe(true);
+      // The DER INTEGER is positive (its first content byte below 0x80) and minimal, at most 16 bytes.
+      const content = serialDer(a.raw);
+      expect(content[0]).toBeLessThan(0x80);
+      expect(content.length).toBeLessThanOrEqual(16);
+      expect(content.length === 1 || content[0] !== 0 || content[1]! >= 0x80).toBe(true);
+      // Ed25519 signatures are deterministic, so the whole certificate is.
+      expect(a.raw.equals(b.raw)).toBe(true);
+    });
+  }
 
   it("wraps DER in a PEM block of 64-column base64", () => {
     const { privateKey, publicKey } = pair();
