@@ -1,18 +1,19 @@
 // Packaging for The Terminal. Every switch Plan 9B (signing and notarization) changes lives in this file.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
-import { assertLayout } from "./scripts/stage-lib.mjs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { assertLayout, buildMachinePaths } from "./scripts/stage-lib.mjs";
+import { BUNDLE_CLAUDE } from "./bundle-claude.mjs";
 
-/**
- * Whether the Agent SDK's native Claude Code binary ships inside the app. Off until Anthropic confirms in writing that
- * it may be redistributed: staging then leaves the `@anthropic-ai/claude-agent-sdk-*` platform packages out, and
- * Claude runs the Owner's own Claude Code from PATH. Codex and Gemini CLI are always bundled.
- */
-export const BUNDLE_CLAUDE = false;
+export { BUNDLE_CLAUDE };
 
 const require = createRequire(import.meta.url);
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const electronVersion = JSON.parse(readFileSync(require.resolve("electron/package.json"), "utf8")).version;
+
+/** electron-builder's signing inputs: any of them set means a build would try to sign. */
+const SIGNING_ENV = ["CSC_LINK", "CSC_NAME", "WIN_CSC_LINK", "CSC_KEY_PASSWORD", "WIN_CSC_KEY_PASSWORD"];
 
 /** A release version: `MAJOR.MINOR.PATCH` with an optional pre-release suffix. */
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -28,7 +29,10 @@ async function afterPack(context) {
     platform === "darwin"
       ? join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
       : join(context.appOutDir, "resources");
-  const problems = assertLayout(resources, /** @type {NodeJS.Platform} */ (platform), Arch[context.arch], { bundleClaude: BUNDLE_CLAUDE });
+  const problems = assertLayout(resources, /** @type {NodeJS.Platform} */ (platform), Arch[context.arch], {
+    bundleClaude: BUNDLE_CLAUDE,
+    buildPaths: buildMachinePaths(REPO_ROOT),
+  });
   if (problems.length > 0) throw new Error(`Packaged layout is incomplete: ${problems.join(", ")}`);
 }
 
@@ -38,7 +42,7 @@ async function afterPack(context) {
  * @returns {import("electron-builder").Configuration}
  */
 export function builderConfig(env) {
-  if (env.THETERMINAL_SIGN === "1") {
+  if (env.THETERMINAL_SIGN === "1" || SIGNING_ENV.some((name) => env[name])) {
     // Plan 9B: hardened runtime, entitlements for V8 JIT, notarization and signtool are configured here.
     throw new Error("Signing is configured in Plan 9B");
   }
