@@ -7,6 +7,8 @@ import type { Status } from "../src/api";
 const status = (over: Partial<Status["connections"]> = {}): Status => ({
   runningAgents: 2,
   todayCostUsd: 0.4,
+  monthCostUsd: 12,
+  monthlyBudgetUsd: null,
   pendingDecisions: 1,
   connections: { enabled: 3, failed: 1, keychain: "ok", ...over },
   ci: null,
@@ -67,6 +69,20 @@ describe("StatusBar", () => {
     render(<StatusBar status={{ ...status(), ci: { state: "unknown", url: null, branch: null, updatedAt: null } }} running={0} pending={0} {...noop} />);
     expect(screen.getByText("CI: unknown")).toBeTruthy();
     expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("shows the month's spend against the budget when one is set, marking it once reached", () => {
+    const { rerender } = render(<StatusBar status={{ ...status(), monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
+    const bar = screen.getByRole("contentinfo", { name: "Status bar" });
+    expect(bar.textContent).toContain("Today: $0.40 · Month: $12.00 of $50.00");
+    expect(screen.getByText("· Month: $12.00 of $50.00", { exact: false }).className).not.toContain("attention");
+    rerender(<StatusBar status={{ ...status(), monthCostUsd: 50, monthlyBudgetUsd: 50 }} running={0} pending={0} {...noop} />);
+    expect(screen.getByText("· Month: $50.00 of $50.00", { exact: false }).className).toContain("attention");
+  });
+
+  it("leaves the month out when no budget is set", () => {
+    render(<StatusBar status={status()} running={0} pending={0} {...noop} />);
+    expect(screen.queryByText(/Month:/)).toBeNull();
   });
 
   it("selects the Needs you and Connections views when clicked", async () => {

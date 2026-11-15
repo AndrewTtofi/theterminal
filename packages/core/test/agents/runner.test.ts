@@ -539,6 +539,25 @@ describe("AgentRunner: live secrets and usage totals", () => {
     expect(getRun(db, run.id)).toMatchObject({ costUsd: 0.1, inputTokens: 10, outputTokens: 5 });
   });
 
+  it("commits agent.rate_limited as the agent with an integer retry, or null for a missing or non-integer one", async () => {
+    const run = await fakeRunner([
+      { rateLimited: { retryAfterS: 30 } },
+      { rateLimited: { retryAfterS: 2.5 } },
+      { rateLimited: { retryAfterS: -1 } },
+      { rateLimited: {} },
+    ]).start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const limited = agentEvents().filter((e) => e.type === "agent.rate_limited");
+    expect(limited.map((e) => e.payload)).toEqual([
+      { runId: run.id, retryAfterS: 30 },
+      { runId: run.id, retryAfterS: null },
+      { runId: run.id, retryAfterS: null },
+      { runId: run.id, retryAfterS: null },
+    ]);
+    expect(limited.every((e) => e.actor.kind === "agent" && e.actor.id === run.id)).toBe(true);
+    expect(getRun(db, run.id)!.status).toBe("completed");
+  });
+
   it("records null token totals when the adapter reports none", async () => {
     const run = await fakeRunner([{ message: "hi" }]).start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilFinished(run.id);

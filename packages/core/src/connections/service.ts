@@ -13,6 +13,7 @@ import {
   type ConnectionKind,
   type ConnectionProvider,
   type FieldStorage,
+  type HardwareInfo,
   type NewLedgerEntry,
   type Provider,
 } from "@theterminal/shared";
@@ -24,6 +25,7 @@ import { redact, truncate } from "../agents/redact.js";
 import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 import { privateKeySecrets } from "./cloud/gcp.js";
+import { hardwareConfig, hardwareFromConfig } from "../capacity/hardware.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -246,6 +248,8 @@ export class ConnectionService {
   private state: "ok" | "unavailable" = "ok";
   /** The last keychain write or delete failed as unavailable (the cache stays good); cleared by the next success. */
   private writeFailed = false;
+  /** The tail of the hardware detections being recorded (see writeHardware). */
+  private hardwareWrites: Promise<unknown> = Promise.resolve();
   /** Whether a `load()` has succeeded since the process started. */
   private loaded = false;
   private loading: Promise<void> | null = null;
@@ -389,7 +393,9 @@ export class ConnectionService {
 
   private async updateNow(actor: Actor, id: string, patch: UpdateConnectionPatch): Promise<Connection> {
     const row = this.requireRow(id);
-    if (row.provider === DETECTED_PROVIDER) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
+    // The Owner may switch This computer off or on; only detection writes its fields.
+    const onlyEnabled = Object.keys(patch).every((k) => k === "enabled" || patch[k as keyof UpdateConnectionPatch] === undefined);
+    if (row.provider === DETECTED_PROVIDER && !onlyEnabled) throw new UnsupportedConnectionError(MANAGED_BY_DETECTION);
     await this.tryLoad();
     const entry = this.availableEntry(row.provider);
     const changes: Record<string, unknown> = {};
@@ -562,6 +568,50 @@ export class ConnectionService {
     const token = this.cache.get(row.id)?.token;
     const repo = (JSON.parse(row.config) as Record<string, string>).repo;
     return token && repo ? { connectionId: row.id, token, repo } : null;
+  }
+
+  /**
+   * Records a hardware detection in the This computer connection: added when absent, else updated with the new config
+   * (every detection is recorded, as its time changes). Whether it is enabled stays the Owner's choice. Detections run
+   * one at a time, so two at once never both add it.
+   */
+  writeHardware(actor: Actor, info: HardwareInfo): Promise<Connection> {
+    const next = this.hardwareWrites.then(() => this.writeHardwareNow(actor, info));
+    this.hardwareWrites = next.catch(() => undefined);
+    return next;
+  }
+
+  private async writeHardwareNow(actor: Actor, info: HardwareInfo): Promise<Connection> {
+    const entry = this.availableEntry(DETECTED_PROVIDER);
+    const config = this.checkConfig(entry, hardwareConfig(info), []);
+    const existing = this.rows().find((r) => r.provider === DETECTED_PROVIDER);
+    if (existing) {
+      const payload = eventPayloadSchemas["connection.updated"].parse({ connectionId: existing.id, name: existing.name, changes: { config } });
+      return this.exclusive(existing.id, async () => {
+        await this.commitWithKeychain(existing.id, DETECTED_PROVIDER, [], () => {
+          this.requireRow(existing.id);
+          return { projectId: null, actor, type: "connection.updated", payload };
+        });
+        return this.get(existing.id);
+      });
+    }
+    const connectionId = this.newId();
+    const payload = eventPayloadSchemas["connection.added"].parse({
+      connectionId, kind: entry.kind, provider: entry.provider, name: entry.label, config, secretFields: [], privateFields: [],
+    });
+    return this.exclusive(connectionId, async () => {
+      await this.commitWithKeychain(connectionId, DETECTED_PROVIDER, [], () => {
+        this.assertNoConflict(entry);
+        return { projectId: null, actor, type: "connection.added", payload };
+      });
+      return this.get(connectionId);
+    });
+  }
+
+  /** The last detection recorded in an enabled This computer connection, or null. */
+  hardware(): HardwareInfo | null {
+    const row = this.rows().find((r) => r.provider === DETECTED_PROVIDER && r.enabled === 1);
+    return row ? hardwareFromConfig(JSON.parse(row.config) as Record<string, string>) : null;
   }
 
   /** The plan and monthly budget of each enabled model connection. */

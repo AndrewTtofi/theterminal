@@ -16,6 +16,8 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
   const runningCount = status?.runningAgents ?? running;
   const needsYou = status?.pendingDecisions ?? pending;
   const cost = (status?.todayCostUsd ?? 0).toFixed(2);
+  const month = status?.monthCostUsd ?? 0;
+  const budget = status?.monthlyBudgetUsd ?? null;
   const conn = status?.connections;
   const connections = conn
     ? `Connections: ${conn.enabled} connected${conn.failed > 0 ? `, ${conn.failed} failed` : ""}`
@@ -24,7 +26,12 @@ export function StatusBar({ status, running, pending, onSelectView, onResetLayou
     <footer className="status-bar" aria-label="Status bar">
       <div className="status-left">
         <span className="status-item">Agents running: {runningCount}</span>
-        <span className="status-item">Today: ${cost}</span>
+        <span className="status-item">
+          Today: ${cost}
+          {budget !== null && (
+            <span className={month >= budget ? "attention" : undefined}>{` · Month: $${month.toFixed(2)} of $${budget.toFixed(2)}`}</span>
+          )}
+        </span>
         <button
           type="button"
           className={`status-item${needsYou > 0 ? " attention" : ""}`}

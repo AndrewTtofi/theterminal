@@ -52,6 +52,10 @@ export function describeEntry(e: LedgerEntry): string {
       return `${who} said: "${clip(p.text, 80)}"`;
     case "agent.finished":
       return `Agent run ${p.status}`;
+    case "agent.rate_limited": {
+      const retry = typeof p.retryAfterS === "number" ? `; retry after ${p.retryAfterS} s` : "";
+      return `Agent ${String(p.runId ?? "").slice(0, 8)} was rate-limited by the provider${retry}`;
+    }
     case "settings.claude_auth_changed":
       return `${who} set Claude to use ${p.mode === "subscription" ? "own subscription" : "API key"}`;
     case "settings.provider_auth_changed": {

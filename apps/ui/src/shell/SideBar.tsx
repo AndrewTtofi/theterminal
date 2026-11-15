@@ -1,10 +1,10 @@
 import type { ComponentType, KeyboardEvent, PointerEvent } from "react";
 import { AgentsSideBar } from "../views/AgentsSideBar";
+import { CapacitySideBar } from "../views/CapacitySideBar";
 import { ConnectionsSideBar } from "../views/ConnectionsSideBar";
 import { GitHubSideBar } from "../views/GitHubSideBar";
 import { LedgerSideBar } from "../views/LedgerSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
-import { PlaceholderSideBar } from "../views/PlaceholderSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
@@ -21,7 +21,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   ledger: LedgerSideBar,
   connections: ConnectionsSideBar,
   github: GitHubSideBar,
-  capacity: PlaceholderSideBar,
+  capacity: CapacitySideBar,
 };
 
 export const clampWidth = (w: number) => Math.min(SIDE_BAR_MAX, Math.max(SIDE_BAR_MIN, Math.round(w)));

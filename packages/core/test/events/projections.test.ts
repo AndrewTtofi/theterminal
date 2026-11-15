@@ -26,8 +26,24 @@ describe("workspaceCounts", () => {
     insert.run("after", "completed", 2, new Date(2026, 10, 15, 0, 0, 0).toISOString());
     insert.run("live", "running", null, new Date(2026, 10, 14, 9, 0, 0).toISOString());
     expect(workspaceCounts(d, now)).toEqual({
-      runningAgents: 1, pendingDecisions: 0, todayCostUsd: 0.75, connections: { enabled: 0, failed: 0 },
+      runningAgents: 1, pendingDecisions: 0, todayCostUsd: 0.75, monthCostUsd: 3.75, connections: { enabled: 0, failed: 0 },
     });
+    d.close();
+  });
+
+  it("sums monthCostUsd only over runs started in the local calendar month", () => {
+    const d = openDatabase(":memory:");
+    const now = new Date(2026, 10, 14, 12, 0, 0);
+    const insert = d.prepare(
+      `INSERT INTO agent_runs (id, project_id, adapter, auth_mode, prompt, status, worktree, cost_usd, started_at)
+       VALUES (?, 'p1', 'fake', 'none', 'p', 'completed', 'wt', ?, ?)`,
+    );
+    insert.run("last-month", 4, new Date(2026, 9, 31, 23, 59, 59, 999).toISOString());
+    insert.run("first", 1.5, new Date(2026, 10, 1, 0, 0, 0).toISOString());
+    insert.run("end", 0.5, new Date(2026, 10, 30, 23, 59, 59, 999).toISOString());
+    insert.run("next-month", 8, new Date(2026, 11, 1, 0, 0, 0).toISOString());
+    insert.run("unreported", null, new Date(2026, 10, 10).toISOString());
+    expect(workspaceCounts(d, now).monthCostUsd).toBe(2);
     d.close();
   });
 });
@@ -133,6 +149,20 @@ describe("agent projections", () => {
     const live = listRuns(db, "p1");
     rebuildAllProjections(db, ledger);
     expect(listRuns(db, "p1")).toEqual(live);
+  });
+
+  it("projects agent.rate_limited into rate_limits with the run's adapter, and rebuilds the same rows", () => {
+    emit("agent.started", { runId: "r1", adapter: "codex", authMode: "api_key", prompt: "p", cardId: null, worktree: "wt/r1" });
+    emit("agent.rate_limited", { runId: "r1", retryAfterS: 12 });
+    emit("agent.rate_limited", { runId: "r1", retryAfterS: null });
+    const dump = () => db.prepare("SELECT run_id, adapter, at, retry_after_s FROM rate_limits ORDER BY rowid").all();
+    const live = dump();
+    expect(live).toEqual([
+      { run_id: "r1", adapter: "codex", at: expect.any(String), retry_after_s: 12 },
+      { run_id: "r1", adapter: "codex", at: expect.any(String), retry_after_s: null },
+    ]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
   });
 
   it("rebuild after mixed board + agent history equals the live projections", () => {

@@ -1490,6 +1490,28 @@ describe("GeminiAdapter", () => {
     expect(r.error).not.toContain(SECRET);
   });
 
+  it("emits rate_limited when the prompt fails with Gemini's 429 status (RESOURCE_EXHAUSTED), and not for other errors", async () => {
+    script([{ type: "fail", message: "[API Error: Quota exceeded for this model (Status: RESOURCE_EXHAUSTED)]" }]);
+    const h = harness();
+    expect((await adapter().start(h.opts)).status).toBe("failed");
+    expect(h.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
+    script([{ type: "fail", message: "Internal error" }]);
+    const h2 = harness();
+    await adapter().start(h2.opts);
+    expect(h2.events.filter((e) => e.type === "rate_limited")).toEqual([]);
+  });
+
+  it("emits rate_limited once for an API error in the agent's text, never for prose that mentions a rate limit", async () => {
+    script([
+      { type: "message", text: "I added a rate limit to the API handler. " },
+      { type: "message", text: "[API Error: You exceeded your current quota (Status: RESOURCE_EXHAUSTED)] " },
+      { type: "message", text: "[API Error: 429 Too Many Requests, rate limit] " },
+    ]);
+    const h = harness();
+    await adapter().start(h.opts);
+    expect(h.events.filter((e) => e.type === "rate_limited")).toEqual([{ type: "rate_limited" }]);
+  });
+
   it("fails when gemini exits in the middle of a prompt", async () => {
     script([{ type: "message", text: "partial" }, { type: "exit", code: 2 }]);
     const h = harness();

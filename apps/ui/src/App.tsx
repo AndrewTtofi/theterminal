@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentAction, AgentRun, Board as BoardData, GitHubOverview, LedgerEntry, PendingAgentAction, Project } from "@theterminal/shared";
+import type {
+  AgentAction, AgentRun, Board as BoardData, CapacityReport, GitHubOverview, LedgerEntry, PendingAgentAction, Project,
+} from "@theterminal/shared";
 import { ApiError, api, errorMessage, subscribeLedger } from "./api";
 import type { AgentsInfo, Health, Status } from "./api";
 import { Workbench } from "./shell/Workbench";
@@ -52,6 +54,10 @@ export function App() {
   const [runActions, setRunActions] = useState<AgentAction[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
   const [github, setGitHub] = useState<{ overview: GitHubOverview | null; error: string | null }>({ overview: null, error: null });
+  const [capacity, setCapacity] = useState<{ report: CapacityReport | null; error: string | null }>({ report: null, error: null });
+  /** Set once the Capacity view or tab has asked for the report: from then on, usage changes refresh it too. */
+  const capacityWanted = useRef(false);
+  const refreshCapacityRef = useRef<() => void>(() => {});
   const connections = useConnections();
   const refreshConnections = useRef(connections.refresh);
   refreshConnections.current = connections.refresh;
@@ -89,6 +95,9 @@ export function App() {
         if (e.type.startsWith("agent.")) refresh();
         // Tests, enables and removals change a connection's status: reread the list from the server.
         if (e.type.startsWith("connection.")) refreshConnections.current();
+        // Spend, rate limits, budgets and hardware change the Capacity report.
+        const usage = e.type === "agent.finished" || e.type === "agent.rate_limited" || e.type.startsWith("connection.");
+        if (usage && capacityWanted.current) refreshCapacityRef.current();
       });
       refresh();
       refreshStatus();
@@ -116,6 +125,22 @@ export function App() {
       }
     }, () => !mounted.current),
   );
+  // The Capacity view and tab ask for this when they open and every 60 s while open; made once, like refreshGitHub.
+  const [refreshCapacity] = useState(() => {
+    const load = coalesced(async () => {
+      try {
+        const report = await api.getCapacity();
+        if (mounted.current) setCapacity({ report, error: null });
+      } catch (e) {
+        if (mounted.current) setCapacity((prev) => ({ report: prev.report, error: e instanceof ApiError ? e.code : "request_failed" }));
+      }
+    }, () => !mounted.current);
+    return () => {
+      capacityWanted.current = true;
+      load();
+    };
+  });
+  refreshCapacityRef.current = refreshCapacity;
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -286,6 +311,7 @@ export function App() {
     connections,
     status,
     github: { ...github, refresh: refreshGitHub },
+    capacity: { ...capacity, refresh: refreshCapacity },
   };
 
   return (

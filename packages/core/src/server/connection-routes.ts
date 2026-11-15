@@ -111,10 +111,14 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
     void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
+    const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
     return {
       runningAgents: counts.runningAgents,
       pendingDecisions: counts.pendingDecisions,
       todayCostUsd: counts.todayCostUsd,
+      monthCostUsd: counts.monthCostUsd,
+      // The sum of the enabled model connections' budgets; null when none has one.
+      monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
       connections: { ...counts.connections, keychain: connections.keychainState() },
       ci: ci(),
     };
