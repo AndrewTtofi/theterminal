@@ -25,18 +25,24 @@ export function keyRejection(err: unknown): string | null {
   return name !== undefined && KEY_REJECTIONS.has(name) ? name : null;
 }
 
+/** The catalog's region shape; the region becomes part of the pinned endpoint's host name. */
+const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
 type StsClientLike = Pick<STSClient, "send" | "destroy">;
 export type StsClientConstructor = new (config: STSClientConfig) => StsClientLike;
 
 /**
  * An STS caller over the AWS SDK. Every client gets the stored keys and region explicitly, and the default credential
  * provider is replaced by one that refuses, so the SDK never takes credentials from `~/.aws` or the environment.
- * (It may still read non-credential settings such as retry mode from them.)
+ * The endpoint is pinned to the region's STS host. (The SDK may still read other settings, such as retry mode.)
  */
 export function createRealSts(Client: StsClientConstructor = STSClient): StsCaller {
   async function call<T>(keys: StaticKeys, run: (client: StsClientLike) => Promise<T>): Promise<T> {
+    if (!REGION.test(keys.region)) throw new Error("not an AWS region");
     const client = new Client({
       region: keys.region,
+      // Pinned: an endpoint URL from AWS_ENDPOINT_URL(_STS) or the AWS config file must never receive the keys.
+      endpoint: `https://sts.${keys.region}.amazonaws.com`,
       credentials: { accessKeyId: keys.accessKeyId, secretAccessKey: keys.secretAccessKey },
       credentialDefaultProvider: () => async () => {
         throw new Error("the default AWS credential chain is disabled");

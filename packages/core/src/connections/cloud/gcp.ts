@@ -26,6 +26,18 @@ export function parseServiceAccount(json: string): ServiceAccount | null {
   }
 }
 
+/** PEM body lines this long are redacted on their own: a tool may print the key one line at a time. */
+const MIN_PEM_LINE = 40;
+
+/**
+ * The strings that give away a private key: the key itself, its JSON-escaped form (as it appears inside a key file)
+ * and each base64 body line of at least 40 characters. The BEGIN and END lines are not secret and are left out.
+ */
+export function privateKeySecrets(key: string): string[] {
+  const lines = key.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length >= MIN_PEM_LINE && !l.startsWith("-----"));
+  return [...new Set([key, JSON.stringify(key).slice(1, -1), ...lines])];
+}
+
 const b64url = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
 
 /** A self-signed RS256 JWT asking the token endpoint for `scope`, valid for one hour from `now`. */
