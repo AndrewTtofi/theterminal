@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatUsd, joinAnd, plural } from "../src/index.js";
+import { formatUsd, joinAnd, plural, visibleControls } from "../src/index.js";
 
 describe("plural", () => {
   it("uses the singular for one and the plural otherwise", () => {
@@ -28,5 +28,15 @@ describe("formatUsd", () => {
     expect(formatUsd(1000)).toBe("$1,000.00");
     expect(formatUsd(1_000_000)).toBe("$1,000,000.00");
     expect(formatUsd(12.3456)).toBe("$12.35");
+  });
+});
+
+describe("visibleControls", () => {
+  it("shows controls, bidi and zero-width characters as escapes and keeps line breaks and tabs", () => {
+    expect(visibleControls("a‮b")).toBe("a\\u202eb");
+    expect(visibleControls("x\u001b[31m")).toBe("x\\u001b[31m");
+    expect(visibleControls("y\r\b\f")).toBe("y\\r\\b\\f");
+    expect(visibleControls("z​⁦")).toBe("z\\u200b\\u2066");
+    expect(visibleControls("line\nnext\tcol")).toBe("line\nnext\tcol");
   });
 });

@@ -22,3 +22,12 @@ export function formatUsd(n: number): string {
 export function lowerFirst(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1);
 }
+
+/** C0 and C1 controls other than a line break and a tab, and bidi and zero-width characters. */
+const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+const SHORT_ESCAPES: Record<string, string> = { "\b": "\\b", "\f": "\\f", "\r": "\\r" };
+
+/** Characters that could hide, reorder or restyle what is shown, as JSON escapes (`\r`, `\u001b`, `‮`). */
+export function visibleControls(s: string): string {
+  return s.replace(HIDDEN_CHARS, (c) => SHORT_ESCAPES[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}

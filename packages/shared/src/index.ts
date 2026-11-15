@@ -7,3 +7,4 @@ export * from "./capacity.js";
 export * from "./text.js";
 export * from "./intake.js";
 export * from "./gates.js";
+export * from "./narration.js";
