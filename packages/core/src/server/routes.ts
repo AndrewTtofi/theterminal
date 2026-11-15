@@ -8,6 +8,7 @@ import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServe
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/changes.js";
 import { UnsafeGitConfigError } from "../agents/worktrees.js";
+import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
@@ -93,6 +94,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     // A fixed sentence chosen by the code that threw, never request text.
     if (err instanceof RunActiveError) return reply.code(409).send({ error: "run_active", message: err.message });
     // A fixed sentence: the repository's configuration includes other files, or the like. Never a path.
+    if (err instanceof OverrideBusyError) return reply.code(409).send({ error: "override_busy" });
+    if (err instanceof ProgramNotFoundError) return reply.code(400).send({ error: "program_not_found" });
+    if (err instanceof ProgramNotAllowedError) return reply.code(400).send({ error: "program_not_allowed" });
+    if (err instanceof OverridesShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
     if (err instanceof UnsafeGitConfigError) return reply.code(409).send({ error: "unsafe_repository", message: err.message });
     if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
     if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });

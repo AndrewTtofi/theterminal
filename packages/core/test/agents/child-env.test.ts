@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MCP_ENV_NAME, allowlistedEnv, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
+import { MCP_ENV_NAME, allowlistedEnv, assertEmptyGitconfig, baseChildEnv, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
@@ -255,5 +255,49 @@ describe("allowlistedEnv", () => {
     expect(allowlistedEnv(input, "darwin")).toEqual({ PATH: "p", HOME: "h", LC_ALL: "c" });
     expect(allowlistedEnv(input, "win32")).toEqual({ PATH: "p", HOME: "h", LC_ALL: "c", SystemRoot: "C:\\W" });
     expect(input).toEqual(snapshot);
+  });
+});
+
+describe("baseChildEnv", () => {
+  const dirty = {
+    PATH: "/usr/bin",
+    HOME: "/home/user",
+    ANTHROPIC_API_KEY: "sk-ant-TESTKEY-0000000000",
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    GIT_DIR: "/elsewhere",
+    NODE_OPTIONS: "--require x",
+    LC_ALL: "C",
+  } as NodeJS.ProcessEnv;
+
+  it("is exactly the allowlisted names plus the three git pins, and leaves the base untouched", () => {
+    const snapshot = { ...dirty };
+    const env = baseChildEnv(DATA_DIR, dirty);
+    expect(dirty).toEqual(snapshot);
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/user",
+      LC_ALL: "C",
+      GIT_CONFIG_GLOBAL: join(DATA_DIR, EMPTY_GITCONFIG),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+  });
+
+  it("buildChildEnv starts from it: in a login mode the only addition is Claude's working-directory pin", () => {
+    expect(buildChildEnv("codex", "chatgpt", { dataDir: DATA_DIR, base: dirty })).toEqual(baseChildEnv(DATA_DIR, dirty));
+    expect(buildChildEnv("claude", "subscription", { dataDir: DATA_DIR, base: dirty })).toEqual({
+      ...baseChildEnv(DATA_DIR, dirty),
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1",
+    });
+  });
+
+  it("throws when the shared git config has content", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gitcfg-"));
+    try {
+      writeFileSync(join(dir, EMPTY_GITCONFIG), "[user]\n");
+      expect(() => baseChildEnv(dir, dirty)).toThrow(SharedGitconfigModifiedError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

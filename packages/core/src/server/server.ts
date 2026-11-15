@@ -19,6 +19,8 @@ import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerIntakeRoutes } from "./intake-routes.js";
 import { registerStoryRoutes } from "./story-routes.js";
 import { registerChangesRoutes } from "./changes-routes.js";
+import { registerOverrideRoutes } from "./override-routes.js";
+import { OverrideService } from "../override/service.js";
 import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
@@ -470,6 +472,9 @@ export async function createServer(opts: {
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
+    const clean = (runId: string, s: string, max: number) => runner.cleanFor(runId)(s, max);
+    const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which });
+
     const intake = new IntakeService({ db, ledger, recorded });
     const gates = new GateService({ db, ledger, recorded });
 
@@ -479,6 +484,7 @@ export async function createServer(opts: {
     let boundPort = 0;
     try {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
+      if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       registerAuth(app, { token, port: () => boundPort });
       registerLedgerStream(app, ledger);
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
@@ -494,7 +500,8 @@ export async function createServer(opts: {
       });
       registerIntakeRoutes(app, { intake });
       registerStoryRoutes(app, { db, ledger });
-      registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean: (runId, s, max) => runner.cleanFor(runId)(s, max) });
+      registerChangesRoutes(app, { db, dataDir: opts.dataDir, worktrees, clean });
+      registerOverrideRoutes(app, { overrides });
       registerConnectionRoutes(app, {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
@@ -525,6 +532,7 @@ export async function createServer(opts: {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
     } catch (err) {
+      await overrides.shutdown();
       await signin.shutdown();
       await app.close().catch(() => undefined);
       throw err;
@@ -538,6 +546,7 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
           await signin.shutdown(); // kills every login and status check before the db closes
           for (const client of app.websocketServer.clients) client.terminate();

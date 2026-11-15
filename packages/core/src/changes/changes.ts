@@ -219,7 +219,7 @@ function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
 }
 
 /** Git in the run's worktree, pinned to its verified git directory and work tree. */
-type WorktreeGit = (args: string[]) => Promise<string>;
+export type WorktreeGit = (args: string[]) => Promise<string>;
 
 const isWindows = process.platform === "win32";
 const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
@@ -231,7 +231,7 @@ const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
  * `.git` file pointing anywhere else, fails with WorktreeMissingError. Every later call passes the verified
  * `--git-dir` and `--work-tree`, so neither can change in between.
  */
-async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string): Promise<WorktreeGit> {
+export async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string): Promise<WorktreeGit> {
   let gitDir: string;
   try {
     const out = (await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]))

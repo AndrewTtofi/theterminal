@@ -456,7 +456,8 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       const detail = output || null;
       if (p.timedOut === true) return { headline: "Override killed after 10 minutes", detail, attention: true };
       if (p.ok === true) return { headline: `Override finished (exit ${show(p.exitCode, 20)})`, detail, attention: true };
-      const how = typeof p.exitCode === "number" ? `exit ${show(p.exitCode, 20)}` : `signal ${show(p.signal, 20)}`;
+      const how =
+        typeof p.exitCode === "number" ? `exit ${show(p.exitCode, 20)}` : typeof p.signal === "string" && p.signal !== "" ? `signal ${show(p.signal, 20)}` : "exit unknown";
       return { headline: `Override failed (${how})`, detail, attention: true };
     }
 

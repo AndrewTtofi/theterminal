@@ -29,6 +29,13 @@ export {
 } from "./changes/changes.js";
 export type { ChangesDeps } from "./changes/changes.js";
 export { registerChangesRoutes } from "./server/changes-routes.js";
+export {
+  OverrideService, OverrideBusyError, ProgramNotFoundError, ProgramNotAllowedError, OverridesShuttingDownError, OVERRIDE_RUN_ACTIVE,
+  OVERRIDE_TIMEOUT_MS, OVERRIDE_OUTPUT_CHARS, OVERRIDE_BUFFER,
+} from "./override/service.js";
+export type { OverrideDeps } from "./override/service.js";
+export { registerOverrideRoutes } from "./server/override-routes.js";
+export type { OverrideRouteDeps } from "./server/override-routes.js";
 export type { ChangesRouteDeps } from "./server/changes-routes.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
 export {
@@ -59,7 +66,7 @@ export { GeminiAdapter } from "./agents/gemini/adapter.js";
 export { ProviderSettings } from "./agents/settings.js";
 export { which } from "./agents/which.js";
 export type { WhichOptions } from "./agents/which.js";
-export { buildChildEnv } from "./agents/child-env.js";
+export { baseChildEnv, buildChildEnv } from "./agents/child-env.js";
 export { JsonRpcPeer } from "./agents/jsonrpc.js";
 export type { RpcHandler } from "./agents/jsonrpc.js";
 export { CodexAdapter, codexApprovalToAction } from "./agents/codex/adapter.js";

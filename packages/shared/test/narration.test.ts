@@ -423,6 +423,7 @@ describe("narrate: override", () => {
     expect(h(completed({ ok: false, exitCode: null, signal: "SIGKILL", timedOut: true }))).toBe("Override killed after 10 minutes");
     expect(h(completed({ ok: false, exitCode: 2 }))).toBe("Override failed (exit 2)");
     expect(h(completed({ ok: false, exitCode: null, signal: "SIGTERM" }))).toBe("Override failed (signal SIGTERM)");
+    expect(h(completed({ ok: false, exitCode: null, signal: null, output: "workspace restarted" }))).toBe("Override failed (exit unknown)");
     expect(n(completed({ output: "" })).detail).toBeNull();
   });
 });

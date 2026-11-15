@@ -51,9 +51,27 @@ export function fakeAgentEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
 }
 
 /**
- * The child-process environment for a provider CLI, built from an allowlist: a copy of the allowlisted
- * variables in `base` (default process.env), which is never changed. Every GIT_*, provider variable,
- * NODE_OPTIONS and the like is dropped. Then git is pinned to the empty global config, and in api_key mode
+ * The base of every child environment: a copy of the allowlisted variables in `base` (default process.env, never
+ * changed), with git pinned to the empty global config, no system config and no prompts. Throws
+ * SharedGitconfigModifiedError if the shared empty git config is no longer empty. Holds no provider key or
+ * connection value: anything a child needs beyond this is added by its caller.
+ */
+export function baseChildEnv(
+  dataDir: string,
+  base: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const env = allowlistedEnv(base, platform);
+  env.GIT_CONFIG_GLOBAL = join(dataDir, EMPTY_GITCONFIG);
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_TERMINAL_PROMPT = "0";
+  assertEmptyGitconfig(dataDir);
+  return env;
+}
+
+/**
+ * The child-process environment for a provider CLI, built from baseChildEnv (the allowlist and the git pins). Every
+ * GIT_*, provider variable, NODE_OPTIONS and the like is dropped. Then in api_key mode
  * only the given key is added, then a cloud grant's allowlisted variables (`extraEnv`). Login modes pass no key, so the CLI's own stored login is used untouched.
  * Throws SharedGitconfigModifiedError if the shared empty git config is no longer empty.
  */
@@ -66,10 +84,8 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
   for (const [k] of mcp) {
     if (!MCP_ENV_NAME.test(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
   }
-  const env = allowlistedEnv(opts.base ?? process.env, opts.platform ?? process.platform);
-  env.GIT_CONFIG_GLOBAL = join(opts.dataDir, EMPTY_GITCONFIG);
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  env.GIT_TERMINAL_PROMPT = "0";
+  // Throws before anything is added when the shared git config was modified: the run fails before the CLI starts.
+  const env = baseChildEnv(opts.dataDir, opts.base ?? process.env, opts.platform ?? process.platform);
   // Keep the shell in the worktree root after every command, so relative paths resolve where the gate judged them.
   if (provider === "claude") env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
   if (mode === "api_key" && opts.apiKey) {
@@ -86,6 +102,5 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
   for (const [k, v] of extra) if (env[k] === undefined) env[k] = v;
   // MCP secret variables never come from `base` either (TT_MCP_* is not allowlisted), only from the run's MCP servers.
   for (const [k, v] of mcp) env[k] = v;
-  assertEmptyGitconfig(opts.dataDir); // a modified shared config fails the run before the CLI starts
   return env;
 }
