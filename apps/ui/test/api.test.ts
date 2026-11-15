@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, shareDownloadUrl, shareSnapshotUrl, subscribeLedger } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl, refusedChangesNote, setUnauthorizedHandler, shareDownloadUrl, shareSnapshotUrl, subscribeLedger } from "../src/api";
 import type { LedgerEntry, PresenceEntry } from "@theterminal/shared";
 
 function respond(status: number, body?: unknown) {
@@ -592,5 +592,42 @@ describe("a collaborator's run without an API key", () => {
     expect(errorMessage(new ApiError(409, "api_key_required", { provider: "<b>x</b>" }), "run")).toBe(
       "No API key is configured for this provider. Ask the Owner to add one in Connections.",
     );
+  });
+});
+
+describe("people api and the signed-out redirect", () => {
+  afterEach(() => setUnauthorizedHandler(null));
+  const reply = (status: number, body: unknown) =>
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })));
+
+  it("calls the handler on the auth hook's 401 only, and still throws", async () => {
+    const onUnauthorized = vi.fn();
+    setUnauthorizedHandler(onUnauthorized);
+    reply(401, { error: "unauthorized" });
+    await expect(api.listProjects()).rejects.toMatchObject({ status: 401, code: "unauthorized" });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    reply(401, { error: "invalid_credential" });
+    await expect(api.signInKeyChallenge()).rejects.toMatchObject({ code: "invalid_credential" });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes one of my sessions by its prefix", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.revokeMySession("ab12cd34");
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/me/sessions/ab12cd34");
+    expect(fetchMock.mock.calls[0]![1].method).toBe("DELETE");
+  });
+
+  it("words the people refusals", () => {
+    expect(errorMessage(new ApiError(404, "invite_invalid"))).toBe("This invitation is no longer valid. Ask the Owner for a new one.");
+    expect(errorMessage(new ApiError(423, "locked", { retryAfterS: 61 }))).toBe("Too many failed attempts. Try again in 2 minutes.");
+    expect(errorMessage(new ApiError(502, "remote_start_failed"))).toBe("The listener could not start. Is the port free?");
+    expect(errorMessage(new ApiError(502, "acme_failed", { type: "urn:ietf:params:acme:error:dns" }))).toBe(
+      "Let's Encrypt could not issue a certificate (urn:ietf:params:acme:error:dns). Check that the domain points here and port 80 is reachable.",
+    );
+    expect(errorMessage(new ApiError(502, "acme_failed", { type: "<b>\u202e" }))).not.toContain("\u202e");
+    // A read-only ledger is still worded as before.
+    expect(errorMessage(new ApiError(423, "ledger_read_only"))).toBe("Workspace is read-only");
   });
 });
