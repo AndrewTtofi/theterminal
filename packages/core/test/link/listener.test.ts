@@ -4,6 +4,7 @@ import { helloResponseSchema } from "@theterminal/shared";
 import type { LinkIdentity } from "../../src/link/identity.js";
 import { LinkListener, type ListenerDeps } from "../../src/link/listener.js";
 import { registerLinkProtocolRoutes, type LinkProtocolDeps } from "../../src/link/protocol-routes.js";
+import { LinkProtocolError } from "../../src/link/client.js";
 import { holdPort, newIdentity, rawTlsGet, tcpAccepts } from "./helpers.js";
 
 let server: LinkIdentity;
@@ -92,6 +93,16 @@ describe("LinkListener", () => {
     const port = await listener().start(0);
     const reply = await rawTlsGet(port, "/api/health?x=TESTKEY", paired);
     expect(reply).toEqual({ kind: "reply", status: 404, body: JSON.stringify({ error: "not_found" }) });
+  });
+
+  it("answers a LinkProtocolError thrown by a route 502 machine_bad_reply, not 500", async () => {
+    const port = await listener({
+      register: (app) => app.get("/link/v1/relay", async () => {
+        throw new LinkProtocolError();
+      }),
+    }).start(0);
+    const reply = await rawTlsGet(port, "/link/v1/relay", paired);
+    expect(reply).toEqual({ kind: "reply", status: 502, body: JSON.stringify({ error: "machine_bad_reply" }) });
   });
 
   it("moves to the next port when the first is taken, and stops answering after stop()", async () => {

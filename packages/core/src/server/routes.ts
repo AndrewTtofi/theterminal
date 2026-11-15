@@ -12,6 +12,7 @@ import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/ch
 import { HooksDirModifiedError, SharedGitconfigModifiedError, UnsafeGitConfigError } from "../agents/worktrees.js";
 import { OverrideBusyError, OverridesShuttingDownError, ProgramNotAllowedError, ProgramNotFoundError } from "../override/service.js";
 import { redact } from "../agents/redact.js";
+import { LinkProtocolError } from "../link/client.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
 } from "../connections/service.js";
@@ -127,6 +128,8 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof GitHubUnavailableError) return reply.code(503).send({ error: "github_unavailable" });
   if (err instanceof AlreadyDecidedError) return reply.code(409).send({ error: "already_decided" });
   if (err instanceof ShuttingDownError) return reply.code(503).send({ error: "shutting_down" });
+  // A linked machine's reply could not be read: fixed code, never the reply.
+  if (err instanceof LinkProtocolError) return reply.code(502).send({ error: "machine_bad_reply" });
   if (err instanceof LedgerReadOnlyError) {
     return reply.code(423).send({ error: "ledger_read_only" });
   }

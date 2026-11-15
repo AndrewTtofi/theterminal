@@ -234,6 +234,12 @@ describe("LinkClient.connectUnpinned", () => {
   it("reports a closed port as unreachable", async () => {
     const held = await holdPort();
     await held.release();
-    await expect(LinkClient.connectUnpinned(me, `127.0.0.1:${held.port}`, 3000)).rejects.toBeInstanceOf(MachineUnreachableError);
+    const address = `127.0.0.1:${held.port}`;
+    const err = await LinkClient.connectUnpinned(me, address, 3000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MachineUnreachableError);
+    // No machine id is known before pairing: the error names the address instead, never an empty id.
+    expect((err as MachineUnreachableError).machineId).toBeNull();
+    expect((err as MachineUnreachableError).address).toBe(address);
+    expect((err as Error).message).toBe("machine unreachable");
   });
 });

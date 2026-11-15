@@ -14,7 +14,7 @@ import { LinkClient } from "../../src/link/client.js";
 import { IdentityUnavailableError, LinkService } from "../../src/link/service.js";
 import { registerLinkProtocolRoutes } from "../../src/link/protocol-routes.js";
 import { holdPort, rawTlsGet, tcpAccepts } from "./helpers.js";
-import { LinkIdentity } from "../../src/link/identity.js";
+import { IDENTITY_ACCOUNT, LinkIdentity } from "../../src/link/identity.js";
 
 const owner = { kind: "human", id: "owner" } as const;
 
@@ -107,6 +107,36 @@ describe("LinkService identity", () => {
     await expect(link.setName(owner, "sk-ant-TESTKEY000000abcdef")).rejects.toBeInstanceOf(SecretInTextError);
     await expect(link.setName({ kind: "agent", id: "a" }, "Mac")).rejects.toBeInstanceOf(HumanRequiredError);
     expect(types(ledger)).toHaveLength(2);
+  });
+
+  it("treats a stored key that cannot be read as unavailable, with one fixed warning holding no key material", async () => {
+    const secrets = new MemorySecretStore();
+    await secrets.set(IDENTITY_ACCOUNT, "-----BEGIN PRIVATE KEY-----\nTESTKEYnotakey\n-----END PRIVATE KEY-----\n");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { ledger, link } = makeService({ secrets });
+      await link.load();
+      expect(link.identityState()).toBe("unavailable");
+      expect(link.self()).toBeNull();
+      expect(ledger.list()).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]).toHaveLength(1);
+      expect(String(warn.mock.calls[0]![0])).not.toMatch(/TESTKEY|PRIVATE KEY/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not warn for an unavailable keychain, which is reported through identityState", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { link } = makeService({ secrets: new MemorySecretStore({ failOn: new Set(["get"]) }) });
+      await link.load();
+      expect(link.identityState()).toBe("unavailable");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("reports an unavailable keychain: no identity, no linking, nothing recorded", async () => {
@@ -240,6 +270,33 @@ describe("LinkService linking opt-in", () => {
     const third = makeService({ db, secrets }).link;
     await third.load();
     expect(third.self()!.linking).toEqual({ enabled: false, port: null });
+  });
+});
+
+describe("LinkService listener lifecycle", () => {
+  it("a second load() with the opt-in recorded keeps one listener and leaks none", async () => {
+    const started: LinkListener[] = [];
+    const db = openDatabase(":memory:");
+    const ledger = new Ledger(db);
+    const link: LinkService = new LinkService({
+      db, ledger, secrets: new MemorySecretStore(), bind: "127.0.0.1",
+      listener: (deps) => {
+        const l = new LinkListener(deps);
+        started.push(l);
+        return l;
+      },
+      client: (identity) => new LinkClient({ identity }),
+      registerProtocol: (app) => registerLinkProtocolRoutes(app, { link }),
+    });
+    services.push(link);
+    await link.load();
+    const port = await link.enableLinking(owner, LINKING_ACK, 0);
+    await link.load();
+    expect(started).toHaveLength(1);
+    expect(link.self()!.linking.port).toBe(port);
+    await link.disableLinking(owner);
+    expect(await tcpAccepts(port)).toBe(false);
+    expect(started.every((l) => l.port() === null)).toBe(true);
   });
 });
 

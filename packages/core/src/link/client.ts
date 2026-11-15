@@ -9,7 +9,14 @@ import type { LinkIdentity } from "./identity.js";
 
 /** The machine did not answer: refused, timed out, or the connection was cut. Nothing about the cause is kept. */
 export class MachineUnreachableError extends Error {
-  constructor(public readonly machineId: string) {
+  /**
+   * `machineId` is the paired machine's id; null when none is known yet (pairing), and then `address` names where
+   * the connection was tried. The message is fixed either way.
+   */
+  constructor(
+    public readonly machineId: string | null,
+    public readonly address?: string,
+  ) {
     super("machine unreachable");
     this.name = "MachineUnreachableError";
   }
@@ -262,7 +269,7 @@ export class LinkClient {
     const { host, port } = parseAddress(address);
     return new Promise((resolve, reject) => {
       const socket = tls.connect({ host, port, ...tlsOptions(identity) });
-      socket.setTimeout(timeoutMs, () => socket.destroy(new MachineUnreachableError("")));
+      socket.setTimeout(timeoutMs, () => socket.destroy(new MachineUnreachableError(null, address)));
       let settled = false;
       socket.once("secureConnect", () => {
         const spki = presentedSpki(socket);
@@ -278,7 +285,7 @@ export class LinkClient {
         if (settled) return;
         settled = true;
         socket.destroy();
-        reject(new MachineUnreachableError(""));
+        reject(new MachineUnreachableError(null, address));
       });
     });
   }

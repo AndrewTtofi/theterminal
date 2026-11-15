@@ -12,7 +12,7 @@ import { NotFoundError } from "../board/board-service.js";
 import { HumanRequiredError } from "../intake/service.js";
 import { SecretInTextError } from "../intake/recorded-text.js";
 import { redact } from "../agents/redact.js";
-import type { SecretStore } from "../secrets/store.js";
+import { SecretStoreUnavailableError, type SecretStore } from "../secrets/store.js";
 import { LinkIdentity, machineIdOf } from "./identity.js";
 import type { LinkClient, Peer } from "./client.js";
 import type { LinkListener, ListenerDeps, PeerCheck } from "./listener.js";
@@ -50,6 +50,7 @@ const HELLO_CACHE_MS = 15_000;
 const SYSTEM = { kind: "system", id: "link" } as const;
 /** Fixed text: console output ends up in bug reports, so it never holds an address or an OS error. */
 const BIND_FAILED = "The Terminal: linking is on, but the link listener could not start; other computers cannot reach this one until it does";
+const IDENTITY_UNREADABLE = "The Terminal: the link identity stored in the keychain could not be read; linking is unavailable";
 const IDENTITY_FAILED = "The Terminal: this computer's link identity could not be loaded; linking is unavailable";
 
 const ackSchema = z.object({ acknowledgement: z.literal(LINKING_ACK) });
@@ -95,7 +96,10 @@ export class LinkService {
     try {
       this.identity = await LinkIdentity.load({ secrets: this.deps.secrets, onCreated: () => undefined });
       this.state = "ok";
-    } catch {
+    } catch (err) {
+      // An unavailable keychain is reported through identityState(). Anything else (a stored key that does not parse)
+      // gets one fixed sentence: the error itself may quote the stored value, so it is never logged.
+      if (!(err instanceof SecretStoreUnavailableError)) console.warn(IDENTITY_UNREADABLE);
       this.identity = null;
       this.state = "unavailable";
       return;
@@ -121,7 +125,7 @@ export class LinkService {
         return;
       }
     }
-    if (this.enabled() && !this.closed) {
+    if (this.enabled() && !this.closed && this.listener === null) {
       const recorded = Number(getSetting(db, "link.port"));
       const port = Number.isInteger(recorded) && recorded > 0 && recorded <= 65535 ? recorded : LINK_DEFAULT_PORT;
       try {
@@ -146,7 +150,10 @@ export class LinkService {
     };
   }
 
-  /** Names this computer for the machines it links with; refused when the name holds a secret. */
+  /**
+   * Human only (HumanRequiredError otherwise): names this computer for the machines it links with. Trimmed, at most
+   * 40 characters, and refused (SecretInTextError) when the name holds a secret.
+   */
   async setName(actor: Actor, name: string): Promise<void> {
     if (actor.kind !== "human") throw new HumanRequiredError();
     const parsed = z.object({ name: machineNameSchema }).parse({ name: name.trim() }).name;
@@ -276,7 +283,10 @@ export class LinkService {
     return false;
   }
 
+  /** Starts the listener; when one already runs, answers its port, so no second listener is ever created. */
   private async startListener(port: number): Promise<number> {
+    const running = this.listener?.port() ?? null;
+    if (running !== null) return running;
     const identity = this.identity;
     if (!identity) throw new IdentityUnavailableError();
     if (this.closed) throw new LinkingDisabledError();
