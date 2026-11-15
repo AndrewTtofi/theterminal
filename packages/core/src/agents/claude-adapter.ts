@@ -146,7 +146,7 @@ export class ClaudeAdapter implements AgentAdapter {
       apiKey?: () => string | undefined;
       /** The Claude Code binary shipped with the Agent SDK, for subscription mode. Default: `bundledClaude`. */
       bundled?: () => string | null;
-      /** Locates Claude Code on PATH, consulted only when there is no bundled one. Default: `claude` on PATH. */
+      /** Locates Claude Code on PATH, consulted only when there is no bundled one (in either mode). Default: `claude` on PATH. */
       findClaude?: () => string | null;
     },
   ) {
@@ -161,11 +161,13 @@ export class ClaudeAdapter implements AgentAdapter {
     if (o.signal.aborted) return { status: "failed", error: STOPPED };
     const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
-    // Subscription mode names the Claude Code bundled with the SDK (PATH only when it is missing); Claude Code reads
-    // the user's own login itself, never we. api_key mode leaves the choice to the SDK, which uses the same binary.
+    // Subscription mode names the Claude Code bundled with the SDK; Claude Code reads the user's own login itself,
+    // never we. api_key mode leaves the choice to the SDK, which uses the same binary. Without a bundled one (the
+    // desktop app does not ship it), both modes run the Claude Code on PATH.
     let executable: string | null = null;
-    if (o.authMode === "subscription") {
-      executable = this.bundled() ?? this.findClaude();
+    const bundled = this.bundled();
+    if (o.authMode === "subscription" || bundled === null) {
+      executable = bundled ?? this.findClaude();
       if (executable === null) return { status: "failed", error: NO_CLAUDE_CODE };
     }
 

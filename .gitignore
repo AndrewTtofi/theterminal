@@ -4,3 +4,6 @@ dist
 test-results/
 playwright-report/
 .tmp-data/
+apps/desktop/stage/
+apps/desktop/release/
+apps/desktop/.cache/
