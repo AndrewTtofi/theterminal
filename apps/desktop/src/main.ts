@@ -6,18 +6,22 @@
  *   exits 0 silently, even when its other flags (`--port`, `--headless`, `--ready-file`) differ; it only brings the
  *   first instance's window forward.
  * - Quitting stops the server over IPC (`server.stop()`). A headless launch is asked to quit with SIGINT or SIGTERM.
- *   On Windows a killed or force-closed host gets no signal: the server then relies on core's own shutdown when its
- *   IPC channel disconnects. Callers that stop a headless app (the smoke suite) must check no `cli.js` is left.
+ *   A killed host gets no chance to do that. On POSIX the server notices its IPC channel closing and shuts down on
+ *   its own, releasing its lock. On Windows the server child is in the host's kill-on-close job object (libuv), so
+ *   it is killed with the host: its `server.lock` stays behind naming a dead pid, and the next start takes the
+ *   folder over.
  */
 import { execFile } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, Menu, session, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, Menu, session, shell } from "electron";
 import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
+import { finishRestart } from "./lifecycle.js";
+import { menuTemplate } from "./menu.js";
 import { writeReadyFile } from "./ready-file.js";
 import { fallbackMacPath, loginShellPath, serverEnv } from "./server-env.js";
 import { ServerStartError, startServer, type ServerHandle } from "./server-process.js";
@@ -122,6 +126,8 @@ function run(args: DesktopArgs, dataDir: string): void {
         args: serverArgs(layout, dataDir, args.port),
         env,
         logFile: serverLogFile(dataDir),
+        // The first launch waits for the user to allow keychain access; the server is ready only after that.
+        readyTimeoutMs: 120_000,
       });
       ready = await server.ready;
     } catch (err) {
@@ -170,8 +176,15 @@ function run(args: DesktopArgs, dataDir: string): void {
     };
     const { response } = win && !win.isDestroyed() ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
     if (quitting) return;
-    if (response === 0) app.relaunch();
-    app.exit(0);
+    // The server is stopped before the relaunch, so the new app finds the data folder free. `app.exit()` skips
+    // `before-quit`; `stopping` keeps a quit that arrives meanwhile from stopping the server a second time.
+    stopping = true;
+    await finishRestart({
+      restart: response === 0,
+      stopServer: () => server?.stop() ?? Promise.resolve(),
+      relaunch: () => app.relaunch(),
+      exit: (code) => app.exit(code),
+    });
   }
 
   function createWindow(r: ReadyMessage): BrowserWindow {
@@ -180,7 +193,13 @@ function run(args: DesktopArgs, dataDir: string): void {
       width: 1400,
       height: 900,
       title: TITLE,
-      webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
+      webPreferences: {
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        spellcheck: false,
+        devTools: !app.isPackaged,
+      },
     });
     // Navigation, new windows and webviews are locked down by hardenContents (web-contents-created).
     forgetBootstrapUrl(w.webContents, r.port);
@@ -226,22 +245,12 @@ function probe(file: string, probeArgs: string[], opts: { timeout: number }): Pr
   });
 }
 
-/** Electron's default menu, with Open in Browser in the File menu. */
+/** Electron's default menu, with Open in Browser in the File menu and no DevTools item when packaged (see menu.ts). */
 function setMenu(r: ReadyMessage): void {
-  const mac = process.platform === "darwin";
-  const template: MenuItemConstructorOptions[] = [
-    ...(mac ? [{ role: "appMenu" } as const] : []),
-    {
-      label: "File",
-      submenu: [
-        { label: "Open in Browser", click: () => void shell.openExternal(r.url) },
-        { type: "separator" },
-        mac ? { role: "close" } : { role: "quit" },
-      ],
-    },
-    { role: "editMenu" },
-    { role: "viewMenu" },
-    { role: "windowMenu" },
-  ];
+  const template = menuTemplate({
+    mac: process.platform === "darwin",
+    packaged: app.isPackaged,
+    openInBrowser: () => void shell.openExternal(r.url),
+  });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

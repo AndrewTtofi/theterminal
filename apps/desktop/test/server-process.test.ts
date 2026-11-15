@@ -193,18 +193,28 @@ describe("terminateChild", () => {
     }
     kill(signal?: NodeJS.Signals) {
       this.signals.push(signal);
-      if (this.diesOn === (signal ?? "SIGTERM")) {
-        this.signalCode = signal ?? "SIGTERM";
-        setImmediate(() => this.emit("exit", null, this.signalCode));
-      }
+      if (this.diesOn === (signal ?? "SIGTERM")) this.die(signal ?? "SIGTERM");
       return true;
     }
+    die(signal: NodeJS.Signals | null) {
+      this.signalCode = signal;
+      if (signal === null) this.exitCode = 1;
+      setImmediate(() => this.emit("exit", this.exitCode, this.signalCode));
+    }
   }
+
+  type Run = (file: string, args: string[]) => Promise<void>;
+  const TASKKILL: [string, string[]] = ["taskkill", ["/PID", "1234", "/T", "/F"]];
+  const noRun: Run = () => Promise.reject(new Error("run should not be called"));
 
   it("stops at SIGTERM when the child exits within the grace", async () => {
     const c = new FakeChild("SIGTERM");
     const runs: [string, string[]][] = [];
-    await terminateChild(c, { graceMs: 1000, platform: "darwin", run: (f, a) => runs.push([f, a]) });
+    const run: Run = (f, a) => {
+      runs.push([f, a]);
+      return Promise.resolve();
+    };
+    await terminateChild(c, { graceMs: 1000, platform: "darwin", run });
     expect(c.signals).toEqual([undefined]);
     expect(runs).toEqual([]);
   });
@@ -212,23 +222,51 @@ describe("terminateChild", () => {
   it("sends SIGKILL after the grace on POSIX", async () => {
     const c = new FakeChild("never");
     const runs: [string, string[]][] = [];
-    await terminateChild(c, { graceMs: 50, platform: "linux", run: (f, a) => runs.push([f, a]) });
+    const run: Run = (f, a) => {
+      runs.push([f, a]);
+      return Promise.resolve();
+    };
+    await terminateChild(c, { graceMs: 50, platform: "linux", run });
     expect(c.signals).toEqual([undefined, "SIGKILL"]);
     expect(runs).toEqual([]);
   });
 
-  it("runs taskkill on the process tree after the grace on win32", async () => {
+  it("on win32 runs taskkill on the whole process tree first, and sends no signal when that works", async () => {
     const c = new FakeChild("never");
     const runs: [string, string[]][] = [];
-    await terminateChild(c, { graceMs: 50, platform: "win32", run: (f, a) => runs.push([f, a]) });
+    const run: Run = (f, a) => {
+      runs.push([f, a]);
+      c.die(null);
+      return Promise.resolve();
+    };
+    await terminateChild(c, { graceMs: 1000, platform: "win32", run });
+    expect(runs).toEqual([TASKKILL]);
+    expect(c.signals).toEqual([]);
+  });
+
+  it("on win32 falls back to kill() when taskkill fails", async () => {
+    const c = new FakeChild("SIGTERM");
+    const runs: [string, string[]][] = [];
+    const run: Run = (f, a) => {
+      runs.push([f, a]);
+      return Promise.reject(new Error("taskkill: not found"));
+    };
+    await terminateChild(c, { graceMs: 1000, platform: "win32", run });
+    expect(runs).toEqual([TASKKILL]);
     expect(c.signals).toEqual([undefined]);
-    expect(runs).toEqual([["taskkill", ["/PID", "1234", "/T", "/F"]]]);
+  });
+
+  it("on win32 falls back to kill() when the child outlives a successful taskkill by the grace", async () => {
+    const c = new FakeChild("SIGTERM");
+    const run: Run = () => Promise.resolve();
+    await terminateChild(c, { graceMs: 50, platform: "win32", run });
+    expect(c.signals).toEqual([undefined]);
   });
 
   it("does nothing for a child that has already exited", async () => {
     const c = new FakeChild("never");
     c.exitCode = 0;
-    await terminateChild(c, { graceMs: 50, platform: "linux", run: () => {} });
+    await terminateChild(c, { graceMs: 50, platform: "linux", run: noRun });
     expect(c.signals).toEqual([]);
   });
 });

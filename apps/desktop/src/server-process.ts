@@ -60,22 +60,35 @@ function waitForExit(child: KillableChild, ms: number): Promise<boolean> {
 }
 
 /**
- * Ends a child: `kill()` (SIGTERM), then, if it is still alive after `graceMs`, SIGKILL on POSIX, or on win32
- * `taskkill /PID <pid> /T /F` for the whole process tree. `run` takes a fixed argument list, never a shell.
+ * Ends a child. On POSIX: `kill()` (SIGTERM), then SIGKILL if it is still alive after `graceMs`. On win32, where
+ * `kill()` is TerminateProcess on the child alone and would orphan the agents it started: `taskkill /PID <pid> /T /F`
+ * first, for the whole process tree, and `kill()` as the fallback when taskkill fails or the child outlives it by
+ * `graceMs`. `run` takes a fixed argument list, never a shell, and rejects when the program fails.
  */
 export async function terminateChild(
   child: KillableChild,
-  o: { graceMs: number; platform: NodeJS.Platform; run: (file: string, args: string[]) => void },
+  o: { graceMs: number; platform: NodeJS.Platform; run: (file: string, args: string[]) => Promise<void> },
 ): Promise<void> {
   if (hasExited(child) || child.pid === undefined) return;
+  if (o.platform === "win32") {
+    const treeKilled = await o.run("taskkill", ["/PID", String(child.pid), "/T", "/F"]).then(
+      () => true,
+      () => false,
+    );
+    if (treeKilled && (await waitForExit(child, o.graceMs))) return;
+    if (!hasExited(child)) child.kill();
+    return;
+  }
   child.kill();
   if (await waitForExit(child, o.graceMs)) return;
-  if (o.platform === "win32") o.run("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
-  else child.kill("SIGKILL");
+  child.kill("SIGKILL");
 }
 
-function runDetached(file: string, args: string[]): void {
-  execFile(file, args, { windowsHide: true, shell: false }, () => {});
+/** Runs a program with a fixed argument list and no shell; rejects when it cannot run or exits non-zero. */
+function run(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { windowsHide: true, shell: false, timeout: 10_000 }, (err) => (err ? reject(err) : resolve()));
+  });
 }
 
 /** The part of a writable stream that createLogSink needs. */
@@ -134,7 +147,8 @@ function isReadyMessage(m: unknown): m is ReadyMessage {
  * never through a shell. Its stdout and stderr go to `logFile`. `ready` settles once: with the first valid ready
  * message, or with a ServerStartError when the child exits, fails to spawn or `readyTimeoutMs` passes first (the
  * child is then terminated). `stop()` asks for a shutdown over IPC and terminates the child after `stopTimeoutMs`.
- * Termination is SIGTERM, then after `killGraceMs` SIGKILL (POSIX) or `taskkill /T /F` (win32).
+ * Termination is SIGTERM, then after `killGraceMs` SIGKILL (POSIX); on win32 `taskkill /T /F` on the process tree, then
+ * `kill()` after `killGraceMs` if that did not end the child.
  */
 export function startServer(o: {
   nodeFile: string;
@@ -156,7 +170,7 @@ export function startServer(o: {
     windowsHide: true,
     shell: false,
   });
-  const terminate = () => terminateChild(child, { graceMs: killGraceMs, platform: process.platform, run: runDetached });
+  const terminate = () => terminateChild(child, { graceMs: killGraceMs, platform: process.platform, run });
 
   let stderrTail = "";
   child.stdout?.on("data", (chunk: Buffer) => log?.write(chunk));

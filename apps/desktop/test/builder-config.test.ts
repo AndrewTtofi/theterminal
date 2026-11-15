@@ -12,7 +12,7 @@ describe("builderConfig", () => {
     expect(c.appId).toBe("org.theterminal.desktop");
     expect(c.asar).toBe(true);
     expect(c.npmRebuild).toBe(false);
-    expect(c.files).toEqual(["dist/**/*", "package.json"]);
+    expect(c.files).toEqual(["dist/**/*", "!dist/**/*.map", "package.json"]);
     expect(c.publish).toBeNull();
     expect(c.electronVersion).toMatch(/^\d+\.\d+\.\d+$/);
   });
