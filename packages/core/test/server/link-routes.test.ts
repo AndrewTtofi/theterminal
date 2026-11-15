@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LINKING_ACK, encodePairingCode, parsePairingCode, type LedgerEntry, type Machine } from "@theterminal/shared";
 import { fakeDiscovery } from "../../src/link/discovery.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
@@ -78,6 +78,19 @@ async function enabled(s: RunningServer) {
 }
 
 describe("link routes", { timeout: 30_000 }, () => {
+  it("GET /api/link/machines lists the paired machines without asking them or browsing the network", async () => {
+    const discovery = fakeDiscovery();
+    const browse = vi.spyOn(discovery, "browse");
+    const s = await start({ discovery });
+    const res = await send(s, "GET", "/api/link/machines");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+    expect((await send(s, "GET", "/api/link/machines", undefined, { authed: false })).status).toBe(401);
+    expect(browse).not.toHaveBeenCalled();
+    await send(s, "GET", "/api/link");
+    expect(browse).toHaveBeenCalled(); // the full overview, which the Machines view asks for, still browses
+  });
+
   it("GET /api/link/verify is 401 without auth, and with nothing mirrored answers ok with nothing checked", async () => {
     const s = await start();
     expect((await send(s, "GET", "/api/link/verify", undefined, { authed: false })).status).toBe(401);

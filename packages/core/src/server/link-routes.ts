@@ -37,6 +37,10 @@ export function registerLinkRoutes(app: FastifyInstance, deps: LinkRouteDeps): v
     return s;
   };
 
+  // The paired machines as last seen: no machine is asked and the network is not browsed (for names and the Run on
+  // picker). The full overview below, which does both, is for the Machines view.
+  app.get("/api/link/machines", async () => link.presence());
+
   app.get("/api/link", async () => {
     const ok = link.identityState() === "ok";
     // Each paired machine is asked once (3 s at most, all at once; answers are kept 15 s) before the rows are read.

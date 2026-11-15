@@ -457,6 +457,32 @@ describe("narrate: linked machines", () => {
     expect(h(entry("machine.unpaired", { machineId, name: "GPU box" }))).toBe('Owner unlinked "GPU box"');
   });
 
+  it("narrates why a remote run failed in fixed words, never the recorded error", () => {
+    const failed = (error: string) => h(entry("link.run_failed", { runId: "r1", machineId, error }, system), machines);
+    for (const code of ["unreachable", "not_sent", "machine_bad_reply", "upload_refused", "connection_disabled", "no_repo", "invalid_input", "repo_too_large"]) {
+      expect(failed(code)).toBe("GPU box could not start the run");
+    }
+    for (const code of ["bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame"]) {
+      expect(failed(code)).toBe("The run on GPU box stopped: signature check failed");
+    }
+    expect(failed("machine_unpaired")).toBe("The run on GPU box stopped: the machine was unlinked");
+    expect(failed("conflict")).toBe("The run on GPU box stopped: its entries clash with records here");
+    expect(failed("remote_not_found")).toBe("The run on GPU box stopped: the machine refused");
+    expect(failed("machine_key_mismatch")).toBe("The run on GPU box stopped: the machine's key changed");
+    expect(failed("<b>sk-ant-TESTKEY-000</b>")).toBe("The run on GPU box failed");
+    expect(failed("__proto__")).toBe("The run on GPU box failed");
+  });
+
+  it("narrates refused changes in fixed words", () => {
+    const refused = (reason: string) => n(entry("link.changes_refused", { runId: "r1", machineId, reason }, system), machines);
+    expect(refused("bad_bundle").headline).toBe("The changes from GPU box were refused: what it sent could not be read");
+    expect(refused("conflict").headline).toBe("The changes from GPU box were refused: they clash with records here");
+    expect(refused("not_from_base").headline).toBe("The changes from GPU box were refused: they do not start from the project as it was sent");
+    expect(refused("wrong_path").headline).toBe("The changes from GPU box were refused: they name the wrong working copy");
+    expect(refused("other").headline).toBe("The changes from GPU box were refused");
+    expect(refused("bad_bundle")).toMatchObject({ attention: true, topic: "machine" });
+  });
+
   it("narrates a run requested from and accepted by another machine", () => {
     const requested = n(
       entry("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "Train the model", cardId: null, connectionIds: [] }),
@@ -469,12 +495,12 @@ describe("narrate: linked machines", () => {
     expect(h(entry("link.run_requested", { runId: "r1", machineId: "cd".repeat(16), adapter: "codex", prompt: "x".repeat(100), cardId: null, connectionIds: [] }), machines)).toBe(
       `Owner asked a linked machine to run a Codex agent: "${"x".repeat(80)}…"`,
     );
-    const failed = n(entry("link.run_failed", { runId: "r1", machineId, error: "no repo" }, system), machines);
-    expect(failed.headline).toBe("GPU box could not start the run: no repo");
+    const failed = n(entry("link.run_failed", { runId: "r1", machineId, error: "no_repo" }, system), machines);
+    expect(failed.headline).toBe("GPU box could not start the run");
     expect(failed.attention).toBe(true);
     expect(failed.topic).toBe("machine");
-    expect(h(entry("link.run_failed", { runId: "r1", machineId, error: "no repo" }, system))).toBe(
-      "A linked machine could not start the run: no repo",
+    expect(h(entry("link.run_failed", { runId: "r1", machineId, error: "unreachable" }, system))).toBe(
+      "A linked machine could not start the run",
     );
     expect(h(entry("link.project_received", { projectId: "p1", machineId, name: "Book club" }, system), machines)).toBe(
       'Received the project "Book club" from GPU box',

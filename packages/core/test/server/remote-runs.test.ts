@@ -139,7 +139,9 @@ describe("a remote run between two servers", { timeout: T }, () => {
     const run = (await res.json()) as AgentRun;
     expect(run).toMatchObject({ projectId, adapter: "fake", status: "running", machineId: workerId });
 
-    expect((await ofType(requester, "link.run_requested")).map((e) => (e.payload as { runId: string }).runId)).toContain(run.id);
+    const requested = (await ofType(requester, "link.run_requested")).find((e) => (e.payload as { runId: string }).runId === run.id)!;
+    // The commit this computer sent is recorded here: the returned changes are checked against it, not the worker's say.
+    expect((requested.payload as { base?: string }).base).toMatch(/^[0-9a-f]{40}$/);
     const action = await pendingOf(run.id);
     expect(action).toMatchObject({ projectName: "Demo", kind: "shell", status: "pending", machineName: "GPU box" });
     const types = origins(await ledger(requester), run.id).map((o) => o.type);

@@ -220,6 +220,8 @@ describe("link.* events", () => {
     ok("link.decision_received", { runId: "r1", actionId: "a1", machineId, decision: "allow" });
     ok("link.mirrored", { machineId, origin: origin(), signature: "c".repeat(128) });
     ok("link.changes_imported", { runId: "r1", machineId, commit: "d".repeat(40) });
+    for (const reason of ["bad_bundle", "conflict", "not_from_base", "wrong_path"]) ok("link.changes_refused", { runId: "r1", machineId, reason });
+    ok("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "go", cardId: null, connectionIds: [], base: "e".repeat(40) });
   });
 
   it("refuses a short signature, eleven connections, a bad decision and extra keys", () => {
@@ -231,11 +233,13 @@ describe("link.* events", () => {
     bad("link.run_failed", { runId: "r1", machineId, error: "x".repeat(501) });
     bad("link.changes_imported", { runId: "r1", machineId, commit: "d".repeat(39) });
     bad("link.run_accepted", { runId: "r1", machineId, projectId: "p1", extra: 1 });
+    bad("link.changes_refused", { runId: "r1", machineId, reason: "something else" });
+    bad("link.run_requested", { runId: "r1", machineId, adapter: "codex", prompt: "go", cardId: null, connectionIds: [], base: "HEAD" });
   });
 
   it("puts every link payload schema into eventPayloadSchemas", () => {
     for (const type of Object.keys(linkPayloadSchemas)) expect(eventPayloadSchemas).toHaveProperty([type]);
-    expect(Object.keys(linkPayloadSchemas)).toHaveLength(13);
+    expect(Object.keys(linkPayloadSchemas)).toHaveLength(14);
   });
 });
 

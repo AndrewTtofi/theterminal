@@ -177,6 +177,10 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "link.changes_imported":
       db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);
       break;
+    case "link.changes_refused":
+      // The link run ends here; the run itself stays as the worker reported it.
+      db.prepare("UPDATE link_runs SET state = 'failed', error = ?, updated_at = ? WHERE run_id = ?").run(p.reason, e.ts, p.runId);
+      break;
     case "link.mirrored":
       applyMirrored(db, e);
       break;

@@ -111,6 +111,7 @@ describe("eventPayloadSchemas", () => {
       "intake.reopened",
       "intake.started",
       "link.changes_imported",
+      "link.changes_refused",
       "link.decision_received",
       "link.mirrored",
       "link.project_received",

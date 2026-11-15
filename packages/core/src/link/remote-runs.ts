@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
-  agentPayloadSchemas, helloResponseSchema, LINK_PROTOCOL_VERSION, type Actor, type AdapterId, type AgentAction, type AgentRun,
+  agentPayloadSchemas, helloResponseSchema, type ChangesRefusedReason, LINK_PROTOCOL_VERSION, type Actor, type AdapterId, type AgentAction, type AgentRun,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
@@ -46,6 +46,8 @@ const SLOW_TIMEOUT_MS = 300_000;
 const QUICK_TIMEOUT_MS = 10_000;
 const MAX_PROMPT = 20_000;
 const MAX_REASON = 500;
+/** Unreadable snapshot replies in a row before the changes are refused. */
+const MAX_BAD_REPLIES = 3;
 const OBJECT_ID = /^[0-9a-f]{40}$/;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 /** Remote statuses that would read as something about this computer (its session, its own workspace) are not passed on. */
@@ -167,11 +169,13 @@ export class RemoteRunService {
     // IdentityUnavailableError here, before anything is recorded.
     const slow = this.client(SLOW_TIMEOUT_MS);
     const runId = randomUUID();
+    // The commit this computer sends, recorded with the request: the returned changes must descend from it.
+    const base = await this.head(input.projectId);
 
     commitEvent(db, ledger, () => ({
       event: {
         projectId: input.projectId, actor, type: "link.run_requested",
-        payload: { runId, machineId: machine.id, adapter: input.adapter, prompt, cardId, connectionIds },
+        payload: { runId, machineId: machine.id, adapter: input.adapter, prompt, cardId, connectionIds, base },
       },
       result: () => undefined,
     }));
@@ -180,6 +184,7 @@ export class RemoteRunService {
     const bundle = join(outgoing, `${runId}.bundle`);
     try {
       await exportRepoBundle(this.deps.worktrees, input.projectId, bundle);
+      if ((await this.head(input.projectId)) !== base) throw new Error("the project moved while it was being sent");
       await this.upload(slow, peer, runId, bundle);
       // The project's name is cleaned like any text that leaves this computer; the worker cleans it again.
       const projectName = [...this.clean(project.name).trim()].slice(0, 120).join("") || "Project";
@@ -188,6 +193,8 @@ export class RemoteRunService {
       });
     } catch (err) {
       const error = err instanceof RemoteRunRefusedError ? err.code
+        // Refused before connecting: named apart from a frame over the cap.
+        : err instanceof RemoteRefusedError && err.code === "too_large" ? "repo_too_large"
         : err instanceof RemoteRefusedError ? err.code
           : err instanceof MachineUnreachableError ? "unreachable"
             : err instanceof MachineKeyMismatchError ? "machine_key_mismatch"
@@ -352,6 +359,11 @@ export class RemoteRunService {
       } catch (err) {
         if (signal.aborted || err instanceof StopFollowing) return;
         if (err instanceof MachineUnreachableError) link.observed(current.machineId, false);
+        if (err instanceof MachineKeyMismatchError) {
+          // Another key at the machine's address: a security signal, never a quiet retry.
+          this.recordFailed(current.projectId, runId, current.machineId, "machine_key_mismatch");
+          return;
+        }
         if (err instanceof RemoteRefusedError && !transientRefusal(err)) {
           // The worker says no for good (it does not know the run, or not from us): the run cannot be followed.
           this.recordFailed(current.projectId, runId, current.machineId, `remote_${err.code}`.slice(0, 100));
@@ -364,31 +376,65 @@ export class RemoteRunService {
     }
   }
 
-  /** Downloads and imports the run's snapshot, retrying a worker that is away or still settling with the backoff. */
+  /**
+   * Downloads and imports the run's snapshot, retrying a worker that is away or still settling with the backoff. A
+   * worker whose replies cannot be read MAX_BAD_REPLIES times in a row has its changes refused (`bad_bundle`).
+   */
   private async importLoop(runId: string, signal: AbortSignal): Promise<void> {
     let attempt = 0;
+    let badReplies = 0;
     while (!signal.aborted) {
       const outcome = await this.importOnce(runId, signal).catch((err: unknown) => err);
-      if (outcome === "done" || outcome === "never") return;
-      const retry = outcome instanceof MachineUnreachableError || outcome instanceof LinkProtocolError ||
-        outcome instanceof BundleGitLimitError || (outcome instanceof RemoteRefusedError && transientRefusal(outcome));
-      if (!retry) return; // refused for good, or not a snapshot this computer accepts: left for the Owner to see
+      if (outcome === "done" || outcome === "over") return;
+      const badReply = outcome instanceof LinkProtocolError || (outcome instanceof RemoteRefusedError && outcome.code === "unknown");
+      if (badReply && ++badReplies >= MAX_BAD_REPLIES) {
+        this.refuseChanges(runId, "bad_bundle");
+        return;
+      }
+      if (!badReply) badReplies = 0;
+      const retry = badReply || outcome instanceof MachineUnreachableError || outcome instanceof BundleGitLimitError ||
+        (outcome instanceof RemoteRefusedError && transientRefusal(outcome));
+      if (!retry) return; // a permanent refusal by the worker: left as it is, tried again after a restart
       await sleep(this.backoff(attempt++), signal);
     }
+  }
+
+  /** Records that the run's returned changes were refused here; the link run then ends, and is never tried again. */
+  private refuseChanges(runId: string, reason: ChangesRefusedReason): void {
+    const current = getLinkRun(this.deps.db, runId);
+    if (!current || current.direction !== "requested" || current.state !== "finished") return;
+    try {
+      commitEvent(this.deps.db, this.deps.ledger, () => ({
+        event: { projectId: current.projectId, actor: LINK_ACTOR, type: "link.changes_refused", payload: { runId, machineId: current.machineId, reason } },
+        result: () => undefined,
+      }));
+    } catch {
+      // A read-only ledger: nothing more to do.
+    }
+  }
+
+  /** The project repository's HEAD commit. */
+  private async head(projectId: string): Promise<string> {
+    const repo = await this.deps.worktrees.ensureProjectRepo(projectId);
+    return (await this.deps.worktrees.runGit(repo, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
   }
 
   /**
    * One download and import of the snapshot: into `<dataDir>/link/incoming` (created first), then importSnapshot,
    * which checks the bundle and adds the run's working copy at the path the run recorded; the snapshot must descend
-   * from the run's starting commit. Commits `link.changes_imported`. Answers "never" when the run cannot be imported
-   * here (no run row, a working copy path of another shape), and throws for a failure.
+   * from the commit this computer sent. Commits `link.changes_imported`. A deterministic refusal (an unreadable
+   * bundle, a conflict here, changes not from that commit, another working copy path) commits `link.changes_refused`
+   * and answers "over", as does a run no longer waiting for its changes; a failure that may pass is thrown.
    */
-  private async importOnce(runId: string, signal: AbortSignal): Promise<"done" | "never"> {
+  private async importOnce(runId: string, signal: AbortSignal): Promise<"done" | "over"> {
     const { db, ledger, link, worktrees } = this.deps;
     const current = getLinkRun(db, runId);
+    if (!current || current.state !== "finished") return "over";
     const run = getRun(db, runId);
-    if (!current || current.state !== "finished" || !run || run.machineId !== current.machineId) return "never";
-    if (run.worktree !== `projects/${run.projectId}/worktrees/${runId}` || !ID_PATTERN.test(runId)) return "never";
+    if (!run || run.machineId !== current.machineId || run.worktree !== `projects/${run.projectId}/worktrees/${runId}` || !ID_PATTERN.test(runId)) {
+      this.refuseChanges(runId, "wrong_path");
+      return "over";
+    }
     const peer = link.peerFor(current.machineId);
     const incoming = join(this.deps.dataDir, "link", "incoming");
     // The client writes into an existing folder only: without it a download would end with no file.
@@ -396,12 +442,16 @@ export class RemoteRunService {
     const file = join(incoming, `${runId}.${randomUUID()}.bundle`);
     try {
       await this.client(SLOW_TIMEOUT_MS).download(peer, `/link/v1/runs/${encodeURIComponent(runId)}/changes`, file, MAX_BUNDLE_BYTES, signal);
-      if (signal.aborted) return "never";
+      if (signal.aborted) return "over"; // left finished: followed again after a restart
       link.observed(peer.machineId, true);
       const { commit, absPath, relPath } = await importSnapshot(worktrees, run.projectId, runId, file);
-      if (!OBJECT_ID.test(commit) || relPath !== run.worktree || !(await this.descends(run, commit))) {
+      const refusal: ChangesRefusedReason | null = !OBJECT_ID.test(commit) ? "bad_bundle"
+        : relPath !== run.worktree ? "wrong_path"
+          : !(await this.descends(run, commit)) ? "not_from_base" : null;
+      if (refusal !== null) {
         await this.discard(run.projectId, runId, absPath);
-        return "never";
+        this.refuseChanges(runId, refusal);
+        return "over";
       }
       commitEvent(db, ledger, () => ({
         event: { projectId: run.projectId, actor: LINK_ACTOR, type: "link.changes_imported", payload: { runId, machineId: current.machineId, commit } },
@@ -410,19 +460,29 @@ export class RemoteRunService {
       return "done";
     } catch (err) {
       if (err instanceof MachineUnreachableError) link.observed(peer.machineId, false);
-      if (err instanceof BundleInvalidError || err instanceof ConflictError) return "never";
+      if (err instanceof BundleInvalidError || err instanceof ConflictError) {
+        this.refuseChanges(runId, err instanceof ConflictError ? "conflict" : "bad_bundle");
+        return "over";
+      }
       throw err;
     } finally {
       rmSync(file, { force: true, maxRetries: 5, retryDelay: 50 });
     }
   }
 
-  /** Whether the snapshot commit descends from the commit the run started at (when the worker recorded one). */
+  /**
+   * Whether the snapshot commit descends from the commit this computer sent, as its own `link.run_requested` recorded
+   * it (never the worker's `agent.started.base`). A request without one is refused.
+   */
   private async descends(run: AgentRun, commit: string): Promise<boolean> {
-    if (run.base === null) return true;
-    if (!/^[0-9a-f]{40,64}$/.test(run.base)) return false;
+    const row = this.deps.db.prepare(
+      `SELECT json_extract(payload, '$.base') AS base FROM ledger WHERE type = 'link.run_requested'
+         AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.runId') = ? ELSE 0 END LIMIT 1`,
+    ).get(run.id) as { base: unknown } | undefined;
+    const base = row?.base;
+    if (typeof base !== "string" || !/^[0-9a-f]{40,64}$/.test(base)) return false;
     const repo = this.deps.worktrees.repoPath(run.projectId);
-    return this.deps.worktrees.runGit(repo, ["merge-base", "--is-ancestor", run.base, commit]).then(() => true, () => false);
+    return this.deps.worktrees.runGit(repo, ["merge-base", "--is-ancestor", base, commit]).then(() => true, () => false);
   }
 
   /** Removes an imported working copy that did not pass the checks: the worktree, its branch and the snapshot ref. */

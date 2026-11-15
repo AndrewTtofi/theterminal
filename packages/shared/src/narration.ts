@@ -17,7 +17,7 @@ import { KIND_LABELS } from "./connections.js";
 import type { Actor, LedgerEntry } from "./domain.js";
 import { GATES, type GateId } from "./gates.js";
 import { INTAKE_DECISIONS, INTAKE_QUESTIONS, renderAnswer, type IntakeAnswer } from "./intake.js";
-import { MIRRORABLE_TYPES } from "./link.js";
+import { CHANGES_REFUSED_PHRASES, MIRRORABLE_TYPES } from "./link.js";
 import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
 export type NarrationTopic =
@@ -497,7 +497,15 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       };
     }
     case "link.run_failed":
-      return { headline: fit(`${cap(machine(p, ctx))} could not start the run: `, p.error, "", 120), attention: true };
+      // Fixed words only: the recorded error may have come from the other machine.
+      return { headline: runFailed(str(p.error), machine(p, ctx)), attention: true };
+    case "link.changes_refused": {
+      const reason = str(p.reason);
+      const why = Object.prototype.hasOwnProperty.call(CHANGES_REFUSED_PHRASES, reason)
+        ? CHANGES_REFUSED_PHRASES[reason as keyof typeof CHANGES_REFUSED_PHRASES]
+        : null;
+      return { headline: `The changes from ${machine(p, ctx)} were refused${why ? `: ${why}` : ""}`, attention: true };
+    }
     case "link.project_received":
       return { headline: `Received the project "${show(p.name, 120)}" from ${machine(p, ctx)}` };
     case "link.run_accepted":
@@ -513,6 +521,30 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     default:
       return { headline: `${who} recorded ${show(e.type, 80)}` };
   }
+}
+
+/** Codes recorded when a remote run never started: this computer's own, and the worker's start refusals. */
+const START_CODES = new Set([
+  "unreachable", "not_sent", "machine_bad_reply", "upload_refused", "invalid_input", "not_found", "no_repo", "bundle_invalid",
+  "bundle_git_limit", "repo_too_large", "upload_limit", "connection_disabled", "connection_unsupported", "mcp_unsupported",
+  "local_model_unsupported", "duplicate_mcp_server", "duplicate_cloud_provider", "cloud_credentials_failed", "keychain_unavailable",
+  "identity_unavailable", "shutting_down", "read_only", "internal", "unknown",
+]);
+/** Refusals of a frame a correct machine never sends (the requester's FATAL_REFUSALS, and a frame of another run). */
+const FRAME_REFUSALS = new Set([
+  "bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame",
+]);
+
+/** Why a remote run failed, in fixed words chosen by its recorded code; the code itself is never shown. */
+function runFailed(error: string, where: string): string {
+  if (START_CODES.has(error)) return `${cap(where)} could not start the run`;
+  const on = `The run on ${where}`;
+  if (FRAME_REFUSALS.has(error)) return `${on} stopped: signature check failed`;
+  if (error === "machine_unpaired") return `${on} stopped: the machine was unlinked`;
+  if (error === "conflict") return `${on} stopped: its entries clash with records here`;
+  if (error === "machine_key_mismatch") return `${on} stopped: the machine's key changed`;
+  if (error.startsWith("remote_")) return `${on} stopped: the machine refused`;
+  return `${on} failed`;
 }
 
 /** The linked machine an entry names, as the context knows it, else `a linked machine`. */

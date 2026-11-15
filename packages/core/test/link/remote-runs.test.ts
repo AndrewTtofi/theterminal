@@ -261,15 +261,53 @@ describe("RemoteRunService: following a worker's stream", () => {
     expect(new Set(originIds()).size).toBe(originIds().length);
     // A snapshot that is not a bundle is never imported: no entry, no working copy, and no file left behind.
     await vi.waitFor(() => expect(back.requests.some((r) => r.includes("/changes"))).toBe(true), { timeout: 5000 });
-    // The refused import (git checks the file) ends by removing what was downloaded.
+    // The refused import is recorded once (link.changes_refused), the download removed, and it is never asked again.
     const incoming = join(dataDir, "link", "incoming");
-    await vi.waitFor(() => expect(readdirSync(incoming)).toEqual([]), { timeout: 60_000, interval: 50 });
-    await sleep(200);
-    expect(back.requests.filter((r) => r.includes("/changes"))).toHaveLength(1); // refused for good: not asked again
+    await vi.waitFor(() => expect(ledger.list().filter((e) => e.type === "link.changes_refused")).toHaveLength(1), { timeout: 60_000, interval: 50 });
+    expect(ledger.list().find((e) => e.type === "link.changes_refused")!.payload).toEqual({
+      runId: remote.runId, machineId: remote.machineId, reason: "bad_bundle",
+    });
+    expect(readdirSync(incoming)).toEqual([]);
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "bad_bundle" });
+    expect(getRun(db, remote.runId)!.status).toBe("completed"); // the run itself is left as the worker reported it
     expect(ledger.list().filter((e) => e.type === "link.changes_imported")).toEqual([]);
-    expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
     expect(existsSync(join(dataDir, "projects", projectId, "worktrees", remote.runId))).toBe(false);
+    // Not on a restart either.
+    service.resume();
+    await sleep(300);
+    expect(back.requests.filter((r) => r.includes("/changes"))).toHaveLength(1);
   }, GIT_T);
+
+  it("a worker whose snapshot replies cannot be read is asked a bounded number of times, then the changes are refused", async () => {
+    const started = remote.started();
+    const finished = remote.finished();
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/changes")) return res.writeHead(502, { "content-type": "text/plain" }).end("not json");
+      ndjson(res);
+      res.write(`${remote.line(started)}\n${remote.line(finished)}\n`);
+      res.end();
+    });
+    await vi.waitFor(() => expect(ledger.list().filter((e) => e.type === "link.changes_refused")).toHaveLength(1), { timeout: 10_000 });
+    expect(ledger.list().find((e) => e.type === "link.changes_refused")!.payload).toMatchObject({ reason: "bad_bundle" });
+    const asked = fixture.requests.filter((r) => r.includes("/changes")).length;
+    expect(asked).toBe(3);
+    await sleep(300);
+    expect(fixture.requests.filter((r) => r.includes("/changes"))).toHaveLength(asked);
+  });
+
+  it("another key at the machine's address ends the run (machine_key_mismatch) instead of retrying quietly", async () => {
+    const impostor = await remoteRun(remote.runId, projectId);
+    const fixture = await fixtureWorker(impostor.identity, (_req, res) => res.writeHead(500).end());
+    cleanups.push(() => fixture.close());
+    pairAt(fixture.port);
+    requestRun(db, ledger, remote);
+    service.resume();
+    await vi.waitFor(() => expect(getLinkRun(db, remote.runId)!.state).toBe("failed"), { timeout: 5000 });
+    expect(getLinkRun(db, remote.runId)!.error).toBe("machine_key_mismatch");
+    await sleep(300);
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toHaveLength(1);
+    expect(fixture.requests).toEqual([]); // nothing was ever sent to it
+  });
 
   it("a run this computer did not request is never followed, and shutdown stops every stream", async () => {
     const fixture = await fixtureWorker(remote.identity, (_req, res) => {

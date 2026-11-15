@@ -141,6 +141,17 @@ export function runIdOf(e: LedgerEntry): string | undefined {
   return isObject(p) && typeof p.runId === "string" ? p.runId : undefined;
 }
 
+/** Why this computer refused a remote run's returned changes (`link.changes_refused`). */
+export const CHANGES_REFUSED_REASONS = ["bad_bundle", "conflict", "not_from_base", "wrong_path"] as const;
+export type ChangesRefusedReason = (typeof CHANGES_REFUSED_REASONS)[number];
+/** The fixed words for each reason, wherever a refusal is shown. */
+export const CHANGES_REFUSED_PHRASES: Record<ChangesRefusedReason, string> = {
+  bad_bundle: "what it sent could not be read",
+  conflict: "they clash with records here",
+  not_from_base: "they do not start from the project as it was sent",
+  wrong_path: "they name the wrong working copy",
+};
+
 export const linkPayloadSchemas = {
   "machine.identity_created": z.object({ machineId, publicKey, fingerprint }).strict(),
   "machine.named": z.object({ name: machineNameSchema }).strict(),
@@ -158,7 +169,11 @@ export const linkPayloadSchemas = {
     .strict(),
   "machine.unpaired": z.object({ machineId, name: machineNameSchema }).strict(),
   "link.run_requested": z
-    .object({ runId: id, machineId, adapter: z.enum(ADAPTERS), prompt, cardId, connectionIds })
+    .object({
+      runId: id, machineId, adapter: z.enum(ADAPTERS), prompt, cardId, connectionIds,
+      /** The project's commit this computer sent (its HEAD when the repository was exported); the changes must descend from it. */
+      base: z.string().regex(/^[0-9a-f]{40,64}$/).optional(),
+    })
     .strict(),
   "link.run_failed": z.object({ runId: id, machineId, error: z.string().max(500) }).strict(),
   "link.project_received": z.object({ projectId: id, machineId, name: projectName }).strict(),
@@ -168,6 +183,7 @@ export const linkPayloadSchemas = {
   "link.changes_imported": z
     .object({ runId: id, machineId, commit: z.string().regex(/^[0-9a-f]{40}$/) })
     .strict(),
+  "link.changes_refused": z.object({ runId: id, machineId, reason: z.enum(CHANGES_REFUSED_REASONS) }).strict(),
 } satisfies Record<string, z.ZodType>;
 export type LinkEventType = keyof typeof linkPayloadSchemas;
 
