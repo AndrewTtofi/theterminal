@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
+import { renderAsOwner as render } from "./as-owner";
 import userEvent from "@testing-library/user-event";
 import type { Board as BoardData } from "@theterminal/shared";
 import { Board } from "../src/components/Board";

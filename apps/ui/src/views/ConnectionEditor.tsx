@@ -12,7 +12,7 @@ import { engineText } from "./CapacityPanel";
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
 const FILE_STORE_NOTE = "Stored in this server's encrypted secret store. Never written to the ledger or the API.";
 /** Where a stored secret is, as the server says: its own encrypted file on a server install, else the keychain. */
-const storedIn = (status: { connections: { secretStore?: "keychain" | "file" } } | null) =>
+const storedIn = (status: { connections: { secretStore?: "keychain" | "file" | "memory" } } | null) =>
   status?.connections.secretStore === "file"
     ? { placeholder: "Stored in this server's encrypted secret store", note: FILE_STORE_NOTE }
     : { placeholder: "Stored in your keychain", note: KEYCHAIN_NOTE };

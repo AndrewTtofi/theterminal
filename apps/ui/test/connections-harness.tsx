@@ -7,6 +7,7 @@ import type { DockApi } from "../src/shell/Dock";
 import { ShellContext } from "../src/shell/model";
 import type { ShellContextValue, WorkbenchModel } from "../src/shell/model";
 import { useConnections } from "../src/use-connections";
+import { OWNER_ME } from "./as-owner";
 
 export const AGENTS: AgentsInfo = {
   adapters: ["fake"],
@@ -77,7 +78,7 @@ export function renderWithConnections(
       onProviderAuthChange: opts.onProviderAuthChange ?? vi.fn().mockResolvedValue(true),
       connections,
       status: opts.status ?? null,
-      ...(opts.me !== undefined && { me: opts.me }),
+      me: opts.me === undefined ? OWNER_ME : opts.me,
     } as unknown as WorkbenchModel;
     return <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>{children}</ShellContext.Provider>;
   }

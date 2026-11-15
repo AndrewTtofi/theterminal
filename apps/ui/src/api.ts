@@ -146,7 +146,7 @@ export type Status = {
   /** The summed monthly budgets of the enabled model connections; null when none has one. */
   monthlyBudgetUsd: number | null;
   /** `secretStore` is where the server keeps connection secrets: the OS keychain, or its own encrypted file (a server install). */
-  connections: { enabled: number; failed: number; keychain: "ok" | "unavailable"; secretStore?: "keychain" | "file" };
+  connections: { enabled: number; failed: number; keychain: "ok" | "unavailable"; secretStore?: "keychain" | "file" | "memory" };
   /** null when GitHub is not connected. */
   ci: CiStatus | null;
   /** Undecided plan decisions over every open intake. */
@@ -678,6 +678,8 @@ export type PresenceWhere = { projectId: string | null; view: string | null };
 /** How often presence() is read for a change, and the heartbeat that keeps a connected person inside the server's 5-minute expiry. */
 const PRESENCE_POLL_MS = 1000;
 const PRESENCE_HEARTBEAT_MS = 60_000;
+/** The WebSocket close code the server uses when it ends a person's access. */
+const POLICY_VIOLATION = 1008;
 
 /**
  * Streams ledger entries with seq > afterSeq; reconnects with backoff 1s→10s, resuming from the last seq. The same
@@ -687,13 +689,21 @@ const PRESENCE_HEARTBEAT_MS = 60_000;
 export function subscribeLedger(
   afterSeq: number,
   onEntry: (e: LedgerEntry) => void,
-  opts: { onPresence?: (people: PresenceEntry[]) => void; WS?: typeof WebSocket; presence?: () => PresenceWhere } = {},
+  opts: {
+    onPresence?: (people: PresenceEntry[]) => void;
+    WS?: typeof WebSocket;
+    presence?: () => PresenceWhere;
+    /** After a 1008 close, the person is still signed in (their role changed): the stream reconnected with this Me. */
+    onAccessChanged?: (me: Me) => void;
+  } = {},
 ): () => void {
   const WS = opts.WS ?? WebSocket;
   const where = opts.presence ?? (() => ({ projectId: null, view: null }));
   let last = afterSeq;
   let delay = 1000;
   let closed = false;
+  /** True once the caller unsubscribed: nothing reconnects after that. */
+  let stopped = false;
   let socket: WebSocket | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let sentKey: string | null = null;
@@ -708,7 +718,7 @@ export function subscribeLedger(
     sentAt = Date.now();
     socket.send(msg);
   };
-  const poll = setInterval(() => sendPresence(false), PRESENCE_POLL_MS);
+  let poll = setInterval(() => sendPresence(false), PRESENCE_POLL_MS);
 
   const connect = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -727,8 +737,27 @@ export function subscribeLedger(
       last = msg.seq;
       onEntry(msg);
     };
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       if (closed) return;
+      // 1008: the server ended this person's access (signed out, removed, role changed). Reconnecting would only be
+      // refused again: stop, and ask who is signed in, so a 401 sends the page to sign-in at once.
+      if (ev?.code === POLICY_VIOLATION) {
+        closed = true;
+        clearInterval(poll);
+        void api.getMe().then(
+          (me) => {
+            // Still signed in (a role change closes the stream too): what they may see is judged again on reconnect.
+            if (stopped) return;
+            closed = false;
+            poll = setInterval(() => sendPresence(false), PRESENCE_POLL_MS);
+            connect();
+            opts.onAccessChanged?.(me);
+          },
+          // A 401 has already called the unauthorized handler (sign-in); anything else leaves the stream stopped.
+          () => {},
+        );
+        return;
+      }
       timer = setTimeout(connect, delay);
       delay = Math.min(delay * 2, 10000);
     };
@@ -736,6 +765,7 @@ export function subscribeLedger(
   connect();
 
   return () => {
+    stopped = true;
     closed = true;
     clearInterval(poll);
     if (timer) clearTimeout(timer);

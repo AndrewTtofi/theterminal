@@ -8,6 +8,7 @@ import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { ALL_ANSWERS, APPROVED_AT, intakeView } from "./intake-fixtures";
 import { shellNav } from "./connections-harness";
+import { OWNER_ME } from "./as-owner";
 
 const NOTICE =
   "What you write here is recorded permanently in this project's ledger. Do not paste passwords, keys or other people's personal details.";
@@ -21,6 +22,7 @@ function setup(intake: IntakeView | null | undefined, over: Partial<WorkbenchMod
     onDecideIntake: vi.fn().mockResolvedValue(true),
     onCompleteIntake: vi.fn().mockResolvedValue(true),
     onReopenIntake: vi.fn().mockResolvedValue(true),
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   const ui = (m: WorkbenchModel) => (

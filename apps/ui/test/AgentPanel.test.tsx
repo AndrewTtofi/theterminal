@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
+import { renderAsOwner as render } from "./as-owner";
 import userEvent from "@testing-library/user-event";
 import type { AgentAction, AgentRun, Connection } from "@theterminal/shared";
 import { AgentPanel } from "../src/components/AgentPanel";

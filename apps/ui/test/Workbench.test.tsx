@@ -15,6 +15,7 @@ import { planPassed, shipBlocked } from "./gate-fixtures";
 import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
 import { digestsModel, preview, shareModel } from "./share-fixtures";
+import { OWNER_ME } from "./as-owner";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
   return {
@@ -127,6 +128,7 @@ function model(over: Partial<AppModel> = {}): AppModel {
     diff: vi.fn().mockReturnValue(new Promise(() => {})),
     onOverrideCommand: vi.fn(async () => ({ ok: true as const })),
     onOverrideDiscard: vi.fn(async () => ({ ok: true as const, files: 0 })),
+    me: OWNER_ME,
     ...over,
   };
 }

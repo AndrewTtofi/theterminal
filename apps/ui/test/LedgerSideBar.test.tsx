@@ -6,6 +6,7 @@ import { ShellContext } from "../src/shell/model";
 import type { LedgerScope, WorkbenchModel } from "../src/shell/model";
 import { LedgerSideBar } from "../src/views/LedgerSideBar";
 import { fakeDock, shellNav } from "./connections-harness";
+import { OWNER_ME } from "./as-owner";
 
 const ALL: NarrationTopic[] = [
   "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
@@ -21,6 +22,7 @@ function renderSideBar(
     ledgerTopics: ALL,
     onLedgerScopeChange: vi.fn(),
     onLedgerTopicsChange,
+    me: OWNER_ME,
     ...over,
   } as unknown as WorkbenchModel;
   const dock = fakeDock();

@@ -272,8 +272,8 @@ export type WorkbenchModel = {
   onOpenFile: (runId: string, path: string) => void;
 
   /**
-   * Who is signed in. Absent means the Owner (a model built before Plan 8, as the tests do); null means the person is
-   * not known, which counts as a viewer. The UI disables what the role cannot do; the server is the real guard.
+   * Who is signed in; absent or null (not known) counts as a viewer. The UI disables what the role cannot do; the
+   * server is the real guard.
    */
   me?: Me | null;
   /** Who is here now and what they look at, as the event stream last said. */
@@ -294,10 +294,12 @@ export type WorkbenchModel = {
   onViewChange?: (view: ViewId) => void;
 };
 
-/** The role the UI acts for: the Owner when the model has no `me` (before Plan 8), a viewer when `me` is null. */
+/**
+ * The role the UI acts for: the signed-in person's. Without one (no model, `me` absent or null) it is a viewer, so the
+ * display fails closed; the server is the real guard either way.
+ */
 export function roleOf(model: Pick<WorkbenchModel, "me"> | null | undefined): Role {
-  if (!model || model.me === undefined) return "owner";
-  return model.me?.role ?? "viewer";
+  return model?.me?.role ?? "viewer";
 }
 
 /** What a gate card needs to know of the person at it, and of everyone (to name a requirement's person). */
@@ -319,10 +321,18 @@ export function gateFor(role: Role, min: Role): { disabled: boolean; title?: str
   return atLeast(role, min) ? { disabled: false } : { disabled: true, title: roleTitle(role) };
 }
 
-/** The role of whoever is at the shell; the Owner outside it (a component rendered on its own). */
+/**
+ * The role a component rendered outside the shell acts for (a card on its own); without it, and without a shell, the
+ * role is a viewer's.
+ */
+export const RoleContext = createContext<Role | null>(null);
+
+/** The role of whoever is at the shell, else the one RoleContext gives, else a viewer's. */
 export function useViewerRole(): Role {
-  const ctx = useContext(ShellContext);
-  return roleOf(ctx?.model);
+  const shell = useContext(ShellContext);
+  const given = useContext(RoleContext);
+  if (shell) return roleOf(shell.model);
+  return given ?? "viewer";
 }
 
 /** What App provides: the shell adds the actions that open tabs, since it owns the dock. */

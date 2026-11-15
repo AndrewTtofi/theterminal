@@ -18,13 +18,14 @@ import { MachinesSideBar } from "../src/views/MachinesSideBar";
 import { fakeDock, shellNav } from "./connections-harness";
 import { machine, overview, self } from "./machines-fixtures";
 import { machines as capacities } from "./capacity-fixtures";
+import { OWNER_ME } from "./as-owner";
 
 const m = vi.mocked(api);
 
 function renderSideBar(machines: Partial<WorkbenchModel["machines"]>) {
   const refresh = vi.fn();
   const dock = fakeDock();
-  const model = { machines: { overview: null, error: null, refresh, ...machines } } as unknown as WorkbenchModel;
+  const model = { me: OWNER_ME, machines: { overview: null, error: null, refresh, ...machines } } as unknown as WorkbenchModel;
   const view = render(
     <ShellContext.Provider value={{ model, dock: () => dock, ...shellNav() }}>
       <MachinesSideBar />

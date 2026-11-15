@@ -479,7 +479,7 @@ describe("subscribeLedger", () => {
     sent: string[] = [];
     onopen: (() => void) | null = null;
     onmessage: ((m: { data: string }) => void) | null = null;
-    onclose: (() => void) | null = null;
+    onclose: ((e: { code: number }) => void) | null = null;
     readyState = 0;
     constructor(readonly url: string) {
       FakeWS.all.push(this);
@@ -505,6 +505,61 @@ describe("subscribeLedger", () => {
   afterEach(() => {
     FakeWS.all = [];
     vi.useRealTimers();
+  });
+
+  it("on a 1008 close (revoked, removed, role changed) stops reconnecting, asks /api/me once, and a 401 goes to sign-in", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { "content-type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onUnauthorized = vi.fn();
+    setUnauthorizedHandler(onUnauthorized);
+    try {
+      subscribeLedger(0, () => {}, { WS });
+      const ws = FakeWS.all[0]!;
+      ws.open();
+      const sentBefore = ws.sent.length;
+      ws.onclose?.({ code: 1008 });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(FakeWS.all).toHaveLength(1);
+      expect(ws.sent.length).toBe(sentBefore);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![0]).toBe("/api/me");
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    } finally {
+      setUnauthorizedHandler(null);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("after a 1008 close of someone still signed in (their role changed) reconnects once and reports the new Me", async () => {
+    vi.useFakeTimers();
+    const me = { personId: "r1", name: "R", role: "maintainer", listener: "remote", method: "key", credentials: [], sessions: [] };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(me), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAccessChanged = vi.fn();
+    try {
+      const stop = subscribeLedger(0, () => {}, { WS, onAccessChanged });
+      FakeWS.all[0]!.onclose?.({ code: 1008 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onAccessChanged).toHaveBeenCalledWith(me);
+      expect(FakeWS.all).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(FakeWS.all).toHaveLength(2);
+      stop();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still reconnects after any other close", async () => {
+    vi.useFakeTimers();
+    const stop = subscribeLedger(0, () => {}, { WS });
+    FakeWS.all[0]!.onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(FakeWS.all).toHaveLength(2);
+    stop();
   });
 
   it("sends entries to onEntry and presence frames to onPresence", () => {

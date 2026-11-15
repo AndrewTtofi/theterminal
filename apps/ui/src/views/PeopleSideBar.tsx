@@ -14,7 +14,7 @@ export function presenceLine(p: PresenceEntry, projects: Project[]): string {
   const who = `${name(p.name)} · ${ROLE_LABELS[p.role]}`;
   if (p.projectId === null) return `${who} · not in a project`;
   const project = projects.find((x) => x.id === p.projectId)?.name;
-  const view = p.view !== null && p.view in VIEW_LABELS ? VIEW_LABELS[p.view as ViewId] : "A view";
+  const view = p.view !== null && Object.hasOwn(VIEW_LABELS, p.view) ? VIEW_LABELS[p.view as ViewId] : "A view";
   return `${who} · ${view} in ${project === undefined ? "a project" : name(project)}`;
 }
 

@@ -278,7 +278,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
         const g = gateRef.current;
         if (g && e.projectId === g.projectId && changesGates(e.type)) refreshGateRef.current();
         for (const listener of [...entryListeners.current]) listener(e);
-      }, { onPresence: setPresence, presence: presenceWhere });
+      }, { onPresence: setPresence, presence: presenceWhere, onAccessChanged: () => refreshPeopleRef.current() });
       refresh();
       refreshStatus();
       setProjects(await api.listProjects());

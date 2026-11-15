@@ -51,4 +51,14 @@ describe("PeopleSideBar", () => {
     );
     expect(within(screen.getByRole("region", { name: "Remote access" })).getByText("On")).toBeTruthy();
   });
+
+  it("names an unknown view plainly, even one that is an object property name", () => {
+    renderInShell(
+      <PeopleSideBar />,
+      peopleModel({
+        presence: [{ personId: "r1", name: "R", role: "reviewer", projectId: "p1", view: "toString", since: "2026-11-15T09:00:00.000Z" }],
+      }),
+    );
+    expect(within(screen.getByRole("region", { name: "People here" })).getByText("R · Reviewer · A view in Local Model Hub")).toBeTruthy();
+  });
 });
