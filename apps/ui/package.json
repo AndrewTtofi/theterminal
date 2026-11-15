@@ -12,7 +12,7 @@
   "devDependencies": {
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.10",
-    "@types/react": "^18.3.31",
+    "@types/react": "^19.3.0",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.0",
     "jsdom": "^31.0.1",
@@ -21,7 +21,7 @@
   "dependencies": {
     "@theterminal/shared": "workspace:*",
     "dockview-react": "8.8.3",
-    "react": "^18.3.1",
+    "react": "^19.3.1",
     "react-dom": "^18.3.1"
   }
 }
