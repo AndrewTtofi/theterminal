@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MCP_ENV_NAME, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
+import { MCP_ENV_NAME, allowlistedEnv, assertEmptyGitconfig, buildChildEnv, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { EMPTY_GITCONFIG, SharedGitconfigModifiedError } from "../../src/agents/worktrees.js";
 
 const DATA_DIR = "/data/theterminal";
@@ -246,4 +246,14 @@ describe("assertEmptyGitconfig", () => {
         expect(() => assertEmptyGitconfig(dir)).toThrow(SharedGitconfigModifiedError);
       }
     }));
+});
+
+describe("allowlistedEnv", () => {
+  it("allowlistedEnv keeps exactly the allowlisted names and LC_* (Windows names only on win32)", () => {
+    const input = { PATH: "p", HOME: "h", LC_ALL: "c", NODE_OPTIONS: "x", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\W" } as NodeJS.ProcessEnv;
+    const snapshot = { ...input };
+    expect(allowlistedEnv(input, "darwin")).toEqual({ PATH: "p", HOME: "h", LC_ALL: "c" });
+    expect(allowlistedEnv(input, "win32")).toEqual({ PATH: "p", HOME: "h", LC_ALL: "c", SystemRoot: "C:\\W" });
+    expect(input).toEqual(snapshot);
+  });
 });
