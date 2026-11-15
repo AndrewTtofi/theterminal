@@ -1,7 +1,7 @@
 import { DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
-  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, QuestionId, RemoteState, Role, ShareLink, ShareLinkState,
+  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
   ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -44,6 +44,15 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       db.prepare(
         "UPDATE agent_runs SET status = ?, cost_usd = ?, input_tokens = ?, output_tokens = ?, error = ?, finished_at = ? WHERE id = ?",
       ).run(p.status, p.costUsd, p.inputTokens ?? null, p.outputTokens ?? null, p.error, e.ts, p.runId);
+      break;
+    case "agent.message":
+      db.prepare("UPDATE agent_runs SET last_message = ? WHERE id = ?").run(p.text, p.runId);
+      break;
+    case "agent.progress":
+      // The latest snapshot only; every earlier one stays in the ledger.
+      db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ?").run(
+        canonicalJson({ steps: p.steps, done: p.done, current: p.current }), p.runId,
+      );
       break;
     case "agent.rate_limited":
       // The adapter comes from the run; an entry for an unknown run projects nothing.
@@ -467,6 +476,7 @@ type RunRow = {
   auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
   started_at: string; finished_at: string | null; machine_id: string | null;
+  progress: string | null; last_message: string | null; accepted_commit: string | null;
 };
 type ActionRow = {
   id: string; run_id: string; kind: AgentAction["kind"]; tool: string; summary: string; input: string;
@@ -479,6 +489,8 @@ const toRun = (r: RunRow): AgentRun => ({
   prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
   startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id,
+  progress: r.progress === null ? null : (JSON.parse(r.progress) as RunProgress), lastMessage: r.last_message,
+  acceptedCommit: r.accepted_commit,
 });
 const toAction = (r: ActionRow): AgentAction => ({
   id: r.id, runId: r.run_id, kind: r.kind, tool: r.tool, summary: r.summary, input: JSON.parse(r.input),
@@ -542,6 +554,8 @@ export type WorkspaceCounts = {
   monthCostUsd: number;
   /** Enabled connections, and those of them whose last test failed. */
   connections: { enabled: number; failed: number };
+  /** Runs that finished (however they ended) on the local calendar day of `now`. */
+  doneToday: number;
 };
 
 /** Counts for the status bar. */
@@ -566,6 +580,9 @@ export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts
       enabled: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1"),
       failed: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1 AND status_state = 'failed'"),
     },
+    doneToday: (db
+      .prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE finished_at >= ? AND finished_at < ?")
+      .get(dayStart.toISOString(), nextDay.toISOString()) as { n: number }).n,
   };
 }
 

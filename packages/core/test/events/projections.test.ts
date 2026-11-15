@@ -35,7 +35,25 @@ describe("workspaceCounts", () => {
     insert.run("live", "running", null, new Date(2026, 10, 14, 9, 0, 0).toISOString());
     expect(workspaceCounts(d, now)).toEqual({
       runningAgents: 1, pendingDecisions: 0, todayCostUsd: 0.75, monthCostUsd: 3.75, connections: { enabled: 0, failed: 0 },
+      doneToday: 0,
     });
+    d.close();
+  });
+
+  it("doneToday counts runs finished on the local calendar day of now, not yesterday's or running ones", () => {
+    const d = openDatabase(":memory:");
+    const now = new Date(2026, 10, 14, 12, 0, 0);
+    const insert = d.prepare(
+      `INSERT INTO agent_runs (id, project_id, adapter, auth_mode, prompt, status, worktree, started_at, finished_at)
+       VALUES (?, 'p1', 'fake', 'none', 'p', ?, 'wt', ?, ?)`,
+    );
+    const started = new Date(2026, 10, 13, 9, 0, 0).toISOString();
+    insert.run("yesterday", "completed", started, new Date(2026, 10, 13, 23, 59, 59, 999).toISOString());
+    insert.run("midnight", "completed", started, new Date(2026, 10, 14, 0, 0, 0).toISOString());
+    insert.run("today", "failed", started, new Date(2026, 10, 14, 11, 0, 0).toISOString());
+    insert.run("tomorrow", "completed", started, new Date(2026, 10, 15, 0, 0, 0).toISOString());
+    insert.run("live", "running", started, null);
+    expect(workspaceCounts(d, now).doneToday).toBe(2);
     d.close();
   });
 
@@ -183,6 +201,28 @@ describe("agent projections", () => {
     ]);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
+  });
+
+  it("migrates agent_runs with progress, last_message and accepted_commit", () => {
+    const columns = (db.prepare("PRAGMA table_info(agent_runs)").all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toEqual(expect.arrayContaining(["progress", "last_message", "accepted_commit"]));
+  });
+
+  it("projects the latest agent.progress and the last agent.message, null without them, and rebuilds the same rows", () => {
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r1" });
+    expect(getRun(db, "r1")).toMatchObject({ progress: null, lastMessage: null, acceptedCommit: null });
+    emit("agent.message", { runId: "r1", text: "first" });
+    emit("agent.progress", { runId: "r1", steps: ["Read", "Fix"], done: [], current: 1 });
+    emit("agent.progress", { runId: "r1", steps: ["Read", "Fix"], done: [1], current: 2 });
+    emit("agent.message", { runId: "r1", text: "second" });
+    emit("agent.progress", { runId: "r9", steps: ["Other"], done: [], current: null }); // an unknown run projects nothing
+    const run = getRun(db, "r1")!;
+    expect(run.progress).toEqual({ steps: ["Read", "Fix"], done: [1], current: 2 });
+    expect(run.lastMessage).toBe("second");
+    expect(getRun(db, "r9")).toBeNull();
+    const rows = db.prepare("SELECT * FROM agent_runs ORDER BY rowid").all();
+    rebuildAllProjections(db, ledger);
+    expect(db.prepare("SELECT * FROM agent_runs ORDER BY rowid").all()).toEqual(rows);
   });
 
   it("rebuild after mixed board + agent history equals the live projections", () => {
@@ -696,6 +736,20 @@ describe("mirrored remote runs (applyMirrored)", () => {
     expect(getLinkRun(db, remote.runId)!.state).toBe("imported");
   });
 
+  it("an inner agent.progress from the run's machine sets the run's progress, and rebuilds the same", () => {
+    mirror(remote.started());
+    mirror(remote.message("Planning"));
+    const p = remote.record("agent.progress", { runId: remote.runId, steps: ["Read", "Fix", "Test"], done: [1], current: 2 });
+    mirror(p);
+    expect(getRun(db, remote.runId)).toMatchObject({
+      progress: { steps: ["Read", "Fix", "Test"], done: [1], current: 2 }, lastMessage: "Planning", machineId: remote.machineId,
+    });
+    expect(getLinkRun(db, remote.runId)!.lastSeq).toBe(p.seq);
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
   it("mirroredIds lists the origin ids already mirrored for a run, and only that run's", () => {
     expect(mirroredIds(db, remote.runId)).toEqual(new Set());
     const a = remote.started();
@@ -841,7 +895,7 @@ describe("people, invites, remote access and gate requirements", () => {
   const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1, 2`).all());
 
   it("migrates to user_version 11 with the people tables, sessions and credential_state", () => {
-    expect(db.pragma("user_version", { simple: true })).toBe(11);
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(11);
     const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
     expect(columns("people")).toEqual(["id", "name", "role", "joined_at", "last_seen_at", "removed_at"]);
     expect(columns("sessions")).toEqual([

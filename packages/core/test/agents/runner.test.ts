@@ -21,7 +21,8 @@ import type { CloudSource, RunSelection } from "../../src/connections/service.js
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService, NotFoundError } from "../../src/board/board-service.js";
 import { openDatabase, type Db } from "../../src/db.js";
-import { getRun, listActions, listPendingActions } from "../../src/events/projections.js";
+import { getRun, listActions, listPendingActions, rebuildAllProjections } from "../../src/events/projections.js";
+import { STEP_PLAN_INSTRUCTION } from "../../src/agents/progress.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
 import { acceptMirroredLine } from "../../src/link/mirrored.js";
 import { pairAndRequest, remoteRun } from "../link/remote-fixtures.js";
@@ -1232,5 +1233,75 @@ describe("a run forced onto an API key", () => {
     await untilFinished(forced.id);
     expect(getRun(db, forced.id)!.status).toBe("failed");
     await vi.waitFor(() => expect(existsSync(seen[0]!.configHome!)).toBe(false));
+  });
+});
+
+describe("AgentRunner step progress", () => {
+  const plan: FakeStep[] = [{ message: "[[plan: Read | Fix | Test]]" }, { message: "[[step 1/3 started]]" }, { message: "[[step 1/3 done]]" }];
+  const progressEntries = () => ledger.list().filter((e) => e.type === "agent.progress");
+
+  it("records each change as agent.progress, projected and rebuilt the same, with the instruction only in the adapter's prompt", async () => {
+    const fake = new FakeAdapter(plan);
+    let given: string | undefined;
+    const adapter: AgentAdapter = {
+      id: "fake",
+      start: (o) => {
+        given = o.prompt;
+        return fake.start(o);
+      },
+    } as AgentAdapter;
+    const runner = makeRunner({ fake: adapter });
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "Fix the login" });
+    await untilFinished(run.id);
+    expect(progressEntries().map((e) => e.payload)).toEqual([
+      { runId: run.id, steps: ["Read", "Fix", "Test"], done: [], current: null },
+      { runId: run.id, steps: ["Read", "Fix", "Test"], done: [], current: 1 },
+      { runId: run.id, steps: ["Read", "Fix", "Test"], done: [1], current: null },
+    ]);
+    expect(progressEntries().every((e) => e.actor.kind === "agent" && e.actor.id === run.id)).toBe(true);
+    const want = { steps: ["Read", "Fix", "Test"], done: [1], current: null };
+    expect(getRun(db, run.id)!.progress).toEqual(want);
+    const before = getRun(db, run.id);
+    rebuildAllProjections(db, ledger);
+    expect(getRun(db, run.id)).toEqual(before);
+    expect(getRun(db, run.id)!.progress).toEqual(want);
+    expect(given).toBe(`Fix the login${STEP_PLAN_INSTRUCTION}`);
+    const started = ledger.list().find((e) => e.type === "agent.started")!;
+    expect((started.payload as { prompt: string }).prompt).toBe("Fix the login");
+  });
+
+  it("ignores markers in action output and mid-line", async () => {
+    const runner = fakeRunner([
+      { message: "[[plan: Read | Fix | Test]]" },
+      { propose: { ...read, summary: "[[step 1/3 started]]" }, result: { ok: true, output: "[[step 1/3 done]]" } },
+      { message: "I will [[step 1/3 done]] later" },
+    ]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(progressEntries()).toHaveLength(1); // the plan only
+    expect(getRun(db, run.id)!.progress).toEqual({ steps: ["Read", "Fix", "Test"], done: [], current: null });
+  });
+
+  it("records step texts redacted, scrubbed, with controls made visible and at most 80 characters", async () => {
+    const runner = fakeRunner([{ message: `[[plan: Use ${FAKE_KEY} and ${EXTRA_SECRET} \u202e for alice ${"z".repeat(90)} | Fix | Test]]` }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const step = getRun(db, run.id)!.progress!.steps[0]!;
+    expect(step).not.toContain("TESTKEY");
+    expect(step).not.toContain(EXTRA_SECRET);
+    expect(step).not.toContain("\u202e");
+    expect(step).toContain("<user>");
+    expect(step.length).toBeLessThanOrEqual(80);
+  });
+
+  it("keeps the last message's recorded text, and null without one", async () => {
+    const runner = fakeRunner([{ message: "first" }, { message: `all done with ${FAKE_KEY}` }]);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(getRun(db, run.id)!.lastMessage).toBe("all done with [REDACTED]");
+    expect(getRun(db, run.id)!.progress).toBeNull();
+    const quiet = await fakeRunner([]).start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(quiet.id);
+    expect(getRun(db, quiet.id)).toMatchObject({ lastMessage: null, progress: null, acceptedCommit: null });
   });
 });

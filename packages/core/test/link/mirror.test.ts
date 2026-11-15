@@ -21,6 +21,7 @@ const PAYLOADS: Record<(typeof MIRRORABLE_TYPES)[number], (runId: string) => unk
     runId, adapter: "fake", authMode: "none", prompt: "Fix the tests", cardId: null, worktree: `projects/${PROJECT}/worktrees/${runId}`,
   }),
   "agent.message": (runId) => ({ runId, text: "Looking at the tests" }),
+  "agent.progress": (runId) => ({ runId, steps: ["Read the tests", "Fix them"], done: [1], current: 2 }),
   "agent.action.requested": (runId) => ({
     runId, actionId: `${runId}-a1`, kind: "shell", tool: "shell", summary: "npm test", input: { command: "npm test" },
   }),
@@ -162,6 +163,15 @@ describe("checkFrame (the requester's gate for an untrusted line)", () => {
     const frame = signFrame(worker, entryOf("agent.action.requested"));
     const result = checkFrame(line(frame), expectation());
     expect(result).toEqual({ ok: true, frame });
+  });
+
+  it("accepts an agent.progress frame, and refuses one that breaks the progress schema", () => {
+    const entry = entryOf("agent.progress");
+    const frame = signFrame(worker, entry);
+    expect(checkFrame(line(frame), expectation())).toEqual({ ok: true, frame });
+    const origin = { ...frame.origin, payload: { runId: RUN, steps: ["a"], done: [2], current: null } };
+    const forged = { origin, signature: worker.sign(Buffer.from(canonicalJson(origin))) };
+    expect(checkFrame(line(forged), expectation())).toEqual({ ok: false, reason: "invalid_payload" });
   });
 
   it("accepts a connection.used frame with a null project", () => {

@@ -1,9 +1,9 @@
-import { mirrorFrameSchema, type AgentAction, type AgentRun, type LedgerEntry, type MirroredOrigin } from "@theterminal/shared";
+import { mirrorFrameSchema, PROGRESS_LIMITS, visibleControls, type AgentAction, type AgentRun, type LedgerEntry, type MirroredOrigin } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { getLinkRun, getMachine, MirroredEntryRefusedError, requestedCardId } from "../events/projections.js";
-import { redact } from "../agents/redact.js";
+import { redact, truncate } from "../agents/redact.js";
 import { checkFrame, cleanStrings, displayOrigin, verifyFrame, type FrameCheck, type FrameRefusal } from "./mirror.js";
 
 /**
@@ -128,7 +128,16 @@ export function remoteDisplay(db: Db, clean: (s: string) => string = builtInClea
   const machineOf = db.prepare("SELECT machine_id FROM agent_runs WHERE id = ?");
   const remote = (runId: string) => ((machineOf.get(runId) as { machine_id: string | null } | undefined)?.machine_id ?? null) !== null;
   return {
-    run: (r) => (r.machineId === null ? r : { ...r, prompt: clean(r.prompt), error: r.error === null ? null : clean(r.error) }),
+    run: (r) => {
+      if (r.machineId === null) return r;
+      const shown = { ...r, prompt: clean(r.prompt), error: r.error === null ? null : clean(r.error) };
+      if (r.lastMessage !== undefined) shown.lastMessage = r.lastMessage === null ? null : clean(r.lastMessage);
+      if (r.progress) {
+        const step = (s: string) => truncate(visibleControls(clean(s)), PROGRESS_LIMITS.stepChars);
+        shown.progress = { ...r.progress, steps: r.progress.steps.map(step) };
+      }
+      return shown;
+    },
     action: (a) =>
       !remote(a.runId)
         ? a

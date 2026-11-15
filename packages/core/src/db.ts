@@ -177,6 +177,10 @@ const MIGRATIONS = [
   CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, person_id TEXT NOT NULL, listener TEXT NOT NULL, method TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT);
   CREATE INDEX sessions_person ON sessions (person_id);
   CREATE TABLE credential_state (credential_id TEXT PRIMARY KEY, counter INTEGER NOT NULL);`,
+  // Home: a run's latest step report (JSON), its last message, and the commit it was accepted into.
+  `ALTER TABLE agent_runs ADD COLUMN progress TEXT;
+  ALTER TABLE agent_runs ADD COLUMN last_message TEXT;
+  ALTER TABLE agent_runs ADD COLUMN accepted_commit TEXT;`,
 ];
 
 export type Db = Database.Database;
