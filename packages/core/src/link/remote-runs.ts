@@ -44,6 +44,8 @@ const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 const SLOW_TIMEOUT_MS = 300_000;
 /** A decision, a stop or a hello answers at once. */
 const QUICK_TIMEOUT_MS = 10_000;
+/** The stop sent to a machine as it is unlinked: short, so a machine that does not answer never holds up the unlink. */
+const UNPAIR_STOP_TIMEOUT_MS = 3_000;
 const MAX_PROMPT = 20_000;
 const MAX_REASON = 500;
 /** Unreadable snapshot replies in a row before the changes are refused. */
@@ -119,6 +121,7 @@ export class RemoteRunService {
   private readonly clean: (s: string) => string;
   private readonly following = new Map<string, Following>();
   private readonly stopWatching: () => void;
+  private readonly stopUnpairing: () => void;
   private closed = false;
 
   constructor(deps: RemoteRunDeps) {
@@ -133,11 +136,29 @@ export class RemoteRunService {
       const machineId = (e.payload as { machineId?: unknown }).machineId;
       if (typeof machineId === "string") queueMicrotask(() => this.unpaired(machineId));
     });
+    // Before the trust goes, while the machine's key still checks its reply: a stop for each run still going there.
+    this.stopUnpairing = deps.link.onUnpairing((machineId) => this.stopRunsOn(machineId));
+  }
+
+  /**
+   * The machine is about to be unlinked: each run this computer asked of it that may still be going there is asked
+   * to stop, all at once and with a short timeout, so the agent does not go on working for a machine that will not
+   * take its results. Best effort: a machine that is unreachable, refuses or does not answer in time is left to the
+   * unlink, which goes on regardless (`unpaired` then ends the runs here). Nothing is recorded by this.
+   */
+  private async stopRunsOn(machineId: string): Promise<void> {
+    const runs = listLinkRuns(this.deps.db).filter(
+      (r) => r.direction === "requested" && r.machineId === machineId && (r.state === "requested" || r.state === "running"),
+    );
+    await Promise.all(
+      runs.map((r) => this.send(machineId, `/link/v1/runs/${encodeURIComponent(r.runId)}/stop`, {}, UNPAIR_STOP_TIMEOUT_MS).catch(() => undefined)),
+    );
   }
 
   /**
    * The machine was unlinked: its key is gone, so nothing from it can be checked any more. Each run this computer
-   * asked of it stops being followed and ends here (`machine_unpaired`); nothing is sent to the machine.
+   * asked of it stops being followed and ends here (`machine_unpaired`); nothing more is sent to the machine (the
+   * stops went before the unpair, see stopRunsOn).
    */
   private unpaired(machineId: string): void {
     for (const r of listLinkRuns(this.deps.db)) {
@@ -289,10 +310,10 @@ export class RemoteRunService {
     return run.machineId;
   }
 
-  private async send(machineId: string, path: string, body: unknown): Promise<void> {
+  private async send(machineId: string, path: string, body: unknown, timeoutMs = QUICK_TIMEOUT_MS): Promise<void> {
     const peer = this.deps.link.peerFor(machineId);
     try {
-      await this.client(QUICK_TIMEOUT_MS).request(peer, "POST", path, body);
+      await this.client(timeoutMs).request(peer, "POST", path, body);
       this.deps.link.observed(machineId, true);
     } catch (err) {
       if (err instanceof MachineUnreachableError) this.deps.link.observed(machineId, false);
@@ -312,6 +333,7 @@ export class RemoteRunService {
   async shutdown(): Promise<void> {
     this.closed = true;
     this.stopWatching();
+    this.stopUnpairing();
     const all = [...this.following.values()];
     for (const f of all) f.abort.abort();
     await Promise.all(all.map((f) => f.done));

@@ -90,6 +90,34 @@ export class LinkWorker {
     this.heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this.now = deps.now ?? Date.now;
     this.cleanText = deps.cleanText ?? ((t) => redact(t));
+    // A requester this computer unpairs can no longer decide, stop or collect its runs here: they end with the pairing.
+    // After the entry's listeners, so the order is kept.
+    deps.ledger.onAppend((e) => {
+      if (e.type !== "machine.unpaired") return;
+      const machineId = (e.payload as { machineId?: unknown }).machineId;
+      if (typeof machineId === "string") queueMicrotask(() => this.unpaired(machineId));
+    });
+  }
+
+  /**
+   * The machine was unpaired here: every run accepted from it that is still running is stopped as the Owner here would
+   * stop it (its pending actions denied, `agent.finished` with status `stopped`). A run already over, or one the
+   * runner no longer has, is left as it is.
+   */
+  private unpaired(machineId: string): void {
+    const rows = this.deps.db
+      .prepare(
+        `SELECT lr.run_id AS runId FROM link_runs lr JOIN agent_runs ar ON ar.id = lr.run_id
+         WHERE lr.machine_id = ? AND lr.direction = 'accepted' AND ar.status = 'running'`,
+      )
+      .all(machineId) as { runId: string }[];
+    for (const { runId } of rows) {
+      try {
+        this.deps.runner.stop(OWNER, runId);
+      } catch {
+        // Over between the query and the stop, or not a run this runner has: nothing left to stop.
+      }
+    }
   }
 
   /** A run id as the runner accepts it, checked before it is used in any path. ZodError otherwise. */

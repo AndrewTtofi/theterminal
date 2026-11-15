@@ -376,6 +376,36 @@ describe("link protocol: runs from a paired machine", () => {
     expect(frames.map((f) => f.origin.type)).toEqual(["agent.started", "agent.action.requested", "agent.action.decided", "agent.finished"]);
   });
 
+  it("unpairing the requester stops the runs accepted from it; unpairing another machine leaves them alone", { timeout: T }, async () => {
+    const w = await startWorker([{ propose: shell, result: { ok: true, output: "x" } }]);
+    await uploadRepo(w, "run-unpaired");
+    await startRun(w, "run-unpaired");
+    const reading = readStream(w, "run-unpaired");
+    await until(() => expect(listPendingActions(w.db, "p1")).toHaveLength(1));
+    const other = await newIdentity();
+    commitEvent(w.db, w.ledger, () => ({
+      event: {
+        projectId: null, actor: owner, type: "machine.paired",
+        payload: {
+          machineId: other.machineId, name: "Other", publicKey: other.publicKeyBase64, fingerprint: other.fingerprint,
+          address: "127.0.0.1:2", role: "showed_code",
+        },
+      },
+      result: () => undefined,
+    }));
+    await w.link.unpair(owner, other.machineId);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(getRun(w.db, "run-unpaired")!.status).toBe("running");
+    expect(listPendingActions(w.db, "p1")).toHaveLength(1);
+
+    await w.link.unpair(owner, requester.machineId);
+    await until(() => expect(getRun(w.db, "run-unpaired")!.status).toBe("stopped"));
+    expect(listPendingActions(w.db, "p1")).toHaveLength(0);
+    // The stream the requester already held ends with the run, as after any stop.
+    const frames = await reading;
+    expect(frames.map((f) => f.origin.type)).toEqual(["agent.started", "agent.action.requested", "agent.action.decided", "agent.finished"]);
+  });
+
   it("ends the stream cleanly before an entry it cannot sign as a frame the requester would accept", { timeout: T }, async () => {
     const w = await startWorker([{ propose: shell, result: { ok: true, output: "x" } }]);
     await uploadRepo(w, "run-big-frame");

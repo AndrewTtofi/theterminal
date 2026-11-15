@@ -277,14 +277,14 @@ test("unlinking a machine ends the runs this computer had on it", async ({ page,
   await thisComputer(page).getByRole("switch", { name: "Allow linking" }).click();
   await expect(thisComputer(page).getByRole("switch", { name: "Allow linking" })).toHaveAttribute("aria-checked", "false");
 
-  // The peer still holds the run, waiting for a decision that will not come from here: its Owner ends it there.
+  // Before this computer forgot it, the peer was asked to stop the run: nothing waits there for a decision that will
+  // not come, and its ledger records the stop as any stop.
   const peer = await openPeer(browser);
-  const card = shellCard(peer);
-  await expect(card).toBeVisible();
-  await card.getByRole("button", { name: "Deny", exact: true }).click();
-  await card.getByRole("textbox").fill("unlinked");
-  await card.getByRole("button", { name: "Confirm deny" }).click();
-  await expect(card).toHaveCount(0);
+  await expect(shellCard(peer)).toHaveCount(0);
+  await expect.poll(() => runStatuses(peer, project)).toEqual(["stopped"]);
+  await showAllProjects(peer);
+  // Narrated there without the adapter's name: the peer has no local context for a run it executed for another machine.
+  await expect(lineMatching(ledgerItems(peer), "The agent was stopped( · .*)?")).toHaveCount(1);
   await openView(peer, "Machines");
   await machineRow(peer, "Mac").getByRole("button", { name: 'Unlink "Mac"' }).click();
   await machineRow(peer, "Mac").getByRole("group", { name: 'Unlink "Mac"?' }).getByRole("button", { name: "Unlink", exact: true }).click();

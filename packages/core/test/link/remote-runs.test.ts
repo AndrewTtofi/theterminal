@@ -313,7 +313,12 @@ describe("RemoteRunService: following a worker's stream", () => {
     const started = remote.started();
     let beat: ReturnType<typeof setInterval> | undefined;
     cleanups.push(() => clearInterval(beat));
-    const fixture = await follow((_req, res) => {
+    const fixture = await follow((req, res) => {
+      if (!req.url!.includes("/events")) {
+        // The stop sent before the unpair is refused (a worker that lost the run): the unlink goes on regardless.
+        res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
       ndjson(res);
       res.write(`${remote.line(started)}\n`);
       // Alive and waiting (a decision is pending there): heartbeats only, never an end.
@@ -328,6 +333,45 @@ describe("RemoteRunService: following a worker's stream", () => {
     await sleep(300); // several backoffs: never asked again
     expect(eventsRequests(fixture)).toHaveLength(1);
     expect(ledger.list().filter((e) => e.type === "link.run_failed")).toHaveLength(1);
+  });
+
+  it("unlinking the machine first asks it to stop each run it is executing, while its key is still trusted, then forgets it", async () => {
+    const started = remote.started();
+    let beat: ReturnType<typeof setInterval> | undefined;
+    cleanups.push(() => clearInterval(beat));
+    const stops: { url: string; trusted: boolean }[] = [];
+    const fixture = await follow((req, res) => {
+      if (req.url!.includes("/events")) {
+        ndjson(res);
+        res.write(`${remote.line(started)}\n`);
+        beat = setInterval(() => res.write("\n"), 40);
+        return;
+      }
+      // The stop arrives while the machine is still paired here: the unpair is recorded only afterwards.
+      stops.push({ url: req.url!, trusted: ledger.list().every((e) => e.type !== "machine.unpaired") });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    });
+    await vi.waitFor(() => expect(originIds()).toEqual([started.id]), { timeout: 5000 });
+    await link.unpair(owner, remote.machineId);
+    expect(stops).toEqual([{ url: `/link/v1/runs/${remote.runId}/stop`, trusted: true }]);
+    expect(ledger.list().filter((e) => e.type === "machine.unpaired")).toHaveLength(1);
+    await vi.waitFor(() => expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" }), { timeout: 2000 });
+    await sleep(200);
+    expect(fixture.requests.filter((r) => r.endsWith("/stop"))).toHaveLength(1); // once, never retried
+  });
+
+  it("a stop the machine cannot take never blocks the unlink: it is forgotten all the same and its runs end here", async () => {
+    const started = remote.started();
+    const fixture = await follow((_req, res) => {
+      ndjson(res);
+      res.write(`${remote.line(started)}\n`);
+    });
+    await vi.waitFor(() => expect(originIds()).toEqual([started.id]), { timeout: 5000 });
+    await fixture.close(); // gone: the stop is refused at the socket
+    await link.unpair(owner, remote.machineId);
+    expect(ledger.list().filter((e) => e.type === "machine.unpaired")).toHaveLength(1);
+    await vi.waitFor(() => expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "machine_unpaired" }), { timeout: 2000 });
+    expect(fixture.requests.filter((r) => r.endsWith("/stop"))).toEqual([]);
   });
 
   it("unlinking another machine leaves this one's runs alone", async () => {

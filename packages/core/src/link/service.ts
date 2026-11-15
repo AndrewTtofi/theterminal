@@ -161,6 +161,8 @@ export class LinkService {
   private browse: { stop: () => void; list: Discovered[]; timer: ReturnType<typeof setTimeout> | null } | null = null;
   /** Enabling and disabling run one at a time, so two requests can never start two listeners. */
   private serial: Promise<unknown> = Promise.resolve();
+  /** What runs before a machine is unpaired, while its key is still trusted (see onUnpairing). */
+  private readonly unpairing = new Set<(machineId: string) => Promise<void>>();
 
   constructor(deps: LinkServiceDeps) {
     this.deps = deps;
@@ -442,11 +444,27 @@ export class LinkService {
     };
   }
 
-  /** Human only: forgets a paired machine (`machine.unpaired`); its key opens nothing from then on. */
+  /**
+   * Runs `fn` as a machine is about to be unpaired, before the trust is removed, so a last word (a stop for the runs
+   * this computer has on it) can still be sent to it and checked against its key. Best effort: the hooks run together,
+   * and one that rejects or throws never blocks the unpair. Answers the function that removes the hook.
+   */
+  onUnpairing(fn: (machineId: string) => Promise<void>): () => void {
+    this.unpairing.add(fn);
+    return () => void this.unpairing.delete(fn);
+  }
+
+  /**
+   * Human only: forgets a paired machine (`machine.unpaired`); its key opens nothing from then on. First every
+   * onUnpairing hook runs with the machine still trusted; the unpair is recorded whatever they did.
+   */
   async unpair(actor: Actor, machineId: string): Promise<void> {
     if (actor.kind !== "human") throw new HumanRequiredError();
     const m = getMachine(this.deps.db, machineId);
     if (!m) throw new NotFoundError("machine", machineId);
+    await Promise.all([...this.unpairing].map((fn) => fn(m.id).catch(() => undefined)));
+    // Unpaired meanwhile (a second request): as it was found gone at the start.
+    if (!getMachine(this.deps.db, m.id)) throw new NotFoundError("machine", machineId);
     commitEvent(this.deps.db, this.deps.ledger, () => ({
       event: { projectId: null, actor, type: "machine.unpaired", payload: { machineId: m.id, name: m.name } },
       result: () => undefined,
