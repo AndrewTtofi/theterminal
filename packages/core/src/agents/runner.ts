@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -364,6 +365,13 @@ export class AgentRunner {
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
+    // A collaborator's run gets an empty config home of its own: the CLI reads none of the Owner's settings and finds
+    // none of the Owner's logins, whatever its default home holds.
+    if (provider !== null && input.forceApiKey) {
+      const home = join(this.deps.dataDir, "projects", input.projectId, "run-homes", runId);
+      mkdirSync(home, { recursive: true });
+      credentials.configHome = home;
+    }
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
     // Its key stays in `localModel`, never in `env`: Codex lets every `env` name through to the agent's commands.
     if (localModel !== null) credentials.localModel = localModel;

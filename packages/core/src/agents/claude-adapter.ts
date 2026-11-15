@@ -350,6 +350,6 @@ export class ClaudeAdapter implements AgentAdapter {
     if (mode === "subscription") return buildChildEnv("claude", mode, { dataDir: this.dataDir, cliHome: credentials.cliHome, extraEnv, mcpEnv }); // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir, extraEnv, mcpEnv });
+    return buildChildEnv("claude", mode, { apiKey: key, dataDir: this.dataDir, extraEnv, mcpEnv, configHome: credentials.configHome });
   }
 }

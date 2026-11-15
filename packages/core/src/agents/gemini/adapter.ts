@@ -353,7 +353,7 @@ export class GeminiAdapter implements AgentAdapter {
     if (mode === "google") return { ...buildChildEnv("gemini", mode, { dataDir: this.dataDir, cliHome, googleCloudProject, extraEnv }), ...this.fakeEnv }; // the user's own login, untouched
     const key = credentials.apiKey ?? this.apiKey();
     if (!key) return NO_API_KEY;
-    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv }), ...this.fakeEnv };
+    return { ...buildChildEnv("gemini", mode, { apiKey: key, dataDir: this.dataDir, googleCloudProject, extraEnv, configHome: credentials.configHome }), ...this.fakeEnv };
   }
 }
 

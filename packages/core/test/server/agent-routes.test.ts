@@ -29,7 +29,7 @@ import { asPrincipal, fakeAuth } from "../fixtures/principal.js";
 const ENV_KEYS = [
   "THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT", "FAKE_SERVICE_TOKEN", "THETERMINAL_CODEX_BIN", "OPENAI_API_KEY",
   "THETERMINAL_FAKE_CODEX_SCRIPT", "THETERMINAL_GEMINI_BIN", "GEMINI_API_KEY", "THETERMINAL_FAKE_GEMINI_SCRIPT",
-  "ANTHROPIC_API_KEY", "THETERMINAL_FAKE_LOG",
+  "ANTHROPIC_API_KEY", "THETERMINAL_FAKE_LOG", "CODEX_HOME",
 ] as const;
 const FAKE_CODEX = fileURLToPath(new URL("../fixtures/fake-codex.mjs", import.meta.url));
 const FAKE_GEMINI = fileURLToPath(new URL("../fixtures/fake-gemini.mjs", import.meta.url));
@@ -898,6 +898,26 @@ describe("collaborators run agents on API keys and are named on what they do", {
     expect(owners.status).toBe(201);
     expect((await owners.json()) as AgentRun).toMatchObject({ adapter: "codex", authMode: "chatgpt" });
     expect(await (await get(s, "/api/ledger")).text()).not.toContain(FAKE_OPENAI_KEY);
+  });
+
+  it("a collaborator's run never sees the Owner's CLI home: its config home is an empty folder under the data folder", async () => {
+    process.env.THETERMINAL_CODEX_BIN = FAKE_CODEX;
+    process.env.THETERMINAL_FAKE_CODEX_SCRIPT = JSON.stringify([{ message: "Done." }]);
+    process.env.CODEX_HOME = join(tmp(), "owners-codex-home"); // where the Owner's own login would live
+    const log = join(tmp(), "fake.log");
+    process.env.THETERMINAL_FAKE_LOG = log;
+    const { s, projectId, dataDir, send } = await startSeeded(script);
+    await send("owner", "POST", "/api/connections", { kind: "llm", provider: "codex", name: "Codex", secrets: { apiKey: FAKE_OPENAI_KEY } });
+    const res = await send("maintainer", "POST", `/api/projects/${projectId}/runs`, { adapter: "codex", prompt: "go" });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    await untilFinished(s, run.id);
+    const started = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { start?: boolean; env?: { CODEX_HOME: string | null } })
+      .find((e) => e.start)!;
+    const home = started.env!.CODEX_HOME!;
+    expect(home.startsWith(dataDir)).toBe(true);
+    expect(home).not.toBe(process.env.CODEX_HOME);
+    expect(home.startsWith(process.env.CODEX_HOME!)).toBe(false);
   });
 
   it("a reviewer decides an action and is named for it; a viewer may not decide", async () => {

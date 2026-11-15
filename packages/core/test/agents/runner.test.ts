@@ -1144,3 +1144,34 @@ describe("AgentRunner with a local model", () => {
     expect("apiKey" in seen[0]!.localModel!).toBe(false);
   });
 });
+
+describe("a run forced onto an API key", () => {
+  /** An adapter that records what it was started with and finishes at once. */
+  const capturing = () => {
+    const seen: RunCredentials[] = [];
+    const adapter: AgentAdapter = { id: "claude", start: async (o) => { seen.push(o.credentials); return { status: "completed" }; } };
+    return { adapter, seen };
+  };
+
+  it("gets an empty config home of its own under the data folder, so the CLI cannot find the Owner's login; the Owner's run gets none", async () => {
+    const { adapter, seen } = capturing();
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { claude: adapter }, extraSecrets: () => [], dataDir,
+      credentials: () => ({ connectionId: "c1", name: "Claude", apiKey: FAKE_KEY }),
+    });
+    runners.push(runner);
+    const forced = await runner.start({ kind: "human", id: "m1" }, { projectId, adapter: "claude", prompt: "p", forceApiKey: true });
+    await untilFinished(forced.id);
+    expect(forced.authMode).toBe("api_key");
+    const home = seen[0]!.configHome!;
+    expect(home.startsWith(dataDir + sep)).toBe(true);
+    expect(home).toContain(forced.id);
+    expect(existsSync(home)).toBe(true);
+    expect(readdirSync(home)).toEqual([]);
+    expect(seen[0]!.apiKey).toBe(FAKE_KEY);
+
+    const owners = await runner.start(owner, { projectId, adapter: "claude", prompt: "p" });
+    await untilFinished(owners.id);
+    expect(seen[1]!.configHome).toBeUndefined();
+  });
+});

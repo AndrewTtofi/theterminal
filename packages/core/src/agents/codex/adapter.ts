@@ -380,7 +380,7 @@ export class CodexAdapter implements AgentAdapter {
     const localKey: Record<string, string> = localModel?.apiKey ? { [LOCAL_KEY_VAR]: localModel.apiKey } : {};
     if (grantNames.length > 0 || localModel?.apiKey) args.push(...codexCommandPolicyArgs(grantNames));
     const extraEnv = { ...Object.fromEntries(grantNames.map((n) => [n, o.credentials.env[n]!])), ...localKey };
-    const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv });
+    const childEnv = buildChildEnv("codex", o.authMode, { apiKey, dataDir: this.dataDir, cliHome: o.credentials.cliHome, extraEnv, configHome: o.credentials.configHome });
     const env = { ...childEnv, ...this.fakeEnv };
     if (o.authMode === "api_key" || localModel !== undefined) {
       // An empty home of our own: none of the user's exec-policy rules, MCP servers or hooks apply.
