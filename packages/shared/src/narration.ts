@@ -15,13 +15,15 @@
 import type { ActionKind, AgentAction } from "./agents.js";
 import { KIND_LABELS } from "./connections.js";
 import type { Actor, LedgerEntry } from "./domain.js";
-import { GATES, type GateId } from "./gates.js";
+import { GATES, requirementLabel, type GateId, type GateRequirement } from "./gates.js";
 import { INTAKE_DECISIONS, INTAKE_QUESTIONS, renderAnswer, type IntakeAnswer } from "./intake.js";
 import { CHANGES_REFUSED_PHRASES, MIRRORABLE_TYPES } from "./link.js";
+import { OWNER_ID, ROLE_LABELS, type Role } from "./people.js";
 import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
 export type NarrationTopic =
-  | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "share" | "other";
+  | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "share" | "people"
+  | "remote" | "other";
 export type NarrationRefs = {
   cardId?: string;
   runId?: string;
@@ -35,15 +37,21 @@ export type NarrationRefs = {
   linkId?: string;
 };
 export type Narration = { headline: string; detail: string | null; topic: NarrationTopic; attention: boolean; refs: NarrationRefs };
-/** What the caller knows beyond the entry: a card's title, a run's adapter, a linked machine's name. Nothing else. */
+/**
+ * What the caller knows beyond the entry: a card's title, a run's adapter, a linked machine's name, a person's
+ * name. Nothing else.
+ */
 export type NarrationContext = {
   cardTitle?: (cardId: string) => string | undefined;
   adapterName?: (runId: string) => string | undefined;
   machineName?: (machineId: string) => string | undefined;
+  personName?: (personId: string) => string | undefined;
 };
 export type ActionLike = Pick<AgentAction, "kind" | "tool" | "summary" | "input">;
 
 const HEADLINE_MAX = 200;
+/** The longest a person's name is shown in a headline (a name is at most 60 characters; escapes count). */
+const NAME_MAX = 60;
 /**
  * The longest headline the templates build. The blind cap in `capHeadline` gives exactly HEADLINE_MAX
  * characters, so a headline that stays under it never had its fixed words cut.
@@ -92,18 +100,24 @@ function own<T>(rec: Record<string, T>, key: unknown): T | undefined {
  * Text for a headline, with hidden characters shown as escapes (and, when `quoted`, `"` and `\` escaped), clipped to
  * at most `max` characters AFTER escaping, plus `…` when cut. An escape is never cut in half.
  */
-function clipVisible(s: string, max: number, quoted = false): string {
+function clipVisible(s: string, max: number, quoted = false, oneLine = false): string {
   let out = "";
   for (const c of s) {
-    const unit = quoted && (c === '"' || c === "\\") ? `\\${c}` : visibleControls(c);
+    const unit =
+      quoted && (c === '"' || c === "\\") ? `\\${c}` : oneLine && (c === "\n" || c === "\t") ? ONE_LINE[c]! : visibleControls(c);
     if (out.length + unit.length > max) return `${out}…`;
     out += unit;
   }
   return out;
 }
 
+const ONE_LINE: Record<string, string> = { "\n": "\\n", "\t": "\\t" };
+
 /** A payload value as headline text (see `clipVisible`). */
 const show = (v: unknown, max: number, quoted = false): string => clipVisible(str(v), max, quoted);
+
+/** A person's name as headline text: as `show`, and on one line, with line breaks and tabs shown as escapes too. */
+const showName = (v: unknown, quoted = false): string => clipVisible(str(v), NAME_MAX, quoted, true);
 
 /**
  * `before` + the free text + `after`, the free text clipped to `max` and to the room the fixed words leave under the
@@ -126,10 +140,46 @@ function lookup<T>(fn: ((key: string) => T | undefined) | undefined, key: string
   return fn && key !== undefined ? fn(key) : undefined;
 }
 
-function actorName(a: Actor, agent: string): string {
+/**
+ * Who an actor is, in words: a person by the name the context knows (shown inert), else the Owner's fixed word for
+ * the Owner and `Someone` for anyone else, never a raw id; `agent` for an agent; `Policy` or `The workspace` for the system.
+ */
+export function actorName(a: Actor, ctx: NarrationContext = {}, agent = "The agent"): string {
   if (a.kind === "system") return a.id === "policy" ? "Policy" : "The workspace";
   if (a.kind === "agent") return agent;
-  return a.id === "owner" ? "Owner" : show(a.id, 30);
+  let name: string | undefined;
+  try {
+    const found = lookup(ctx.personName, typeof a.id === "string" ? a.id : undefined);
+    name = typeof found === "string" ? showName(found) : undefined;
+  } catch {
+    // A context that throws names nobody.
+  }
+  if (name) return name;
+  return a.id === OWNER_ID ? "Owner" : "Someone";
+}
+
+/** A person named by id in a payload, as `actorName` names a human. */
+const personRef = (personId: unknown, ctx: NarrationContext): string => actorName({ kind: "human", id: str(personId) }, ctx);
+
+/** A role in lower case, as a headline says it (`a reviewer`). */
+const roleWord = (v: unknown): string => {
+  const label = own<string>(ROLE_LABELS as Record<Role, string>, v);
+  return label ? label.toLowerCase() : show(v, 20);
+};
+const article = (word: string): string => (/^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`);
+
+const TLS_LABELS: Record<string, string> = {
+  self_signed: "self-signed",
+  acme: "Let's Encrypt",
+  provided: "own certificate files",
+};
+
+/** A recorded gate requirement, as narration can read it from a payload, or undefined. */
+function requirementOf(v: unknown): GateRequirement | undefined {
+  if (!isRecord(v)) return undefined;
+  if (typeof v.personId === "string") return { personId: v.personId };
+  if (own(ROLE_LABELS as Record<Role, string>, v.role)) return { role: v.role as Role };
+  return undefined;
 }
 
 function agentName(runId: string | undefined, ctx: NarrationContext): string {
@@ -176,6 +226,10 @@ function topicOf(type: string): NarrationTopic {
       return "machine";
     case "share":
       return "share";
+    case "person":
+      return "people";
+    case "remote":
+      return "remote";
     default:
       return "other";
   }
@@ -282,7 +336,7 @@ type Told = { headline: string; detail?: string | null; attention?: boolean };
 function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
   const runId = idOf(p.runId) ?? (e.actor.kind === "agent" ? e.actor.id : undefined);
   const agent = agentName(runId, ctx);
-  const who = actorName(e.actor, agent);
+  const who = actorName(e.actor, ctx, agent);
   const cardId = idOf(p.cardId);
   const stage = (v: unknown) => show(cap(v), 20);
   /** The first eight characters of a run id, as 5B wrote them. */
@@ -520,7 +574,8 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     case "link.run_accepted":
       return { headline: `Accepted a run from ${machine(p, ctx)}` };
     case "link.decision_received": {
-      const decider = e.actor.kind === "human" ? who : "Owner";
+      // Recorded by the system: the decision is the other machine's Owner's, so this machine's names do not apply.
+      const decider = e.actor.kind === "human" ? who : actorName({ kind: "human", id: OWNER_ID });
       const what = p.decision === "allow" ? "allowed" : p.decision === "deny" ? "denied" : "unknown";
       return { headline: `${decider}'s decision arrived from ${machine(p, ctx)}: ${what}` };
     }
@@ -551,6 +606,53 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     case "share.stopped": {
       const how = own<string>({ shutdown: "closed", restart: "restarted" }, p.reason);
       return { headline: how ? `A share link stopped: The Terminal ${how}` : "A share link stopped" };
+    }
+
+    case "person.invited":
+      return { headline: `${who} invited ${article(roleWord(p.role))}` };
+    case "person.invite_revoked":
+      return { headline: `${who} revoked an invitation` };
+    case "person.joined":
+      return { headline: `${showName(p.name) || "Someone"} joined as ${roleWord(p.role)}` };
+    case "person.credential_added": {
+      const c = isRecord(p.credential) ? p.credential : {};
+      const kind = c.kind === "passkey" ? "passkey" : c.kind === "key" ? "key" : "credential";
+      return { headline: `${who} added a ${kind} ("${show(c.label, 60, true)}")` };
+    }
+    case "person.credential_removed":
+      return { headline: `${who} removed a credential` };
+    case "person.renamed":
+      return { headline: `${who} is now called "${showName(p.name, true)}"` };
+    case "person.role_changed":
+      return { headline: `${who} made ${personRef(p.personId, ctx)} ${article(roleWord(p.to))}` };
+    case "person.removed":
+      return { headline: `${who} removed ${personRef(p.personId, ctx)}` };
+    case "person.signed_in": {
+      const where = p.listener === "remote" ? "remotely" : p.listener === "local" ? "locally" : "";
+      return { headline: `${personRef(p.personId, ctx)} signed in${where ? ` ${where}` : ""}` };
+    }
+    case "person.locked":
+      return {
+        headline: `${personRef(p.personId, ctx)} was locked out after ${show(p.failures, 10)} failed sign-ins`,
+        attention: true,
+      };
+
+    case "remote.enabled": {
+      const where = typeof p.domain === "string" && p.domain ? show(p.domain, 80) : "this machine's addresses";
+      return { headline: `${who} turned remote access on (${where}, port ${show(p.port, 10)})`, attention: true };
+    }
+    case "remote.disabled":
+      return { headline: `${who} turned remote access off` };
+    case "remote.certificate_changed": {
+      const how = own(TLS_LABELS, p.tls) ?? show(p.tls, 20);
+      return { headline: `The remote certificate changed (${how}, fingerprint ${show(str(p.fingerprint).slice(0, 8), 8)}…)` };
+    }
+
+    case "gate.requirement_set": {
+      const before = `${who} set who may sign "${gateTitle(p.gateId)}"`;
+      if (p.requirement === null) return { headline: `${before} back to the default` };
+      const req = requirementOf(p.requirement);
+      return { headline: req ? `${before}: ${requirementLabel(req, (id) => personRef(id, ctx))}` : before };
     }
 
     default:
@@ -643,7 +745,7 @@ export function narrate(e: LedgerEntry, ctx: NarrationContext = {}): Narration {
     told = tell(e, p, ctx);
   } catch {
     const actor: Actor = isRecord(e.actor) ? { kind: e.actor.kind, id: str(e.actor.id) } : { kind: "system", id: "" };
-    told = { headline: `${actorName(actor, "The agent")} recorded ${show(type, 80)}` };
+    told = { headline: `${actorName(actor, ctx)} recorded ${show(type, 80)}` };
   }
   return {
     headline: capHeadline(told.headline),

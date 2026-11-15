@@ -67,6 +67,16 @@ describe("GateService.evaluate", () => {
     ]);
   });
 
+  it("carries each gate's default requirement, signable by the Owner until requirements are recorded", () => {
+    const got = gates.evaluate(card(w.planned), "ship");
+    expect(got.map((g) => [g.id, g.requirement, g.signable])).toEqual([
+      ["ready_to_ship", { role: "reviewer" }, true],
+      ["network_exposure", { role: "owner" }, true],
+      ["payments", { role: "owner" }, true],
+      ["personal_data", { role: "owner" }, true],
+    ]);
+  });
+
   it("without an intake, ready_to_ship is blocked on the plan", () => {
     const got = gates.evaluate(card(w.bare), "ship");
     expect(got.map((g) => g.id)).toEqual(["ready_to_ship"]);

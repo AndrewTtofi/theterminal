@@ -46,6 +46,20 @@ const ADDED_AFTER_ZOD_3: readonly EventType[] = [
   "share.revoked",
   "share.expired",
   "share.stopped",
+  "gate.requirement_set",
+  "person.invited",
+  "person.invite_revoked",
+  "person.joined",
+  "person.credential_added",
+  "person.credential_removed",
+  "person.renamed",
+  "person.role_changed",
+  "person.removed",
+  "person.signed_in",
+  "person.locked",
+  "remote.enabled",
+  "remote.disabled",
+  "remote.certificate_changed",
 ];
 
 describe("ledger payloads written by zod 3", () => {

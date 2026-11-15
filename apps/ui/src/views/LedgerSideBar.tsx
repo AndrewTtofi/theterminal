@@ -19,6 +19,9 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   connection: "Connections",
   settings: "Settings",
   machine: "Machines",
+  // Labels only: Plan 8 Task 9 adds both topics to LEDGER_TOPICS with the People view.
+  people: "People",
+  remote: "Remote access",
   other: "Other",
 };
 

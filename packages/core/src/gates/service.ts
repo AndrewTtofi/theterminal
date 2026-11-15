@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  STAGES, applicableGates, gateDecisionInputSchema, outcomeOf, stageSchema,
+  DEFAULT_GATE_REQUIREMENT, OWNER_ID, STAGES, applicableGates, satisfies, gateDecisionInputSchema, outcomeOf, stageSchema,
   type Actor, type Card, type ConditionId, type GateDecisionInput, type GateEvaluation, type GateId, type NewLedgerEntry,
   type Stage,
 } from "@theterminal/shared";
@@ -154,10 +154,13 @@ export class GateService {
       const conditions = evaluateConditions(this.db, def.conditions, {
         projectId: card.projectId, cardId: card.id, facts, decisions,
       });
+      // The default requirement, judged for the Owner, until recorded requirements and a signer arrive (Plan 8 Task 5).
+      const requirement = DEFAULT_GATE_REQUIREMENT[def.id];
       return {
         id: def.id, title: def.title, explanation: def.explanation, risks: def.risks, learn: def.learn,
         acknowledgement: def.acknowledgement, signOff: def.signOff,
         conditions, met: conditions.every((c) => c.met), outcome: outcomeOf(def, conditions),
+        requirement, signable: satisfies(requirement, { personId: OWNER_ID, role: "owner" }),
       };
     });
   }
