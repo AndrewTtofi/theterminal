@@ -48,7 +48,9 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
     () => [...entries].sort((a, b) => b.seq - a.seq).map((e) => ({ e, n: narrate(e, ctx) })),
     [entries, ctx],
   );
-  const inTopics = ({ n }: { n: { topic: NarrationTopic } }) => topics === undefined || topics.includes(n.topic);
+  // Overrides are always shown, whatever the filter says.
+  const inTopics = ({ n }: { n: { topic: NarrationTopic } }) =>
+    topics === undefined || n.topic === "override" || topics.includes(n.topic);
   const shown = narrated.filter(inTopics);
   const hiddenAttention = narrated.filter((x) => x.n.attention && !inTopics(x)).length;
   return (

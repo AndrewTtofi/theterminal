@@ -17,9 +17,9 @@ import { KIND_LABELS } from "./connections.js";
 import type { Actor, LedgerEntry } from "./domain.js";
 import { GATES, type GateId } from "./gates.js";
 import { INTAKE_DECISIONS, INTAKE_QUESTIONS, renderAnswer, type IntakeAnswer } from "./intake.js";
-import { formatUsd, plural, visibleControls } from "./text.js";
+import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
-export type NarrationTopic = "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "other";
+export type NarrationTopic = "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "other";
 export type NarrationRefs = {
   cardId?: string;
   runId?: string;
@@ -27,6 +27,7 @@ export type NarrationRefs = {
   connectionId?: string;
   intakeId?: string;
   gateId?: GateId;
+  overrideId?: string;
 };
 export type Narration = { headline: string; detail: string | null; topic: NarrationTopic; attention: boolean; refs: NarrationRefs };
 /** What the caller knows beyond the entry: a card's title and a run's adapter. Narration adds nothing else. */
@@ -161,6 +162,8 @@ function topicOf(type: string): NarrationTopic {
       return "connection";
     case "settings":
       return "settings";
+    case "override":
+      return "override";
     default:
       return "other";
   }
@@ -173,6 +176,7 @@ function refsOf(p: Payload): NarrationRefs {
   const actionId = idOf(p.actionId);
   const connectionId = idOf(p.connectionId);
   const intakeId = idOf(p.intakeId);
+  const overrideId = idOf(p.overrideId);
   const gates = Array.isArray(p.gates) ? p.gates : [];
   const gateId = idOf(p.gateId) ?? (isRecord(gates[0]) ? idOf(gates[0].gateId) : undefined);
   if (cardId) refs.cardId = cardId;
@@ -180,6 +184,7 @@ function refsOf(p: Payload): NarrationRefs {
   if (actionId) refs.actionId = actionId;
   if (connectionId) refs.connectionId = connectionId;
   if (intakeId) refs.intakeId = intakeId;
+  if (overrideId) refs.overrideId = overrideId;
   if (gateId && GATES.some((g) => g.id === gateId)) refs.gateId = gateId as GateId;
   return refs;
 }
@@ -431,6 +436,29 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
         headline: fit(`${who} waived "${gateTitle(p.gateId)}" for ${cardRef(cardId, ctx)}: `, p.reason),
         attention: true,
       };
+
+    case "override.command": {
+      const args = Array.isArray(p.args) ? p.args.map(str) : [];
+      const shown = clipVisible([str(p.program), ...args].join(" "), 80, true);
+      return {
+        headline: fit(`OVERRIDE: ${who} ran "${shown}" in ${lowerFirst(agent)}'s working copy: `, p.reason),
+        detail: json({ program: p.program, args: p.args, cwd: p.cwd }),
+        attention: true,
+      };
+    }
+    case "override.discard":
+      return {
+        headline: fit(`OVERRIDE: ${who} discarded ${show(p.files, 20)} changed file(s) of ${lowerFirst(agent)}'s run: `, p.reason),
+        attention: true,
+      };
+    case "override.completed": {
+      const output = str(p.output);
+      const detail = output || null;
+      if (p.timedOut === true) return { headline: "Override killed after 10 minutes", detail, attention: true };
+      if (p.ok === true) return { headline: `Override finished (exit ${show(p.exitCode, 20)})`, detail, attention: true };
+      const how = typeof p.exitCode === "number" ? `exit ${show(p.exitCode, 20)}` : `signal ${show(p.signal, 20)}`;
+      return { headline: `Override failed (${how})`, detail, attention: true };
+    }
 
     default:
       return { headline: `${who} recorded ${show(e.type, 80)}` };

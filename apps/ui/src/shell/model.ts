@@ -45,7 +45,8 @@ export type GatePrompt = {
 };
 
 /** Every narration topic, in the order the ledger's filter lists them. */
-export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];
+/** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
+export const LEDGER_TOPICS: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
 
 /** Everything the shell shows and every action it can take; App owns the data and the API calls. */
 export type WorkbenchModel = {

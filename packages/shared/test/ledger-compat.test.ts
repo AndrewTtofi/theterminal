@@ -24,6 +24,9 @@ const ADDED_AFTER_ZOD_3: readonly EventType[] = [
   "gate.blocked",
   "gate.signed_off",
   "gate.waived",
+  "override.command",
+  "override.discard",
+  "override.completed",
 ];
 
 describe("ledger payloads written by zod 3", () => {

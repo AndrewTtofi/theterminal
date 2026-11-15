@@ -252,6 +252,16 @@ describe("LedgerPanel narration and raw record", () => {
     expect(aside.textContent).not.toContain("Detect GPU");
   });
 
+  it("never hides an override, whatever topics are chosen", () => {
+    const override = entry(2, "override.discard", { overrideId: "o1", runId: "r1", reason: "The agent broke the build", files: 2 });
+    render(<LedgerPanel topics={["gate"]} entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" }), override]} />);
+    const aside = screen.getByRole("complementary", { name: "Ledger" });
+    const items = within(aside).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain("OVERRIDE: Owner discarded 2 changed file(s) of the agent's run: The agent broke the build");
+    expect(screen.queryByText(/hidden by the topic filter/)).toBeNull();
+  });
+
   it("labels each Raw summary with its headline", () => {
     render(<LedgerPanel entries={[entry(1, "card.created", { title: "Detect GPU", stage: "plan" })]} />);
     const summary = screen.getByRole("listitem").querySelector("summary")!;

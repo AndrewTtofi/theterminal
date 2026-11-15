@@ -7,7 +7,7 @@ import type { LedgerScope, WorkbenchModel } from "../src/shell/model";
 import { LedgerSideBar } from "../src/views/LedgerSideBar";
 import { fakeDock } from "./connections-harness";
 
-const ALL: NarrationTopic[] = ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"];
+const ALL: NarrationTopic[] = ["board", "agent", "decision", "gate", "override", "intake", "connection", "settings", "other"];
 
 function renderSideBar(over: { ledgerScope?: LedgerScope; selectedId?: string | null; ledgerTopics?: NarrationTopic[] } = {}) {
   const onLedgerTopicsChange = vi.fn();
@@ -34,9 +34,16 @@ describe("LedgerSideBar", () => {
     const show = screen.getByRole("group", { name: "Show" });
     const boxes = within(show).getAllByRole("checkbox") as HTMLInputElement[];
     expect(boxes.map((b) => b.labels?.[0]?.textContent)).toEqual([
-      "Board", "Agents", "Decisions", "Gates", "Intake", "Connections", "Settings", "Other",
+      "Board", "Agents", "Decisions", "Gates", "Overrides", "Intake", "Connections", "Settings", "Other",
     ]);
     expect(boxes.every((b) => b.checked)).toBe(true);
+  });
+
+  it("always shows overrides: their box stays ticked and cannot be cleared", () => {
+    renderSideBar({ ledgerTopics: ["board"] });
+    const box = screen.getByRole("checkbox", { name: "Overrides" }) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(box.disabled).toBe(true);
   });
 
   it("removes and adds a topic", async () => {
