@@ -53,6 +53,34 @@ afterAll(() => {
   for (const line of headlines) expect(line.length).toBeLessThanOrEqual(200);
 });
 
+describe("narrate: project sources", () => {
+  it("narrates imports, links, accepts, applies and publishes", () => {
+    const sha = "a".repeat(40);
+    const imp = (from: string, files: number, bytes: number) =>
+      h(entry("project.files_imported", { projectId: "p1", from, commit: sha, files, bytes, skipped: 0, secretsIncluded: false }));
+    expect(imp("github", 12, 3_565_158)).toBe("Owner added 12 files (3.4 MB) from GitHub");
+    expect(imp("folder", 12, 3_565_158)).toBe("Owner added 12 files (3.4 MB) from a folder");
+    expect(imp("files", 1, 500)).toBe("Owner added 1 file (500 bytes) to the project");
+    expect(h(entry("project.source_set", { projectId: "p1", kind: "github", repo: "o/r", branch: "main", remoteCommit: sha, syncedCommit: sha }))).toBe(
+      "Owner linked the project to GitHub: o/r",
+    );
+    const folder = h(entry("project.source_set", { projectId: "p1", kind: "folder", path: "/Users/secret/folder", syncedCommit: sha }));
+    expect(folder).toBe("Owner linked the project to a folder on this computer");
+    expect(folder).not.toContain("secret");
+    expect(h(entry("run.accepted", { runId: "r1", commit: sha, files: 2 }), ctx)).toMatch(/^Owner accepted the changes of /);
+    expect(h(entry("project.folder_applied", { projectId: "p1", from: sha, to: sha, written: 3, deleted: 1, skipped: 1 }))).toBe(
+      "Owner applied 4 files to the folder (1 skipped)",
+    );
+    expect(h(entry("project.published", { projectId: "p1", branch: "the-terminal/0123abcd", pullUrl: "https://github.com/o/r/pull/1", from: sha, to: sha, files: 2 }))).toBe(
+      "Owner opened a pull request on GitHub",
+    );
+  });
+  it("files run.accepted under agent and project.* under board", () => {
+    expect(n(entry("run.accepted", { runId: "r1", commit: "a".repeat(40), files: 1 })).topic).toBe("agent");
+    expect(n(entry("project.published", { projectId: "p1", branch: "the-terminal/0123abcd", pullUrl: "https://github.com/o/r/pull/1", from: "a".repeat(40), to: "a".repeat(40), files: 1 })).topic).toBe("board");
+  });
+});
+
 describe("narrate: board", () => {
   it("narrates project and card events", () => {
     expect(h(entry("project.created", { projectId: "p1", name: "Book club", pitch: "" }))).toBe(

@@ -210,6 +210,7 @@ function topicOf(type: string): NarrationTopic {
     case "project":
       return "board";
     case "agent":
+    case "run":
       return "agent";
     case "gate":
       return "gate";
@@ -330,6 +331,10 @@ export function narrateAction(a: AgentAction): { headline: string; detail: strin
   const detail = typeof a.output === "string" && a.output.length > 0 ? a.output : json(a.input);
   return { headline, detail, means: own(ACTION_KIND_MEANS, a.kind) ?? ACTION_KIND_MEANS.other };
 }
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+const sizeText = (b: number): string =>
+  b < 1024 ? plural(b, "byte") : b < 1_048_576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1_048_576).toFixed(1)} MB`;
 
 type Told = { headline: string; detail?: string | null; attention?: boolean };
 
@@ -594,6 +599,28 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     }
     case "link.changes_imported":
       return { headline: `The run's changes arrived from ${machine(p, ctx)}` };
+    case "project.files_imported": {
+      const from = own<string>({ github: "from GitHub", folder: "from a folder", files: "to the project" }, p.from) ?? "to the project";
+      const files = num(p.files);
+      return { headline: `${who} added ${plural(files, "file")} (${sizeText(num(p.bytes))}) ${from}` };
+    }
+    case "project.source_set":
+      return {
+        headline:
+          p.kind === "github"
+            ? fit(`${who} linked the project to GitHub: `, p.repo, "", 120)
+            : `${who} linked the project to a folder on this computer`,
+      };
+    case "run.accepted":
+      return { headline: `${who} accepted the changes of ${agent}` };
+    case "project.folder_applied": {
+      const skipped = num(p.skipped);
+      return {
+        headline: `${who} applied ${plural(num(p.written) + num(p.deleted), "file")} to the folder${skipped > 0 ? ` (${skipped} skipped)` : ""}`,
+      };
+    }
+    case "project.published":
+      return { headline: `${who} opened a pull request on GitHub` };
     case "share.confirmed": {
       const sections = Array.isArray(p.sections) ? p.sections.length : 0;
       return {

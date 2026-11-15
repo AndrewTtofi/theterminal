@@ -17,3 +17,4 @@ export * from "./digest.js";
 export * from "./people.js";
 export * from "./theme.js";
 export * from "./home.js";
+export * from "./sources.js";
