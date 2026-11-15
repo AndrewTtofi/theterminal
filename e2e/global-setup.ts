@@ -5,14 +5,19 @@ import { createServer } from "../packages/core/dist/index.js";
 
 const fixture = (name: string) => join(import.meta.dirname, "..", "packages", "core", "test", "fixtures", name);
 
-// A read inside the worktree (auto-allowed), a shell command (asks; once allowed, its output is the bare Claude test
-// key that connections.spec.ts stores, which no built-in redaction pattern matches), an edit outside it (auto-denied).
+// A read inside the worktree (auto-allowed), a message, a shell command (asks; once allowed, its output is the bare
+// Claude test key that connections.spec.ts stores, which no built-in redaction pattern matches, and it writes
+// notes.txt holding that key into the working copy, so a run has one untracked file to show in Changes), a message,
+// an edit outside it (auto-denied). The first message is what the Needs-you tab shows as said before the decision.
 const FAKE_SCRIPT = JSON.stringify([
   { propose: { tool: "Read", kind: "file_read", summary: "Read README.md", input: { path: "README.md" }, paths: ["README.md"] } },
+  { message: "I read README.md. Next I check the GPU." },
   {
     propose: { tool: "Bash", kind: "shell", summary: "Run: nvidia-smi", input: { command: "nvidia-smi" }, paths: [] },
     result: { ok: true, output: "zq-TESTKEY-e2e-opaque-0000000000" },
+    write: { path: "notes.txt", content: "key=zq-TESTKEY-e2e-opaque-0000000000\nhello\n" },
   },
+  { message: "I wrote notes.txt." },
   { propose: { tool: "Edit", kind: "file_edit", summary: "Edit /etc/hosts", input: { path: "/etc/hosts" }, paths: ["/etc/hosts"] } },
   // Only in a run given AWS credentials (cloud.spec.ts), so the other flows are unchanged: a shell command that asks,
   // then prints the bare minted session token (never stored, and no redaction pattern matches it) and the Azure secret.

@@ -80,7 +80,7 @@ test("guided intake: describe, answer, decide, approve; then reopen, take paymen
   await decide(panel, "How much should the first version include?", "The smallest version that proves the idea");
   await decide(panel, "Where should it run?", "On this computer only");
 
-  await expect(panel.getByRole("heading", { name: "Your plan" })).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Your plan", level: 3 })).toBeVisible();
   const summary = panel.locator(".intake-plan .summary");
   await expect(summary).toContainText("Book Club is for the members of a small book club.");
   await expect(summary).toContainText("People use it in a web browser.");
