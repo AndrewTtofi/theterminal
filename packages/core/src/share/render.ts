@@ -5,6 +5,7 @@ import {
   STAGES,
   formatUsd,
   plural,
+  visibleControls,
   type Evidence,
   type Figure,
   type ReadinessRow,
@@ -34,7 +35,8 @@ export function contentHashOf(html: string): string {
   return createHash("sha256").update(Buffer.from(html, "utf8")).digest("hex");
 }
 
-const e = escapeHtml;
+/** Every snapshot string: bidi, zero-width and control characters made visible as escapes, then HTML-escaped. */
+const e = (s: string) => escapeHtml(visibleControls(s));
 
 const ESTIMATE =
   '<abbr title="Not a figure from the provider. Computed by The Terminal from recorded usage.">estimate</abbr>';
@@ -154,7 +156,8 @@ function stack(s: ShareSnapshot): string {
       ),
     );
   }
-  if (s.hardware) {
+  // Second line of defence: the footer's "Not included" must stay true even if a snapshot carries hardware anyway.
+  if (s.options.includeHardware && s.hardware) {
     const h = s.hardware;
     const bits = [h.cpu === null ? null : e(h.cpu), h.memoryGb === null ? null : `${h.memoryGb} GB`, h.gpu === null ? null : e(h.gpu)];
     const known = bits.filter((b): b is string => b !== null);
@@ -221,7 +224,7 @@ function digests(s: ShareSnapshot): string {
     .map((d) => {
       const items = d.items.map((i) => `<li><time>${e(i.time)}</time> ${e(i.headline)}</li>`).join("");
       const more = d.more > 0 ? `<p class="muted">and ${d.more} more</p>` : "";
-      const asks = s.asks.filter((a) => a.day === d.day);
+      const asks = s.options.includePrompts ? s.asks.filter((a) => a.day === d.day) : [];
       const askList =
         asks.length === 0
           ? ""

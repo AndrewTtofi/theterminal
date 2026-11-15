@@ -114,6 +114,52 @@ describe("renderShareHtml", () => {
     expect(html).toContain("&lt;img src=x onerror=&quot;a&quot;&gt;&#39;");
   });
 
+  it("shows bidi overrides, isolates and zero-width characters as escapes, never raw", () => {
+    const sneaky = (word: string) => `${word}\u202Eevil\u2066x\u200By`;
+    const html = render((s) => {
+      s.waiting[0]!.cardTitle = sneaky("card");
+      s.waiting[0]!.headline = sneaky("headline");
+      s.decisions[0]!.reason = sneaky("reason");
+      s.digests[0]!.summary = sneaky("summary");
+    });
+    expect(html).not.toMatch(/[\u202E\u2066\u200B]/u);
+    for (const word of ["card", "headline", "reason", "summary"]) {
+      expect(html).toContain(`${word}\\u202eevil\\u2066x\\u200by`);
+    }
+    // The exported escapeHtml keeps its contract: only the five HTML characters.
+    expect(escapeHtml("a\u202Eb")).toBe("a\u202Eb");
+  });
+
+  it("leaves out hardware and asks unless the snapshot's options include them", () => {
+    const hardware = {
+      cpu: "Test CPU",
+      cores: 8,
+      memoryGb: 16,
+      gpu: "Test GPU",
+      gpuMemoryGb: 8,
+      platform: "linux" as const,
+      wsl: false,
+      detectedAt: "2026-11-15T09:00:00.000Z",
+    };
+    const asks = [{ day: "2026-11-15", time: "10:00", adapterLabel: "Fake agent", cardTitle: "Login", prompt: "Build the login page" }];
+    const off = render((s) => {
+      s.hardware = hardware;
+      s.asks = asks;
+    });
+    expect(off).not.toContain("This computer:");
+    expect(off).not.toContain("Test CPU");
+    expect(off).not.toContain("Build the login page");
+    expect(text(sectionHtml(off, "digests"))).not.toContain("Asks");
+    const on = render((s) => {
+      s.options.includeHardware = true;
+      s.options.includePrompts = true;
+      s.hardware = hardware;
+      s.asks = asks;
+    });
+    expect(text(on)).toContain("This computer: Test CPU · 16 GB · Test GPU");
+    expect(text(on)).toContain("Build the login page");
+  });
+
   it("shows the overview: name, pitch and dates", () => {
     const overview = text(sectionHtml(render(), "overview"));
     expect(overview).toContain("Book Club");
@@ -172,6 +218,7 @@ describe("renderShareHtml", () => {
     expect(text(html)).toContain("#8 · 0123456789ab");
     expect(html).not.toContain("This computer:");
     const withHw = render((s) => {
+      s.options.includeHardware = true;
       s.hardware = {
         cpu: "Test CPU",
         cores: 8,
@@ -220,6 +267,7 @@ describe("renderShareHtml", () => {
     expect(day).toContain('<time>10:00</time> Owner started a Fake agent on &quot;Login&quot;');
     expect(text(sectionHtml(html, "digests"))).not.toContain("Asks");
     const withAsks = render((s) => {
+      s.options.includePrompts = true;
       s.digests[0]!.more = 5;
       s.asks = [
         { day: "2026-11-15", time: "10:00", adapterLabel: "Fake agent", cardTitle: "Login", prompt: "Build the login page" },
