@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ## Unreleased
 
 ### Added
+- Brand: the `>_` mark, wordmark, app icons for macOS and Windows, a favicon and a brand guide (`docs/brand.md`).
+- Ice is the new default look. Settings → Appearance (the gear at the bottom of the activity bar) has six built-in themes (Ice, Phosphor, Amber, Classic, Light, High contrast), and lets you duplicate, edit, import and export your own. Approval, danger and override colours always stay readable.
 - VS Code-style workbench: activity bar, side bar, tabbed main area with the board as home, bottom panel, saved layout and a live status bar (running agents, today's cost, pending decisions, connections).
 - Connections view: add Claude, Codex (OpenAI), Gemini and GitHub credentials. Secrets are stored in the OS keychain and never reach the ledger, API responses or logs. Each connection has a read-only connection test.
 - Agent runs use the configured connection's key, and each use is recorded in the ledger. A stored key is redacted from agent output immediately and stays redacted after removal.
