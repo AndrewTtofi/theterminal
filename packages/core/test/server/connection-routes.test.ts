@@ -273,7 +273,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [] };
+    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null, intakeDecisions: 0, intakeProjects: [], shareLinks: 0 };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));

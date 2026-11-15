@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
+import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl, shareDownloadUrl, shareSnapshotUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -340,5 +340,61 @@ describe("ledger pages", () => {
       "/api/ledger?afterSeq=3",
       "/api/ledger",
     ]);
+  });
+});
+
+describe("share api", () => {
+  it("previews with the options and confirms with the preview's id and hash", async () => {
+    const f = respond(200, {});
+    await api.previewShare("p 1", { includePrompts: true, includeHardware: false, digestDays: 14 });
+    expect(call(f, 0)[0]).toBe("/api/projects/p%201/share/preview");
+    expect(call(f, 0)[1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ includePrompts: true, includeHardware: false, digestDays: 14 });
+    await api.confirmShare("p 1", "pv1", "ab".repeat(32));
+    expect(call(f, 1)[0]).toBe("/api/projects/p%201/share/confirm");
+    expect(JSON.parse(call(f, 1)[1].body as string)).toEqual({ previewId: "pv1", contentHash: "ab".repeat(32) });
+  });
+
+  it("lists snapshots, addresses, links and digests", async () => {
+    const f = respond(200, []);
+    await api.listShareSnapshots("p1");
+    await api.listShareAddresses();
+    await api.listShareLinks();
+    await api.listShareLinks("p 1");
+    await api.getDigests("p1", 30);
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/projects/p1/share/snapshots",
+      "/api/share/addresses",
+      "/api/share/links",
+      "/api/share/links?projectId=p%201",
+      "/api/projects/p1/digests?days=30",
+    ]);
+  });
+
+  it("creates a link with POST and revokes it with DELETE", async () => {
+    const f = respond(201, { link: {}, url: "http://127.0.0.1:1/t" });
+    await api.createShareLink("s/1", "127.0.0.1", 1440);
+    expect(call(f, 0)[0]).toBe("/api/share/snapshots/s%2F1/links");
+    expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ address: "127.0.0.1", ttlMinutes: 1440 });
+    const g = respond(204);
+    await expect(api.revokeShareLink("l1")).resolves.toBeUndefined();
+    expect(call(g, 0)[0]).toBe("/api/share/links/l1");
+    expect(call(g, 0)[1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("names the saved page's inline and download urls", () => {
+    expect(shareSnapshotUrl("s1")).toBe("/api/share/snapshots/s1");
+    expect(shareDownloadUrl("s1")).toBe("/api/share/snapshots/s1/download");
+  });
+
+  it("words the share refusals before the generic ones", () => {
+    expect(errorMessage(new ApiError(409, "preview_stale"))).toBe("The preview has changed or expired. Preview again before confirming.");
+    expect(errorMessage(new ApiError(404, "preview_not_found"))).toBe("The preview has changed or expired. Preview again before confirming.");
+    expect(errorMessage(new ApiError(409, "share_not_clean"))).toBe("The page could not be cleaned of sensitive text and was not generated.");
+    expect(errorMessage(new ApiError(409, "share_too_large"))).toBe("The page is too large to share. Choose fewer digest days.");
+    expect(errorMessage(new ApiError(409, "share_link_active"))).toBe("A link is already live for this project. Revoke it first.");
+    expect(errorMessage(new ApiError(409, "snapshot_tampered"))).toBe("This snapshot's file no longer matches the ledger. It will not be shared.");
+    expect(errorMessage(new ApiError(404, "snapshot_missing"))).toBe("This snapshot's file is missing.");
+    expect(errorMessage(new ApiError(409, "link_not_active"))).toBe("That link is no longer live.");
   });
 });

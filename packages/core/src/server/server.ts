@@ -25,6 +25,12 @@ import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
+import { registerShareRoutes } from "./share-routes.js";
+import { registerShareLinkRoutes } from "./share-link-routes.js";
+import { shareCleaner } from "../share/clean.js";
+import { buildSnapshot } from "../share/snapshot.js";
+import { ShareService } from "../share/service.js";
+import { ShareLinkManager, shareAddresses } from "../share/link-server.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -381,6 +387,8 @@ export async function createServer(opts: {
   sts?: StsCaller;
   /** Detects this computer's hardware. Default: the real programs (see selectHardware). */
   hardware?: () => Promise<HardwareInfo>;
+  /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
+  sharePort?: number;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -480,11 +488,45 @@ export async function createServer(opts: {
 
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
+    // Share: the share page's cleaner and service.
+    // The cleaner reads every secret the server knows on each call, minted cloud values included, like every cleaner here.
+    const shareClean = shareCleaner({
+      dataDir: opts.dataDir,
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+    const share = new ShareService({
+      db,
+      ledger,
+      dataDir: opts.dataDir,
+      clean: shareClean,
+      build: (id, o) =>
+        buildSnapshot(
+          {
+            db, ledger, integrity: () => integrity, gates, connections: () => connections.list(),
+            // The client reports "unknown" when GitHub is not connected; the page says "not connected" instead.
+            ci: async () => (connections.githubSource() ? github.ciStatus() : null),
+            hardware: () => connections.hardware(),
+            clean: shareClean,
+          },
+          id,
+          o,
+        ),
+    });
+    // Each live link is its own read-only listener; the status bar counts those listeners, never the ledger's rows.
+    // The server has no logger of its own (Fastify's is off), so a background end that cannot be recorded goes to
+    // the console as a fixed sentence, like the server's other start and shutdown warnings.
+    const links = new ShareLinkManager({
+      db, ledger, service: share, addresses: () => shareAddresses(), log: (message) => console.error(message),
+      ...(opts.sharePort !== undefined && { port: opts.sharePort }),
+    });
+    const shareLinks = (): number => links.activeCount();
+
     const app = Fastify();
     let boundPort = 0;
     try {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
+      if (!ledger.readOnly) links.recoverOnStartup(); // no link's listener survives a restart
       registerAuth(app, { token, port: () => boundPort });
       registerLedgerStream(app, ledger);
       registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
@@ -506,8 +548,11 @@ export async function createServer(opts: {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
+        shareLinks,
       });
       registerGitHubRoutes(app, { github });
+      registerShareRoutes(app, { db, ledger, share });
+      registerShareLinkRoutes(app, { links, addresses: () => shareAddresses() });
       registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
       });
@@ -532,6 +577,7 @@ export async function createServer(opts: {
         throw new Error(`No free port between ${first} and ${first + PORT_ATTEMPTS - 1}; pass --port to choose another`);
       }
     } catch (err) {
+      await links.shutdown();
       await overrides.shutdown();
       await signin.shutdown();
       await app.close().catch(() => undefined);
@@ -546,6 +592,7 @@ export async function createServer(opts: {
       integrity,
       async close() {
         try {
+          await links.shutdown(); // closes every share link's listener and records it, while the db is open
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
           await signin.shutdown(); // kills every login and status check before the db closes

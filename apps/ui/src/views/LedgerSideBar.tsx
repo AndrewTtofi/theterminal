@@ -14,6 +14,7 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   decision: "Decisions",
   gate: "Gates",
   override: "Overrides",
+  share: "Share",
   intake: "Intake",
   connection: "Connections",
   settings: "Settings",

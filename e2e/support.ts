@@ -151,6 +151,14 @@ export async function allow(page: Page, summary: string) {
   await expect(card).toHaveCount(0);
 }
 
+/** Clicks Allow on the project's decision card with this summary, once it appears. */
+export async function allowIn(page: Page, summary: string, projectName: string) {
+  const card = decisionCard(page, summary, projectName);
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Allow" }).click();
+  await expect(card).toHaveCount(0);
+}
+
 /** The seq of the last ledger entry of every project, read in the page (it carries the cookie). */
 export function latestSeq(page: Page): Promise<number> {
   return page.evaluate(async () => {

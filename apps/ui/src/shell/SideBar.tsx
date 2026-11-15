@@ -8,6 +8,7 @@ import { LedgerSideBar } from "../views/LedgerSideBar";
 import { NeedsYouSideBar } from "../views/NeedsYouSideBar";
 import { LearnSideBar } from "../views/LearnSideBar";
 import { ProjectsSideBar } from "../views/ProjectsSideBar";
+import { ShareSideBar } from "../views/ShareSideBar";
 import { VIEW_LABELS } from "./views";
 import type { ViewId } from "./views";
 
@@ -25,6 +26,7 @@ const CONTENT: Record<ViewId, ComponentType> = {
   connections: ConnectionsSideBar,
   github: GitHubSideBar,
   capacity: CapacitySideBar,
+  share: ShareSideBar,
   learn: LearnSideBar,
 };
 
