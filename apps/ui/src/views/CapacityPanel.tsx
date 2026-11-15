@@ -198,7 +198,7 @@ export function CapacityPanel(_props: { id: string }) {
               <td>
                 <FigureText figure={s.month.costUsd} format={usd} />
               </td>
-              <td>{s.monthlyBudgetUsd === null ? "none" : usd(s.monthlyBudgetUsd)}</td>
+              <td>{s.monthlyBudgetUsd == null ? "none" : usd(s.monthlyBudgetUsd)}</td>
               <td>
                 <Tokens s={s} />
               </td>

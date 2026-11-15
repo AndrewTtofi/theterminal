@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { AuthMode, CapacityReport, HardwareInfo, LocalEngine, MachineCapacity, Provider } from "@theterminal/shared";
+import { OWNER_ID, type AuthMode, type CapacityReport, type CapacitySource, type HardwareInfo, type LocalEngine, type MachineCapacity, type Provider } from "@theterminal/shared";
 import { capacityReport } from "../capacity/report.js";
 import type { ConnectionService } from "../connections/service.js";
 import type { Db } from "../db.js";
@@ -21,6 +21,9 @@ export type CapacityRouteDeps = {
 };
 
 const LOCAL_ENGINES_TTL_MS = 30_000;
+
+/** The report as anyone but the Owner gets it: each source without its plan, budget and sign-in mode. */
+export type CollaboratorCapacityReport = Omit<CapacityReport, "sources"> & { sources: Omit<CapacitySource, "plan" | "monthlyBudgetUsd" | "mode">[] };
 
 /** Capacity: usage per provider, budgets, observed rate limits and this computer. Errors are mapped in routes.ts. */
 export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRouteDeps): { report: () => Promise<CapacityReport> } {
@@ -46,10 +49,13 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
     });
   };
 
-  // Usage, budgets, this computer and the linked machines; connections appear by id, kind, provider and name only.
-  app.get("/api/capacity", needs("viewer"), async (): Promise<CapacityReport> => {
+  // Usage, this computer and the linked machines; connections appear by id, kind, provider and name only. What the
+  // Owner pays for (plan, budget) and how they sign in (mode) is theirs alone: a collaborator's sources go without.
+  app.get("/api/capacity", needs("viewer"), async (req): Promise<CapacityReport | CollaboratorCapacityReport> => {
     const [machines, engines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
-    return local(machines, engines);
+    const report = await local(machines, engines);
+    if (req.principal?.personId === OWNER_ID) return report;
+    return { ...report, sources: report.sources.map(({ plan: _plan, monthlyBudgetUsd: _budget, mode: _mode, ...rest }) => rest) };
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.
