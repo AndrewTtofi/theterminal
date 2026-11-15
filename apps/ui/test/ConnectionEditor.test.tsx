@@ -233,6 +233,19 @@ describe("ConnectionEditor", () => {
     });
   });
 
+  it.each(["mcp_stdio", "mcp_http"])("the %s editor says Codex cannot use MCP servers yet", async (provider) => {
+    renderWithConnections(<ConnectionEditor id={`connection:new:${provider}`} />);
+    expect(
+      await screen.findByText("Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy."),
+    ).toBeTruthy();
+  });
+
+  it("other editors carry no Codex MCP note", async () => {
+    renderWithConnections(<ConnectionEditor id="connection:new:claude" />);
+    await screen.findByLabelText("Name");
+    expect(screen.queryByText(/Codex cannot use MCP servers/)).toBeNull();
+  });
+
   it("This computer shows its detected values read-only, with the detection note and no Save", async () => {
     const hw = connection({ id: "h1", kind: "hardware", provider: "local_hardware", name: "This computer", config: { cores: "8" }, secretFields: [] });
     m.listConnections.mockResolvedValue([hw]);

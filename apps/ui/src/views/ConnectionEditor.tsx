@@ -9,6 +9,8 @@ import { useShell } from "../shell/model";
 
 const KEYCHAIN_NOTE = "Stored in your operating system's keychain. Never written to files, the ledger or the API.";
 const DETECTED_NOTE = "Filled in by detection. Use Detect this computer in the Capacity view.";
+const CODEX_MCP_NOTE =
+  "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.";
 const ENV_VARS: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
 /** "Claude (Anthropic)" → "Claude". */
@@ -244,6 +246,7 @@ function EditorForm({ panelId, entry, conn }: { panelId: string; entry: CatalogE
         </div>
       )}
       {entry.fields.map(field)}
+      {(entry.provider === "mcp_stdio" || entry.provider === "mcp_http") && <p className="note">{CODEX_MCP_NOTE}</p>}
       {detected && <p className="field-help">{DETECTED_NOTE}</p>}
       {error && (
         <p className="error" role="alert">

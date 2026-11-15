@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ActionKind, AuthMode } from "@theterminal/shared";
 import type { AdapterStartOptions, AgentAdapter, ProposedAction, RunCredentials } from "../adapter.js";
+import { MCP_SERVER_NAME, type McpServerSpec } from "../../connections/mcp.js";
 import { buildChildEnv } from "../child-env.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { REDACTED, redact, trailingSecretContext } from "../redact.js";
@@ -31,6 +32,7 @@ const MODE_CHANGED = "agent changed its approval mode";
 const NO_ASKING_MODE = "Gemini offers no approval mode that asks for every tool";
 const NO_ALLOW_ONCE = "agent offered no allow_once option";
 const OUTSIDE = "outside worktree";
+const INVALID_MCP_NAME = "invalid MCP server name";
 
 /** ACP v1. Gemini answers with the client's version when it supports it; anything else is refused. */
 const PROTOCOL_VERSION = 1;
@@ -50,16 +52,38 @@ const CORE_TOOLS = ["read_file", "write_file", "replace", "run_shell_command"];
  * directories (priority p becomes 4 + p/1000): the ask rules land at 4.999 and outrank every settings-derived
  * allow, their `argsPattern` skips the shell heuristics, and the wildcard deny at 4.998 covers every other
  * tool the registry can expose (glob, grep_search, list_directory, read_many_files, web_fetch,
- * google_web_search, save_memory, write_todos, skills, subagents, MCP tools...). Only admin-tier policies
+ * google_web_search, save_memory, write_todos, skills, subagents, other MCP tools...). Only admin-tier policies
  * (/etc/gemini-cli, remote admin settings) rank higher.
+ *
+ * Each MCP server of the run gets an ask rule of its own. gemini-cli 0.68.0 names MCP tools `mcp_<server>_<tool>`
+ * (parsed with /^([^_]+)_(.+)$/, so a server name holds no underscore) and loads `mcpName = "<server>"` with
+ * `toolName = "*"` as `mcp_<server>_*`, matched against the call's server name: every tool of that server asks. It
+ * outranks the allow rule `--allowed-mcp-server-names` adds (4.1) and the `tools.core` wildcard deny (4.24); `tools.core`
+ * only filters built-in tools, so MCP tools are still registered.
  */
-const POLICY_TOML =
-  CORE_TOOLS.map((tool) => `[[rule]]\ntoolName = "${tool}"\ndecision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`).join("\n") +
+const askRule = (match: string) => `[[rule]]\n${match}decision = "ask_user"\npriority = 999\nargsPattern = ".*"\n`;
+const policyToml = (names: string[]): string =>
+  [...CORE_TOOLS.map((tool) => askRule(`toolName = "${tool}"\n`)), ...names.map((name) => askRule(`mcpName = "${name}"\ntoolName = "*"\n`))].join("\n") +
   `\n[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 998\n`;
-/** `--extensions none` loads no extension; the MCP allowlist names a server that does not exist, so none connects. */
-const ACP_ARGS = ["--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", "theterminal-none"];
+/**
+ * `--extensions none` loads no extension; `--allowed-mcp-server-names` allows only the run's MCP servers (checked
+ * against MCP_SERVER_NAME, so no comma can appear), or a name that does not exist when there are none.
+ */
+const acpArgs = (names: string[]): string[] => [
+  "--acp", "--approval-mode", "default", "--extensions", "none", "--allowed-mcp-server-names", names.length > 0 ? names.join(",") : "theterminal-none",
+];
 /** Per run: our policy directory replaces the user's, and `--allowed-tools` replaces `tools.allowed` with a name matching no tool. */
-const runArgs = (policies: string): string[] => [...ACP_ARGS, "--policy", policies, "--allowed-tools", "theterminal-none"];
+const runArgs = (policies: string, names: string[]): string[] => [...acpArgs(names), "--policy", policies, "--allowed-tools", "theterminal-none"];
+/**
+ * An MCP server as ACP `session/new` takes it (gemini-cli 0.68.0 maps it into its config; a stdio server runs in the
+ * session cwd). Env and header values travel over stdin, never on a command line.
+ */
+function toAcpServer(s: McpServerSpec): Rec {
+  const pairs = (r: Record<string, string>) => Object.entries(r).map(([name, value]) => ({ name, value }));
+  return s.transport === "stdio"
+    ? { name: s.serverName, command: s.command, args: s.args, env: pairs(s.env) }
+    : { type: "http", name: s.serverName, url: s.url, headers: pairs(s.headers) };
+}
 const PROJECT_ID = /^[A-Za-z0-9_-]{1,100}$/;
 /** Variables of every provider's key family: a terminal command run for the agent never sees them. */
 const PROVIDER_ENV = /^(?:ANTHROPIC_|CLAUDE_CODE_|OPENAI_|CODEX_|GEMINI_|GOOGLE_|VERTEX)/i;
@@ -215,7 +239,7 @@ function shimTarget(shim: string, readFile: (p: string) => string, exists: (p: s
  * call that reaches execution without either is reported as ungated: the run fails and Gemini is killed.
  *
  * Gemini is configured for this run through its command line (a per-run policy directory that makes every kept
- * tool ask and denies the rest, an empty tool allowlist, no extensions, no MCP servers) and, in api_key mode, an
+ * tool ask and denies the rest, an empty tool allowlist, no extensions, only the MCP servers selected for the run) and, in api_key mode, an
  * isolated per-project home with our own user-scope settings; the user's `~/.gemini` is never written, and
  * `authenticate` is never called: on this CLI it rewrites the user's settings and can clear their login.
  */
@@ -266,6 +290,9 @@ export class GeminiAdapter implements AgentAdapter {
     // Gemini runs a prompt starting with "/" or "$" as one of its own commands (some write files or download code), unrecorded.
     if (/^[/$]/.test(o.prompt.trimStart())) return { status: "failed", error: COMMAND_PROMPT };
     if (!PROJECT_ID.test(o.projectId)) return { status: "failed", error: "invalid projectId" };
+    // The service derives every name; checked again here, before anything reaches Gemini.
+    const mcpNames = o.credentials.mcpServers.map((s) => s.serverName);
+    if (!mcpNames.every((n) => MCP_SERVER_NAME.test(n))) return { status: "failed", error: INVALID_MCP_NAME };
     const env = this.env(o.authMode, o.credentials);
     if (typeof env === "string") return { status: "failed", error: env };
     let file: string;
@@ -292,7 +319,7 @@ export class GeminiAdapter implements AgentAdapter {
     try {
       const policies = join(runDir, "policies");
       mkdirSync(policies);
-      writeFileSync(join(policies, "theterminal.toml"), POLICY_TOML);
+      writeFileSync(join(policies, "theterminal.toml"), policyToml(mcpNames));
       if (o.authMode === "api_key") {
         // An isolated home of our own: our settings apply, and nothing of the user's ~/.gemini (settings,
         // policies, hooks, trusted folders, credentials) is read or copied.
@@ -313,7 +340,7 @@ export class GeminiAdapter implements AgentAdapter {
       // the agent itself does.
       env.GEMINI_CLI_NO_RELAUNCH = "1"; // the npm entry point would otherwise relaunch the CLI as a child our signals never reach
       env.NO_BROWSER = "true"; // a missing Google login fails instead of opening a browser from a background run
-      return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, [...base, ...runArgs(policies)]);
+      return await new GeminiRun(o, this.spawn, this.worktrees, env).run(file, [...base, ...runArgs(policies, mcpNames)]);
     } finally {
       rmSync(runDir, { recursive: true, force: true });
     }
@@ -415,7 +442,7 @@ class GeminiRun {
     if (!isRecord(init) || init.protocolVersion !== PROTOCOL_VERSION) {
       throw new Error(`unsupported ACP protocol version: ${isRecord(init) ? String(init.protocolVersion) : "none"}`);
     }
-    const session = await this.setup("session/new", { cwd: this.o.cwd, mcpServers: [] });
+    const session = await this.setup("session/new", { cwd: this.o.cwd, mcpServers: this.o.credentials.mcpServers.map(toAcpServer) });
     if (!isRecord(session) || typeof session.sessionId !== "string" || session.sessionId === "") throw new Error("Gemini returned no session id");
     this.sessionId = session.sessionId;
     if (isRecord(session.modes) && session.modes.currentModeId !== DEFAULT_MODE) {

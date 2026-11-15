@@ -662,6 +662,20 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
     });
 
+    it("never hands Codex the run's MCP servers, even if some reached it: only the ones Codex knows of, all disabled", async () => {
+      script({ mcpServers: ["docs"], steps: [] });
+      const spec = {
+        serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "http" as const,
+        url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer TESTKEY-mcp-header-0000000000" },
+      };
+      const { result } = run(make(), undefined, { credentials: { env: {}, mcpServers: [spec] } });
+      expect(await result).toEqual({ status: "completed" });
+      const config = received("thread/start")[0].params.config as Record<string, unknown>;
+      expect(Object.keys(config).filter((k) => k.startsWith("mcp_servers."))).toEqual(["mcp_servers.docs.enabled"]);
+      expect(config["mcp_servers.docs.enabled"]).toBe(false);
+      expect(JSON.stringify(fakeLog())).not.toMatch(/tt-abc12345|TESTKEY-mcp/);
+    });
+
     it("re-lists MCP servers after the thread starts, and refuses one only the thread sees", async () => {
       script({ mcpAddedByThread: ["project-server"], steps: [] });
       const { result } = run(make());

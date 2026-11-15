@@ -21,9 +21,18 @@ export type ChildEnvOptions = {
    * is built. A variable this function already set (the Gemini connection's GOOGLE_CLOUD_PROJECT) is never replaced.
    */
   extraEnv?: Record<string, string>;
+  /**
+   * Claude only: the values of the run's MCP env variables and headers, which its MCP config names as `${TT_MCP_<n>_<m>}`
+   * so they never appear on Claude Code's command line. Every name must match MCP_ENV_NAME, else a TypeError is thrown
+   * before anything is built.
+   */
+  mcpEnv?: Record<string, string>;
   /** Test-only: the platform whose variables are allowlisted. Default process.platform. */
   platform?: NodeJS.Platform;
 };
+
+/** The variables that carry MCP secrets to Claude Code: server index, then value index. */
+export const MCP_ENV_NAME = /^TT_MCP_\d+_\d+$/;
 
 /** Exact names copied from the base environment when present. Everything else is dropped. */
 export const CHILD_ENV_ALLOWLIST: readonly string[] = [
@@ -68,6 +77,10 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
   for (const [k] of extra) {
     if (!CLOUD_ENV_ALLOWLIST.includes(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
   }
+  const mcp = Object.entries(opts.mcpEnv ?? {});
+  for (const [k] of mcp) {
+    if (!MCP_ENV_NAME.test(k)) throw new TypeError(`variable not allowed for a child: ${k}`);
+  }
   const win = (opts.platform ?? process.platform) === "win32";
   // Windows environment names are case-insensitive (`Path`, MSYS's `SYSTEMROOT`): compare upper-cased, keep the
   // original spelling, and keep only the first spelling of a name.
@@ -102,6 +115,8 @@ export function buildChildEnv(provider: Provider, mode: AuthMode, opts: ChildEnv
   if (provider === "gemini" && opts.googleCloudProject) env.GOOGLE_CLOUD_PROJECT = opts.googleCloudProject;
   // Cloud variables never come from `base`, only from a grant; what the CLI itself needs is never moved.
   for (const [k, v] of extra) if (env[k] === undefined) env[k] = v;
+  // MCP secret variables never come from `base` either (TT_MCP_* is not allowlisted), only from the run's MCP servers.
+  for (const [k, v] of mcp) env[k] = v;
   assertEmptyGitconfig(opts.dataDir); // a modified shared config fails the run before the CLI starts
   return env;
 }

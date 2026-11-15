@@ -2,13 +2,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HookCallbackMatcher, HookInput, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import { query as realSdkQuery, type HookCallbackMatcher, type HookInput, type Options, type SpawnOptions, type query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
+import { classify } from "../../src/agents/policy.js";
 import { AgentRunner, DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
+import type { McpServerSpec } from "../../src/connections/mcp.js";
 import { EMPTY_GITCONFIG, WorktreeManager } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
@@ -20,6 +22,18 @@ import { ClaudeAdapter as IndexClaudeAdapter, ProviderSettings as IndexProviderS
 const FAKE_KEY = "sk-ant-TESTKEY0123456789abcdef";
 const CONNECTION_KEY = "sk-ant-TESTKEY-0000000000";
 const CWD = join("tmp", "worktree");
+const MCP_ENV_SECRET = "TESTKEY-mcp-env-0000000000";
+const MCP_HEADER_SECRET = "Bearer TESTKEY-mcp-header-0000000000";
+const MCP_SPECS: McpServerSpec[] = [
+  {
+    serverName: "tt-abc12345", connectionId: "abc12345-0000-4000-8000-000000000000", name: "Docs", transport: "stdio",
+    command: "npx", args: ["-y", "example-server"], env: { API_TOKEN: MCP_ENV_SECRET, MODE: "read" },
+  },
+  {
+    serverName: "tt-9f8e7d6c", connectionId: "9f8e7d6c-0000-4000-8000-000000000000", name: "Tracker", transport: "http",
+    url: "https://mcp.example.com/mcp", headers: { Authorization: MCP_HEADER_SECRET },
+  },
+];
 
 describe("toolToAction", () => {
   const cases: [string, Record<string, unknown>, Partial<ProposedAction>][] = [
@@ -115,6 +129,19 @@ describe("toolToAction", () => {
     expect(toolToAction("Read", { file_path: 42 }, CWD).paths).toEqual([]);
     expect(toolToAction("Grep", { pattern: "x", path: ["a"] }, CWD).paths).toEqual([]);
     expect(toolToAction("Read", { file_path: "" }, CWD).paths).toEqual([]);
+  });
+
+  it("names the server of one of our MCP tools, and the gate asks for it", () => {
+    const a = toolToAction("mcp__tt-abc12345__list", {}, CWD);
+    expect(a).toEqual({ tool: "mcp__tt-abc12345__list", kind: "mcp", summary: "MCP tool list on tt-abc12345", input: {}, paths: [] });
+    expect(toolToAction("mcp__my_server__get_item", {}, CWD).summary).toBe("MCP tool get_item on my_server");
+    expect(toolToAction("mcp__odd", {}, CWD)).toMatchObject({ kind: "mcp", summary: "MCP tool mcp__odd" });
+    const wtRoot = mkdtempSync(join(tmpdir(), "claude-mcp-"));
+    try {
+      expect(classify(a, join(wtRoot, "wt"), new WorktreeManager(wtRoot)).verdict).toBe("ask");
+    } finally {
+      rmSync(wtRoot, { recursive: true, force: true });
+    }
   });
 
   it("is exported from the core index", () => {
@@ -496,6 +523,64 @@ describe("ClaudeAdapter", () => {
     expect(await done).toEqual({ status: "failed", error: "run stopped" });
     expect(q.calls[0]!.options.abortController!.signal.aborted).toBe(true);
     expect(q.closed).toBe(true);
+  });
+
+  it("hands the selected MCP servers to Claude Code with their secrets as variables of its env, keeping strictMcpConfig", async () => {
+    const q = fakeQuery([success(0)]);
+    const h = harness();
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...h.opts, credentials: { env: {}, mcpServers: MCP_SPECS } });
+    const { options } = q.calls[0]!;
+    expect(options.strictMcpConfig).toBe(true);
+    expect(options.mcpServers).toEqual({
+      "tt-abc12345": { type: "stdio", command: "npx", args: ["-y", "example-server"], env: { API_TOKEN: "${TT_MCP_0_0}", MODE: "${TT_MCP_0_1}" } },
+      "tt-9f8e7d6c": { type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "${TT_MCP_1_0}" } },
+    });
+    expect(options.env).toMatchObject({ TT_MCP_0_0: MCP_ENV_SECRET, TT_MCP_0_1: "read", TT_MCP_1_0: MCP_HEADER_SECRET });
+    expect(JSON.stringify(options.mcpServers)).not.toContain("TESTKEY");
+  });
+
+  it("passes no mcpServers option and no MCP variables without MCP servers", async () => {
+    const q = fakeQuery([success(0)]);
+    await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start(harness().opts);
+    expect(q.calls[0]!.options).not.toHaveProperty("mcpServers");
+    expect(Object.keys(q.calls[0]!.options.env!).filter((k) => k.startsWith("TT_MCP_"))).toEqual([]);
+  });
+
+  it("fails without starting Claude when an MCP server name is not one of ours", async () => {
+    const q = fakeQuery([success(0)]);
+    const bad = { ...MCP_SPECS[0]!, serverName: "tt_bad" } as McpServerSpec;
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: q.fn, apiKey: () => FAKE_KEY }).start({ ...harness().opts, credentials: { env: {}, mcpServers: [bad] } });
+    expect(r).toEqual({ status: "failed", error: "invalid MCP server name" });
+    expect(q.calls).toHaveLength(0);
+  });
+
+  it("the command line the Agent SDK builds for Claude Code holds no MCP secret; its env does", async () => {
+    // The real SDK, stopped at the point where it would spawn Claude Code: it puts mcpServers on the command line.
+    let spawned: SpawnOptions | undefined;
+    const capture = ((p: Parameters<typeof sdkQuery>[0]) => {
+      try {
+        return realSdkQuery({
+          ...p,
+          options: {
+            ...p.options,
+            spawnClaudeCodeProcess: (so) => {
+              spawned = so;
+              throw new Error("not spawning in tests");
+            },
+          },
+        });
+      } catch {
+        return Object.assign((async function* () {})(), { close: () => undefined });
+      }
+    }) as unknown as typeof sdkQuery;
+    const r = await new ClaudeAdapter({ dataDir: DATA_DIR, query: capture, apiKey: () => FAKE_KEY }).start({ ...harness().opts, credentials: { env: {}, mcpServers: MCP_SPECS } });
+    expect(r.status).toBe("failed");
+    expect(spawned).toBeDefined();
+    const argv = [spawned!.command, ...spawned!.args].join(" ");
+    expect(argv).toContain("--mcp-config");
+    expect(argv).toContain("${TT_MCP_0_0}");
+    for (const secret of [MCP_ENV_SECRET, MCP_HEADER_SECRET, "TESTKEY"]) expect(argv).not.toContain(secret);
+    expect(spawned!.env).toMatchObject({ TT_MCP_0_0: MCP_ENV_SECRET, TT_MCP_1_0: MCP_HEADER_SECRET });
   });
 
   it("does not start Claude when the signal is already aborted", async () => {
