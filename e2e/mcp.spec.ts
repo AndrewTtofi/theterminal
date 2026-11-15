@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
-  allow, connectionId, ledgerItems, line, lineMatching, openEditor, openProject, prepareRun, removeConnection, runStatuses,
+  allow, connectionId, ledgerItems, line, lineMatching, RUN_FINISHED, openEditor, openProject, prepareRun, removeConnection, runStatuses,
   saveWithSecret, showAllProjects, startRun, watchForLeaks,
 } from "./support.js";
 
@@ -66,7 +66,7 @@ test("Codex and Gemini refuse an MCP server; an agent that takes one is given it
   await startRun(page);
   await allow(page, "Run: nvidia-smi");
   const ledger = ledgerItems(page);
-  await expect(line(ledger, "Agent run completed")).toHaveCount(1);
+  await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(1);
   await showAllProjects(page);
   await expect(lineMatching(ledger, 'Agent [0-9a-f]{8} was given the MCP server "MCP server"')).toHaveCount(1);
 

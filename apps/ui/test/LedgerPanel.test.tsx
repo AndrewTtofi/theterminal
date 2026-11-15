@@ -193,7 +193,8 @@ describe("LedgerPanel narration and raw record", () => {
   it("shows the headline with the context, and the raw payload underneath as text", () => {
     render(<LedgerPanel entries={[entry(1, "card.moved", { cardId: "c9", from: "build", to: "ship" })]} ctx={ctx} />);
     const li = screen.getByRole("listitem");
-    expect(li.textContent).toContain('Owner moved "Login" from Build to Ship');
+    expect(li.querySelector(".headline")?.textContent).toBe('Owner moved "Login" from Build to Ship');
+    expect(li.querySelector(".headline details")).toBeNull();
     const raw = li.querySelector("details");
     expect(raw?.querySelector("summary")?.textContent).toBe("Raw");
     const pre = raw?.querySelector("pre")?.textContent ?? "";

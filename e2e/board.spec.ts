@@ -24,12 +24,12 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   // 4. the ledger, newest first
   const items = page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
   const expected = [
-    "Owner moved a card from Design to Build",
+    'Owner moved "Detect GPU" from Design to Build',
     'Owner added "Detect GPU" to Design',
-    'Owner created project "Local Model Hub"',
+    'Owner created the project "Local Model Hub"',
   ];
   await expect(items).toHaveCount(3);
-  for (const [i, text] of expected.entries()) await expect(items.nth(i)).toContainText(text);
+  for (const [i, text] of expected.entries()) await expect(items.nth(i).locator(".headline")).toHaveText(text);
 
   // 5. a context without the cookie is rejected. Node-side requests use the loopback address:
   // Node on Windows does not resolve *.localhost (browser navigation still uses the app host).
@@ -44,5 +44,5 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "Local Model Hub" }).click();
   await expect(page.getByRole("region", { name: "Build" }).getByText("Detect GPU")).toBeVisible();
   await expect(items).toHaveCount(3);
-  await expect(items.first()).toContainText(expected[0]);
+  await expect(items.first().locator(".headline")).toHaveText(expected[0]!);
 });

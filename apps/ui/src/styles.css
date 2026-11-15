@@ -100,6 +100,7 @@ legend { color: var(--muted); padding: 0 4px; }
 .ledger-side label { display: block; padding: 2px 0; }
 .ledger-side fieldset + fieldset { margin-top: 8px; }
 .ledger-export { margin: 12px 0 0; }
+.ledger-export .hint { margin-left: 6px; font-size: 12px; color: var(--muted); }
 .ledger-export .note { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
 .side-group { margin-bottom: 12px; }
 .side-group h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 8px 0 4px; }

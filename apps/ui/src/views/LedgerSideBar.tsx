@@ -23,6 +23,8 @@ export function LedgerSideBar() {
   const { model, dock } = useShell();
   const toggle = (topic: NarrationTopic, on: boolean) =>
     model.onLedgerTopicsChange(LEDGER_TOPICS.filter((t) => (t === topic ? on : model.ledgerTopics.includes(t))));
+  // Every project's entries, one project's, or nothing to export yet (this project chosen, none selected).
+  const exportFrom = model.ledgerScope === "all" ? null : (model.selectedId ?? undefined);
   return (
     <div className="ledger-side">
       <fieldset>
@@ -53,9 +55,20 @@ export function LedgerSideBar() {
         Open ledger panel
       </button>
       <p className="ledger-export">
-        <a download href={exportLedgerUrl(model.ledgerScope === "all" ? null : model.selectedId)}>
-          Export for audit
-        </a>
+        {exportFrom === undefined ? (
+          <>
+            <button type="button" disabled aria-describedby="ledger-export-hint">
+              Export for audit
+            </button>
+            <span id="ledger-export-hint" className="hint">
+              Select a project
+            </span>
+          </>
+        ) : (
+          <a download href={exportLedgerUrl(exportFrom)}>
+            Export for audit
+          </a>
+        )}
         <span className="note">Downloads every entry as one line of JSON with its hash chain and a plain-language headline.</span>
       </p>
     </div>

@@ -58,6 +58,14 @@ describe("LedgerSideBar", () => {
     ).toBeTruthy();
   });
 
+  it("does not export when this project is chosen but none is selected", () => {
+    renderSideBar({ selectedId: null });
+    expect(screen.queryByRole("link", { name: "Export for audit" })).toBeNull();
+    const button = screen.getByRole("button", { name: "Export for audit" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText("Select a project")).toBeTruthy();
+  });
+
   it("links the export of every project when all projects are shown", () => {
     renderSideBar({ ledgerScope: "all" });
     expect(screen.getByRole("link", { name: "Export for audit" }).getAttribute("href")).toBe("/api/ledger/export");

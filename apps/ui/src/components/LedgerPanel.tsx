@@ -42,7 +42,7 @@ export function LedgerPanel({ entries, topics, ctx }: { entries: LedgerEntry[]; 
       <ul>
         {shown.map(({ e, n }) => (
           <li key={e.seq} className={n.attention ? "attention" : undefined}>
-            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · {n.headline}
+            <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString()}</time> · <span className="headline">{n.headline}</span>
             <details className="raw">
               <summary>Raw</summary>
               <pre>{rawRecord(n.detail, e.payload)}</pre>

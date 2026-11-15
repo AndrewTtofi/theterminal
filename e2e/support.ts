@@ -5,10 +5,15 @@ import { expect, type Locator, type Page } from "@playwright/test";
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Ledger lines whose description is exactly `text` (each line is "<time> · <description>"). */
-export const line = (ledger: Locator, text: string) => ledger.filter({ hasText: new RegExp(` · ${escape(text)}$`) });
-/** Ledger lines whose description matches `pattern` (anchored at both ends). */
-export const lineMatching = (ledger: Locator, pattern: string) => ledger.filter({ hasText: new RegExp(` · ${pattern}$`) });
+/** Ledger lines whose headline matches `pattern` (anchored at both ends); the raw record under it is ignored. */
+export const lineMatching = (ledger: Locator, pattern: string) =>
+  ledger.filter({ has: ledger.page().locator(".headline", { hasText: new RegExp(`^${pattern}$`) }) });
+/** Ledger lines whose headline is exactly `text`. */
+export const line = (ledger: Locator, text: string) => lineMatching(ledger, escape(text));
+/** The ledger's headlines, in the order shown (newest first). */
+export const headlines = async (ledger: Locator) => (await ledger.locator(".headline").allInnerTexts()).map((t) => t.trim());
+/** How a completed run of the given adapter reads in the ledger (a reported cost follows the headline). */
+export const RUN_FINISHED = (adapter: string) => `The ${adapter} agent finished( · .*)?`;
 
 export const ledgerItems = (page: Page) => page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
 export const statusBar = (page: Page) => page.getByRole("contentinfo", { name: "Status bar" });
