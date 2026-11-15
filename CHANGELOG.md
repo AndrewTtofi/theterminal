@@ -11,6 +11,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Sign in to your own Claude, ChatGPT or Google subscription from the Connections view, using the provider's own login. The Terminal never sees the credentials.
 - Codex and Gemini CLI are bundled, so nothing has to be installed separately.
 - Token counts on finished runs.
+- Desktop app (unsigned test builds): a macOS dmg (Apple Silicon and Intel) and a Windows installer, built by the "Release builds" workflow. Opening the app starts the local server and shows the workspace in its own window.
 - Documentation: `docs/connections-and-credentials.md`.
 
 ### Changed
