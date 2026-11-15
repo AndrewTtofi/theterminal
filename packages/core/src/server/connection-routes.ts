@@ -16,6 +16,8 @@ export type ConnectionRouteDeps = {
   /** The CI status for the status bar without waiting on the network; null when GitHub is not connected. */
   ci: () => CiStatus | null;
   intake: IntakeService;
+  /** Share links being served right now: the live listeners, never the projection's rows. */
+  shareLinks: () => number;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -44,7 +46,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci, intake } = deps;
+  const { db, connections, signin, ledger, ci, intake, shareLinks } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -127,6 +129,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       // Undecided plan decisions over every open intake, and the projects they belong to.
       intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0),
       intakeProjects,
+      shareLinks: shareLinks(),
     };
   });
 }

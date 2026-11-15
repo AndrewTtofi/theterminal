@@ -25,6 +25,10 @@ import { IntakeService } from "../intake/service.js";
 import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
+import { registerShareRoutes } from "./share-routes.js";
+import { shareCleaner } from "../share/clean.js";
+import { buildSnapshot } from "../share/snapshot.js";
+import { ShareService } from "../share/service.js";
 import { GitHubClient } from "../github/client.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -480,6 +484,33 @@ export async function createServer(opts: {
 
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
+    // Share: the share page's cleaner and service.
+    // The cleaner reads every secret the server knows on each call, minted cloud values included, like every cleaner here.
+    const shareClean = shareCleaner({
+      dataDir: opts.dataDir,
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+    const share = new ShareService({
+      db,
+      ledger,
+      dataDir: opts.dataDir,
+      clean: shareClean,
+      build: (id, o) =>
+        buildSnapshot(
+          {
+            db, ledger, integrity: () => integrity, gates, connections: () => connections.list(),
+            // The client reports "unknown" when GitHub is not connected; the page says "not connected" instead.
+            ci: async () => (connections.githubSource() ? github.ciStatus() : null),
+            hardware: () => connections.hardware(),
+            clean: shareClean,
+          },
+          id,
+          o,
+        ),
+    });
+    // Live share links: Task 5b replaces this with the link manager's count of listeners.
+    const shareLinks = (): number => 0;
+
     const app = Fastify();
     let boundPort = 0;
     try {
@@ -506,8 +537,10 @@ export async function createServer(opts: {
         db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
+        shareLinks,
       });
       registerGitHubRoutes(app, { github });
+      registerShareRoutes(app, { db, ledger, share });
       registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
       });
