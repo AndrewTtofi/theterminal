@@ -42,8 +42,18 @@ export function serverLogFile(dataDir: string): string {
 }
 
 /** The core CLI arguments for the server child. Without a port, core picks its default. */
-export function serverArgs(layout: Layout, dataDir: string, port?: number): string[] {
+export function serverArgs(layout: Layout, dataDir: string, port?: number, opts: { restrictedSignIn?: boolean } = {}): string[] {
   const args = ["start", "--data-dir", dataDir, "--ui-dir", layout.uiDir, "--core-dir", layout.coreDir];
   if (port !== undefined) args.push("--port", String(port));
+  // The server child's environment is allowlisted, so the switch goes to it as a flag.
+  if (opts.restrictedSignIn === true) args.push("--allow-restricted-signin");
   return args;
+}
+
+/**
+ * The restricted sign-in switch, as the app was started: THETERMINAL_RESTRICTED_SIGNIN=1 exactly (the same variable
+ * the headless server reads). Read once, at start.
+ */
+export function restrictedSignInRequested(env: NodeJS.ProcessEnv): boolean {
+  return env.THETERMINAL_RESTRICTED_SIGNIN === "1";
 }

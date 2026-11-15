@@ -11,6 +11,17 @@ export const PROVIDER_MODES = {
   gemini: ["api_key", "google"],
 } as const;
 export type AuthMode = "api_key" | "subscription" | "chatgpt" | "google" | "none";
+/**
+ * Own-plan modes whose providers do not allow other apps to use them: Anthropic has not approved third-party use of a
+ * Claude plan login, and Google does not allow other apps to use the Gemini CLI's Google sign-in. They are off unless
+ * the server starts with the restricted sign-in switch (RESTRICTED_SIGNIN_ENV=1, or `--allow-restricted-signin`).
+ * Codex's ChatGPT sign-in is not on this list.
+ */
+export const RESTRICTED_MODES: Partial<Record<Provider, AuthMode>> = { claude: "subscription", gemini: "google" };
+/** The environment variable that turns the restricted own-plan modes on (exactly "1"); read once, at start. */
+export const RESTRICTED_SIGNIN_ENV = "THETERMINAL_RESTRICTED_SIGNIN";
+/** Whether `mode` is `p`'s restricted own-plan mode. */
+export const isRestrictedMode = (p: Provider, mode: string): boolean => RESTRICTED_MODES[p] === mode;
 export const ACTION_KINDS = ["file_read", "file_write", "file_edit", "shell", "web", "mcp", "other"] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 export type ActionStatus = "pending" | "allowed" | "denied" | "completed" | "failed";

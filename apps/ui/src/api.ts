@@ -110,10 +110,14 @@ export type AgentsInfo = {
   adapters: AdapterId[];
   /**
    * mode: how the Owner signs in to the provider; apiKey: where a run's API key comes from ("environment" is the
-   * server's own variable, a development fallback). The Owner alone is told; a collaborator's copy has `available`
-   * only, and no `acks`.
+   * server's own variable, a development fallback); ownModeAvailable: whether the provider's own-plan mode can be chosen
+   * on this server (false while its restricted sign-in switch is off). The Owner alone is told; a collaborator's copy
+   * has `available` only, and no `acks`.
    */
-  providers: Record<Provider, { available: boolean; mode?: AuthMode; apiKey?: "connection" | "environment" | "none" }>;
+  providers: Record<
+    Provider,
+    { available: boolean; mode?: AuthMode; apiKey?: "connection" | "environment" | "none"; ownModeAvailable?: boolean }
+  >;
   acks?: Record<Provider, string>;
 };
 
@@ -575,6 +579,12 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     }
     if (e.status === 400 && e.code === "duplicate_cloud_provider") {
       return "A run can be given only one connection per cloud provider. Untick the extra one.";
+    }
+    // The server has this provider's own-plan sign-in turned off (its restricted sign-in switch).
+    if (e.code === "restricted_signin_off") {
+      const provider = detailString(e, "provider");
+      const who = provider !== undefined && provider in PROVIDER_WORDS ? `${PROVIDER_WORDS[provider as Provider]} ` : "";
+      return `Signing in with your own ${who}plan is turned off on this server. Use an API key.`;
     }
     // A collaborator's run: the Owner has no API key for that provider, and only the Owner can add one.
     if (e.code === "api_key_required") {

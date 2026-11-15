@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import manifest from "../node-runtime.json" with { type: "json" };
-import { PRUNE, WORKSPACE_PRUNE, assertLayout, isExcludedPackage, nodeArchive, sanitizeManifest, verifySha256 } from "../scripts/stage-lib.mjs";
+import {
+  PRUNE, WORKSPACE_PRUNE, assertLayout, collectNotices, isExcludedPackage, nodeArchive, noticesText, sanitizeManifest, thirdPartyPrograms,
+  verifySha256, writeNotices,
+} from "../scripts/stage-lib.mjs";
 
 let tmp: string;
 beforeEach(() => {
@@ -126,6 +130,11 @@ describe("assertLayout", () => {
     [`${NM}/@theterminal/shared/dist/index.js`]: "",
     [`node/${exe}`]: "",
     "ui/index.html": "",
+    "THIRD_PARTY_NOTICES.txt": "",
+    "licenses/nodejs/LICENSE": "",
+    "licenses/openai-codex/LICENSE": "",
+    "licenses/google-gemini-cli/LICENSE": "",
+    "licenses/anthropic-claude-agent-sdk/LICENSE.md": "",
   });
 
   it("is empty for a complete tree", () => {
@@ -169,8 +178,10 @@ describe("assertLayout", () => {
 
   it("requires the native Claude Code package when Claude is bundled", () => {
     write(tree("darwin", "arm64", "node"));
-    expect(assertLayout(tmp, "darwin", "arm64", { bundleClaude: true })).toEqual(["core/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64"]);
-    write({ [`${NM}/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`]: "" });
+    expect(assertLayout(tmp, "darwin", "arm64", { bundleClaude: true })).toEqual([
+      "core/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64", "licenses/anthropic-claude-code/LICENSE",
+    ]);
+    write({ [`${NM}/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`]: "", "licenses/anthropic-claude-code/LICENSE.md": "" });
     expect(assertLayout(tmp, "darwin", "arm64", { bundleClaude: true })).toEqual([]);
   });
 
@@ -249,6 +260,106 @@ describe("assertLayout", () => {
       "core/node_modules/@google/gemini-cli/package.json",
       "node/node",
       "ui/index.html",
+      "THIRD_PARTY_NOTICES.txt",
+      "licenses/nodejs/LICENSE",
+      "licenses/openai-codex/LICENSE",
+      "licenses/google-gemini-cli/LICENSE",
+      "licenses/anthropic-claude-agent-sdk/LICENSE",
     ]);
+  });
+
+  it("requires Claude Code's licence when Claude is bundled", () => {
+    write({ ...tree("darwin", "arm64", "node"), [`${NM}/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`]: "" });
+    expect(assertLayout(tmp, "darwin", "arm64", { bundleClaude: true })).toEqual(["licenses/anthropic-claude-code/LICENSE"]);
+  });
+});
+
+describe("third-party notices", () => {
+  const APP = fileURLToPath(new URL("..", import.meta.url));
+  const NM = "core/node_modules";
+  const pkg = (name: string, version: string, license: string) => JSON.stringify({ name, version, license });
+  /** A staged tree whose programs ship their files as the published packages do (Codex ships none). */
+  const staged = (): Record<string, string> => ({
+    "node/LICENSE": "Node licence",
+    [`${NM}/@openai/codex/package.json`]: pkg("@openai/codex", "0.169.0", "Apache-2.0"),
+    [`${NM}/@google/gemini-cli/package.json`]: pkg("@google/gemini-cli", "0.68.0", "Apache-2.0"),
+    [`${NM}/@google/gemini-cli/LICENSE`]: "Gemini licence",
+    [`${NM}/@anthropic-ai/claude-agent-sdk/package.json`]: pkg("@anthropic-ai/claude-agent-sdk", "0.3.323", "SEE LICENSE IN README.md"),
+    [`${NM}/@anthropic-ai/claude-agent-sdk/LICENSE.md`]: "Agent SDK terms",
+  });
+
+  it("names Node, Codex, Gemini CLI and the Agent SDK, and Claude Code only when it is bundled", () => {
+    expect(thirdPartyPrograms("darwin", "arm64", false).map((p) => p.id)).toEqual([
+      "nodejs", "openai-codex", "google-gemini-cli", "anthropic-claude-agent-sdk",
+    ]);
+    const bundled = thirdPartyPrograms("darwin", "arm64", true);
+    expect(bundled.at(-1)).toMatchObject({ id: "anthropic-claude-code", dir: `${NM}/@anthropic-ai/claude-agent-sdk-darwin-arm64` });
+  });
+
+  it("keeps a copy of Codex's upstream LICENSE and NOTICE, which its npm package does not ship", () => {
+    for (const f of ["LICENSE", "NOTICE"]) expect(existsSync(join(APP, "third-party", "openai-codex", f))).toBe(true);
+    expect(readFileSync(join(APP, "third-party", "openai-codex", "LICENSE"), "utf8")).toContain("Apache License");
+  });
+
+  it("collects each program's licence and notice files, with Codex's from the kept copy", () => {
+    write(staged());
+    const { entries, problems } = collectNotices(tmp, APP, thirdPartyPrograms("darwin", "arm64", false, "24.22.2"));
+    expect(problems).toEqual([]);
+    expect(entries.map((e) => [e.id, e.version, e.license, e.files.map((f) => f.name)])).toEqual([
+      ["nodejs", "24.22.2", "MIT", ["LICENSE"]],
+      ["openai-codex", "0.169.0", "Apache-2.0", ["LICENSE", "NOTICE"]],
+      ["google-gemini-cli", "0.68.0", "Apache-2.0", ["LICENSE"]],
+      ["anthropic-claude-agent-sdk", "0.3.323", "SEE LICENSE IN README.md", ["LICENSE.md"]],
+    ]);
+    expect(entries[1]!.files[0]!.from).toBe(join(APP, "third-party", "openai-codex", "LICENSE"));
+    expect(entries[2]!.files[0]!.from).toBe(join(tmp, "core", "node_modules", "@google", "gemini-cli", "LICENSE"));
+  });
+
+  it("prefers the package's own files over the kept copy, and takes a NOTICE the package ships", () => {
+    write({ ...staged(), [`${NM}/@openai/codex/LICENSE.txt`]: "shipped", [`${NM}/@google/gemini-cli/NOTICE`]: "Gemini notice" });
+    const { entries } = collectNotices(tmp, APP, thirdPartyPrograms("darwin", "arm64", false, "24.22.2"));
+    const codex = entries.find((e) => e.id === "openai-codex")!;
+    expect(codex.files.map((f) => f.from)).toEqual([
+      join(tmp, "core", "node_modules", "@openai", "codex", "LICENSE.txt"), join(APP, "third-party", "openai-codex", "NOTICE"),
+    ]);
+    expect(entries.find((e) => e.id === "google-gemini-cli")!.files.map((f) => f.name)).toEqual(["LICENSE", "NOTICE"]);
+  });
+
+  it("names every program whose licence file is missing", () => {
+    const files = staged();
+    delete files[`${NM}/@google/gemini-cli/LICENSE`];
+    delete files["node/LICENSE"];
+    write(files);
+    const { problems } = collectNotices(tmp, APP, thirdPartyPrograms("darwin", "arm64", true, "24.22.2"));
+    expect(problems).toEqual([
+      "no licence file for Node.js (node)",
+      "no licence file for Gemini CLI (core/node_modules/@google/gemini-cli)",
+      "no licence file for Claude Code (core/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64)",
+    ]);
+  });
+
+  it("writes the files under licenses/<id>/ and a THIRD_PARTY_NOTICES.txt listing every program", () => {
+    write(staged());
+    const { entries } = collectNotices(tmp, APP, thirdPartyPrograms("darwin", "arm64", false, "24.22.2"));
+    writeNotices(tmp, entries);
+    expect(readFileSync(join(tmp, "licenses", "google-gemini-cli", "LICENSE"), "utf8")).toBe("Gemini licence");
+    expect(readFileSync(join(tmp, "licenses", "openai-codex", "NOTICE"), "utf8")).toContain("OpenAI");
+    const text = readFileSync(join(tmp, "THIRD_PARTY_NOTICES.txt"), "utf8");
+    expect(text).toBe(noticesText(entries));
+    for (const line of [
+      "Codex CLI 0.169.0 (@openai/codex)",
+      "  Licence: Apache-2.0",
+      "  Files: licenses/openai-codex/LICENSE, licenses/openai-codex/NOTICE",
+      "Node.js 24.22.2",
+    ]) {
+      expect(text.split("\n")).toContain(line);
+    }
+    expect(assertLayout(tmp, "darwin", "arm64").filter((p) => p.startsWith("licenses/") || p === "THIRD_PARTY_NOTICES.txt")).toEqual([]);
+  });
+
+  it("replaces licenses/ from an earlier stage", () => {
+    write({ ...staged(), "licenses/old/LICENSE": "stale" });
+    writeNotices(tmp, collectNotices(tmp, APP, thirdPartyPrograms("darwin", "arm64", false, "24.22.2")).entries);
+    expect(existsSync(join(tmp, "licenses", "old"))).toBe(false);
   });
 });

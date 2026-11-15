@@ -51,4 +51,28 @@ describe("ProviderAuthSettings", () => {
     );
     expect((s.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(false);
   });
+
+  it("hides the own-plan choice of a provider whose own-plan mode is turned off, with one plain line instead", () => {
+    render(<ProviderAuthSettings modes={API} acks={ACKS} ownModeAvailable={{ claude: false, codex: true, gemini: false }} onChange={vi.fn()} />);
+    const claude = section("Claude sign-in");
+    expect(claude.queryByLabelText("My own Claude subscription")).toBeNull();
+    expect(claude.getByText("Signing in with your own Claude plan is turned off until Anthropic allows it. Use an API key.")).toBeTruthy();
+    expect((claude.getByLabelText("API key (recommended)") as HTMLInputElement).checked).toBe(true);
+    const gemini = section("Gemini sign-in");
+    expect(gemini.queryByLabelText("My own Google account")).toBeNull();
+    expect(
+      gemini.getByText("Signing in with your own Google account is turned off: Google doesn't allow other apps to use Gemini CLI's Google sign-in. Use an API key."),
+    ).toBeTruthy();
+    // Codex's ChatGPT sign-in is unchanged.
+    const codex = section("Codex sign-in");
+    expect(codex.getByLabelText("My own ChatGPT plan")).toBeTruthy();
+    expect(codex.queryByText(/turned off/)).toBeNull();
+  });
+
+  it("shows every own-plan choice when the server allows them", () => {
+    render(<ProviderAuthSettings modes={API} acks={ACKS} ownModeAvailable={{ claude: true, codex: true, gemini: true }} onChange={vi.fn()} />);
+    expect(section("Claude sign-in").getByLabelText("My own Claude subscription")).toBeTruthy();
+    expect(section("Gemini sign-in").getByLabelText("My own Google account")).toBeTruthy();
+    expect(screen.queryByText(/turned off/)).toBeNull();
+  });
 });

@@ -4,6 +4,7 @@ import { cardInputSchema, cardStatusSchema, gateDecisionInputSchema, stageSchema
 import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
+import { RestrictedSignInError } from "../agents/settings.js";
 import {
   AdapterUnavailableError, ApiKeyRequiredError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError,
   RemoteRunError, ShuttingDownError,
@@ -122,6 +123,8 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof AdapterUnavailableError) return reply.code(400).send({ error: "invalid_input" });
   // A collaborator's run with no API key for the provider: the provider's fixed name, nothing else.
   if (err instanceof ApiKeyRequiredError) return reply.code(409).send({ error: "api_key_required", provider: err.provider });
+  // A restricted own-plan mode or sign-in while the restricted sign-in switch is off: the provider's fixed name only.
+  if (err instanceof RestrictedSignInError) return reply.code(409).send({ error: "restricted_signin_off", provider: err.provider });
   if (err instanceof ConflictError) return reply.code(409).send({ error: "conflict" });
   if (err instanceof SecretInConfigError) return reply.code(400).send({ error: "secret_in_config" });
   if (err instanceof UnknownFieldError) return reply.code(400).send({ error: "invalid_input" });

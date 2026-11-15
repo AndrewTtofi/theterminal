@@ -67,16 +67,20 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
     if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(id)) throw new NotFoundError("project", id);
   };
 
-  // The Owner learns how they sign in to each provider, where its key would come from and reads the acknowledgements;
-  // a collaborator learns only which agents exist and whether their programs are there. How the Owner signs in
-  // (a subscription, a ChatGPT or Google login) is theirs alone, as it is in capacity.
+  // The Owner learns how they sign in to each provider, where its key would come from, whether its own-plan mode can
+  // be chosen on this server (the restricted sign-in switch) and reads the acknowledgements; a collaborator learns only
+  // which agents exist and whether their programs are there. How the Owner signs in (a subscription, a ChatGPT or
+  // Google login) is theirs alone, as it is in capacity.
   app.get("/api/agents", needs("viewer"), async (req) => {
     const owner = req.principal?.personId === OWNER_ID;
     return {
       adapters,
       providers: Object.fromEntries(
-        PROVIDERS.map((p) => [p, { available: available(p), ...(owner && { mode: settings.getMode(p), apiKey: apiKey(p) }) }]),
-      ) as Record<Provider, { available: boolean; mode?: AuthMode; apiKey?: ApiKeySource }>,
+        PROVIDERS.map((p) => [
+          p,
+          { available: available(p), ...(owner && { mode: settings.getMode(p), apiKey: apiKey(p), ownModeAvailable: settings.ownModeAvailable(p) }) },
+        ]),
+      ) as Record<Provider, { available: boolean; mode?: AuthMode; apiKey?: ApiKeySource; ownModeAvailable?: boolean }>,
       ...(owner && { acks: PROVIDER_ACKS }),
     };
   });

@@ -92,7 +92,7 @@ export { AgentRunner, AdapterUnavailableError, RemoteRunError, ShuttingDownError
 export type { AgentRunnerDeps } from "./agents/runner.js";
 export { ClaudeAdapter, toolToAction } from "./agents/claude-adapter.js";
 export { GeminiAdapter } from "./agents/gemini/adapter.js";
-export { ProviderSettings } from "./agents/settings.js";
+export { ProviderSettings, RestrictedSignInError } from "./agents/settings.js";
 export { which } from "./agents/which.js";
 export type { WhichOptions } from "./agents/which.js";
 export { baseChildEnv, buildChildEnv } from "./agents/child-env.js";

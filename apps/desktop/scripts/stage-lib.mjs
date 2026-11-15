@@ -1,7 +1,7 @@
 // The pure parts of staging: which Node archive to fetch, how to check it, what to remove from deployed core, and
 // what a complete staged tree (or a packed app's Resources) must and must not contain.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 
@@ -86,6 +86,141 @@ const CLAUDE_NATIVE = /^@anthropic-ai\/claude-agent-sdk-/;
  */
 export function isExcludedPackage(name, bundleClaude) {
   return !bundleClaude && CLAUDE_NATIVE.test(name);
+}
+
+/** A licence file as packages name it: LICENSE, LICENCE or COPYING, optionally .md or .txt. */
+const LICENSE_FILE = /^(?:licen[cs]e|copying)(?:\.(?:md|txt))?$/i;
+/** A notice file: NOTICE, optionally .md or .txt. */
+const NOTICE_FILE = /^notice(?:\.(?:md|txt))?$/i;
+
+/** Where staging puts each program's licence and notice files (`licenses/<id>/`), and the list of them all. */
+export const LICENSES_DIR = "licenses";
+export const NOTICES_FILE = "THIRD_PARTY_NOTICES.txt";
+
+/**
+ * @typedef {{ id: string; name: string; dir: string; package?: string; fallback?: string; version?: string; license?: string }} ThirdPartyProgram
+ *   `dir`: where it is staged ("/"-separated, relative to the stage); `fallback`: a folder (relative to apps/desktop)
+ *   with copies of the upstream licence and notice files, for a package published without them
+ */
+
+/**
+ * The third-party programs the app ships, whose licence files staging must find. Codex's npm package ships no
+ * LICENSE or NOTICE, so a copy of the upstream files (openai/codex at the bundled release's tag) is kept in
+ * third-party/openai-codex. Claude Code's native binary is listed only when it is bundled.
+ * @param {string} platform
+ * @param {string} arch
+ * @param {boolean} bundleClaude
+ * @param {string} [nodeVersion]
+ * @returns {ThirdPartyProgram[]}
+ */
+export function thirdPartyPrograms(platform, arch, bundleClaude, nodeVersion) {
+  const pa = `${platform}-${arch}`;
+  return [
+    { id: "nodejs", name: "Node.js", dir: "node", license: "MIT", ...(nodeVersion !== undefined && { version: nodeVersion }) },
+    { id: "openai-codex", name: "Codex CLI", package: "@openai/codex", dir: "core/node_modules/@openai/codex", fallback: "third-party/openai-codex" },
+    { id: "google-gemini-cli", name: "Gemini CLI", package: "@google/gemini-cli", dir: "core/node_modules/@google/gemini-cli" },
+    {
+      id: "anthropic-claude-agent-sdk", name: "Claude Agent SDK", package: "@anthropic-ai/claude-agent-sdk",
+      dir: "core/node_modules/@anthropic-ai/claude-agent-sdk",
+    },
+    ...(bundleClaude
+      ? [{ id: "anthropic-claude-code", name: "Claude Code", package: `@anthropic-ai/claude-agent-sdk-${pa}`, dir: `core/node_modules/@anthropic-ai/claude-agent-sdk-${pa}` }]
+      : []),
+  ];
+}
+
+/** The files in `dir` whose names match `pattern`, sorted, as `{ name, from }`. */
+function matching(dir, pattern) {
+  return readdirSafe(dir)
+    .filter((n) => pattern.test(n) && statSafe(join(dir, n))?.isFile())
+    .map((name) => ({ name, from: join(dir, name) }));
+}
+
+function statSafe(p) {
+  try {
+    return statSync(p);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Each program's licence files (required) and notice files (whichever exist): the staged package's own, else the
+ * kept upstream copies. Version and licence come from the staged package.json unless the program names them.
+ * @param {string} stageDir
+ * @param {string} appDir apps/desktop
+ * @param {ThirdPartyProgram[]} programs
+ * @returns {{ entries: { id: string; name: string; package?: string; version: string; license: string; files: { name: string; from: string }[] }[]; problems: string[] }}
+ */
+export function collectNotices(stageDir, appDir, programs) {
+  const entries = [];
+  const problems = [];
+  for (const p of programs) {
+    const dir = join(stageDir, ...p.dir.split("/"));
+    const fallback = p.fallback === undefined ? undefined : join(appDir, ...p.fallback.split("/"));
+    const pick = (/** @type {RegExp} */ pattern) => {
+      const own = matching(dir, pattern);
+      return own.length > 0 || fallback === undefined ? own : matching(fallback, pattern);
+    };
+    const licenses = pick(LICENSE_FILE);
+    if (licenses.length === 0) {
+      problems.push(`no licence file for ${p.name} (${p.dir})`);
+      continue;
+    }
+    let manifest = {};
+    try {
+      manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    } catch {
+      manifest = {};
+    }
+    entries.push({
+      id: p.id,
+      name: p.name,
+      ...(p.package !== undefined && { package: p.package }),
+      version: p.version ?? (typeof manifest.version === "string" ? manifest.version : "unknown"),
+      license: p.license ?? (typeof manifest.license === "string" ? manifest.license : "see the licence file"),
+      files: [...licenses, ...pick(NOTICE_FILE)],
+    });
+  }
+  return { entries, problems };
+}
+
+/**
+ * The text of THIRD_PARTY_NOTICES.txt for `entries` (from collectNotices).
+ * @param {{ id: string; name: string; package?: string; version: string; license: string; files: { name: string }[] }[]} entries
+ */
+export function noticesText(entries) {
+  const lines = [
+    "Third-party software in The Terminal",
+    "",
+    "The Terminal is licensed under the Apache License 2.0. It ships the programs below, each under its own licence.",
+    `Their licence and notice files are in the ${LICENSES_DIR} folder next to this file.`,
+  ];
+  for (const e of entries) {
+    lines.push(
+      "",
+      `${e.name} ${e.version}${e.package === undefined ? "" : ` (${e.package})`}`,
+      `  Licence: ${e.license}`,
+      `  Files: ${e.files.map((f) => `${LICENSES_DIR}/${e.id}/${f.name}`).join(", ")}`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Replaces `<stage>/licenses` with each entry's files under `licenses/<id>/`, and writes THIRD_PARTY_NOTICES.txt.
+ * @param {string} stageDir
+ * @param {{ id: string; name: string; package?: string; version: string; license: string; files: { name: string; from: string }[] }[]} entries
+ */
+export function writeNotices(stageDir, entries) {
+  const root = join(stageDir, LICENSES_DIR);
+  rmSync(root, { recursive: true, force: true });
+  for (const e of entries) {
+    const dir = join(root, e.id);
+    mkdirSync(dir, { recursive: true });
+    for (const f of e.files) copyFileSync(f.from, join(dir, f.name));
+  }
+  writeFileSync(join(stageDir, NOTICES_FILE), noticesText(entries));
 }
 
 /** Whether `p` is a symlink to a directory. */
@@ -260,6 +395,11 @@ export function assertLayout(stageDir, platform, arch, opts = {}) {
   need("core/node_modules/@google/gemini-cli/package.json");
   need(`node/${platform === "win32" ? "node.exe" : "node"}`);
   need("ui/index.html");
+  need(NOTICES_FILE);
+  for (const p of thirdPartyPrograms(platform, arch, bundleClaude)) {
+    const dir = join(stageDir, LICENSES_DIR, p.id);
+    need(`${LICENSES_DIR}/${p.id}/LICENSE`, readdirSafe(dir).some((n) => LICENSE_FILE.test(n)));
+  }
 
   for (const entry of PRUNE) {
     if (existsSync(join(stageDir, "core", ...entry.split("/")))) problems.push(`forbidden: core/${entry}`);
