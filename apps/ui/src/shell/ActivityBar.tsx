@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { VIEWS, VIEW_LABELS } from "./views";
+import { useWorkspace } from "./workspace-store";
 import type { ActivityViewId, ViewId } from "./views";
 
 type Props = {
@@ -19,6 +20,7 @@ const svg = (children: ReactNode) => (
 );
 
 const ICONS: Record<ActivityViewId, ReactNode> = {
+  home: svg(<><path d="M4 11l8-7 8 7" /><path d="M6 10v10h12V10" /><path d="M10 20v-6h4v6" /></>),
   board: svg(<><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="11" rx="1" /><rect x="17" y="4" width="4" height="7" rx="1" /></>),
   agents: svg(<><rect x="5" y="8" width="14" height="11" rx="2" /><path d="M12 8V4M9 13h.01M15 13h.01M9.5 16h5" /></>),
   changes: svg(<><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M12 7v6M9 10h6M9 17h6" /></>),
@@ -44,10 +46,11 @@ const BADGES: Partial<Record<ActivityViewId, keyof Pick<Props, "running" | "pend
 
 export function ActivityBar({ active, running, pending, onSelect }: Props) {
   const counts = { running, pending };
+  const { showBoard } = useWorkspace();
   return (
     <div className="activity-bar">
       <nav className="activity-views" aria-label="Views">
-        {VIEWS.map((v) => {
+        {VIEWS.filter((v) => v !== "board" || showBoard).map((v) => {
           const badgeOf = BADGES[v];
           const count = badgeOf ? counts[badgeOf] : 0;
           return (

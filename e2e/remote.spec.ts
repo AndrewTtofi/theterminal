@@ -128,11 +128,11 @@ test("a maintainer joins over TLS with a browser key, works without seeing a sec
 
     // Presence over the remote listener.
     await maintainer.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: PROJECT }).click();
-    await openView(maintainer, "Board");
+    await openView(maintainer, "Home");
     await openView(owner, "People");
     await expect(
       owner.locator(".people-side").getByRole("region", { name: "People here" }).getByRole("listitem")
-        .filter({ hasText: /^Maintainer Two · Maintainer · Board in Remote Project$/ }),
+        .filter({ hasText: /^Maintainer Two · Maintainer · Home in Remote Project$/ }),
     ).toHaveCount(1);
 
     // Connections: names only. The details are the Owner's, in the view and at the route.

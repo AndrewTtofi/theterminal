@@ -8,7 +8,7 @@ import {
   staleRunPanels,
 } from "../src/shell/dock-layout";
 
-const KNOWN = ["board", "agent_feed", "ledger", "conversation", "capacity", "terminal"];
+const KNOWN = ["home", "board", "agent_feed", "ledger", "conversation", "capacity", "terminal"];
 const apis: DockviewApi[] = [];
 
 /** A real dockview instance in jsdom, with plain DOM panels. */
@@ -46,22 +46,32 @@ describe("restoreOrDefault", () => {
     saved.panels.conversation!.title = "Conversation";
     const api = dock();
     expect(restoreOrDefault(api, saved, KNOWN)).toBe("restored");
-    expect(ids(api)).toEqual(["board", "conversation"]);
+    expect(ids(api)).toEqual(["conversation", "home"]);
   });
 
   it("builds the default layout when nothing is saved", () => {
     const api = dock();
     expect(restoreOrDefault(api, null, KNOWN)).toBe("default");
-    expect(ids(api)).toEqual(["board", "conversation"]);
-    expect(api.getPanel("conversation")!.group).toBe(api.getPanel("board")!.group);
-    expect(api.getPanel("board")!.group.activePanel?.id).toBe("board");
+    expect(ids(api)).toEqual(["conversation", "home"]);
+    expect(api.getPanel("conversation")!.group).toBe(api.getPanel("home")!.group);
+    expect(api.getPanel("home")!.group.activePanel?.id).toBe("home");
+  });
+
+  it("still restores a saved layout that holds a Board tab", () => {
+    const api0 = dock();
+    buildDefault(api0);
+    api0.addPanel({ id: "board", component: "board", title: "Board", position: { referencePanel: "home", direction: "within" } });
+    const saved = JSON.parse(JSON.stringify(api0.toJSON())) as SerializedDockview;
+    const api = dock();
+    expect(restoreOrDefault(api, saved, KNOWN)).toBe("restored");
+    expect(ids(api)).toEqual(["board", "conversation", "home"]);
   });
 
   it("falls back to the default for corrupt layouts", () => {
     for (const bad of ["{not json", 42, { grid: "nope" }, { panels: {} }, { grid: {}, panels: [] }]) {
       const api = dock();
       expect(restoreOrDefault(api, bad, KNOWN)).toBe("default");
-      expect(ids(api)).toEqual(["board", "conversation"]);
+      expect(ids(api)).toEqual(["conversation", "home"]);
     }
   });
 
@@ -70,13 +80,13 @@ describe("restoreOrDefault", () => {
     saveNamedLayout("Broken", { grid: { root: "nope" }, panels: { board: { id: "elsewhere" } } });
     const api = dock();
     expect(restoreOrDefault(api, loadNamedLayout("Broken"), KNOWN)).toBe("default");
-    expect(ids(api)).toEqual(["board", "conversation"]);
-    expect(api.getPanel("board")!.group.activePanel?.id).toBe("board");
+    expect(ids(api)).toEqual(["conversation", "home"]);
+    expect(api.getPanel("home")!.group.activePanel?.id).toBe("home");
   });
 
   it("falls back when a panel uses a component that is not registered", () => {
     const saved = savedDefault();
-    saved.panels["connection:x"] = { ...saved.panels.board!, id: "connection:x", contentComponent: "connection" };
+    saved.panels["connection:x"] = { ...saved.panels.home!, id: "connection:x", contentComponent: "connection" };
     const api = dock();
     expect(restoreOrDefault(api, saved, KNOWN)).toBe("default");
     expect(api.getPanel("connection:x")).toBeUndefined();
@@ -85,7 +95,7 @@ describe("restoreOrDefault", () => {
   it("restores a connection panel once its component is registered", () => {
     const api0 = dock();
     buildDefault(api0);
-    api0.addPanel({ id: "connection:x", component: "connection", title: "Claude", position: { referencePanel: "board", direction: "within" } });
+    api0.addPanel({ id: "connection:x", component: "connection", title: "Claude", position: { referencePanel: "home", direction: "within" } });
     const saved = JSON.parse(JSON.stringify(api0.toJSON())) as SerializedDockview;
     const api = dock();
     expect(restoreOrDefault(api, saved, [...KNOWN, "connection"])).toBe("restored");
@@ -97,7 +107,7 @@ describe("restoreOrDefault", () => {
     const empty = JSON.parse(JSON.stringify(api0.toJSON())) as SerializedDockview;
     const api = dock();
     expect(restoreOrDefault(api, empty, KNOWN)).toBe("default");
-    expect(ids(api)).toEqual(["board", "conversation"]);
+    expect(ids(api)).toEqual(["conversation", "home"]);
   });
 
   it("falls back when every group with panels is hidden", () => {
@@ -120,7 +130,7 @@ describe("restoreOrDefault", () => {
     const api = dock();
     restoreOrDefault(api, saved, KNOWN);
     expect(api.groups.some((g) => g.api.location.type !== "grid")).toBe(false);
-    expect(api.getPanel("board")).toBeTruthy();
+    expect(api.getPanel("home")).toBeTruthy();
   });
 });
 
@@ -142,25 +152,26 @@ describe("presets", () => {
     expect(PRESET_LABELS).toEqual({ guided: "Guided", operator: "Operator" });
   });
 
-  it("builds Guided: the Board and the Conversation in the main area, Board active", () => {
+  it("builds Guided: Home and the Conversation in the main area, Home active", () => {
     const api = dock();
     buildPreset(api, "guided");
-    expect(ids(api)).toEqual(["board", "conversation"]);
+    expect(ids(api)).toEqual(["conversation", "home"]);
+    expect(api.panels.map((p) => p.title).sort()).toEqual(["Conversation", "Home"]);
     expect(api.groups).toHaveLength(1);
-    expect(api.getPanel("board")!.group.activePanel?.id).toBe("board");
+    expect(api.getPanel("home")!.group.activePanel?.id).toBe("home");
   });
 
-  it("builds Operator: Board and Capacity above; Terminal, Agent feed and Ledger below (30 %), Ledger active", () => {
+  it("builds Operator: Home and Capacity above; Terminal, Agent feed and Ledger below (30 %), Ledger active", () => {
     const api = dock();
     buildPreset(api, "operator");
-    expect(ids(api)).toEqual(["agent_feed", "board", "capacity", "ledger", "terminal"]);
-    const main = api.getPanel("board")!.group;
+    expect(ids(api)).toEqual(["agent_feed", "capacity", "home", "ledger", "terminal"]);
+    const main = api.getPanel("home")!.group;
     const bottom = api.getPanel("ledger")!.group;
     expect(main).not.toBe(bottom);
-    expect(main.panels.map((p) => p.id)).toEqual(["board", "capacity"]);
+    expect(main.panels.map((p) => p.id)).toEqual(["home", "capacity"]);
     expect(bottom.panels.map((p) => p.id)).toEqual(["terminal", "agent_feed", "ledger"]);
     expect(bottom.activePanel?.id).toBe("ledger");
-    expect(main.activePanel?.id).toBe("board");
+    expect(main.activePanel?.id).toBe("home");
     expect(bottom.api.height).toBe(Math.round(800 * 0.3));
   });
 });

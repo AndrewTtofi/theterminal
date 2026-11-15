@@ -25,6 +25,28 @@ export async function openView(page: Page, name: string) {
   await expect(button).toHaveAttribute("aria-pressed", "true");
 }
 
+/** Per-device workspace settings key (`apps/ui/src/shell/workspace-store.ts`). */
+const WORKSPACE_KEY = "tt.workspace.v1";
+
+/** Turns "Show the Board" on for every page this test opens, through an init script. Call it before `page.goto`. */
+export async function enableBoard(page: Page) {
+  await page.addInitScript((key) => {
+    try {
+      localStorage.setItem(key, JSON.stringify({ showBoard: true }));
+    } catch {
+      // storage unavailable: the Board stays hidden
+    }
+  }, WORKSPACE_KEY);
+}
+
+/** Opens (or brings back and focuses) the Board tab from its activity bar button. Needs `enableBoard` first. */
+export async function openBoard(page: Page) {
+  const button = page.getByRole("navigation", { name: "Views" }).getByRole("button", { name: "Board", exact: true });
+  await button.click();
+  // Clicking the active view's button hides the side bar; the tab is open either way.
+  await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+}
+
 /** Shows every project's entries (connection entries belong to no project) in the Ledger panel. */
 export async function showAllProjects(page: Page) {
   await openView(page, "Ledger");
@@ -40,13 +62,15 @@ export async function operatorLayout(page: Page) {
   await expect(page.getByRole("tab", { name: "Ledger" })).toBeVisible();
 }
 
-/** Opens the agent server, creates (and selects) a project, and chooses the Operator layout. */
+/** Opens the agent server, creates (and selects) a project, chooses the Operator layout and opens the Board tab. */
 export async function openProject(page: Page, name: string) {
+  await enableBoard(page);
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
   await operatorLayout(page);
+  await openBoard(page);
 }
 
 /** Opens a catalog entry's editor from the Connections view (a new connection, or the existing one). */

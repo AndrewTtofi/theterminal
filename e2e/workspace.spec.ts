@@ -8,8 +8,8 @@ test("Guided by default: ask in the Conversation, decide in the strip with more 
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   // The workspace shows once it knows who is signed in.
   await expect(page.getByRole("navigation", { name: "Views" })).toBeVisible();
-  // A fresh browser: the Guided layout, with the Board and the Conversation only.
-  expect(await tabNames(page)).toEqual(["Board", "Conversation"]);
+  // A fresh browser: the Guided layout, with Home and the Conversation only.
+  expect(await tabNames(page)).toEqual(["Home", "Conversation"]);
   await expect(layoutSelect(page).locator("option:checked")).toHaveText("Guided");
 
   const name = "Workspace Project";
@@ -104,7 +104,7 @@ test("the Operator preset, a saved layout kept across a reload and restored with
 
   await statusBar(page).getByRole("button", { name: "Reset layout" }).click();
   await expect(layoutSelect(page).locator("option:checked")).toHaveText("Guided");
-  expect(await tabNames(page)).toEqual(["Board", "Conversation"]);
+  expect(await tabNames(page)).toEqual(["Home", "Conversation"]);
 
   // A saved layout holding a diff tab of a run the server does not know restores without that tab.
   await page.evaluate(() => {
@@ -120,13 +120,13 @@ test("the Operator preset, a saved layout kept across a reload and restored with
       }
       return null;
     };
-    leafWith(mine.grid.root, "board")!.views.push("diff:gone:x");
+    leafWith(mine.grid.root, "home")!.views.push("diff:gone:x");
     mine.panels["diff:gone:x"] = { id: "diff:gone:x", contentComponent: "diff", title: "x" };
     localStorage.setItem("tt.layouts.v1", JSON.stringify(saved));
   });
   await layoutSelect(page).selectOption({ label: "Mine" });
   await expect(page.getByRole("tab", { name: "Terminal" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Home" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "x", exact: true })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Ledger" })).toHaveCount(0);
   await expect(layoutSelect(page).locator("option:checked")).toHaveText("Mine");

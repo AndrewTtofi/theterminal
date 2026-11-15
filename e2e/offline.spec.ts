@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
-  addCard, allow, latestSeq, ledgerItems, lineMatching, openEditor, openView, operatorLayout, prepareRun, removeConnection,
+  addCard, allow, enableBoard, openBoard, latestSeq, ledgerItems, lineMatching, openEditor, openView, operatorLayout, prepareRun, removeConnection,
   RUN_FINISHED, saveWithSecret, startRun, statusBar, watchForLeaks,
 } from "./support.js";
 
@@ -14,11 +14,13 @@ const OFFLINE_NOTE = "You seem to be offline. Cloud models will not answer; a lo
 
 /** Opens the peer, creates (and selects) a project, and chooses the Operator layout. */
 async function openPeerProject(page: Page, name: string) {
+  await enableBoard(page);
   await page.goto(process.env.TT_E2E_PEER_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
   await operatorLayout(page);
+  await openBoard(page);
 }
 
 test("without internet the status bar says Offline (inferred), local work goes on, and cloud features say why they fail", async ({ page }) => {

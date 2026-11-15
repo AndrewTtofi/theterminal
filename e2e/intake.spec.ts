@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { SECRET_LIKE, SECRET_REFUSED, ledgerItems, line, projectEntries, operatorLayout } from "./support.js";
+import { SECRET_LIKE, SECRET_REFUSED, ledgerItems, line, projectEntries, operatorLayout, enableBoard, openBoard } from "./support.js";
 
 const PERMANENCE =
   "What you write here is recorded permanently in this project's ledger. Do not paste passwords, keys or other people's personal details.";
@@ -38,6 +38,7 @@ const cardsIn = (page: Page, stage: string) => column(page, stage).locator(".car
 
 test("guided intake: describe, answer, decide, approve; then reopen, take payments and approve again", async ({ page }) => {
   const name = "Book Club";
+  await enableBoard(page);
   await page.goto(process.env.TT_E2E_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
@@ -88,7 +89,7 @@ test("guided intake: describe, answer, decide, approve; then reopen, take paymen
   await panel.getByRole("button", { name: "Approve plan" }).click();
   await expect(panel.getByText(/^Approved /)).toBeVisible();
 
-  await page.getByRole("tab", { name: "Board" }).click();
+  await openBoard(page);
   await expect(column(page, "Plan").getByText('Define what "done" means')).toBeVisible();
   await expect(column(page, "Ship").getByText("Run it on this computer")).toBeVisible();
   await expect(column(page, "Operate").getByText("Monitoring and health checks")).toBeVisible();
@@ -115,7 +116,7 @@ test("guided intake: describe, answer, decide, approve; then reopen, take paymen
   await panel.getByRole("button", { name: "Approve plan" }).click();
   await expect(panel.getByText(/^Approved /)).toBeVisible();
 
-  await page.getByRole("tab", { name: "Board" }).click();
+  await openBoard(page);
   await expect(line(ledger, "Owner reopened the plan: We will sell book club memberships")).toHaveCount(1);
   await expect(line(ledger, "Owner approved the plan (1 card added)")).toHaveCount(1);
   await expect(cardsIn(page, "Ship")).toHaveCount(2);

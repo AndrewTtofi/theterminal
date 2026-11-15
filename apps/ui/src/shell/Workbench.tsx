@@ -7,6 +7,7 @@ import { basename } from "../components/text";
 import { AgentFeedPanel } from "../views/AgentFeedPanel";
 import { TerminalPanel } from "../views/TerminalPanel";
 import { BoardView } from "../views/BoardView";
+import { HomeView } from "../views/HomeView";
 import { ConversationPanel } from "../views/ConversationPanel";
 import { CapacityPanel } from "../views/CapacityPanel";
 import { ConnectionEditor } from "../views/ConnectionEditor";
@@ -34,7 +35,7 @@ import type { ViewId } from "./views";
 
 // Stable registry: dockview keys components by name, so this object must not change between renders.
 const PANELS = {
-  board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
+  home: HomeView, board: BoardView, agent_feed: AgentFeedPanel, ledger: LedgerBottomPanel, connection: ConnectionEditor, capacity: CapacityPanel,
   intake: IntakePanel, story: StoryPanel,
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
   link_machine: LinkMachinePanel,
@@ -59,9 +60,9 @@ function isTyping(target: EventTarget | null): boolean {
  * and a status bar. The Needs-you strip sits outside the dock so decisions surface in every layout.
  */
 export function Workbench({ model }: Props) {
-  const [view, setView] = useState<ViewId>("board");
+  const [view, setView] = useState<ViewId>("home");
   /** The last view other than Learn, which Learn ranks its topics for. */
-  const [lastView, setLastView] = useState<ViewId>("board");
+  const [lastView, setLastView] = useState<ViewId>("home");
   const [learnTopic, setLearnTopic] = useState<string | null>(null);
   const [sideOpen, setSideOpen] = useState(true);
   const [width, setWidth] = useState(SIDE_BAR_DEFAULT);
@@ -75,8 +76,8 @@ export function Workbench({ model }: Props) {
   const waiting = pending + notices.reduce((a, n) => a + n.decisions, 0) + gates;
 
   const showView = (v: ViewId) => {
-    // The Board view's home is the Board tab: bring it back if it was closed.
-    if (v === "board") dockRef.current?.focus("board");
+    // Home and the Board have a tab of their own: bring it back if it was closed.
+    if (v === "home" || v === "board") dockRef.current?.focus(v);
     setView(v);
     if (v !== "learn") setLastView(v);
     setSideOpen(true);
@@ -84,7 +85,7 @@ export function Workbench({ model }: Props) {
   /** The activity bar's action: the active view's button hides the side bar, or shows it again. */
   const selectView = (v: ViewId) => {
     if (v === view && sideOpen) {
-      if (v === "board") dockRef.current?.focus("board");
+      if (v === "home" || v === "board") dockRef.current?.focus(v);
       setSideOpen(false);
       return;
     }

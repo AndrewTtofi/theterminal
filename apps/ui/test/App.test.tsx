@@ -109,7 +109,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { ApiError, api, errorMessage } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
-import { testDock } from "./test-dock";
+import { WITH_BOARD, testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 import { changes, fileDiff, listing, run1, runEntry } from "./changes-fixtures";
@@ -140,6 +140,7 @@ async function operatorLayout() {
 beforeEach(() => {
   vi.resetAllMocks();
   testDock.api = null;
+  testDock.restore = WITH_BOARD;
   h.onEntry = undefined;
   h.subs.clear();
   m.getStatus.mockResolvedValue({
