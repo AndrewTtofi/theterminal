@@ -26,7 +26,7 @@ When a tab points to something that no longer exists, it is closed automatically
 
 Open **Changes** in the activity bar to see what an agent changed in a run.
 
-**It is read-only.** People never edit code here. Diff and file tabs have no edit controls and no way to save, and the server offers no route that writes to a run's files. Review, then ask an agent to change things.
+**It is read-only.** People never edit code here. There is no editor: people never edit a run's files directly. The only way a person can change them is the emergency override, which is recorded in red. Otherwise, review, then ask an agent to change things.
 
 ### What you see
 
