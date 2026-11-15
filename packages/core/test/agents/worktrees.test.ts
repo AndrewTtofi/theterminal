@@ -880,3 +880,106 @@ describe("WorktreeManager", () => {
     });
   });
 });
+
+describe("imports, materialising and run snapshots", () => {
+  const stage = (files: Record<string, string | Buffer>): string => {
+    const dir = join(dataDir, "staging", "s1");
+    for (const [p, content] of Object.entries(files)) {
+      const abs = join(dir, ...p.split("/"));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+    }
+    return dir;
+  };
+
+  it("commitFiles makes one commit holding exactly the staged files, ignored ones forced", async () => {
+    const repo = await mgr.ensureProjectRepo("proj1");
+    writeFileSync(join(repo, ".gitignore"), "*.log\n");
+    await git(repo, "add", ".gitignore");
+    await git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "ignore logs");
+    const before = await git(repo, "rev-parse", "HEAD");
+    const dir = stage({ "src/a.ts": "export const a = 1;\n", "build.log": "ignored, but imported\n" });
+
+    const head = await mgr.commitFiles("proj1", dir, ["src/a.ts", "build.log"], "Added 2 files");
+    expect(head).toBe(await git(repo, "rev-parse", "HEAD"));
+    expect(await git(repo, "rev-parse", "HEAD~1")).toBe(before);
+    expect(await git(repo, "log", "-1", "--format=%s")).toBe("Added 2 files");
+    expect(await git(repo, "log", "-1", "--format=%an <%ae>")).toBe("The Terminal <agent@theterminal.localhost>");
+    expect((await git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).split("\n").sort()).toEqual(["build.log", "src/a.ts"]);
+    expect(await git(repo, "show", "HEAD:src/a.ts")).toBe("export const a = 1;");
+  });
+
+  it("commitFiles with nothing changed returns HEAD without a commit", async () => {
+    await mgr.commitFiles("proj1", stage({ "a.txt": "same\n" }), ["a.txt"], "Added 1 file");
+    const repo = mgr.repoPath("proj1");
+    const head = await git(repo, "rev-parse", "HEAD");
+    expect(await mgr.commitFiles("proj1", stage({ "a.txt": "same\n" }), ["a.txt"], "Added 1 file")).toBe(head);
+    expect(await git(repo, "rev-list", "--count", "HEAD")).toBe("2");
+  });
+
+  it("commitFiles treats glob characters in a name literally", async () => {
+    const repo = await mgr.ensureProjectRepo("proj1");
+    const name = "[ab].txt"; // as a glob it would match a.txt, which lies untracked in the repo's working tree
+    writeFileSync(join(repo, "a.txt"), "not staged by the import\n");
+    await mgr.commitFiles("proj1", stage({ [name]: "x\n" }), [name], "Added 1 file");
+    expect(await git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")).toBe(name);
+  });
+
+  it("commitFiles refuses a target that leaves the repo through a symlink", async (ctx) => {
+    const repo = await mgr.ensureProjectRepo("proj1");
+    try {
+      symlinkSync(outside, join(repo, "out"), "dir");
+    } catch {
+      return ctx.skip();
+    }
+    const dir = stage({ "out/x.txt": "escape\n" });
+    await expect(mgr.commitFiles("proj1", dir, ["out/x.txt"], "Added 1 file")).rejects.toThrow();
+    expect(existsSync(join(outside, "x.txt"))).toBe(false);
+  });
+
+  it("commitFiles refuses a .git path or a symlink in staging", async (ctx) => {
+    await mgr.ensureProjectRepo("proj1");
+    const dir = stage({ "a.txt": "a\n" });
+    await expect(mgr.commitFiles("proj1", dir, [".git/config"], "Added 1 file")).rejects.toThrow();
+    await expect(mgr.commitFiles("proj1", dir, ["../a.txt"], "Added 1 file")).rejects.toThrow();
+    writeFileSync(join(outside, "secret.txt"), "outside\n");
+    try {
+      symlinkSync(join(outside, "secret.txt"), join(dir, "l.txt"), "file");
+    } catch {
+      return ctx.skip();
+    }
+    await expect(mgr.commitFiles("proj1", dir, ["l.txt"], "Added 1 file")).rejects.toThrow();
+  });
+
+  it("materialise writes the committed bytes exactly, binary included", async () => {
+    const bin = Buffer.from([0, 1, 2, 0, 0xff, 0x0d, 0x0a, 0x0a, 0]);
+    const crlf = "line one\r\nline two\r\n";
+    const commit = await mgr.commitFiles("proj1", stage({ "b/data.bin": bin, "crlf.txt": crlf, "skip.txt": "no\n" }), ["b/data.bin", "crlf.txt", "skip.txt"], "Added 3 files");
+    const out = join(dataDir, "projects", "proj1", "apply", "a1");
+    mkdirSync(out, { recursive: true });
+    await mgr.materialise("proj1", commit, ["b/data.bin", "crlf.txt"], out);
+    expect(readFileSync(join(out, "b", "data.bin"))).toEqual(bin);
+    expect(readFileSync(join(out, "crlf.txt"), "utf8")).toBe(crlf);
+    expect(existsSync(join(out, "skip.txt"))).toBe(false);
+    // The project repo's own index is untouched.
+    expect(await git(mgr.repoPath("proj1"), "status", "--porcelain")).toBe("");
+  });
+
+  it("snapshotRun captures the run's untracked, modified and deleted files on top of its HEAD", async () => {
+    await mgr.commitFiles("proj1", stage({ "keep.txt": "keep\n", "gone.txt": "gone\n" }), ["keep.txt", "gone.txt"], "Added 2 files");
+    const wt = await mgr.createRunWorktree("proj1", "run-12345678abc");
+    writeFileSync(join(wt.absPath, "new.txt"), "made by the run\n");
+    writeFileSync(join(wt.absPath, "keep.txt"), "changed\n");
+    rmSync(join(wt.absPath, "gone.txt"));
+    const commit = await mgr.snapshotRun("proj1", "run-12345678abc");
+    expect(commit).toMatch(/^[0-9a-f]{40}$/);
+    const repo = mgr.repoPath("proj1");
+    expect(await git(repo, "log", "-1", "--format=%s", commit)).toBe("Run run-1234");
+    expect(await git(repo, "rev-parse", `${commit}^`)).toBe(wt.base);
+    expect((await git(repo, "ls-tree", "--name-only", commit)).split("\n").sort()).toEqual(["keep.txt", "new.txt"]);
+    expect(await git(repo, "show", `${commit}:keep.txt`)).toBe("changed");
+    // Nothing moved: the run's branch and index are as they were.
+    expect(await git(wt.absPath, "rev-parse", "HEAD")).toBe(wt.base);
+    expect(await git(wt.absPath, "status", "--porcelain")).not.toBe("");
+  });
+});
