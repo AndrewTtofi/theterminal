@@ -18,6 +18,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - **Add another** in the Connections view, for providers that allow several connections (cloud accounts and MCP servers).
 - A read-only GitHub view (branches, open pull requests, CI runs) and a live `CI` item in the status bar.
 - A Capacity view: usage and budgets per provider with estimates labelled as estimates, observed rate limits, and hardware detection for this computer.
+- Plan intake: describe an idea, answer a few plain-language questions, make the decisions that matter and approve a plan, which creates your first cards. Everything is recorded in the ledger. Typed text is checked for secrets, and home folders and usernames are rewritten to `~` and `<user>`.
+- Plain-language headlines for ledger entries, built locally from fixed templates and never stored. Long commands are cut with "(and n more lines)" and hidden or text-reversing characters are shown visibly.
+- Readiness gates on moves to Ship and Operate, and when spend passes your budget: seven gates, each cleared by a sign-off or by a waiver with a reason. Blocked attempts are recorded. You cannot create a card directly in Ship or Operate.
+- Card stories: everything that happened to a card, with its plan, gate decisions and estimated cost, plus the ledger's integrity check.
+- Audit export of the ledger as NDJSON, with an integrity header, gap lines for unreadable or missing entries, and a trailer.
+- Documentation: `docs/glass-box.md`.
 
 ### Changed
 - Agent programs receive an allowlisted environment only. Other secrets in your shell are no longer passed to them.

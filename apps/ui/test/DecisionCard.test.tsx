@@ -23,9 +23,31 @@ const action: AgentAction = {
 describe("DecisionCard", () => {
   it("shows the title and collapsible details", () => {
     render(<DecisionCard action={action} onDecide={vi.fn()} />);
-    expect(screen.getByText("Agent wants to: run npm test")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 3 }).textContent).toBe('Agent wants to run the command "npm test"');
     expect(screen.getByText("Details")).toBeTruthy();
     expect(document.querySelector("pre")?.textContent).toContain("npm test");
+  });
+
+  it("says what the kind of action means, and keeps the summary in its label", () => {
+    const { container } = render(<DecisionCard action={action} onDecide={vi.fn()} />);
+    const heading = screen.getByRole("heading", { level: 4, name: "What this means" });
+    expect(heading.nextElementSibling).toBe(container.querySelector("p.means"));
+    expect(container.querySelector("p.means")?.textContent).toBe(
+      "Runs a program on this computer, inside the agent's working copy. It can read and change files there and reach the network.",
+    );
+    expect(screen.getByRole("article", { name: "Decision: run npm test" })).toBeTruthy();
+  });
+
+  it("makes hidden characters in its label visible", () => {
+    const { container } = render(<DecisionCard action={{ ...action, summary: "run a\u202eb" }} onDecide={vi.fn()} />);
+    expect(container.querySelector("article")!.getAttribute("aria-label")).toBe("Decision: run a\\u202eb");
+  });
+
+  it("phrases other kinds from their input", () => {
+    const read = { ...action, kind: "file_read" as const, tool: "Read", summary: "Read: a.md", input: { file_path: "docs/a.md" } };
+    const { container } = render(<DecisionCard action={read} onDecide={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 3 }).textContent).toBe("Agent wants to read docs/a.md");
+    expect(container.querySelector("p.means")?.textContent).toBe("Reads a file inside the agent's working copy of the project. Nothing changes.");
   });
 
   it("allows", async () => {
@@ -102,12 +124,24 @@ describe("DecisionCard", () => {
   });
 
   it("makes C1 controls and bidi and zero-width characters in the text to be typed visible", () => {
-    const typed = "a\u0085b\u009bc​d‏e‪f‮g⁦h⁩i j";
+    const typed = "a\u0085b\u009bc\u200Bd\u200Fe\u202Af\u202Eg\u2066h\u2069i j";
     const stdin = { ...action, tool: "codex.stdin", summary: "Type into bash: ...", input: { command: "bash", kind: "writeStdin", reason: typed } };
     const { container } = render(<DecisionCard action={stdin} onDecide={vi.fn()} />);
     expect(container.querySelector("pre.command")?.textContent).toBe(
       "a\\u0085b\\u009bc\\u200bd\\u200fe\\u202af\\u202eg\\u2066h\\u2069i j",
     );
+  });
+
+  it("makes hidden characters in the project name visible", () => {
+    const { container } = render(<DecisionCard action={action} projectName={"Book\u202EClub"} onDecide={vi.fn()} />);
+    expect(container.querySelector("p.project-name")?.textContent).toBe("Book\\u202eClub");
+  });
+
+  it("makes hidden characters in a shell command visible", () => {
+    const sneaky = { ...action, input: { command: "echo safe\u202e; rm -rf ./out" } };
+    const { container } = render(<DecisionCard action={sneaky} onDecide={vi.fn()} />);
+    expect(container.querySelector("pre.command")?.textContent).toBe("echo safe\\u202e; rm -rf ./out");
+    expect(container.querySelector("details pre")?.textContent).toContain("echo safe\\u202e;");
   });
 
   it("shows no command block for other kinds of action", () => {
@@ -132,7 +166,8 @@ describe("DecisionCard", () => {
     const evil = { ...action, summary: '<img src=x onerror="window.__pwned=1">', input: { x: "<script>window.__pwned=1</script>" } };
     const { container } = render(<DecisionCard action={evil} onDecide={vi.fn()} />);
     expect(container.querySelector("img, script")).toBeNull();
-    expect(container.textContent).toContain('<img src=x onerror="window.__pwned=1">');
+    // Shown as literal text (narration escapes the quotes inside a command).
+    expect(container.textContent).toContain("<img src=x onerror=");
     expect(container.querySelector("pre")?.textContent).toContain("<script>");
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
   });

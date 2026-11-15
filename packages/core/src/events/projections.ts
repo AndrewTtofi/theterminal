@@ -1,4 +1,6 @@
-import type { AgentAction, AgentRun, LedgerEntry, PendingAgentAction } from "@theterminal/shared";
+import type {
+  AgentAction, AgentRun, DecisionId, GateDecision, IntakeAnswer, IntakeSession, LedgerEntry, PendingAgentAction, QuestionId,
+} from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
 import type { Ledger } from "../ledger/ledger.js";
@@ -86,9 +88,65 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         p.ok ? "ok" : "failed", p.message, e.ts, p.connectionId,
       );
       break;
-    default:
+    case "intake.started":
+      db.prepare(
+        `INSERT INTO intakes (id, project_id, idea, status, summary, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, 'open', NULL, ?, ?, NULL)`,
+      ).run(p.intakeId, e.projectId, p.idea, e.ts, e.ts);
+      break;
+    case "intake.answered":
+      requireIntake(db, p.intakeId, e.projectId);
+      db.prepare("INSERT OR REPLACE INTO intake_answers (intake_id, question_id, answer, answered_at) VALUES (?, ?, ?, ?)").run(
+        p.intakeId, p.questionId, canonicalJson(p.answer), e.ts,
+      );
+      touchIntake(db, p.intakeId, e.ts);
+      break;
+    case "intake.decided":
+      requireIntake(db, p.intakeId, e.projectId);
+      db.prepare(
+        `INSERT OR REPLACE INTO intake_decisions (intake_id, decision_id, chosen, rationale, owner, decided_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(p.intakeId, p.decisionId, p.chosen, p.rationale, p.owner, e.ts);
+      touchIntake(db, p.intakeId, e.ts);
+      break;
+    case "intake.completed":
+      requireIntake(db, p.intakeId, e.projectId);
+      // The card.created entries committed with it are reduced by their own case.
+      db.prepare("UPDATE intakes SET status = 'completed', summary = ?, completed_at = ?, updated_at = ? WHERE id = ?").run(
+        p.summary, e.ts, e.ts, p.intakeId,
+      );
+      break;
+    case "intake.reopened":
+      requireIntake(db, p.intakeId, e.projectId);
+      db.prepare("UPDATE intakes SET status = 'open', completed_at = NULL, updated_at = ? WHERE id = ?").run(e.ts, p.intakeId);
+      break;
+    case "gate.signed_off":
+    case "gate.waived": {
+      // The payload carries no projectId: the entry's projectId is the project (the gate service always sets it).
+      if (e.projectId === null) throw new Error("gate event without a project");
+      const waived = e.type === "gate.waived";
+      db.prepare(
+        `INSERT INTO gate_decisions (entry_id, gate_id, project_id, card_id, kind, from_stage, to_stage, reason, decided_by, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        e.id, p.gateId, e.projectId, p.cardId, waived ? "waived" : "signed_off", p.from, p.to,
+        waived ? p.reason : null, waived ? p.waivedBy : p.signedBy, e.ts,
+      );
+      break;
+    }
+    default: // gate.blocked and conversation entries project nothing
       break;
   }
+}
+
+/** An intake event must name an intake of its own project; otherwise the append rolls back instead of writing orphan rows. */
+function requireIntake(db: Db, intakeId: string, projectId: string | null): void {
+  const row = db.prepare("SELECT 1 FROM intakes WHERE id = ? AND project_id IS ?").get(intakeId, projectId);
+  if (!row) throw new Error("intake event for an unknown intake");
+}
+
+function touchIntake(db: Db, intakeId: string, ts: string): void {
+  db.prepare("UPDATE intakes SET updated_at = ? WHERE id = ?").run(ts, intakeId);
 }
 
 /** `current` plus `added` minus `removed`, deduplicated and sorted. */
@@ -120,7 +178,10 @@ function setSetting(db: Db, key: string, value: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
-const PROJECTION_TABLES = ["cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits"];
+const PROJECTION_TABLES = [
+  "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
+  "intakes", "intake_answers", "intake_decisions", "gate_decisions",
+];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
 export function rebuildAllProjections(db: Db, ledger: Ledger, opts: { beforeSeq?: number } = {}): void {
@@ -239,4 +300,85 @@ export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts
       failed: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1 AND status_state = 'failed'"),
     },
   };
+}
+
+export type { GateDecision };
+export type IntakeRow = IntakeSession;
+
+type IntakeTableRow = {
+  id: string; project_id: string; idea: string; status: IntakeSession["status"]; summary: string | null;
+  created_at: string; updated_at: string; completed_at: string | null;
+};
+const toIntake = (r: IntakeTableRow): IntakeSession => ({
+  id: r.id, projectId: r.project_id, idea: r.idea, status: r.status, summary: r.summary,
+  createdAt: r.created_at, updatedAt: r.updated_at, completedAt: r.completed_at,
+});
+
+export type IntakeState = {
+  intake: IntakeSession;
+  answers: Partial<Record<QuestionId, { answer: IntakeAnswer; answeredAt: string }>>;
+  decisions: Partial<Record<DecisionId, { chosen: string; rationale: string; owner: string; decidedAt: string }>>;
+};
+
+/** The project's intake with its answers and decisions, or null when it has none. */
+export function getIntake(db: Db, projectId: string): IntakeState | null {
+  const r = db.prepare("SELECT * FROM intakes WHERE project_id = ?").get(projectId) as IntakeTableRow | undefined;
+  if (!r) return null;
+  const answers: IntakeState["answers"] = {};
+  const answerRows = db
+    .prepare("SELECT question_id, answer, answered_at FROM intake_answers WHERE intake_id = ?")
+    .all(r.id) as { question_id: QuestionId; answer: string; answered_at: string }[];
+  for (const a of answerRows) answers[a.question_id] = { answer: JSON.parse(a.answer), answeredAt: a.answered_at };
+  const decisions: IntakeState["decisions"] = {};
+  const decisionRows = db
+    .prepare("SELECT decision_id, chosen, rationale, owner, decided_at FROM intake_decisions WHERE intake_id = ?")
+    .all(r.id) as { decision_id: DecisionId; chosen: string; rationale: string; owner: string; decided_at: string }[];
+  for (const d of decisionRows) {
+    decisions[d.decision_id] = { chosen: d.chosen, rationale: d.rationale, owner: d.owner, decidedAt: d.decided_at };
+  }
+  return { intake: toIntake(r), answers, decisions };
+}
+
+/** Open intakes across every project, oldest first, at most 500. */
+export function listOpenIntakes(db: Db): IntakeSession[] {
+  const rows = db.prepare("SELECT * FROM intakes WHERE status = 'open' ORDER BY created_at, rowid LIMIT 500").all() as IntakeTableRow[];
+  return rows.map(toIntake);
+}
+
+type GateDecisionRow = {
+  entry_id: string; gate_id: GateDecision["gateId"]; project_id: string; card_id: string; kind: GateDecision["kind"];
+  from_stage: GateDecision["from"]; to_stage: GateDecision["to"]; reason: string | null; decided_by: string; at: string;
+};
+
+/** The card's gate sign-offs and waivers, in ledger order. */
+export function listGateDecisions(db: Db, cardId: string): GateDecision[] {
+  const rows = db
+    .prepare("SELECT * FROM gate_decisions WHERE card_id = ? ORDER BY at, rowid")
+    .all(cardId) as GateDecisionRow[];
+  return rows.map((r) => ({
+    entryId: r.entry_id, gateId: r.gate_id, projectId: r.project_id, cardId: r.card_id, kind: r.kind,
+    from: r.from_stage, to: r.to_stage, reason: r.reason, decidedBy: r.decided_by, at: r.at,
+  }));
+}
+
+/** Sum of reported cost over the project's runs; a run with no reported cost counts as 0, and no runs gives 0. */
+export function projectSpendUsd(db: Db, projectId: string): number {
+  return (db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM agent_runs WHERE project_id = ?").get(projectId) as {
+    total: number;
+  }).total;
+}
+
+/** Pending actions on the project's runs. */
+export function countPendingActions(db: Db, projectId: string): number {
+  return (db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
+       WHERE r.project_id = ? AND a.status = 'pending'`,
+    )
+    .get(projectId) as { n: number }).n;
+}
+
+/** Runs on the card that are still running. */
+export function countRunningRuns(db: Db, cardId: string): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE card_id = ? AND status = 'running'").get(cardId) as { n: number }).n;
 }

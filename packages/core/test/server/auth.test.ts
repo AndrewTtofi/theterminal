@@ -4,6 +4,7 @@ import { openDatabase } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { registerRoutes } from "../../src/server/routes.js";
+import { GateService } from "../../src/gates/service.js";
 import net from "node:net";
 import { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "../../src/server/auth.js";
 
@@ -21,7 +22,7 @@ beforeEach(async () => {
   await registerAuth(app, { token: TOKEN, port: () => PORT });
   app.get("/", { config: PUBLIC_ROUTE }, async () => "ui");
   app.get("/private", async () => "secret");
-  registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
+  registerRoutes(app, { board, gates: new GateService({ db, ledger }), ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
 });
 
 const bearer = { host: HOST, authorization: `Bearer ${TOKEN}` };
@@ -31,6 +32,13 @@ describe("auth guard", () => {
     const res = await app.inject({ url: "/api/projects", headers: { host: HOST } });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("rejects the gate routes without a token", async () => {
+    const get = await app.inject({ url: "/api/cards/c1/gates?to=ship", headers: { host: HOST } });
+    expect(get.statusCode).toBe(401);
+    const move = await app.inject({ method: "POST", url: "/api/cards/c1/move", headers: { host: HOST }, payload: { to: "ship", gates: [] } });
+    expect(move.statusCode).toBe(401);
   });
 
   it("accepts the bearer token", async () => {

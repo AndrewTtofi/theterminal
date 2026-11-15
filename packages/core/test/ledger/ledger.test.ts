@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GENESIS_HASH, type NewLedgerEntry } from "@theterminal/shared";
+import { GATES, GENESIS_HASH, type NewLedgerEntry } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
 
@@ -84,6 +84,74 @@ describe("Ledger", () => {
     expect(ledger.list({ projectId: "a" }).map((e) => e.seq)).toEqual([1, 3]);
     expect(ledger.list({ afterSeq: 1 }).map((e) => e.seq)).toEqual([2, 3]);
     expect(ledger.list({ limit: 2 }).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  describe("list by card and runs", () => {
+    const ack = GATES.find((g) => g.id === "payments")!.acknowledgement;
+    const entry = (type: string, payload: unknown): NewLedgerEntry => ({ projectId: "p", actor, type, payload } as NewLedgerEntry);
+    const started = (runId: string, cardId: string | null) =>
+      entry("agent.started", { runId, adapter: "fake", authMode: "none", prompt: "go", cardId, worktree: `wt/${runId}` });
+    beforeEach(() => {
+      ledger.append(entry("card.created", { cardId: "c1", title: "One", stage: "design" })); // 1
+      ledger.append(entry("card.created", { cardId: "c2", title: "Two", stage: "design" })); // 2
+      ledger.append(entry("card.moved", { cardId: "c1", from: "design", to: "build" })); // 3
+      ledger.append(entry("card.moved", { cardId: "c2", from: "design", to: "build" })); // 4
+      ledger.append(started("a", null)); // 5
+      ledger.append(started("b", null)); // 6
+      ledger.append(entry("agent.message", { runId: "a", text: "hi" })); // 7
+      ledger.append(entry("agent.message", { runId: "b", text: "hi" })); // 8
+      ledger.append(entry("agent.finished", { runId: "a", status: "completed", costUsd: 0.1, error: null })); // 9
+      ledger.append(entry("gate.signed_off", {
+        gateId: "payments", cardId: "c1", from: "build", to: "ship", conditions: [], acknowledgement: ack, signedBy: "owner",
+      })); // 10
+      ledger.append(entry("gate.signed_off", {
+        gateId: "payments", cardId: "c2", from: "build", to: "ship", conditions: [], acknowledgement: ack, signedBy: "owner",
+      })); // 11
+    });
+
+    it("cardId keeps that card's entries only", () => {
+      const got = ledger.list({ cardId: "c1" });
+      expect(got.map((e) => [e.seq, e.type])).toEqual([[1, "card.created"], [3, "card.moved"], [10, "gate.signed_off"]]);
+    });
+
+    it("runIds keeps those runs' agent entries only", () => {
+      expect(ledger.list({ runIds: ["a"] }).map((e) => e.seq)).toEqual([5, 7, 9]);
+    });
+
+    it("cardId and runIds together give the union, still combined with afterSeq, limit and projectId", () => {
+      expect(ledger.list({ cardId: "c1", runIds: ["a"] }).map((e) => e.seq)).toEqual([1, 3, 5, 7, 9, 10]);
+      expect(ledger.list({ cardId: "c1", runIds: ["a"], afterSeq: 3, limit: 2 }).map((e) => e.seq)).toEqual([5, 7]);
+      expect(ledger.list({ cardId: "c1", projectId: "other" })).toEqual([]);
+    });
+
+    it("an empty runIds matches no run", () => {
+      expect(ledger.list({ runIds: [] })).toEqual([]);
+      expect(ledger.list({ cardId: "c2", runIds: [] }).map((e) => e.seq)).toEqual([2, 4, 11]);
+    });
+
+    it("skips a tampered, unparseable payload instead of failing", () => {
+      db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+      db.prepare("UPDATE ledger SET payload = ? WHERE seq = 3").run("{not json");
+      expect(ledger.list({ cardId: "c1", runIds: ["a"] }).map((e) => e.seq)).toEqual([1, 5, 7, 9, 10]);
+    });
+
+    it("refuses more than 200 runIds", () => {
+      const many = Array.from({ length: 201 }, (_, i) => `r${i}`);
+      expect(() => ledger.list({ runIds: many })).toThrow(RangeError);
+      expect(() => ledger.list({ runIds: many.slice(0, 200) })).not.toThrow();
+    });
+  });
+
+  it("listRows reads past an unparseable row, by range or by seqs", () => {
+    for (let n = 1; n <= 4; n++) ledger.append(created(n));
+    db.exec("DROP TRIGGER IF EXISTS ledger_no_update; DROP TRIGGER IF EXISTS ledger_no_delete;");
+    db.prepare("UPDATE ledger SET payload = ? WHERE seq = 2").run("{not json");
+    const rows = ledger.listRows({ toSeq: 3 });
+    expect(rows.map((r) => ("unreadable" in r ? `gap ${r.seq}` : r.seq))).toEqual([1, "gap 2", 3]);
+    expect(ledger.listRows({ afterSeq: 1, limit: 2 }).map((r) => r.seq)).toEqual([2, 3]);
+    expect(ledger.listRows({ seqs: [4, 1] }).map((r) => r.seq)).toEqual([1, 4]);
+    expect(ledger.listRows({ seqs: [] })).toEqual([]);
+    expect(() => ledger.listRows({ seqs: Array.from({ length: 501 }, (_, i) => i) })).toThrow(RangeError);
   });
 
   it("notifies listeners once per append; unsubscribe stops", () => {

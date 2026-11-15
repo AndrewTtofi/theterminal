@@ -1,11 +1,16 @@
 export { openDatabase } from "./db.js";
 export type { Db } from "./db.js";
 export { canonicalJson } from "./ledger/canonical.js";
-export { Ledger, LedgerReadOnlyError } from "./ledger/ledger.js";
-export type { VerifyResult } from "./ledger/ledger.js";
+export { Ledger, LedgerReadOnlyError, MAX_RUN_IDS } from "./ledger/ledger.js";
+export type { LedgerRow, VerifyResult } from "./ledger/ledger.js";
 export { BoardService, NotFoundError } from "./board/board-service.js";
 export { applyEvent, rebuildAllProjections, getSetting } from "./events/projections.js";
-export { commitEvent } from "./events/commit.js";
+export { commitEvent, commitEvents } from "./events/commit.js";
+export {
+  getIntake, listOpenIntakes, listGateDecisions, projectSpendUsd, countPendingActions, countRunningRuns,
+} from "./events/projections.js";
+export type { GateDecision, IntakeRow, IntakeState } from "./events/projections.js";
+export type { CardStory } from "@theterminal/shared";
 export { registerRoutes } from "./server/routes.js";
 export type { RouteDeps } from "./server/routes.js";
 export { registerAuth, TOKEN_COOKIE, PUBLIC_ROUTE, APP_HOST } from "./server/auth.js";
@@ -17,6 +22,19 @@ export { defaultDataDir } from "./paths.js";
 export { redact, truncate, REDACTED } from "./agents/redact.js";
 export { SharedGitconfigModifiedError, WorktreeManager } from "./agents/worktrees.js";
 export type { AdapterEvent, AdapterStartOptions, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./agents/adapter.js";
+export {
+  IntakeService, RecordedText, HumanRequiredError, SecretInTextError, IntakeCompletedError, IntakeIncompleteError,
+  DecisionNotApplicableError, NoIntakeError,
+} from "./intake/service.js";
+export type { IntakeServiceDeps, IntakeProjectDecisions, RecordedTextDeps } from "./intake/service.js";
+export { GateService, GateBlockedError, GateNotMetError } from "./gates/service.js";
+export type { GateServiceDeps } from "./gates/service.js";
+export { gateFacts, evaluateConditions } from "./gates/conditions.js";
+export { registerIntakeRoutes } from "./server/intake-routes.js";
+export type { IntakeRouteDeps } from "./server/intake-routes.js";
+export { cardStory, narrationContext, ledgerExportLines } from "./story/story.js";
+export { registerStoryRoutes } from "./server/story-routes.js";
+export type { StoryRouteDeps } from "./server/story-routes.js";
 export { registerConnectionRoutes } from "./server/connection-routes.js";
 export type { ConnectionRouteDeps } from "./server/connection-routes.js";
 export { workspaceCounts } from "./events/projections.js";

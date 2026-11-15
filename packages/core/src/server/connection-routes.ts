@@ -6,6 +6,7 @@ import { CliNotInstalledError, InvalidCliHomeError, SignInRunningError, Terminal
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { workspaceCounts } from "../events/projections.js";
+import type { IntakeService } from "../intake/service.js";
 
 export type ConnectionRouteDeps = {
   db: Db;
@@ -14,6 +15,7 @@ export type ConnectionRouteDeps = {
   ledger: Ledger;
   /** The CI status for the status bar without waiting on the network; null when GitHub is not connected. */
   ci: () => CiStatus | null;
+  intake: IntakeService;
 };
 
 const actor = { kind: "human", id: "owner" } as const;
@@ -42,7 +44,7 @@ const patchBody = z
 
 /** Connections and the workspace status. Errors are mapped by the handler in routes.ts. */
 export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionRouteDeps): void {
-  const { db, connections, signin, ledger, ci } = deps;
+  const { db, connections, signin, ledger, ci, intake } = deps;
 
   app.get("/api/connections/catalog", async () => CONNECTION_CATALOG);
 
@@ -111,6 +113,7 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     // Started, never awaited: a hung keychain must not hold up the status bar. A later read sees the outcome.
     void connections.retryIfUnavailable().catch(() => undefined);
     const counts = workspaceCounts(db);
+    const intakeProjects = intake.openDecisionsByProject();
     const budgets = connections.budgets().flatMap((b) => (b.monthlyBudgetUsd === null ? [] : [b.monthlyBudgetUsd]));
     return {
       runningAgents: counts.runningAgents,
@@ -121,6 +124,9 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
       monthlyBudgetUsd: budgets.length === 0 ? null : budgets.reduce((a, b) => a + b, 0),
       connections: { ...counts.connections, keychain: connections.keychainState() },
       ci: ci(),
+      // Undecided plan decisions over every open intake, and the projects they belong to.
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0),
+      intakeProjects,
     };
   });
 }

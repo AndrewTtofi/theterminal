@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { redact } from "../packages/core/dist/index.js";
+import { line, lineMatching, RUN_FINISHED } from "./support.js";
 
 // The agent server keeps secrets in memory and answers connection tests with a stub that looks for TESTKEY (see
 // global-setup.ts). Its fake agent's shell step prints this same key, bare, once allowed. The key matches no built-in
@@ -9,10 +10,6 @@ const KEY = "zq-TESTKEY-e2e-opaque-0000000000";
 test("the stored key matches no built-in redaction pattern, so the live redaction is what the test proves", () => {
   expect(redact(KEY)).toBe(KEY);
 });
-
-const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** Ledger lines whose description is exactly `text` (each line is "<time> · <description>"). */
-const line = (ledger: Locator, text: string) => ledger.filter({ hasText: new RegExp(` · ${escape(text)}$`) });
 
 const ledgerItems = (page: Page) => page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
 const openView = (page: Page, name: string) => page.getByRole("navigation", { name: "Views" }).getByRole("button", { name }).click();
@@ -150,7 +147,7 @@ async function runAndAllowShell(page: Page, prompt: string, completedRuns: numbe
   const card = page.getByRole("article", { name: "Decision: Run: nvidia-smi" });
   await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Allow" }).click();
-  await expect(line(ledgerItems(page), "Agent run completed")).toHaveCount(completedRuns);
+  await expect(lineMatching(ledgerItems(page), RUN_FINISHED("Fake"))).toHaveCount(completedRuns);
 }
 
 test("a stored key is redacted from agent output, and stays redacted after the connection is removed", async ({ page }) => {
@@ -165,7 +162,7 @@ test("a stored key is redacted from agent output, and stays redacted after the c
   const editor = await addClaude(page);
   await runAndAllowShell(page, "Print the key", 1);
   // The ledger panel names the completed action; its output is in the entry's payload.
-  await expect(ledgerItems(page).filter({ hasText: / · Agent [0-9a-f]{8} finished an action$/ })).toHaveCount(1);
+  await expect(line(ledgerItems(page), "Done (1 line of output)")).toHaveCount(1);
   expect(await completedOutputs(page, project)).toEqual(["[REDACTED]"]);
 
   await openView(page, "Connections");

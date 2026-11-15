@@ -11,6 +11,7 @@ import { AgentRunner } from "../../src/agents/runner.js";
 import { ProviderSettings } from "../../src/agents/settings.js";
 import { registerAgentRoutes } from "../../src/server/agent-routes.js";
 import { registerRoutes } from "../../src/server/routes.js";
+import { GateService } from "../../src/gates/service.js";
 import { EMPTY_GITCONFIG, WorktreeManager, ensureEmptyGitconfig } from "../../src/agents/worktrees.js";
 import { BoardService } from "../../src/board/board-service.js";
 import { openDatabase } from "../../src/db.js";
@@ -537,7 +538,7 @@ describe("agent API", { timeout: 15000 }, () => {
     });
     const app = Fastify();
     try {
-      registerRoutes(app, { board, ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
+      registerRoutes(app, { board, gates: new GateService({ db, ledger }), ledger, getIntegrity: () => ({ ok: true, count: 0 }) });
       registerAgentRoutes(app, { db, runner, settings: new ProviderSettings(db, ledger), adapters: ["fake"], available: () => false, apiKey: () => "none" });
       await runner.shutdown();
       const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/runs`, payload: { adapter: "fake", prompt: "go" } });

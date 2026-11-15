@@ -5,6 +5,7 @@ import type {
   AuthMode,
   Board,
   Card,
+  CardStory,
   CatalogEntry,
   CapacityReport,
   CiStatus,
@@ -12,11 +13,17 @@ import type {
   ConnectionKind,
   ConnectionProvider,
   GitHubOverview,
+  DecisionId,
+  GateDecisionInput,
+  GateEvaluation,
   HardwareInfo,
+  IntakeAnswer,
+  IntakeView,
   LedgerEntry,
   PendingAgentAction,
   Project,
   Provider,
+  QuestionId,
   Stage,
 } from "@theterminal/shared";
 
@@ -33,8 +40,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
-    /** What the error names, when the server sends it: the connection whose cloud credentials could not be had. */
-    readonly detail?: string,
+    /** The rest of the error body (everything but `error`), when the server sent more; callers narrow it. */
+    readonly detail?: unknown,
   ) {
     super(`${status} ${code}`);
     this.name = "ApiError";
@@ -55,12 +62,14 @@ async function request<T>(
   });
   if (!res.ok) {
     let code = "internal";
-    let detail: string | undefined;
+    let detail: unknown;
     try {
-      const body = (await res.json()) as { error?: string; name?: unknown; adapter?: unknown };
-      code = body.error ?? code;
-      if (code === "cloud_credentials_failed" && typeof body.name === "string") detail = body.name;
-      if (code === "mcp_unsupported" && typeof body.adapter === "string") detail = body.adapter;
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+        const { error, ...rest } = body as Record<string, unknown>;
+        if (typeof error === "string") code = error;
+        if (Object.keys(rest).length > 0) detail = rest;
+      }
     } catch {
       // non-JSON error body: keep the default code
     }
@@ -106,6 +115,10 @@ export type Status = {
   connections: { enabled: number; failed: number; keychain: "ok" | "unavailable" };
   /** null when GitHub is not connected. */
   ci: CiStatus | null;
+  /** Undecided plan decisions over every open intake. */
+  intakeDecisions: number;
+  /** The projects whose open intake has undecided plan decisions; `name` is the project's name as recorded. */
+  intakeProjects: { projectId: string; name: string; decisions: number }[];
 };
 
 /** A sign-in through the provider's own login command; `lines` are the safe lines it printed (links, codes). */
@@ -121,8 +134,13 @@ export const api = {
   getBoard: (id: string) => request<Board>(`/api/projects/${encodeURIComponent(id)}/board`),
   addCard: (projectId: string, i: { title: string; stage: Stage }) =>
     request<Card>(`/api/projects/${encodeURIComponent(projectId)}/cards`, { method: "POST", body: i }),
-  moveCard: (cardId: string, to: Stage) =>
-    request<Card>(`/api/cards/${encodeURIComponent(cardId)}/move`, { method: "POST", body: { to } }),
+  /** Every gate a move to `to` would raise, evaluated now; nothing is recorded. */
+  getCardGates: (cardId: string, to: Stage) =>
+    request<GateEvaluation[]>(`/api/cards/${enc(cardId)}/gates?to=${enc(to)}`),
+  /** Moves through the gates; a gate left without a decision answers 409 `gate_blocked` with `{ gates }` (see blockedGates). */
+  moveCard: (cardId: string, to: Stage, gates?: GateDecisionInput[]) =>
+    request<Card>(`/api/cards/${enc(cardId)}/move`, { method: "POST", body: gates ? { to, gates } : { to } }),
+  getCardStory: (cardId: string) => request<CardStory>(`/api/cards/${enc(cardId)}/story`),
   getAgents: () => request<AgentsInfo>("/api/agents"),
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
@@ -162,6 +180,31 @@ export const api = {
   getSignIn: (id: string) => request<SignInView>(`/api/connections/signin/${enc(id)}`),
   cancelSignIn: (id: string) => request<void>(`/api/connections/signin/${enc(id)}`, { method: "DELETE" }),
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
+  /**
+   * The project's guided intake, or null when it has none yet. A project that no longer exists throws its 404
+   * `not_found`, which `errorMessage(e, "intake")` words as "This project no longer exists".
+   */
+  getIntake: async (projectId: string): Promise<IntakeView | null> => {
+    try {
+      return await request<IntakeView>(`/api/projects/${enc(projectId)}/intake`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404 && e.code === "no_intake") return null;
+      throw e;
+    }
+  },
+  startIntake: (projectId: string, idea: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake`, { method: "POST", body: { idea } }),
+  answerIntake: (projectId: string, questionId: QuestionId, answer: IntakeAnswer) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/answers`, { method: "POST", body: { questionId, answer } }),
+  decideIntake: (projectId: string, decisionId: DecisionId, chosen: string, rationale?: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/decisions`, {
+      method: "POST",
+      body: rationale === undefined ? { decisionId, chosen } : { decisionId, chosen, rationale },
+    }),
+  /** Sent with no body: the route takes none. */
+  completeIntake: (projectId: string) => request<IntakeView>(`/api/projects/${enc(projectId)}/intake/complete`, { method: "POST" }),
+  reopenIntake: (projectId: string, reason: string) =>
+    request<IntakeView>(`/api/projects/${enc(projectId)}/intake/reopen`, { method: "POST", body: { reason } }),
 };
 
 /** Why a Codex run cannot be given an MCP server; the picker and the MCP editors show it too. */
@@ -171,13 +214,49 @@ export const CODEX_MCP_NOTE =
 export const GEMINI_MCP_NOTE =
   "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
 
-/** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
-export function errorMessage(e: unknown, context?: "run"): string {
+/** A string field of an error's detail, or undefined. */
+function detailString(e: ApiError, key: string): string | undefined {
+  const d = e.detail;
+  if (typeof d !== "object" || d === null) return undefined;
+  const v = (d as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+/** The gate evaluations a refused move (409 `gate_blocked`) sent back, or null for any other error. */
+export function blockedGates(e: unknown): GateEvaluation[] | null {
+  if (!(e instanceof ApiError) || e.code !== "gate_blocked") return null;
+  const d = e.detail;
+  if (typeof d !== "object" || d === null) return null;
+  const gates = (d as Record<string, unknown>).gates;
+  return Array.isArray(gates) ? (gates as GateEvaluation[]) : null;
+}
+
+/** Where the audit export downloads from: every project's entries, or one project's. */
+export function exportLedgerUrl(projectId: string | null): string {
+  return projectId === null ? "/api/ledger/export" : `/api/ledger/export?projectId=${encodeURIComponent(projectId)}`;
+}
+
+/**
+ * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
+ * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
+ * conflict as the plan being open already.
+ */
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen"): string {
   if (e instanceof ApiError) {
     if (e.status === 423) return "Workspace is read-only";
+    if (e.code === "intake_incomplete") return "Answer every question and make every decision first";
+    if (e.code === "secret_in_text") return "That text looks like it contains a key or password. It was not saved.";
+    if (e.code === "intake_completed") return "This plan is approved. Reopen it to change answers.";
+    if (e.code === "stage_gated") {
+      return detailString(e, "message") ?? "Add the card to an earlier stage, then move it, so its readiness checks run.";
+    }
+    if (e.code === "decision_not_applicable") return "That decision no longer applies to your answers";
+    if (context === "intake" && e.status === 409 && e.code === "conflict") return "This project already has a plan intake";
+    if (context === "intake" && e.status === 404 && e.code === "not_found") return "This project no longer exists";
+    if (context === "reopen" && e.status === 409 && e.code === "conflict") return "This plan is already open for changes.";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
-    if (e.status === 400 && e.code === "mcp_unsupported") return e.detail === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
     if (e.status === 400 && e.code === "duplicate_mcp_server") {
       return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
     }
@@ -185,7 +264,7 @@ export function errorMessage(e: unknown, context?: "run"): string {
       return "A run can be given only one connection per cloud provider. Untick the extra one.";
     }
     if (e.status === 502 && e.code === "cloud_credentials_failed") {
-      return `Could not get credentials from "${e.detail ?? "a cloud connection"}". The run did not start.`;
+      return `Could not get credentials from "${detailString(e, "name") ?? "a cloud connection"}". The run did not start.`;
     }
     if (e.status === 409 && e.code === "conflict") return "Already connected";
     if (e.code === "secret_in_config") return "That field must not contain a key or token";

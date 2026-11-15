@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { test, expect, type Page } from "@playwright/test";
 import { redact } from "../packages/core/dist/index.js";
 import {
-  allow, completedOutputs, ledgerItems, line, lineMatching, openEditor, openProject, prepareRun, removeConnection, runStatuses,
+  allow, completedOutputs, ledgerItems, line, lineMatching, RUN_FINISHED, openEditor, openProject, prepareRun, removeConnection, runStatuses,
   saveWithSecret, showAllProjects, startRun, testConnection, watchForLeaks,
 } from "./support.js";
 
@@ -67,7 +67,7 @@ test("a run gets only the cloud accounts ticked for it, and a minted token is re
   await allow(page, "Run: nvidia-smi");
   await allow(page, "Run: printenv");
   const ledger = ledgerItems(page);
-  await expect(line(ledger, "Agent run completed")).toHaveCount(1);
+  await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(1);
   // Review Focus 1: the bare minted token (never stored, matched by no pattern) is redacted, as is the Azure secret.
   expect((await completedOutputs(page, project)).at(-1)).toBe("[REDACTED]\nenv=AZURE_CLIENT_SECRET=[REDACTED]");
 
@@ -77,7 +77,7 @@ test("a run gets only the cloud accounts ticked for it, and a minted token is re
   await page.getByLabel("Prompt").fill("No cloud this time");
   await startRun(page);
   await allow(page, "Run: nvidia-smi");
-  await expect(line(ledger, "Agent run completed")).toHaveCount(2);
+  await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(2);
   const outputs = await completedOutputs(page, project);
   expect(outputs).toHaveLength(3); // nvidia-smi and printenv, then nvidia-smi only
   expect(outputs.filter((o) => o.includes("AZURE_CLIENT_SECRET"))).toHaveLength(1);

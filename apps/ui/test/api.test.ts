@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, errorMessage } from "../src/api";
+import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -17,7 +17,35 @@ describe("run refusals from the server", () => {
   it("carries which agent refused MCP servers", async () => {
     respond(400, { error: "mcp_unsupported", adapter: "gemini" });
     const err = await api.startRun("p1", { adapter: "gemini", prompt: "go", connectionIds: ["m1"] }).catch((e: unknown) => e);
-    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: "gemini" });
+    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: { adapter: "gemini" } });
+  });
+});
+
+describe("error detail", () => {
+  it("carries the rest of the error body as the detail, whatever its shape", async () => {
+    respond(409, { error: "gate_blocked", gates: [{ id: "payments", met: false }] });
+    const err = await api.moveCard("c1", "ship").catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, code: "gate_blocked", detail: { gates: [{ id: "payments", met: false }] } });
+  });
+
+  it("has no detail for a bare error or a non-JSON body", async () => {
+    respond(404, { error: "not_found" });
+    expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "not_found", detail: undefined });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "internal", detail: undefined });
+  });
+
+  it("ignores a detail of the wrong type when wording a message", () => {
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", { name: 7 }), "run")).toBe(
+      'Could not get credentials from "a cloud connection". The run did not start.',
+    );
+  });
+});
+
+describe("audit export", () => {
+  it("links every project's ledger, or one project's", () => {
+    expect(exportLedgerUrl(null)).toBe("/api/ledger/export");
+    expect(exportLedgerUrl("p/1 x")).toBe("/api/ledger/export?projectId=p%2F1%20x");
   });
 });
 
@@ -68,7 +96,7 @@ describe("connections api", () => {
     expect(JSON.parse(call(f, 0)[1].body as string)).toEqual({ adapter: "claude", prompt: "go", connectionIds: ["aws-1"] });
     respond(502, { error: "cloud_credentials_failed", name: "AWS dev" });
     await expect(api.startRun("p1", { adapter: "claude", prompt: "go" })).rejects.toMatchObject({
-      status: 502, code: "cloud_credentials_failed", detail: "AWS dev",
+      status: 502, code: "cloud_credentials_failed", detail: { name: "AWS dev" },
     });
   });
 
@@ -98,13 +126,13 @@ describe("errorMessage", () => {
     expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
       "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
     );
-    expect(errorMessage(new ApiError(400, "mcp_unsupported", "gemini"), "run")).toBe(
+    expect(errorMessage(new ApiError(400, "mcp_unsupported", { adapter: "gemini" }), "run")).toBe(
       "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.",
     );
     expect(errorMessage(new ApiError(400, "duplicate_mcp_server"), "run")).toBe(
       "Two of the selected MCP servers would get the same name in this run. Untick one of them.",
     );
-    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", "AWS dev"), "run")).toBe(
+    expect(errorMessage(new ApiError(502, "cloud_credentials_failed", { name: "AWS dev" }), "run")).toBe(
       'Could not get credentials from "AWS dev". The run did not start.',
     );
   });
@@ -131,5 +159,85 @@ describe("sign-in api", () => {
     expect(call(f, 2)[1]).toMatchObject({ method: "DELETE" });
     await api.getSignInStatus();
     expect(call(f, 3)[0]).toBe("/api/connections/signin-status");
+  });
+});
+
+describe("intake api", () => {
+  it("reads a project's intake, and null when it has none", async () => {
+    let f = respond(200, { step: "answer" });
+    expect(await api.getIntake("p/1")).toEqual({ step: "answer" });
+    expect(call(f, 0)[0]).toBe("/api/projects/p%2F1/intake");
+    f = respond(404, { error: "no_intake" });
+    expect(await api.getIntake("p1")).toBeNull();
+    respond(404, { error: "not_found" });
+    const gone = await api.getIntake("p1").catch((e: unknown) => e);
+    expect(gone).toMatchObject({ status: 404, code: "not_found" });
+    // A project that no longer exists is said plainly, not left loading.
+    expect(errorMessage(gone, "intake")).toBe("This project no longer exists");
+  });
+
+  it("starts, answers, decides, completes and reopens on the intake routes", async () => {
+    const f = respond(200, {});
+    await api.startIntake("p1", "a reading list");
+    await api.answerIntake("p1", "payments", "yes");
+    await api.decideIntake("p1", "first_version", "full", "");
+    await api.decideIntake("p1", "hosting", "local");
+    await api.completeIntake("p1");
+    await api.reopenIntake("p1", "We will take payments");
+    const sent = (f.mock.calls as [string, RequestInit][]).map(([url, init]) => [
+      url, init.method, init.body === undefined ? undefined : JSON.parse(String(init.body)),
+    ]);
+    expect(sent).toEqual([
+      ["/api/projects/p1/intake", "POST", { idea: "a reading list" }],
+      ["/api/projects/p1/intake/answers", "POST", { questionId: "payments", answer: "yes" }],
+      ["/api/projects/p1/intake/decisions", "POST", { decisionId: "first_version", chosen: "full", rationale: "" }],
+      ["/api/projects/p1/intake/decisions", "POST", { decisionId: "hosting", chosen: "local" }],
+      ["/api/projects/p1/intake/complete", "POST", undefined],
+      ["/api/projects/p1/intake/reopen", "POST", { reason: "We will take payments" }],
+    ]);
+    expect(call(f, 4)[1].headers).toBeUndefined();
+  });
+
+  it("words the intake refusals", () => {
+    expect(errorMessage(new ApiError(409, "intake_incomplete", { missing: { questions: [], decisions: ["hosting"] } }))).toBe(
+      "Answer every question and make every decision first",
+    );
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
+    expect(errorMessage(new ApiError(409, "intake_completed"))).toBe("This plan is approved. Reopen it to change answers.");
+    expect(errorMessage(new ApiError(409, "conflict"), "intake")).toBe("This project already has a plan intake");
+    expect(errorMessage(new ApiError(409, "conflict"), "reopen")).toBe("This plan is already open for changes.");
+    expect(errorMessage(new ApiError(409, "decision_not_applicable"))).toBe("That decision no longer applies to your answers");
+  });
+});
+
+describe("gates and stories api", () => {
+  it("reads a move's gates, moves with or without decisions, and reads a card's story", async () => {
+    const f = respond(200, []);
+    await api.getCardGates("c/1", "ship");
+    expect(call(f, 0)[0]).toBe("/api/cards/c%2F1/gates?to=ship");
+    await api.moveCard("c1", "design");
+    expect(JSON.parse(String(call(f, 1)[1].body))).toEqual({ to: "design" });
+    const decision = { gateId: "ready_to_ship", decision: "sign_off", acknowledgement: "I agree." } as const;
+    await api.moveCard("c1", "ship", [decision]);
+    expect(call(f, 2)[0]).toBe("/api/cards/c1/move");
+    expect(JSON.parse(String(call(f, 2)[1].body))).toEqual({ to: "ship", gates: [decision] });
+    await api.getCardStory("c1");
+    expect(call(f, 3)[0]).toBe("/api/cards/c1/story");
+  });
+
+  it("reads the gates of a blocked move from the error, and nothing from any other error", () => {
+    const gates = [{ id: "payments" }];
+    expect(blockedGates(new ApiError(409, "gate_blocked", { gates }))).toEqual(gates);
+    expect(blockedGates(new ApiError(409, "gate_blocked", { gates: "x" }))).toBeNull();
+    expect(blockedGates(new ApiError(409, "gate_not_met", { gates }))).toBeNull();
+    expect(blockedGates(new Error("x"))).toBeNull();
+  });
+
+  it("shows the server's message for a card added straight into a gated stage", () => {
+    expect(errorMessage(new ApiError(409, "stage_gated", { message: "Add the card to an earlier stage, then move it." }))).toBe(
+      "Add the card to an earlier stage, then move it.",
+    );
+    expect(errorMessage(new ApiError(409, "stage_gated"))).toBe("Add the card to an earlier stage, then move it, so its readiness checks run.");
+    expect(errorMessage(new ApiError(400, "secret_in_text"))).toBe("That text looks like it contains a key or password. It was not saved.");
   });
 });

@@ -1,14 +1,18 @@
 import { useState } from "react";
-import { STAGES } from "@theterminal/shared";
+import { STAGES, visibleControls } from "@theterminal/shared";
 import type { Board as BoardData, Stage } from "@theterminal/shared";
 
 type Props = {
   board: BoardData;
   onAddCard: (stage: Stage, title: string) => void;
-  onMoveCard: (cardId: string, to: Stage) => void;
+  /** Moves through the readiness gates; a gated move waits in the Needs-you strip. */
+  onMoveCard: (cardId: string, to: Stage) => Promise<void> | void;
+  onOpenStory?: (cardId: string) => void;
 };
 
-const label = (s: Stage) => s.charAt(0).toUpperCase() + s.slice(1);
+/** "ship" → "Ship". */
+export const stageLabel = (s: Stage) => s.charAt(0).toUpperCase() + s.slice(1);
+const label = stageLabel;
 
 function AddCard({ stage, onAdd }: { stage: Stage; onAdd: (stage: Stage, title: string) => void }) {
   const [title, setTitle] = useState("");
@@ -32,7 +36,7 @@ function AddCard({ stage, onAdd }: { stage: Stage; onAdd: (stage: Stage, title: 
   );
 }
 
-export function Board({ board, onAddCard, onMoveCard }: Props) {
+export function Board({ board, onAddCard, onMoveCard, onOpenStory }: Props) {
   return (
     <div className="board">
       {STAGES.map((stage) => (
@@ -41,11 +45,20 @@ export function Board({ board, onAddCard, onMoveCard }: Props) {
           {board.columns[stage].map((card) => (
             <div key={card.id} className="card">
               <span className={`dot ${card.status}`} title={card.status} role="img" aria-label={card.status} />
-              <span className="card-title">{card.title}</span>
+              <button
+                type="button"
+                className="card-title"
+                aria-label={`Open the story of ${visibleControls(card.title)}`}
+                onClick={() => onOpenStory?.(card.id)}
+              >
+                {visibleControls(card.title)}
+              </button>
               <select
                 aria-label={`Move ${card.title} to`}
                 value=""
-                onChange={(e) => e.target.value && onMoveCard(card.id, e.target.value.toLowerCase() as Stage)}
+                onChange={(e) => {
+                  if (e.target.value) void onMoveCard(card.id, e.target.value.toLowerCase() as Stage);
+                }}
               >
                 <option value="">Move to…</option>
                 {STAGES.filter((s) => s !== stage).map((s) => (

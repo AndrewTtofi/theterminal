@@ -98,6 +98,10 @@ legend { color: var(--muted); padding: 0 4px; }
 .runs button.selected { background: var(--selected); color: var(--fg-strong); }
 .needs-you-list li { margin-bottom: 6px; }
 .ledger-side label { display: block; padding: 2px 0; }
+.ledger-side fieldset + fieldset { margin-top: 8px; }
+.ledger-export { margin: 12px 0 0; }
+.ledger-export .hint { margin-left: 6px; font-size: 12px; color: var(--muted); }
+.ledger-export .note { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
 .side-group { margin-bottom: 12px; }
 .side-group h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 8px 0 4px; }
 .connections-search { width: 100%; margin: 4px 0 8px; }
@@ -167,6 +171,11 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .ledger > h2 { display: none; }
 .feed-run { margin: 0 0 8px; color: var(--fg-strong); }
 .run-actions li { padding: 2px 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.ledger li.attention { border-left: 3px solid var(--attention); padding-left: 6px; }
+.action-status { color: var(--muted); }
+.run-messages li { padding: 2px 0; font-size: 12px; white-space: pre-wrap; }
+details.raw > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); padding: 6px; margin: 2px 0 4px; white-space: pre-wrap; word-break: break-word; }
 .feed-error { color: var(--danger); }
 
 /* Messages */
@@ -174,6 +183,7 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .error { background: #4a1d22; color: #f5c6cb; padding: 4px 16px; }
 .decision-card { background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; padding: 8px; margin-bottom: 6px; }
 .decision-card pre { overflow: auto; max-height: 160px; background: var(--panel); padding: 6px; }
+.decision-card .means { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
 .decision-card .project-name, .decision-card .note { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
 .decision-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .warning { background: #3d3112; color: #f1deb0; border: 1px solid #7a6320; border-radius: 2px; padding: 6px; margin-top: 6px; }
@@ -214,3 +224,60 @@ button.danger:hover:not(:disabled) { background: #b3412e; }
 .capacity-footer { color: var(--muted); margin: 8px 0 0; }
 .status-item .attention { color: var(--attention); }
 abbr[title] { text-decoration: underline dotted; cursor: help; }
+
+/* Plan intake: the side bar's state line, the strip's notices, the tab and its decision cards. */
+.plan-state { padding: 8px 0; border-top: 1px solid var(--line); }
+.plan-state p { margin: 0 0 6px; color: var(--muted); }
+.needs-you-item { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 6px 8px; margin-bottom: 6px; background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; }
+.intake-panel { padding: 12px 16px; max-width: 860px; overflow: auto; height: 100%; }
+.intake-panel .notice { margin: 0 0 12px; padding: 6px 8px; border-left: 3px solid var(--attention); background: var(--panel); }
+.intake-panel .idea, .intake-panel .progress, .intake-panel .note, .intake-panel .approved { color: var(--muted); }
+.intake-panel textarea { display: block; width: 100%; min-height: 64px; margin: 4px 0; }
+.intake-panel label { display: block; }
+.intake-question { border: 0; padding: 0; margin: 0 0 14px; }
+.intake-question legend, .intake-question > label { color: var(--fg-strong); padding: 0; }
+.intake-question .help { margin: 2px 0 4px; font-size: 12px; color: var(--muted); }
+.intake-options { list-style: none; padding: 0; margin: 4px 0 8px; }
+.intake-options li { margin-bottom: 4px; }
+.intake-options label { display: inline; }
+.intake-options .recommended { margin-left: 8px; padding: 0 6px; border-radius: 8px; background: var(--ok); color: #fff; font-size: 11px; }
+.intake-options .tradeoffs { margin: 2px 0 0 22px; font-size: 12px; color: var(--muted); }
+.intake-decision h4 { margin: 8px 0 2px; font-size: 12px; }
+.intake-decision .because ul { margin: 2px 0 6px; padding-left: 18px; }
+.intake-decision .decided { color: var(--ok); margin: 6px 0; }
+.intake-change { margin-top: 16px; }
+.intake-change > button { margin-bottom: 8px; }
+.intake-plan .summary { color: var(--fg-strong); }
+.intake-plan .problem { color: var(--attention); }
+.plan-cards { padding-left: 18px; }
+.plan-cards .stage { color: var(--fg-strong); }
+
+/* Readiness gates in the Needs-you strip */
+.gate-card { background: var(--bg); border: 1px solid var(--line-strong); border-left: 3px solid var(--attention); border-radius: 2px; padding: 8px; margin-bottom: 6px; }
+.gate-card h3 { margin: 0 0 4px; }
+.gate-card h4 { margin: 8px 0 2px; font-size: 12px; }
+.gate-card .gate-move { margin: 0 0 4px; font-weight: 600; }
+.gate-card ul { margin: 0; padding-left: 18px; }
+.gate-checklist { list-style: none; padding-left: 0 !important; }
+.gate-checklist .met [role="img"] { color: var(--ok); }
+.gate-checklist .unmet [role="img"] { color: var(--danger); }
+.gate-card .muted, .gate-card .hint, .gate-card .note { font-size: 12px; color: var(--muted); }
+.gate-ack, .gate-reason { display: block; margin: 8px 0; }
+.gate-reason textarea { display: block; width: 100%; box-sizing: border-box; }
+.gate-passed { margin: 0 0 4px; font-size: 12px; color: var(--muted); }
+.gate-footer { margin: 4px 0 8px; }
+.gate-prompt > .note { font-size: 12px; color: var(--attention); }
+
+/* A card's title opens its story */
+.card button.card-title { background: none; border: none; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.card button.card-title:hover, .card button.card-title:focus-visible { text-decoration: underline; }
+
+/* The story tab */
+.story { padding: 8px 16px; overflow: auto; height: 100%; box-sizing: border-box; }
+.story header p { margin: 2px 0; color: var(--muted); }
+.story ol, .story ul { padding-left: 20px; }
+.story li { margin-bottom: 4px; }
+.story li.attention .headline { color: var(--attention); }
+.story .reason { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.story time { font-size: 12px; color: var(--muted); }
+.ledger > .note { margin: 2px 0 4px; font-size: 12px; color: var(--attention); }

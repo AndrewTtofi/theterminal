@@ -16,6 +16,10 @@ import { acquireDataDirLock } from "./data-dir-lock.js";
 import { registerLedgerStream } from "./events-ws.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
+import { registerIntakeRoutes } from "./intake-routes.js";
+import { registerStoryRoutes } from "./story-routes.js";
+import { IntakeService } from "../intake/service.js";
+import { GateService } from "../gates/service.js";
 import { registerGitHubRoutes } from "./github-routes.js";
 import { registerCapacityRoutes } from "./capacity-routes.js";
 import { GitHubClient } from "../github/client.js";
@@ -25,6 +29,7 @@ import { commitEvent } from "../events/commit.js";
 import { CONNECTION_TESTERS, cloudTesters } from "../connections/testers.js";
 import { fakeSts, realSts, type StsCaller } from "../connections/cloud/aws.js";
 import { mintCloudGrant } from "../connections/cloud/grant.js";
+import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
@@ -401,8 +406,15 @@ export async function createServer(opts: {
     const db = openDatabase(join(opts.dataDir, "ledger.db"));
     openedDb = db;
     const ledger = new Ledger(db);
-    const board = new BoardService(db, ledger);
     const token = loadToken(opts.dataDir, opts.token);
+    // One scrubber and secret check for everything the Owner writes into the ledger: project names, card titles,
+    // intake answers, waiver reasons. Secrets are read on every check (like the runner's), so a value stored later
+    // is refused at once; connections and runner are declared below and only read when a request arrives.
+    const recorded = new RecordedText({
+      dataDir: opts.dataDir,
+      secrets: () => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()],
+    });
+    const board = new BoardService(db, ledger, { recorded });
 
     // Projections are derived state: rebuild them from the verified ledger so out-of-band edits are undone.
     const integrity = ledger.verify();
@@ -456,6 +468,9 @@ export async function createServer(opts: {
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
+    const intake = new IntakeService({ db, ledger, recorded });
+    const gates = new GateService({ db, ledger, recorded });
+
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
 
     const app = Fastify();
@@ -464,7 +479,7 @@ export async function createServer(opts: {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       registerAuth(app, { token, port: () => boundPort });
       registerLedgerStream(app, ledger);
-      registerRoutes(app, { board, ledger, getIntegrity: () => integrity });
+      registerRoutes(app, { board, gates, ledger, getIntegrity: () => integrity });
       const settings = new ProviderSettings(db, ledger);
       registerAgentRoutes(app, {
         db,
@@ -475,8 +490,10 @@ export async function createServer(opts: {
         available: (p) => fakeCli[p] !== undefined || bundled[p]() !== null || which(PROVIDER_CLI[p]) !== null,
         apiKey: (p) => (connections.credentialsFor(p)?.apiKey ? "connection" : process.env[API_KEY_ENV[p]] ? "environment" : "none"),
       });
+      registerIntakeRoutes(app, { intake });
+      registerStoryRoutes(app, { db, ledger });
       registerConnectionRoutes(app, {
-        db, connections, signin, ledger,
+        db, connections, signin, ledger, intake,
         // A GitHub failure never breaks /api/status: ciStatusNow answers from the cache, else "unknown".
         ci: () => (connections.githubSource() ? github.ciStatusNow() : null),
       });

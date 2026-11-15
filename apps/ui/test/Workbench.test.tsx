@@ -9,6 +9,9 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { Workbench } from "../src/shell/Workbench";
 import type { WorkbenchModel } from "../src/shell/model";
 import { testDock } from "./test-dock";
+import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
+import { planPassed, shipBlocked } from "./gate-fixtures";
+import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
@@ -80,10 +83,24 @@ function model(over: Partial<WorkbenchModel> = {}): WorkbenchModel {
     entries: [entry],
     ledgerScope: "project",
     onLedgerScopeChange: vi.fn(),
+    ledgerTopics: ["board", "agent", "decision", "gate", "intake", "connection", "settings", "other"],
+    onLedgerTopicsChange: vi.fn(),
+    narration: {},
     onProviderAuthChange: vi.fn(),
     connections: connectionsModel(),
     github: { overview: null, error: null, refresh: vi.fn() },
     capacity: { report: null, error: null, refresh: vi.fn() },
+    intake: null,
+    onStartIntake: vi.fn().mockResolvedValue(true),
+    onAnswerIntake: vi.fn().mockResolvedValue(true),
+    onDecideIntake: vi.fn().mockResolvedValue(true),
+    onCompleteIntake: vi.fn().mockResolvedValue(true),
+    onReopenIntake: vi.fn().mockResolvedValue(true),
+    gate: null,
+    onResolveGate: vi.fn().mockResolvedValue(true),
+    onCancelGate: vi.fn(),
+    story: vi.fn().mockReturnValue(new Promise(() => {})),
+    subscribeEntries: () => () => {},
     ...over,
   };
 }
@@ -148,14 +165,14 @@ describe("Workbench", () => {
     const { container } = render(<Workbench model={model({ selectedRunId: "run1", runActions: [action] })} />);
     const feed = container.querySelector<HTMLElement>('[data-panel="agent_feed"]')!;
     expect(within(feed).getByText(/Detect GPU/)).toBeTruthy();
-    expect(within(feed).getByText(/read README\.md · allowed · decided by policy/)).toBeTruthy();
+    expect(within(feed).getByRole("listitem").textContent).toMatch(/Allowed to read read README\.md.*allowed · decided by policy/);
   });
 
   it("keeps the ledger in an aside labelled Ledger in the bottom panel", () => {
     const { container } = render(<Workbench model={model()} />);
     const panel = container.querySelector<HTMLElement>('[data-panel="ledger"]')!;
     const aside = within(panel).getByRole("complementary", { name: "Ledger" });
-    expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created project "Local Model Hub"');
+    expect(within(aside).getAllByRole("listitem")[0]!.textContent).toContain('Owner created the project "Local Model Hub"');
   });
 
   it("switches the ledger scope from the Ledger side bar", async () => {
@@ -307,6 +324,40 @@ describe("Workbench", () => {
     expect(ledgerShown()).toBe(true);
   });
 
+  it("keeps a gate card in the strip in the Connections view with the bottom panel closed, and badges it", async () => {
+    const m = model({ gate: { cardId: "c1", cardTitle: "Login", to: "ship", evaluations: [planPassed(), shipBlocked()], note: null, revision: 0, refreshing: false } });
+    const { container } = render(<Workbench model={m} />);
+    await userEvent.click(view("Connections"));
+    await userEvent.keyboard("{Control>}j{/Control}");
+    expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+    const strip = screen.getByRole("region", { name: "Needs you" });
+    expect(within(strip).getByRole("article", { name: "Gate: Ready to ship" })).toBeTruthy();
+    expect(within(strip).getByText("Passed: Plan approved")).toBeTruthy();
+    expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+    await userEvent.click(within(strip).getByRole("button", { name: "Cancel" }));
+    expect(m.onCancelGate).toHaveBeenCalled();
+  });
+
+  it("opens a card's story tab from its title on the board", async () => {
+    const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
+    const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
+    const { container } = render(<Workbench model={m} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open the story of Login" }));
+    expect(container.querySelector('[data-panel="story:c1"]')?.getAttribute("data-active")).toBe("true");
+    expect(m.story).toHaveBeenCalledWith("c1");
+  });
+
+  it("offers the board's cards when starting a run and passes the chosen one", async () => {
+    const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
+    const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
+    render(<Workbench model={m} />);
+    await userEvent.click(view("Agents"));
+    await userEvent.selectOptions(screen.getByLabelText("Card (optional)"), "Login");
+    await userEvent.type(screen.getByLabelText("Prompt"), "hello");
+    await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+    expect(m.onStartRun).toHaveBeenCalledWith("fake", "hello", [], "c1");
+  });
+
   it("does not show the strip when nothing is pending", () => {
     render(<Workbench model={model()} />);
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
@@ -324,5 +375,80 @@ describe("Workbench", () => {
     expect(side.style.width).toBe("480px");
     for (let i = 0; i < 40; i++) await userEvent.keyboard("{ArrowLeft}");
     expect(handle.getAttribute("aria-valuenow")).toBe("200");
+  });
+
+  describe("plan intake", () => {
+    const statusWith = (intakeProjects: Status["intakeProjects"]): Status => ({
+      runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null,
+      connections: { enabled: 0, failed: 0, keychain: "ok" }, ci: null,
+      intakeDecisions: intakeProjects.reduce((a, p) => a + p.decisions, 0), intakeProjects,
+    });
+
+    it("opens the Plan intake tab from the Projects side bar", async () => {
+      const { container } = render(<Workbench model={model()} />);
+      expect(screen.getByText("Plan: not started")).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: "Plan intake" }));
+      const tab = container.querySelector('[data-panel="intake"]');
+      expect(tab?.getAttribute("data-active")).toBe("true");
+      expect(within(tab as HTMLElement).getByRole("region", { name: "Plan intake" })).toBeTruthy();
+    });
+
+    it("keeps the plan notice in the strip in the Connections view with the bottom panel closed, and opens the tab", async () => {
+      const { container } = render(
+        <Workbench model={model({ intake: intakeView(ALL_ANSWERS), status: statusWith([{ projectId: "p1", name: "Local Model Hub", decisions: 2 }]) })} />,
+      );
+      await userEvent.click(view("Connections"));
+      await userEvent.keyboard("{Control>}j{/Control}");
+      expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      const item = strip.querySelector<HTMLElement>("div.needs-you-item")!;
+      expect(item.textContent).toContain("Your plan needs 2 decisions");
+      expect(strip.querySelectorAll("div.needs-you-item")).toHaveLength(1);
+      await userEvent.click(within(item).getByRole("button", { name: "Open intake" }));
+      expect(container.querySelector('[data-panel="intake"]')?.getAttribute("data-active")).toBe("true");
+    });
+
+    it("shows other projects' open plan decisions in the strip and the Needs you side bar, selecting the project", async () => {
+      const onSelectProject = vi.fn();
+      const { container } = render(
+        <Workbench
+          model={model({ onSelectProject, status: statusWith([{ projectId: "p2", name: "Book Club", decisions: 1 }]) })}
+        />,
+      );
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.textContent).toContain("The plan for Book Club needs 1 decision");
+      expect(within(view("Needs you")).getByText("1")).toBeTruthy();
+      await userEvent.click(within(strip).getByRole("button", { name: "Open intake" }));
+      expect(onSelectProject).toHaveBeenCalledWith("p2");
+      expect(container.querySelector('[data-panel="intake"]')?.getAttribute("data-active")).toBe("true");
+
+      await userEvent.click(view("Needs you"));
+      const side = screen.getByRole("complementary", { name: "Side bar" });
+      expect(side.textContent).toContain("The plan for Book Club needs 1 decision");
+      expect(within(side).getByRole("button", { name: "Open intake" })).toBeTruthy();
+    });
+
+    it("shows the selected project's open decisions while questions are still unanswered", () => {
+      const { budget_usd: _b, ...answers } = ALL_ANSWERS;
+      const intake = intakeView({ ...answers, exposure: "internet" }, { hosting: "own_cloud", exposure_protection: "login" });
+      expect(intake.step).toBe("answer");
+      expect(intake.decisions.filter((d) => d.chosen === null)).toHaveLength(1);
+      render(<Workbench model={model({ intake, status: statusWith([{ projectId: "p1", name: "Local Model Hub", decisions: 1 }]) })} />);
+      const strip = screen.getByRole("region", { name: "Needs you" });
+      expect(strip.querySelector("div.needs-you-item")?.textContent).toContain("Your plan needs 1 decision");
+      expect(screen.getByText("Needs you: 1")).toBeTruthy();
+    });
+
+    it("shows no plan notice for an approved plan", () => {
+      const intake = { ...intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }, { completed: true }) };
+      intake.decisions = intake.decisions.map((d) => ({ ...d, chosen: null }));
+      render(<Workbench model={model({ intake })} />);
+      expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    });
+
+    it("does not show the strip once the plan's decisions are made", () => {
+      render(<Workbench model={model({ intake: intakeView(ALL_ANSWERS, { first_version: "smallest", hosting: "local" }) })} />);
+      expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    });
   });
 });

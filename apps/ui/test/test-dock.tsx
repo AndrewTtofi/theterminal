@@ -7,8 +7,10 @@ const DEFAULT: { id: DockPanelId; where: "main" | "bottom" }[] = [
   { id: "agent_feed", where: "bottom" },
   { id: "ledger", where: "bottom" },
 ];
-/** Built-in panels focus() opens when absent: the defaults, and the Capacity tab, which is not open by default. */
-const BUILT_IN: { id: DockPanelId; where: "main" | "bottom" }[] = [...DEFAULT, { id: "capacity", where: "main" }];
+/** Built-in panels focus() opens when absent: the defaults, and the Capacity and Plan intake tabs, not open by default. */
+const BUILT_IN: { id: DockPanelId; where: "main" | "bottom" }[] = [
+  ...DEFAULT, { id: "capacity", where: "main" }, { id: "intake", where: "main" },
+];
 
 /** The DockApi of the most recently mounted TestDock, so tests can close panels as the Owner would. */
 export const testDock: { api: DockApi | null } = { api: null };

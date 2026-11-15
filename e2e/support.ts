@@ -5,10 +5,15 @@ import { expect, type Locator, type Page } from "@playwright/test";
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Ledger lines whose description is exactly `text` (each line is "<time> · <description>"). */
-export const line = (ledger: Locator, text: string) => ledger.filter({ hasText: new RegExp(` · ${escape(text)}$`) });
-/** Ledger lines whose description matches `pattern` (anchored at both ends). */
-export const lineMatching = (ledger: Locator, pattern: string) => ledger.filter({ hasText: new RegExp(` · ${pattern}$`) });
+/** Ledger lines whose headline matches `pattern` (anchored at both ends); the raw record under it is ignored. */
+export const lineMatching = (ledger: Locator, pattern: string) =>
+  ledger.filter({ has: ledger.page().locator(".headline", { hasText: new RegExp(`^${pattern}$`) }) });
+/** Ledger lines whose headline is exactly `text`. */
+export const line = (ledger: Locator, text: string) => lineMatching(ledger, escape(text));
+/** The ledger's headlines, in the order shown (newest first). */
+export const headlines = async (ledger: Locator) => (await ledger.locator(".headline").allInnerTexts()).map((t) => t.trim());
+/** How a completed run of the given adapter reads in the ledger (a reported cost follows the headline). */
+export const RUN_FINISHED = (adapter: string) => `The ${adapter} agent finished( · .*)?`;
 
 export const ledgerItems = (page: Page) => page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
 export const statusBar = (page: Page) => page.getByRole("contentinfo", { name: "Status bar" });
@@ -147,4 +152,64 @@ export function watchForLeaks(page: Page, secrets: string[]) {
 /** A GET without the session cookie, from Node: the loopback address, since Node on Windows does not resolve *.localhost. */
 export function anonymousUrl(path: string): string {
   return `http://127.0.0.1:${new URL(process.env.TT_E2E_AGENT_URL!).port}${path}`;
+}
+
+/** A value that looks like a token to the redaction patterns; refused wherever intake or waiver text is written. */
+export const SECRET_LIKE = "ghp_TESTKEY0000000000000000000000000000";
+/** The message shown when text that looks like a secret is refused. */
+export const SECRET_REFUSED = "That text looks like it contains a key or password. It was not saved.";
+
+/** The id of the project named `name`, read in the page (it carries the cookie). */
+export function projectId(page: Page, name: string): Promise<string> {
+  return page.evaluate(async (n) => {
+    const projects = (await (await fetch("/api/projects")).json()) as { id: string; name: string }[];
+    const found = projects.find((p) => p.name === n);
+    if (!found) throw new Error(`no project named ${n}`);
+    return found.id;
+  }, name);
+}
+
+/** Every ledger entry of the project, oldest first, read from the ledger API in the page. */
+export function projectEntries(
+  page: Page,
+  projectName: string,
+): Promise<{ seq: number; type: string; payload: Record<string, unknown> }[]> {
+  return page.evaluate(async (name) => {
+    const projects = (await (await fetch("/api/projects")).json()) as { id: string; name: string }[];
+    const project = projects.find((p) => p.name === name)!;
+    const out: { seq: number; type: string; payload: Record<string, unknown> }[] = [];
+    for (;;) {
+      const after = out.length === 0 ? 0 : out[out.length - 1]!.seq;
+      const res = await fetch(`/api/ledger?projectId=${encodeURIComponent(project.id)}&afterSeq=${after}&limit=500`);
+      if (!res.ok) throw new Error(`GET /api/ledger: ${res.status}`);
+      const page = (await res.json()) as { seq: number; type: string; payload: Record<string, unknown> }[];
+      if (page.length === 0) return out.sort((a, b) => a.seq - b.seq);
+      out.push(...page);
+    }
+  }, projectName);
+}
+
+/** The readiness gate card in the Needs-you strip. */
+export const gateCard = (page: Page, title: string) => page.getByRole("article", { name: `Gate: ${title}` });
+/** One line of a gate card's checklist ("✓" or "✗", then the condition). */
+export const checklistLine = (gate: Locator, label: string) =>
+  gate.getByRole("list", { name: "Checklist" }).getByRole("listitem").filter({ hasText: label });
+
+/** Ticks the gate's acknowledgement, gives the reason and chooses Waive; the move button below records it. */
+export async function waive(gate: Locator, reason: string) {
+  await gate.getByRole("checkbox").check();
+  await gate.getByLabel("Why are you proceeding anyway?").fill(reason);
+  await gate.getByRole("button", { name: "Waive" }).click();
+  await expect(gate.getByRole("button", { name: "Waive" })).toHaveAttribute("aria-pressed", "true");
+}
+
+/** The button under the gate cards that makes the move with the decisions taken. */
+export const moveButton = (page: Page, card: string, stage: string) =>
+  page.getByRole("region", { name: "Needs you" }).getByRole("button", { name: `Move "${card}" to ${stage}` });
+
+/** Adds a card to a column of the Board and waits until it shows there. */
+export async function addCard(page: Page, stage: string, title: string) {
+  await page.getByLabel(`Add card to ${stage}`).fill(title);
+  await page.getByLabel(`Add card to ${stage}`).press("Enter");
+  await expect(page.getByRole("region", { name: stage }).getByRole("button", { name: `Open the story of ${title}` })).toBeVisible();
 }

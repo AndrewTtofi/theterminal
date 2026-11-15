@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { headlines, line, lineMatching, RUN_FINISHED } from "./support.js";
 
 test("fake agent run: policy auto-allow/deny, human allow and deny", async ({ page }) => {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
@@ -16,22 +17,23 @@ test("fake agent run: policy auto-allow/deny, human allow and deny", async ({ pa
   await page.getByRole("button", { name: "Start agent" }).click();
 
   await expect(card).toBeVisible();
-  await expect(card).toContainText("Agent wants to: Run: nvidia-smi");
+  await expect(card).toContainText('Agent wants to run the command "nvidia-smi"');
   await card.getByRole("button", { name: "Allow" }).click();
 
   // newest first
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const run1 = [
-    "Agent run completed",
-    "Policy denied: outside worktree",
-    "Owner allowed: approved",
-    "Policy allowed: read-only inside worktree",
-    'Owner started a Fake agent: "Detect GPU"',
+    RUN_FINISHED("Fake"),
+    escape("Stopped automatically: outside worktree"),
+    escape("Owner allowed it"),
+    escape("Allowed automatically: read-only inside worktree"),
+    escape('Owner started a Fake agent: "Detect GPU"'),
   ];
-  await expect(ledger.filter({ hasText: "Agent run completed" })).toHaveCount(1);
-  const texts = (await ledger.allInnerTexts()).map((t) => t.trim());
+  await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(1);
+  const texts = await headlines(ledger);
   let from = 0;
   for (const want of run1) {
-    const idx = texts.findIndex((t, i) => i >= from && t.includes(want));
+    const idx = texts.findIndex((t, i) => i >= from && new RegExp(`^${want}$`).test(t));
     expect(idx, `ledger line "${want}" after index ${from}`).toBeGreaterThanOrEqual(from);
     from = idx + 1;
   }
@@ -46,7 +48,7 @@ test("fake agent run: policy auto-allow/deny, human allow and deny", async ({ pa
   await card.getByRole("textbox").fill("not now");
   await card.getByRole("button", { name: "Confirm deny" }).click();
 
-  await expect(ledger.filter({ hasText: "Owner denied: not now" })).toHaveCount(1);
-  await expect(ledger.filter({ hasText: "Agent run completed" })).toHaveCount(2);
+  await expect(line(ledger, "Owner denied it: not now")).toHaveCount(1);
+  await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(2);
   await expect(card).toHaveCount(0);
 });

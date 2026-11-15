@@ -1,11 +1,7 @@
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { headlines, line, lineMatching, RUN_FINISHED } from "./support.js";
 
 // The agent server runs the fake Codex and Gemini CLIs (packages/core/test/fixtures) with the scripts set in global-setup.ts.
-
-const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/** Ledger lines whose description is exactly `text` (each line is "<time> · <description>"). */
-const line = (ledger: Locator, text: string) => ledger.filter({ hasText: new RegExp(` · ${escape(text)}$`) });
 
 async function openProject(page: Page, name: string) {
   await page.goto(process.env.TT_E2E_AGENT_URL!);
@@ -29,13 +25,13 @@ test("Codex: a command asks first, the owner allows it, and the run completes", 
   await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Allow" }).click();
 
-  await expect(line(ledger, "Agent run completed")).toHaveCount(1);
-  await expect(line(ledger, "Owner allowed: approved")).toHaveCount(1);
+  await expect(lineMatching(ledger, RUN_FINISHED("Codex"))).toHaveCount(1);
+  await expect(line(ledger, "Owner allowed it")).toHaveCount(1);
   await expect(line(ledger, 'Owner started a Codex agent: "Run the tests"')).toHaveCount(1);
   // Newest first: the allow comes before (below) the completion.
-  const texts = (await ledger.allInnerTexts()).map((t) => t.trim());
-  const at = (text: string) => texts.findIndex((t) => t.endsWith(` · ${text}`));
-  expect(at("Agent run completed")).toBeLessThan(at("Owner allowed: approved"));
+  const texts = await headlines(ledger);
+  const at = (pattern: string) => texts.findIndex((t) => new RegExp(`^${pattern}$`).test(t));
+  expect(at(RUN_FINISHED("Codex"))).toBeLessThan(at("Owner allowed it"));
   await expect(card).toHaveCount(0);
 });
 
@@ -43,7 +39,7 @@ test("Gemini: a read outside the worktree is denied by policy, and the owner den
   const ledger = await openProject(page, "Gemini Project");
   await startAgent(page, "gemini", "Write the notes");
 
-  await expect(line(ledger, "Policy denied: outside worktree")).toHaveCount(1);
+  await expect(line(ledger, "Stopped automatically: outside worktree")).toHaveCount(1);
 
   const card = page.getByRole("article", { name: "Decision: Write notes.txt" });
   await expect(card).toBeVisible();
@@ -51,12 +47,12 @@ test("Gemini: a read outside the worktree is denied by policy, and the owner den
   await card.getByRole("textbox").fill("not now");
   await card.getByRole("button", { name: "Confirm deny" }).click();
 
-  await expect(line(ledger, "Owner denied: not now")).toHaveCount(1);
-  await expect(line(ledger, "Agent run completed")).toHaveCount(1);
+  await expect(line(ledger, "Owner denied it: not now")).toHaveCount(1);
+  await expect(lineMatching(ledger, RUN_FINISHED("Gemini"))).toHaveCount(1);
   // Newest first: the completion, then the owner's deny, then the policy's.
-  const texts = (await ledger.allInnerTexts()).map((t) => t.trim());
-  const at = (text: string) => texts.findIndex((t) => t.endsWith(` · ${text}`));
-  expect(at("Agent run completed")).toBeLessThan(at("Owner denied: not now"));
-  expect(at("Owner denied: not now")).toBeLessThan(at("Policy denied: outside worktree"));
+  const texts = await headlines(ledger);
+  const at = (pattern: string) => texts.findIndex((t) => new RegExp(`^${pattern}$`).test(t));
+  expect(at(RUN_FINISHED("Gemini"))).toBeLessThan(at("Owner denied it: not now"));
+  expect(at("Owner denied it: not now")).toBeLessThan(at("Stopped automatically: outside worktree"));
   await expect(card).toHaveCount(0);
 });

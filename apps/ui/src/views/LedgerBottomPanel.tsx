@@ -7,5 +7,5 @@ export function LedgerBottomPanel() {
   if (model.ledgerScope === "project" && !model.selectedId) {
     return <p className="empty">Select a project to see its ledger, or show all projects from the Ledger view.</p>;
   }
-  return <LedgerPanel entries={model.entries} />;
+  return <LedgerPanel entries={model.entries} topics={model.ledgerTopics} ctx={model.narration} />;
 }

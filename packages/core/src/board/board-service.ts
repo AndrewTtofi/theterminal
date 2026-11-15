@@ -18,6 +18,7 @@ import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
 import { applyEvent as defaultApplyEvent, rebuildAllProjections } from "../events/projections.js";
+import { RecordedText } from "../intake/recorded-text.js";
 
 export class NotFoundError extends Error {
   constructor(what: string, id: string) {
@@ -38,8 +39,21 @@ const toCard = (r: CardRow): Card => ({
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
+/** The card as the board projects it; NotFoundError when there is none. */
+export function requireCard(db: Db, id: string): Card {
+  const r = db.prepare("SELECT * FROM cards WHERE id = ?").get(id) as CardRow | undefined;
+  if (!r) throw new NotFoundError("card", id);
+  return toCard(r);
+}
+
+const NAME_LIMITS = { min: 1, max: 120 };
+const PITCH_LIMITS = { min: 0, max: 500 };
+const TITLE_LIMITS = { min: 1, max: 200 };
+
 export type BoardServiceOptions = {
   newId?: () => string;
+  /** How project names and card titles are made fit for the ledger; the server shares its own. */
+  recorded?: RecordedText;
   /** Test seam: replaces the projection reducer. */
   applyEvent?: (db: Db, e: LedgerEntry) => void;
 };
@@ -47,6 +61,7 @@ export type BoardServiceOptions = {
 export class BoardService {
   private readonly newId: () => string;
   private readonly apply: (db: Db, e: LedgerEntry) => void;
+  private readonly recorded: RecordedText;
 
   constructor(
     private readonly db: Db,
@@ -55,10 +70,15 @@ export class BoardService {
   ) {
     this.newId = opts.newId ?? (() => randomUUID());
     this.apply = opts.applyEvent ?? defaultApplyEvent;
+    this.recorded = opts.recorded ?? new RecordedText();
   }
 
   createProject(actor: Actor, input: { name: string; pitch?: string }): Project {
-    const { name, pitch } = projectInputSchema.parse(input);
+    const parsed = projectInputSchema.parse(input);
+    // Trimmed, scrubbed of paths and the username, and refused (SecretInTextError) when it holds a secret. The pitch
+    // may be empty (its default).
+    const name = this.recorded.text("name", parsed.name, NAME_LIMITS);
+    const pitch = this.recorded.text("pitch", parsed.pitch, PITCH_LIMITS);
     const projectId = this.newId();
     return this.command(() => ({
       event: { projectId, actor, type: "project.created", payload: { projectId, name, pitch } },
@@ -82,7 +102,9 @@ export class BoardService {
   }
 
   addCard(actor: Actor, projectId: string, input: { title: string; stage: Stage }): Card {
-    const { title, stage } = cardInputSchema.parse(input);
+    const parsed = cardInputSchema.parse(input);
+    const title = this.recorded.text("title", parsed.title, TITLE_LIMITS);
+    const { stage } = parsed;
     const cardId = this.newId();
     return this.command(() => {
       this.requireProject(projectId);
@@ -139,8 +161,6 @@ export class BoardService {
   }
 
   private requireCard(id: string): Card {
-    const r = this.db.prepare("SELECT * FROM cards WHERE id = ?").get(id) as CardRow | undefined;
-    if (!r) throw new NotFoundError("card", id);
-    return toCard(r);
+    return requireCard(this.db, id);
   }
 }

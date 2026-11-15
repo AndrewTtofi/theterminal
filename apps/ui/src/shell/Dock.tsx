@@ -6,7 +6,8 @@ import "dockview-react/dist/styles/dockview.css";
 import { BOTTOM_SHARE, buildDefault, componentOf, restoreOrDefault } from "./dock-layout";
 import { loadLayout, resetLayout, saveLayout } from "./layout-store";
 
-export type DockPanelId = "board" | "agent_feed" | "ledger" | "capacity" | `connection:${string}`;
+export type DockPanelId =
+  | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | `connection:${string}` | `story:${string}`;
 export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
   focus(id: DockPanelId): void;
@@ -24,6 +25,7 @@ const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bo
   agent_feed: { title: "Agent feed", where: "bottom" },
   ledger: { title: "Ledger", where: "bottom" },
   capacity: { title: "Capacity", where: "main" },
+  intake: { title: "Plan intake", where: "main" },
 };
 function bottomPanel(api: DockviewApi): IDockviewPanel | undefined {
   return BOTTOM_IDS.map((id) => api.getPanel(id)).find((p) => p !== undefined);

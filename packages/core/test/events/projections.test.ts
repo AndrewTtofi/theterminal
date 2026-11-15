@@ -1,15 +1,16 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
-import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
+import { CLAUDE_SUBSCRIPTION_ACK, GATES, INTAKE_VERSION, type GateId } from "@theterminal/shared";
 import { openDatabase, type Db } from "../../src/db.js";
 import { Ledger } from "../../src/ledger/ledger.js";
 import { BoardService } from "../../src/board/board-service.js";
-import { commitEvent } from "../../src/events/commit.js";
+import { commitEvent, commitEvents } from "../../src/events/commit.js";
 import { ConnectionService } from "../../src/connections/service.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import {
-  getRun, getSetting, listActions, listAllPendingActions, listPendingActions, listRuns, rebuildAllProjections, workspaceCounts,
+  countPendingActions, countRunningRuns, getIntake, getRun, getSetting, listActions, listAllPendingActions, listGateDecisions,
+  listOpenIntakes, listPendingActions, listRuns, projectSpendUsd, rebuildAllProjections, workspaceCounts,
 } from "../../src/events/projections.js";
 
 describe("workspaceCounts", () => {
@@ -201,5 +202,201 @@ describe("agent projections", () => {
     expect(live).toHaveLength(2);
     rebuildAllProjections(db, ledger);
     expect(dump()).toEqual(live);
+  });
+});
+
+const ack = (gateId: GateId) => GATES.find((g) => g.id === gateId)!.acknowledgement;
+const IDEA = "A reading list for a book club";
+
+function startIntake(projectId = "p1", intakeId = "i1") {
+  return emit("intake.started", { intakeId, idea: IDEA, version: INTAKE_VERSION }, human, projectId)!;
+}
+
+describe("intake projections", () => {
+  it("intake.started inserts an open session with no summary", () => {
+    const e = startIntake();
+    expect(db.prepare("SELECT * FROM intakes").all()).toEqual([
+      { id: "i1", project_id: "p1", idea: IDEA, status: "open", summary: null, created_at: e.ts, updated_at: e.ts, completed_at: null },
+    ]);
+    expect(getIntake(db, "p1")).toEqual({
+      intake: { id: "i1", projectId: "p1", idea: IDEA, status: "open", summary: null, createdAt: e.ts, updatedAt: e.ts, completedAt: null },
+      answers: {},
+      decisions: {},
+    });
+    expect(getIntake(db, "other")).toBeNull();
+  });
+
+  it("intake.answered stores the answer as canonical JSON, replaces a re-answer and bumps updated_at", () => {
+    startIntake();
+    emit("intake.answered", { intakeId: "i1", questionId: "audience", answer: "Members of a book club" }, human);
+    emit("intake.answered", { intakeId: "i1", questionId: "platform", answer: ["web", "mobile"] }, human);
+    emit("intake.answered", { intakeId: "i1", questionId: "budget_usd", answer: 25 }, human);
+    const last = emit("intake.answered", { intakeId: "i1", questionId: "platform", answer: ["web"] }, human)!;
+    expect(db.prepare("SELECT question_id, answer FROM intake_answers ORDER BY question_id").all()).toEqual([
+      { question_id: "audience", answer: '"Members of a book club"' },
+      { question_id: "budget_usd", answer: "25" },
+      { question_id: "platform", answer: '["web"]' },
+    ]);
+    const got = getIntake(db, "p1")!;
+    expect(got.intake.updatedAt).toBe(last.ts);
+    expect(got.answers).toEqual({
+      audience: { answer: "Members of a book club", answeredAt: expect.any(String) },
+      budget_usd: { answer: 25, answeredAt: expect.any(String) },
+      platform: { answer: ["web"], answeredAt: last.ts },
+    });
+  });
+
+  it("intake.decided inserts or replaces the decision", () => {
+    startIntake();
+    emit("intake.decided", { intakeId: "i1", decisionId: "first_version", chosen: "full", rationale: "We want it all", owner: "owner" }, human);
+    const e = emit("intake.decided", { intakeId: "i1", decisionId: "first_version", chosen: "smallest", rationale: "Start small", owner: "owner" }, human)!;
+    expect(db.prepare("SELECT * FROM intake_decisions").all()).toEqual([
+      { intake_id: "i1", decision_id: "first_version", chosen: "smallest", rationale: "Start small", owner: "owner", decided_at: e.ts },
+    ]);
+    expect(getIntake(db, "p1")!.decisions).toEqual({
+      first_version: { chosen: "smallest", rationale: "Start small", owner: "owner", decidedAt: e.ts },
+    });
+  });
+
+  it("intake.completed sets the summary and completion, the cards in the same batch are created, and reopen keeps the summary", () => {
+    startIntake();
+    const entries = commitEvents(db, ledger, () => ({
+      events: [
+        { projectId: "p1", actor: human, type: "intake.completed", payload: {
+          intakeId: "i1", summary: "A small web app", cards: [{ cardId: "c1", title: "Sign in", stage: "plan", outcome: "created" }],
+        } },
+        { projectId: "p1", actor: human, type: "card.created", payload: { cardId: "c1", title: "Sign in", stage: "plan" } },
+      ],
+      result: (es) => es,
+    }));
+    const done = entries[0]!;
+    expect(db.prepare("SELECT status, summary, completed_at, updated_at FROM intakes").get()).toEqual({
+      status: "completed", summary: "A small web app", completed_at: done.ts, updated_at: done.ts,
+    });
+    expect(db.prepare("SELECT id, title FROM cards").all()).toEqual([{ id: "c1", title: "Sign in" }]);
+    expect(listOpenIntakes(db)).toEqual([]);
+
+    const re = emit("intake.reopened", { intakeId: "i1", reason: "The scope changed" }, human)!;
+    expect(db.prepare("SELECT status, summary, completed_at, updated_at FROM intakes").get()).toEqual({
+      status: "open", summary: "A small web app", completed_at: null, updated_at: re.ts,
+    });
+    expect(listOpenIntakes(db).map((i) => i.id)).toEqual(["i1"]);
+  });
+
+  it("listOpenIntakes lists only open sessions", () => {
+    startIntake("p1", "i1");
+    startIntake("p2", "i2");
+    emit("intake.completed", { intakeId: "i2", summary: "Done", cards: [] }, human, "p2");
+    expect(listOpenIntakes(db).map((i) => [i.id, i.projectId, i.status])).toEqual([["i1", "p1", "open"]]);
+  });
+});
+
+describe("gate projections", () => {
+  it("gate.signed_off and gate.waived insert decisions with the entry id; gate.blocked projects nothing", () => {
+    const blocked = emit("gate.blocked", { cardId: "c1", from: "plan", to: "design", gates: [{ gateId: "plan_approved", outcome: "needs_sign_off", unmet: [] }] }, human)!;
+    expect(blocked).toBeTruthy();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM gate_decisions").get()).toEqual({ n: 0 });
+    const signed = emit("gate.signed_off", {
+      gateId: "plan_approved", cardId: "c1", from: "plan", to: "design", conditions: [], acknowledgement: ack("plan_approved"), signedBy: "owner",
+    }, human)!;
+    const waived = emit("gate.waived", {
+      gateId: "ready_to_ship", cardId: "c1", from: "build", to: "ship", unmet: ["no_pending_actions"],
+      reason: "Known and accepted for the demo", acknowledgement: ack("ready_to_ship"), waivedBy: "owner",
+    }, human)!;
+    emit("gate.signed_off", {
+      gateId: "plan_approved", cardId: "c2", from: "plan", to: "design", conditions: [], acknowledgement: ack("plan_approved"), signedBy: "owner",
+    }, human);
+    expect(listGateDecisions(db, "c1")).toEqual([
+      { entryId: signed.id, gateId: "plan_approved", projectId: "p1", cardId: "c1", kind: "signed_off", from: "plan", to: "design", reason: null, decidedBy: "owner", at: signed.ts },
+      { entryId: waived.id, gateId: "ready_to_ship", projectId: "p1", cardId: "c1", kind: "waived", from: "build", to: "ship", reason: "Known and accepted for the demo", decidedBy: "owner", at: waived.ts },
+    ]);
+    expect(listGateDecisions(db, "none")).toEqual([]);
+  });
+});
+
+describe("gate projection without a project", () => {
+  it("rejects a gate.signed_off with a null projectId and leaves the ledger empty", () => {
+    expect(() =>
+      emit("gate.signed_off", {
+        gateId: "plan_approved", cardId: "c1", from: "plan", to: "design", conditions: [], acknowledgement: ack("plan_approved"), signedBy: "owner",
+      }, human, null),
+    ).toThrow("gate event without a project");
+    expect(ledger.list()).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM gate_decisions").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("intake and gate rebuild", () => {
+  it("rebuild after start, three answers, a decision, a completion, a reopen and a waiver equals the live tables", () => {
+    startIntake();
+    emit("intake.answered", { intakeId: "i1", questionId: "audience", answer: "Members of a book club" }, human);
+    emit("intake.answered", { intakeId: "i1", questionId: "platform", answer: ["web"] }, human);
+    emit("intake.answered", { intakeId: "i1", questionId: "budget_usd", answer: 40.5 }, human);
+    emit("intake.decided", { intakeId: "i1", decisionId: "first_version", chosen: "smallest", rationale: "Start small", owner: "owner" }, human);
+    commitEvents(db, ledger, () => ({
+      events: [
+        { projectId: "p1", actor: human, type: "intake.completed", payload: {
+          intakeId: "i1", summary: "A small web app", cards: [{ cardId: "c1", title: "Sign in", stage: "build", outcome: "created" }],
+        } },
+        { projectId: "p1", actor: human, type: "card.created", payload: { cardId: "c1", title: "Sign in", stage: "build" } },
+      ],
+      result: () => null,
+    }));
+    emit("intake.reopened", { intakeId: "i1", reason: "The scope changed" }, human);
+    commitEvents(db, ledger, () => ({
+      events: [
+        { projectId: "p1", actor: human, type: "gate.waived", payload: {
+          gateId: "ready_to_ship", cardId: "c1", from: "build", to: "ship", unmet: ["no_pending_actions"],
+          reason: "Known and accepted for the demo", acknowledgement: ack("ready_to_ship"), waivedBy: "owner",
+        } },
+        { projectId: "p1", actor: human, type: "card.moved", payload: { cardId: "c1", from: "build", to: "ship" } },
+      ],
+      result: () => null,
+    }));
+    const tables = ["intakes", "intake_answers", "intake_decisions", "gate_decisions", "cards"];
+    const dump = () => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1, 2`).all());
+    const live = dump();
+    expect(live.map((rows) => rows.length)).toEqual([1, 3, 1, 1, 1]);
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+});
+
+describe("gate fact queries", () => {
+  const insertRun = (id: string, projectId: string, cardId: string | null, status: string, cost: number | null) =>
+    db.prepare(
+      `INSERT INTO agent_runs (id, project_id, card_id, adapter, auth_mode, prompt, status, worktree, cost_usd, started_at)
+       VALUES (?, ?, ?, 'fake', 'none', 'p', ?, 'wt', ?, '2026-11-15T00:00:00.000Z')`,
+    ).run(id, projectId, cardId, status, cost);
+
+  it("projectSpendUsd sums only that project's runs and is 0 when there are none", () => {
+    insertRun("r1", "p1", null, "completed", 1.25);
+    insertRun("r2", "p1", "c1", "failed", 0.5);
+    insertRun("r3", "p1", "c1", "running", null);
+    insertRun("r4", "p2", null, "completed", 9);
+    expect(projectSpendUsd(db, "p1")).toBe(1.75);
+    expect(projectSpendUsd(db, "p3")).toBe(0);
+  });
+
+  it("countRunningRuns counts only running runs on that card", () => {
+    insertRun("r1", "p1", "c1", "running", null);
+    insertRun("r2", "p1", "c1", "running", null);
+    insertRun("r3", "p1", "c1", "completed", 0);
+    insertRun("r4", "p1", "c2", "running", null);
+    insertRun("r5", "p1", null, "running", null);
+    expect(countRunningRuns(db, "c1")).toBe(2);
+    expect(countRunningRuns(db, "c3")).toBe(0);
+  });
+
+  it("countPendingActions counts pending actions on the project's runs", () => {
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r1" });
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r2" }, agent, "p2");
+    emit("agent.action.requested", { runId: "r1", actionId: "a1", kind: "shell", tool: "Bash", summary: "s", input: null });
+    emit("agent.action.requested", { runId: "r1", actionId: "a2", kind: "shell", tool: "Bash", summary: "s", input: null });
+    emit("agent.action.requested", { runId: "r2", actionId: "b1", kind: "shell", tool: "Bash", summary: "s", input: null }, agent, "p2");
+    emit("agent.action.decided", { runId: "r1", actionId: "a1", decision: "allow", by: "human", reason: "" }, human);
+    expect(countPendingActions(db, "p1")).toBe(1);
+    expect(countPendingActions(db, "p2")).toBe(1);
+    expect(countPendingActions(db, "p3")).toBe(0);
   });
 });
