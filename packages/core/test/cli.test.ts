@@ -13,7 +13,8 @@ const TIMEOUT = 30_000;
 
 type Spawned = { child: ChildProcess; stdout: () => string; stderr: () => string; exit: Promise<number | null> };
 
-const children: ChildProcess[] = [];
+/** Every process a test started, with its exit: teardown awaits them before it removes their folders. */
+const children: { child: ChildProcess; exit: Promise<unknown> }[] = [];
 const servers: RunningServer[] = [];
 const dirs: string[] = [];
 /** Grandchildren, killed after each test if they outlived it. */
@@ -34,12 +35,12 @@ function startCli(args: string[], ipc = true, extraEnv: NodeJS.ProcessEnv = {}):
     stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
     env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory", ...extraEnv },
   });
-  children.push(child);
   let out = "";
   let err = "";
   child.stdout?.setEncoding("utf8").on("data", (d: string) => (out += d));
   child.stderr?.setEncoding("utf8").on("data", (d: string) => (err += d));
   const exit = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+  children.push({ child, exit });
   return { child, stdout: () => out, stderr: () => err, exit };
 }
 
@@ -75,10 +76,15 @@ function alive(pid: number): boolean {
 }
 
 afterEach(async () => {
-  for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+  // A killed child is gone only once it has exited; removing its folder before that fails with EBUSY on Windows.
+  const exits = children.splice(0).map(({ child, exit }) => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    return exit;
+  });
+  await Promise.all(exits);
   for (const pid of pids.splice(0)) if (alive(pid)) process.kill(pid, "SIGKILL");
   for (const s of servers.splice(0)) await s.close();
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
 describe("theterminal start as a host's child process", () => {
@@ -170,7 +176,7 @@ describe("theterminal start as a host's child process", () => {
       stdio: ["ignore", "pipe", "inherit"],
       env: { ...process.env, THETERMINAL_FAKE_AGENT: "1", THETERMINAL_SECRET_STORE: "memory" },
     });
-    children.push(parent);
+    children.push({ child: parent, exit: new Promise((resolve) => parent.once("exit", resolve)) });
     const pid = await new Promise<number>((resolve, reject) => {
       let out = "";
       parent.stdout!.setEncoding("utf8").on("data", (d: string) => {

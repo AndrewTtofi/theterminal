@@ -3,7 +3,8 @@
  *
  * Every test uses its own throwaway data folder (with a space and a non-ASCII letter in its path) and `--port 0`, so
  * it never touches the real data folder or a server already running on the default port. The session token is read
- * from that folder and is never printed.
+ * from that folder and is never printed: no assertion here compares a value that could carry it (a page URL with
+ * `?token=`, a cookie value, `document.cookie`), and process output in an error message is redacted first.
  */
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -78,6 +79,9 @@ const test = base.extend<Fixtures>({
 /** Removes a data folder, retrying while a process that is going away still holds a file in it. */
 const removeDir = (d: string) => rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 
+/** Process output fit for a test report: any session token in a URL is redacted. */
+const redact = (s: string) => s.replace(/token=[^&\s"'<>]+/g, "token=<redacted>");
+
 /** Every file under `dir` (symlinks included) whose name is `claude` or `claude.exe`, relative to `dir`. */
 function claudeFiles(dir: string): string[] {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
@@ -109,7 +113,7 @@ async function headless(start: Fixtures["start"], dir: string, readyFile: string
   let exited = false;
   void p.exit.then(() => (exited = true));
   await waitFor(() => existsSync(readyFile) || exited, 60_000, "the ready file");
-  if (!existsSync(readyFile)) throw new Error(`The app exited before it was ready: ${p.stderr()}`);
+  if (!existsSync(readyFile)) throw new Error(`The app exited before it was ready: ${redact(p.stderr())}`);
   const ready = JSON.parse(readFileSync(readyFile, "utf8")) as { loopbackUrl: string; port: number };
   expect(ready.port).toBeGreaterThan(0);
   const token = readFileSync(join(dir, "token"), "utf8").trim();
@@ -188,19 +192,31 @@ test("the app refuses a data folder held by a running CLI server", async ({ dir,
 
   const app = start(APP, ["--headless", "--data-dir", dir, "--port", "0", "--ready-file", join(dir, "ready.json")]);
   expect(await exitWithin(app, 60_000)).toBe(1);
-  expect(app.stderr()).toContain(IN_USE);
+  expect(redact(app.stderr())).toContain(IN_USE);
 
   cli.child.kill("SIGTERM");
   await exitWithin(cli, 15_000);
 });
 
-test("killing the app stops its server", async ({ dir, start }) => {
+/**
+ * Quits a headless app and waits for its server to go: SIGTERM on POSIX, which the app turns into a clean quit; on
+ * Windows there is no signal, so the host is terminated and the server dies with it (kill-on-close job object).
+ */
+async function quitHeadless(h: Headless, dir: string): Promise<void> {
+  const pid = serverPid(dir);
+  h.child.kill(process.platform === "win32" ? undefined : "SIGTERM");
+  await exitWithin(h, 15_000);
+  await waitFor(() => !alive(pid), 15_000, "the server process to exit");
+}
+
+test("killing the app stops its server, and the next launch takes the folder over", async ({ dir, start }) => {
   const a = await headless(start, dir, join(dir, "ready.json"));
   // The server's own pid (from its lock), so the test sees the server child itself, not just its port.
   const pid = serverPid(dir);
   expect(alive(pid)).toBe(true);
+  const lock = join(dir, "server.lock");
 
-  // A force kill: the host gets no chance to stop the server, which must notice on its own.
+  // A force kill: the host gets no chance to stop the server.
   a.child.kill("SIGKILL");
   await waitFor(
     async () => {
@@ -214,8 +230,23 @@ test("killing the app stops its server", async ({ dir, start }) => {
     15_000,
     "the server to stop answering",
   );
-  await waitFor(() => !existsSync(join(dir, "server.lock")), 15_000, "the lock to be released");
-  await waitFor(() => !alive(pid), 15_000, "the server process to exit");
+  if (process.platform === "win32") {
+    // The server child sits in the host's kill-on-close job object: it dies with the host, and nothing removes its
+    // lock. The lock is then stale: gone, or still naming the dead pid.
+    await waitFor(() => !alive(pid), 15_000, "the server process to exit");
+    if (existsSync(lock)) expect(serverPid(dir)).toBe(pid);
+  } else {
+    // The server notices its IPC channel closing, shuts down on its own and releases its lock.
+    await waitFor(() => !existsSync(lock), 15_000, "the lock to be released");
+    await waitFor(() => !alive(pid), 15_000, "the server process to exit");
+  }
+
+  // Takeover: a second app on the same folder starts in spite of whatever the dead server left behind.
+  const b = await headless(start, dir, join(dir, "ready-b.json"));
+  expect((await get(b, "/api/health")).status).toBe(200);
+  expect(serverPid(dir)).not.toBe(pid);
+  await quitHeadless(b, dir);
+
   // No process (server, agent or Electron helper) still holds a file in the data folder.
   removeDir(dir);
   expect(existsSync(dir)).toBe(false);
@@ -230,14 +261,15 @@ test("window: opens the workspace on theterminal.localhost with the session cook
   let closed = false;
   try {
     const page = await app.firstWindow();
-    await expect(page).toHaveURL(/^http:\/\/theterminal\.localhost:\d+\/$/, { timeout: 60_000 });
+    // Not toHaveURL: its failure message would print the bootstrap URL, which carries the session token.
+    await waitFor(() => /^http:\/\/theterminal\.localhost:\d+\/$/.test(page.url()), 60_000, "the workspace URL");
+    expect(new URL(page.url()).search).toBe("");
     await expect(page.getByRole("navigation", { name: "Views" }).getByRole("button")).toHaveCount(7);
 
-    const cookies = await app.context().cookies();
-    expect(cookies).toContainEqual(
-      expect.objectContaining({ name: "tt_token", domain: "theterminal.localhost", httpOnly: true, sameSite: "Strict" }),
-    );
-    expect(await page.evaluate(() => document.cookie)).not.toContain("tt_token");
+    // Only the cookie's attributes are compared, never its value.
+    const cookies = (await app.context().cookies()).map(({ name, domain, httpOnly, sameSite }) => ({ name, domain, httpOnly, sameSite }));
+    expect(cookies).toContainEqual({ name: "tt_token", domain: "theterminal.localhost", httpOnly: true, sameSite: "Strict" });
+    expect((await page.evaluate(() => document.cookie)).includes("tt_token")).toBe(false);
 
     const origin = new URL(page.url()).origin;
     await app.close();
