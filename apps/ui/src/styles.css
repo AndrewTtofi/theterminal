@@ -388,3 +388,5 @@ details.override [role="status"]:empty { margin: 0; }
 .learn-topic > p { margin: 4px 0 6px 12px; font-size: 12px; line-height: 1.5; }
 .learn-topic.read > summary { color: var(--muted); }
 .learn-footer { font-size: 11px; margin-top: 12px; }
+.learn-side ul { list-style: none; margin: 0; padding: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

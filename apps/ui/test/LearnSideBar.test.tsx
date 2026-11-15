@@ -64,5 +64,39 @@ describe("LearnSideBar", () => {
     const first = screen.getAllByRole("group")[0] as HTMLDetailsElement;
     expect(first.querySelector("summary")!.textContent).toContain(title("estimates"));
     expect(first.open).toBe(true);
+    expect(screen.getAllByText(title("estimates"), { exact: false })).toHaveLength(1);
+  });
+
+  it("does not mark a deep-linked topic read until the person toggles it", async () => {
+    setup({ learnTopic: "estimates", contextView: "board" });
+    const d = screen.getAllByRole("group")[0] as HTMLDetailsElement;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(d.className).not.toContain("read");
+    expect(localStorage.getItem(LEARN_READ_KEY)).toBeNull();
+    d.open = false;
+    fireEvent(d, new Event("toggle"));
+    d.open = true;
+    fireEvent(d, new Event("toggle"));
+    expect(d.className).toContain("read");
+    expect(screen.getByText("read")).toBeTruthy();
+  });
+
+  it("hides the pinned topic when the search does not match it", () => {
+    setup({ learnTopic: "estimates", contextView: "board" });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search topics" }), { target: { value: "keychain" } });
+    expect(screen.queryByText(title("estimates"))).toBeNull();
+  });
+
+  it("lists topics in lists and copes with a missing scrollIntoView", () => {
+    const original = Element.prototype.scrollIntoView;
+    // @ts-expect-error simulating a DOM without the method
+    Element.prototype.scrollIntoView = undefined;
+    try {
+      setup({ learnTopic: "estimates" });
+      expect(screen.getAllByRole("listitem").length).toBe(LEARN_TOPICS.length);
+      expect((screen.getAllByRole("group")[0] as HTMLDetailsElement).open).toBe(true);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
   });
 });

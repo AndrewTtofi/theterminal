@@ -6,20 +6,37 @@ import { useShell } from "../shell/model";
 
 function Topic({ topic, read, open, onRead }: { topic: LearnTopic; read: boolean; open: boolean; onRead: (id: string) => void }) {
   const ref = useRef<HTMLDetailsElement>(null);
+  /** Set while the page itself opens the topic, so that opening is not counted as the person reading it. */
+  const programmatic = useRef(false);
   useEffect(() => {
     const el = ref.current;
     if (!el || !open) return;
-    el.open = true;
+    if (!el.open) {
+      programmatic.current = true;
+      el.open = true;
+    }
     if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
   }, [open]);
   return (
     <details
       ref={ref}
       className={read ? "learn-topic read" : "learn-topic"}
-      onToggle={(e) => e.currentTarget.open && onRead(topic.id)}
+      onToggle={(e) => {
+        if (programmatic.current) {
+          programmatic.current = false;
+          return;
+        }
+        if (e.currentTarget.open) onRead(topic.id);
+      }}
     >
-      <summary>
-        {read && <span className="learn-check" aria-label="Read">✓</span>} {visibleControls(topic.title)}
+      <summary onClick={() => (programmatic.current = false)}>
+        {read && (
+          <>
+            <span aria-hidden="true">✓</span>
+            <span className="sr-only"> read</span>
+          </>
+        )}{" "}
+        {visibleControls(topic.title)}
       </summary>
       <p>{visibleControls(topic.body)}</p>
     </details>
@@ -43,16 +60,20 @@ export function LearnSideBar() {
   const matchedShown = matched.filter(keep);
   const restShown = rest.filter(keep);
   const empty = !pinned && matchedShown.length === 0 && restShown.length === 0;
-  const item = (t: LearnTopic) => <Topic key={t.id} topic={t} read={read.has(t.id)} open={t.id === learnTopic} onRead={onRead} />;
+  const item = (t: LearnTopic) => (
+    <li key={t.id}>
+      <Topic topic={t} read={read.has(t.id)} open={t.id === learnTopic} onRead={onRead} />
+    </li>
+  );
 
   return (
     <div className="learn-side">
       <input type="search" aria-label="Search topics" placeholder="Search topics" value={query} onChange={(e) => setQuery(e.target.value)} />
-      {pinned && item(pinned)}
+      {pinned && <ul>{item(pinned)}</ul>}
       {matchedShown.length > 0 && (
         <>
           <h3>For what you are looking at</h3>
-          {matchedShown.map(item)}
+          <ul>{matchedShown.map(item)}</ul>
         </>
       )}
       {restShown.length > 0 && (
@@ -64,7 +85,7 @@ export function LearnSideBar() {
               inSection.length > 0 && (
                 <section key={s}>
                   <h4>{LEARN_SECTION_LABELS[s]}</h4>
-                  {inSection.map(item)}
+                  <ul>{inSection.map(item)}</ul>
                 </section>
               )
             );
