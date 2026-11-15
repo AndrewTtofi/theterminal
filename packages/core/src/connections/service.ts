@@ -182,6 +182,9 @@ function toOps(secrets: Record<string, string | null>, priv: Record<string, stri
   ];
 }
 
+const MCP_PROVIDERS: ReadonlySet<ConnectionProvider> = new Set(["mcp_stdio", "mcp_http"]);
+const MCP_VAR_REFERENCE = 'must not contain "${": the agent program would read it as a reference to one of its variables';
+
 function invalid(path: (string | number)[], message: string): never {
   throw new z.ZodError([{ code: "custom", path, message }]);
 }
@@ -219,6 +222,9 @@ function checkFormat(provider: ConnectionProvider, field: ConnectionField, value
   if (badUrl !== null) invalid(path, badUrl);
   if (field.pattern !== undefined && !new RegExp(field.pattern).test(value)) invalid(path, "is not in the expected format");
   if (field.format === "pairs") parsePairs(value, pairsKind(provider));
+  // Claude Code expands ${VAR} in an MCP server's command, arguments, URL, env and headers from its own env, which
+  // holds the run's other secrets: a reference there could hand one to the server. Its syntax has no escape.
+  if (MCP_PROVIDERS.has(provider) && value.includes("${")) invalid(path, MCP_VAR_REFERENCE);
 }
 
 /**

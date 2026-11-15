@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { KIND_LABELS } from "@theterminal/shared";
 import type { ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Connection, Provider } from "@theterminal/shared";
-import { CODEX_MCP_NOTE } from "../api";
+import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE } from "../api";
 
 export const KIND_ICON: Record<ActionKind, string> = {
   file_read: "📄",
@@ -47,8 +47,9 @@ export function AgentPanel({ adapters, providers, connections = [], runs, select
   const chosen = adapter || adapters.find(available) || "";
   const selected = runs.find((r) => r.id === selectedRunId);
   const offered = connections.filter((c) => c.enabled && (c.kind === "cloud" || c.kind === "mcp"));
-  // Codex gets no MCP server: a ticked one stays ticked for another agent, but is never sent.
-  const usable = (c: Connection) => !(chosen === "codex" && c.kind === "mcp");
+  // Codex and Gemini get no MCP server: a ticked one stays ticked for another agent, but is never sent.
+  const noMcpNote = chosen === "codex" ? CODEX_MCP_NOTE : chosen === "gemini" ? GEMINI_MCP_NOTE : null;
+  const usable = (c: Connection) => !(noMcpNote !== null && c.kind === "mcp");
   const connectionIds = offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id);
 
   return (
@@ -99,7 +100,7 @@ export function AgentPanel({ adapters, providers, connections = [], runs, select
                 {c.name} ({KIND_LABELS[c.kind]})
               </label>
             ))}
-            {chosen === "codex" && offered.some((c) => c.kind === "mcp") && <p className="note">{CODEX_MCP_NOTE}</p>}
+            {noMcpNote !== null && offered.some((c) => c.kind === "mcp") && <p className="note">{noMcpNote}</p>}
           </fieldset>
         )}
         <button type="submit" disabled={!chosen || !prompt.trim() || starting}>

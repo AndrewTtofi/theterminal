@@ -32,11 +32,29 @@ export class ShuttingDownError extends Error {
   }
 }
 
-/** A Codex run was given an MCP server: Codex gives no approval step for MCP tool calls under its strict policy. */
+/** The agents that are never given MCP servers in this version, and why. */
+const NO_MCP = {
+  // Codex gives no approval step for MCP tool calls under its strict policy.
+  codex: "Codex cannot use MCP servers in The Terminal yet",
+  // gemini-cli 0.68.0 starts MCP servers only in a trusted folder, and a run's worktree is never trusted
+  // (GEMINI_CLI_TRUST_WORKSPACE=false), since trust would also load repo-planted settings, .env and hooks.
+  gemini: "Gemini cannot use MCP servers in The Terminal yet",
+} as const;
+export type NoMcpAdapter = keyof typeof NO_MCP;
+
+/** A Codex or Gemini run was given an MCP server (see NO_MCP). */
 export class McpUnsupportedError extends Error {
-  constructor() {
-    super("Codex cannot use MCP servers in The Terminal yet");
+  constructor(readonly adapter: NoMcpAdapter) {
+    super(NO_MCP[adapter]);
     this.name = "McpUnsupportedError";
+  }
+}
+
+/** Two of a run's MCP connections would get the same server name: one would silently replace the other. */
+export class DuplicateMcpServerError extends Error {
+  constructor() {
+    super("two of the selected MCP connections would get the same server name");
+    this.name = "DuplicateMcpServerError";
   }
 }
 
@@ -245,7 +263,9 @@ export class AgentRunner {
     }
     // Every selected connection is checked before anything is minted or created; errors propagate as they are.
     const selection = (this.deps.selectConnections ?? defaultSelect)(input.connectionIds ?? []);
-    if (input.adapter === "codex" && selection.mcp.length > 0) throw new McpUnsupportedError();
+    if ((input.adapter === "codex" || input.adapter === "gemini") && selection.mcp.length > 0) throw new McpUnsupportedError(input.adapter);
+    const serverNames = selection.mcp.map((m) => m.serverName);
+    if (new Set(serverNames).size !== serverNames.length) throw new DuplicateMcpServerError();
     const providers = selection.cloud.map((c) => c.provider);
     if (new Set(providers).size !== providers.length) throw new DuplicateCloudProviderError();
     const grants = await this.mintAll(selection.cloud);

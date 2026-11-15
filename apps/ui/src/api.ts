@@ -55,9 +55,10 @@ async function request<T>(
     let code = "internal";
     let detail: string | undefined;
     try {
-      const body = (await res.json()) as { error?: string; name?: unknown };
+      const body = (await res.json()) as { error?: string; name?: unknown; adapter?: unknown };
       code = body.error ?? code;
       if (code === "cloud_credentials_failed" && typeof body.name === "string") detail = body.name;
+      if (code === "mcp_unsupported" && typeof body.adapter === "string") detail = body.adapter;
     } catch {
       // non-JSON error body: keep the default code
     }
@@ -155,9 +156,12 @@ export const api = {
   getSignInStatus: () => request<Record<Provider, SignInStatus>>("/api/connections/signin-status"),
 };
 
-/** Why a Codex run cannot be given an MCP server; the picker shows it too. */
+/** Why a Codex run cannot be given an MCP server; the picker and the MCP editors show it too. */
 export const CODEX_MCP_NOTE =
   "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.";
+/** Why a Gemini run cannot be given an MCP server; the picker and the MCP editors show it too. */
+export const GEMINI_MCP_NOTE =
+  "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
 
 /** The message for a failed request. `context: "run"` words the connection refusals for starting a run. */
 export function errorMessage(e: unknown, context?: "run"): string {
@@ -165,7 +169,10 @@ export function errorMessage(e: unknown, context?: "run"): string {
     if (e.status === 423) return "Workspace is read-only";
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
-    if (e.status === 400 && e.code === "mcp_unsupported") return CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "mcp_unsupported") return e.detail === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "duplicate_mcp_server") {
+      return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
+    }
     if (e.status === 400 && e.code === "duplicate_cloud_provider") {
       return "A run can be given only one connection per cloud provider. Untick the extra one.";
     }

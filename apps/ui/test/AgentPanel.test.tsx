@@ -177,6 +177,22 @@ describe("AgentPanel", () => {
       expect(onStart).toHaveBeenCalledWith("codex", "go", []);
     });
 
+    it("with Gemini disables the MCP boxes, explains why, and never sends one", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(
+        <AgentPanel adapters={["claude", "gemini"]} connections={list} runs={[]} selectedRunId={null}
+          onStart={onStart} onSelectRun={vi.fn()} onStop={vi.fn()} />,
+      );
+      await userEvent.click(screen.getByLabelText("Docs (MCP server)"));
+      await userEvent.selectOptions(screen.getByLabelText("Agent"), "gemini");
+      expect((screen.getByLabelText("Docs (MCP server)") as HTMLInputElement).disabled).toBe(true);
+      expect(screen.getByText("Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.")).toBeTruthy();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("gemini", "go", []);
+    });
+
     it("shows no picker when there is nothing to offer", () => {
       render(
         <AgentPanel adapters={["claude"]} connections={[list[2]!, list[3]!]} runs={[]} selectedRunId={null}

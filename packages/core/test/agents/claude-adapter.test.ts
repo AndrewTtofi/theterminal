@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { query as realSdkQuery, type HookCallbackMatcher, type HookInput, type Options, type SpawnOptions, type query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_SUBSCRIPTION_ACK } from "@theterminal/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
-import { ClaudeAdapter, toolToAction } from "../../src/agents/claude-adapter.js";
+import { ClaudeAdapter, VERIFIED_CLAUDE_CODE_VERSION, toolToAction } from "../../src/agents/claude-adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
 import { AgentRunner, DEFAULT_GATE_TIMEOUT_MS } from "../../src/agents/runner.js";
@@ -581,6 +582,16 @@ describe("ClaudeAdapter", () => {
     expect(argv).toContain("${TT_MCP_0_0}");
     for (const secret of [MCP_ENV_SECRET, MCP_HEADER_SECRET, "TESTKEY"]) expect(argv).not.toContain(secret);
     expect(spawned!.env).toMatchObject({ TT_MCP_0_0: MCP_ENV_SECRET, TT_MCP_1_0: MCP_HEADER_SECRET });
+  });
+
+  it("the installed Agent SDK bundles the Claude Code version whose MCP variable expansion was verified", () => {
+    // The package's exports hide package.json; it sits next to the entry point.
+    const entry = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
+    const pkg = JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8")) as { name: string; claudeCodeVersion: string };
+    expect(pkg.name).toBe("@anthropic-ai/claude-agent-sdk");
+    // A bump means: recheck that `--mcp-config` still expands ${VAR} (the live test), then update the constant.
+    expect(pkg.claudeCodeVersion).toBe(VERIFIED_CLAUDE_CODE_VERSION);
+    expect(VERIFIED_CLAUDE_CODE_VERSION).toBe("2.1.323");
   });
 
   it("does not start Claude when the signal is already aborted", async () => {

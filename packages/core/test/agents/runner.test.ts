@@ -11,7 +11,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, McpUnsupportedError, ShuttingDownError,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError,
   type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
@@ -693,7 +693,11 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
     },
     "conn-azure-0001": { env: { AZURE_CLIENT_SECRET: AZURE_SECRET }, credential: "azure_client_secret", expiresAt: null, secrets: [AZURE_SECRET] },
   };
-  const byId: Record<string, CloudSource | McpServerSpec> = { "conn-aws-0001": aws, "conn-azure-0001": azure, "conn-mcp-0001": mcp };
+  /** Another MCP connection whose id gives the same server name. */
+  const mcpTwin: McpServerSpec = { ...mcp, connectionId: "conn-mcp-0002", name: "Docs copy" };
+  const byId: Record<string, CloudSource | McpServerSpec> = {
+    "conn-aws-0001": aws, "conn-azure-0001": azure, "conn-mcp-0001": mcp, "conn-mcp-0002": mcpTwin,
+  };
   const select = (ids: string[]): RunSelection => ({
     cloud: ids.map((id) => byId[id]!).filter((x): x is CloudSource => "provider" in x),
     mcp: ids.map((id) => byId[id]!).filter((x): x is McpServerSpec => "transport" in x),
@@ -859,7 +863,32 @@ describe("AgentRunner: cloud credentials and MCP servers for a run", () => {
       .start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001"] })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(McpUnsupportedError);
+    expect((err as McpUnsupportedError).adapter).toBe("codex");
     expect((err as Error).message).toBe("Codex cannot use MCP servers in The Terminal yet");
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses a Gemini run with an MCP server before anything is minted", async () => {
+    const start = vi.fn(async () => ({ status: "completed" as const }));
+    const runner = cloudRunner({ gemini: { id: "gemini", start } });
+    const err = await runner
+      .start(owner, { projectId, adapter: "gemini", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpUnsupportedError);
+    expect((err as McpUnsupportedError).adapter).toBe("gemini");
+    expect((err as Error).message).toBe("Gemini cannot use MCP servers in The Terminal yet");
+    expect(start).not.toHaveBeenCalled();
+    expect(mint).not.toHaveBeenCalled();
+    noRun();
+  });
+
+  it("refuses a run whose MCP connections would share a server name, before anything is minted", async () => {
+    const runner = cloudRunner({ claude: { id: "claude", start: async () => ({ status: "completed" }) } });
+    const err = await runner
+      .start(owner, { projectId, adapter: "claude", prompt: "p", connectionIds: ["conn-aws-0001", "conn-mcp-0001", "conn-mcp-0002"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DuplicateMcpServerError);
     expect(mint).not.toHaveBeenCalled();
     noRun();
   });

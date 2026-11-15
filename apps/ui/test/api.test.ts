@@ -13,6 +13,14 @@ const call = (f: ReturnType<typeof vi.fn>, i: number) => f.mock.calls[i] as [str
 
 afterEach(() => vi.unstubAllGlobals());
 
+describe("run refusals from the server", () => {
+  it("carries which agent refused MCP servers", async () => {
+    respond(400, { error: "mcp_unsupported", adapter: "gemini" });
+    const err = await api.startRun("p1", { adapter: "gemini", prompt: "go", connectionIds: ["m1"] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 400, code: "mcp_unsupported", detail: "gemini" });
+  });
+});
+
 describe("connections api", () => {
   it("lists connections and the catalog", async () => {
     const f = respond(200, []);
@@ -89,6 +97,12 @@ describe("errorMessage", () => {
     );
     expect(errorMessage(new ApiError(400, "mcp_unsupported"), "run")).toBe(
       "Codex cannot use MCP servers in The Terminal yet: Codex gives no approval step for MCP tool calls under its strict policy.",
+    );
+    expect(errorMessage(new ApiError(400, "mcp_unsupported", "gemini"), "run")).toBe(
+      "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.",
+    );
+    expect(errorMessage(new ApiError(400, "duplicate_mcp_server"), "run")).toBe(
+      "Two of the selected MCP servers would get the same name in this run. Untick one of them.",
     );
     expect(errorMessage(new ApiError(502, "cloud_credentials_failed", "AWS dev"), "run")).toBe(
       'Could not get credentials from "AWS dev". The run did not start.',
