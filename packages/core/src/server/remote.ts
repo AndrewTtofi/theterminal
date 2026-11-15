@@ -1,7 +1,7 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import net, { isIP, isIPv6, type AddressInfo } from "node:net";
+import net, { isIP, isIPv4, isIPv6, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import tls, { type TLSSocket } from "node:tls";
 import {
@@ -205,7 +205,9 @@ export type HostRule = { port: number; domain: string | null; names: string[] };
 
 /**
  * The remote Host rule, case-insensitive. With a domain: `<domain>`, `<domain>:443` or `<domain>:<port>`. Without:
- * `<name>:<port>` for one of the listener's own names, an IPv6 address in brackets. Anything else is refused.
+ * `<ip>:<port>` for any IP literal (IPv4, or IPv6 in brackets without a zone), since the address a client reaches a
+ * NAT'd or forwarded listener by is not one of its own and an IP literal cannot be a DNS-rebinding vector; or
+ * `<name>:<port>` for one of the listener's own hostnames. Any other name is refused.
  */
 export function remoteHostAllowed(host: string, rule: HostRule): boolean {
   if (typeof host !== "string" || host.length === 0 || host.length > 300) return false;
@@ -216,14 +218,13 @@ export function remoteHostAllowed(host: string, rule: HostRule): boolean {
   }
   const suffix = `:${rule.port}`;
   if (!h.endsWith(suffix)) return false;
-  let name = h.slice(0, -suffix.length);
+  const name = h.slice(0, -suffix.length);
   if (name.startsWith("[")) {
-    if (!name.endsWith("]")) return false;
-    name = name.slice(1, -1);
-    if (name.includes("%") || !isIPv6(name)) return false;
-  } else if (name.includes(":")) {
-    return false;
+    const inner = name.slice(1, -1);
+    return name.endsWith("]") && !inner.includes("%") && isIPv6(inner);
   }
+  if (name.includes(":")) return false;
+  if (isIPv4(name)) return true;
   return rule.names.some((n) => n.toLowerCase() === name);
 }
 

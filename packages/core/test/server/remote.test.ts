@@ -79,17 +79,30 @@ describe("remoteHostAllowed", () => {
     ["[::1]:4318".toUpperCase(), true],
     ["tt-test.local:4318", true],
     ["TT-Test.Local:4318", true],
-    ["192.168.1.11:4318", false],
-    ["10.0.0.1:4318", false],
-    ["[fe80::1]:4318", false],
+    // Any IP literal on the port: a NAT'd or forwarded address is not one of the listener's own, and an IP literal
+    // cannot be a DNS-rebinding vector (rebinding needs a name).
+    ["192.168.1.11:4318", true],
+    ["10.0.0.1:4318", true],
+    ["203.0.113.5:4318", true],
+    ["[fe80::1]:4318", true],
+    ["[2001:db8::1]:4318", true],
+    ["[2001:DB8::1]:4318", true],
     ["other.local:4318", false],
     ["evil.example.org:4318", false],
+    ["192.168.1.10.evil.org:4318", false],
     ["192.168.1.10:4317", false],
+    ["10.0.0.1:4317", false],
     ["[::1]:4317", false],
     ["::1:4318", false],
     ["[::1%en0]:4318", false],
+    ["[fe80::1%25eth0]:4318", false],
+    ["[192.168.1.10]:4318", false],
+    ["[evil.example.org]:4318", false],
     ["192.168.1.10", false],
+    ["10.0.0.1", false],
     ["192.168.1.10:443", false],
+    ["192.168.1", false],
+    ["192.168.1.256:4318", false],
     ["", false],
     ["192.168.1.10:4318:4318", false],
   ])("without a domain, %s → %s", (host, ok) => {
@@ -110,6 +123,9 @@ describe("remoteHostAllowed", () => {
     ["evil.example.org", false],
     ["evil.example.org:443", false],
     ["127.0.0.1:4318", false],
+    ["192.168.1.10:4318", false],
+    ["203.0.113.5:4318", false],
+    ["[::1]:4318", false],
     ["tt-test.local:4318", false],
   ])("with the domain example.test, %s → %s", (host, ok) => {
     expect(remoteHostAllowed(host, { ...own, domain: "example.test" })).toBe(ok);
@@ -204,18 +220,20 @@ describe("RemoteListener", () => {
     expect(received).not.toContain("ok");
   });
 
-  it("applies the remote Host check over TLS: the listener's own address only, and /healthz is exempt", async () => {
+  it("applies the remote Host check over TLS: any IP literal or the listener's own names on its port, and /healthz is exempt", async () => {
     const h = await harness();
     const { port, fp } = await enabled(h);
     expect((await pinnedRequest(port, fp, { path: "/whoami", host: `127.0.0.1:${port}` })).status).toBe(200);
     expect((await pinnedRequest(port, fp, { path: "/whoami", host: `tt-test.local:${port}` })).status).toBe(200);
+    // The address a client reaches a NAT'd or forwarded listener by (docker -p, a router) is not one of its own.
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `192.168.1.11:${port}` })).status).toBe(200);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `[::1]:${port}` })).status).toBe(200);
     const evil = await pinnedRequest(port, fp, { path: "/whoami", host: `evil.example.org:${port}` });
     expect(evil.status).toBe(403);
     expect(JSON.parse(evil.body)).toEqual({ error: "bad_host" });
-    // bound to 127.0.0.1, so neither another address nor IPv6 loopback is this listener's
-    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `192.168.1.11:${port}` })).status).toBe(403);
-    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `[::1]:${port}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `other.local:${port}` })).status).toBe(403);
     expect((await pinnedRequest(port, fp, { path: "/whoami", host: `127.0.0.1:${port + 1}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { path: "/whoami", host: `192.168.1.11:${port + 1}` })).status).toBe(403);
     expect((await pinnedRequest(port, fp, { path: "/healthz", host: `evil.example.org:${port}` })).status).toBe(200);
   });
 
@@ -227,7 +245,8 @@ describe("RemoteListener", () => {
     expect(ok.status).toBe(200);
     expect(JSON.parse(ok.body)).toEqual({ listener: "remote", ip: "::1" });
     expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `[::1]:${port + 1}` })).status).toBe(403);
-    expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `127.0.0.1:${port}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `[::1%25lo0]:${port}` })).status).toBe(403);
+    expect((await pinnedRequest(port, fp, { connectHost: "::1", path: "/whoami", host: `evil.example.org:${port}` })).status).toBe(403);
   });
 
   it("with a domain set, the domain alone, :443 or the port pass the Host check; an evil host does not", async () => {
