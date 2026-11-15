@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import {
+  appendFileSync, chmodSync, closeSync, existsSync, linkSync, statSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync,
+  utimesSync, writeFileSync, writeSync, realpathSync,
+} from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -748,6 +751,65 @@ describe("WorktreeManager", () => {
       };
       const m = new WorktreeManager(dataDir, runner);
       await expect(m.ensureProjectRepo("proj1")).rejects.toThrow(GIT_INCLUDES_REFUSED);
+    });
+
+    /** A bare repository, outside dataDir, whose configuration names a filter driver. */
+    const evilCommonDir = async () => {
+      const evil = join(outside, "evil.git");
+      await git(outside, "init", "--bare", "-q", evil);
+      await git(outside, `--git-dir=${evil}`, "config", "filter.evil.smudge", "cat");
+      return evil;
+    };
+
+    it("a commondir planted mid-operation under the worktree's pinned git directory makes the next call scan again and neutralise what it reaches", async () => {
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      const { calls, m } = recording();
+      const scope = new GitScope();
+      const gitDir = (await m.runGit(wt.absPath, ["rev-parse", "--absolute-git-dir"], { scope })).trim();
+      await m.runGit(wt.absPath, ["status"], { scope, gitDir, workTree: wt.absPath });
+      const n = calls.length;
+      // The agent redirects the worktree's common directory: every pinned call would read the planted repository's config.
+      writeFileSync(join(gitDir, "commondir"), `${await evilCommonDir()}\n`);
+      await m.runGit(wt.absPath, ["status"], { scope, gitDir, workTree: wt.absPath });
+      // A scan of what the call now reaches (the planted repository has no HEAD, so the tree scan checks for one).
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "rev-parse", "status"]);
+      expect(calls.at(-1)).toContain("filter.evil.smudge=");
+    });
+
+    it("a commondir planted mid-operation in the main repository's git directory is noticed too", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const { calls, m } = recording();
+      const scope = new GitScope();
+      await m.runGit(repo, ["status"], { scope });
+      const n = calls.length;
+      writeFileSync(join(repo, ".git", "commondir"), `${await evilCommonDir()}\n`);
+      await m.runGit(repo, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "rev-parse", "status"]);
+      expect(calls.at(-1)).toContain("filter.evil.smudge=");
+    });
+
+    it("a fingerprinted file whose content changes with its size, times and inode unchanged still scans again; one over the hash bound is never trusted", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const { calls, m } = recording();
+      const scope = new GitScope();
+      await m.runGit(repo, ["status"], { scope });
+      const cfg = join(repo, ".git", "config");
+      const before = statSync(cfg);
+      // Same length, written in place (same inode), times put back: only the content differs.
+      const text = readFileSync(cfg, "utf8");
+      const fd = openSync(cfg, "r+");
+      writeSync(fd, text.replace("bare = false", "bare = FALSE"), 0, "utf8");
+      closeSync(fd);
+      utimesSync(cfg, before.atime, before.mtime);
+      let n = calls.length;
+      await m.runGit(repo, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status"]);
+      // Over the bound, the file is read by git alone: every call scans.
+      appendFileSync(cfg, `# ${"x".repeat(1024 * 1024)}\n`);
+      n = calls.length;
+      await m.runGit(repo, ["status"], { scope });
+      await m.runGit(repo, ["status"], { scope });
+      expect(since(calls, n)).toEqual(["rev-parse", "config", "config", "ls-tree", "status", "rev-parse", "config", "config", "ls-tree", "status"]);
     });
 
     it("sets the identity keys only when they are not already set, and resets one the agent changed", async () => {

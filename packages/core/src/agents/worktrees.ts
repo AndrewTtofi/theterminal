@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -272,19 +273,45 @@ function canonical(p: string): string {
   }
 }
 
+/** A fingerprinted file over this size is never trusted between scans: the next call scans again. */
+const MAX_STAMPED_BYTES = 1024 * 1024;
+
 /**
- * A fingerprint of a configuration file for noticing a change without reading it: inode, size, modification and
- * status-change time ("-" when missing). A file that cannot be inspected never fingerprints the same twice, so the
- * next call scans again.
+ * A fingerprint of a configuration file for noticing a change: inode, size, modification and status-change time, and
+ * a SHA-256 of its content ("-" when missing). The times and inode alone are not enough: on NTFS the owner can set the
+ * change time and inode numbers are reused, so the content is hashed as well, up to MAX_STAMPED_BYTES, read without
+ * following a symlink. Anything but a regular file, a file over the bound, or one that cannot be read never fingerprints
+ * the same twice, so the next call scans again.
  */
 let unstamped = 0;
 function stamp(file: string): string {
+  const fresh = (): string => `?${++unstamped}`;
+  let st;
   try {
-    const st = lstatSync(file);
-    return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    st = lstatSync(file);
   } catch (e) {
     if (errCode(e) === "ENOENT" || errCode(e) === "ENOTDIR") return "-";
-    return `?${++unstamped}`;
+    return fresh();
+  }
+  if (!st.isFile() || st.size > MAX_STAMPED_BYTES) return fresh();
+  try {
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const buf = Buffer.alloc(MAX_STAMPED_BYTES + 1);
+      let n = 0;
+      for (;;) {
+        const got = readSync(fd, buf, n, buf.length - n, n);
+        if (got === 0) break;
+        n += got;
+        if (n > MAX_STAMPED_BYTES) return fresh(); // grew past the bound while being read
+      }
+      const hash = createHash("sha256").update(buf.subarray(0, n)).digest("hex");
+      return `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}:${hash}`;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return fresh();
   }
 }
 
@@ -306,9 +333,9 @@ type Snapshot = {
  * One operation's git calls (one run start, one view of a run's changes, one discard) share a GitScope: runGit's scan
  * of a repository (the probe, the include scan of the shared and worktree configuration, the filter scan, the
  * `.gitattributes` scan of HEAD's tree) is done once per repository and worktree within it and reused, instead of
- * before every call. Before each reuse the fingerprints (inode, size, mtime, ctime) of the configuration files the scan
- * read are compared with those taken at the scan; any difference, or anything that cannot be fingerprinted, scans
- * again. A scope is held for one operation on a repository whose agent is not live and dropped with it: never kept
+ * before every call. Before each reuse the fingerprints (inode, size, mtime, ctime and a content hash) of the
+ * configuration and `commondir` files the scan read or relied on are compared with those taken at the scan; any
+ * difference, or anything that cannot be fingerprinted, scans again. A scope is held for one operation on a repository whose agent is not live and dropped with it: never kept
  * across operations, never while the run's agent could be writing. Without a scope every call scans.
  */
 export class GitScope {
@@ -476,9 +503,16 @@ export class WorktreeManager {
     snapshot.stamps = stamps;
   }
 
-  /** The fingerprints of the files a scan reads: the shared configuration, the worktree's own, and the top-level .gitattributes. */
+  /**
+   * The fingerprints of the files a scan read or relied on: the shared configuration, the worktree's own, the top-level
+   * .gitattributes, and the `commondir` files of the git directory and the common directory (git reads them even under
+   * a pinned `--git-dir`, so a planted one would redirect every later call to another repository's configuration).
+   */
   private stamps(repo: { gitDir: string; common: string }, top: string): string {
-    return [join(repo.common, "config"), join(repo.gitDir, "config.worktree"), join(top, ".gitattributes")].map(stamp).join("|");
+    return [
+      join(repo.common, "config"), join(repo.gitDir, "config.worktree"), join(top, ".gitattributes"),
+      join(repo.gitDir, "commondir"), join(repo.common, "commondir"),
+    ].map(stamp).join("|");
   }
 
   /**
