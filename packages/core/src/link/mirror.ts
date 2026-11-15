@@ -39,7 +39,9 @@ export type FrameRefusal =
   | "duplicate"
   | "foreign_action"
   /** The frame passed every check, but committing it was refused (the projection rolled it back). */
-  | "conflict";
+  | "conflict"
+  /** The link run has already failed: nothing more of it is accepted. */
+  | "run_failed";
 
 export class MirrorFrameError extends Error {
   constructor(readonly reason: FrameRefusal) {

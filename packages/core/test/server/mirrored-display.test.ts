@@ -85,6 +85,21 @@ describe("a linked machine's entries leave this server through its own cleaner",
       expect(leaks(body)).toBe(false);
     }
 
+    // Stopping or deciding for it here is refused: it runs on the other machine.
+    const head = (await (await get(s, "/api/ledger?limit=500")).json() as LedgerEntry[]).at(-1)!.seq;
+    const stop = await fetch(`http://127.0.0.1:${s.port}/api/runs/${remote.runId}/stop`, {
+      method: "POST", headers: { authorization: `Bearer ${s.token}` },
+    });
+    expect(stop.status).toBe(409);
+    expect(await stop.json()).toMatchObject({ error: "remote_run" });
+    const decision = await fetch(`http://127.0.0.1:${s.port}/api/actions/act-1/decision`, {
+      method: "POST", headers: { authorization: `Bearer ${s.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ decision: "allow", reason: "" }),
+    });
+    expect(decision.status).toBe(409);
+    expect(await decision.json()).toMatchObject({ error: "remote_run" });
+    expect((await (await get(s, "/api/ledger?limit=500")).json() as LedgerEntry[]).at(-1)!.seq).toBe(head);
+
     const messages: LedgerEntry[] = [];
     const ws = new WebSocket(`ws://127.0.0.1:${s.port}/api/events?afterSeq=0`, { headers: { authorization: `Bearer ${s.token}` } });
     sockets.push(ws);

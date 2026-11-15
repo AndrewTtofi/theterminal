@@ -169,6 +169,10 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       break;
     case "link.run_failed":
       db.prepare("UPDATE link_runs SET state = 'failed', error = ?, updated_at = ? WHERE run_id = ?").run(p.error, e.ts, p.runId);
+      // The mirrored run of that machine ends with it while still running; this machine's own runs are never touched.
+      db.prepare(
+        "UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'running' AND machine_id = ?",
+      ).run(p.error, e.ts, p.runId, p.machineId);
       break;
     case "link.changes_imported":
       db.prepare("UPDATE link_runs SET state = 'imported', updated_at = ? WHERE run_id = ?").run(e.ts, p.runId);
@@ -183,6 +187,14 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
 
 const MIRRORED: ReadonlySet<string> = new Set(MIRRORABLE_TYPES);
 
+/** A mirrored entry the projection refuses; the commit rolls back. */
+export class MirroredEntryRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MirroredEntryRefusedError";
+  }
+}
+
 /**
  * A linked machine's entry, committed here as `link.mirrored`: the worker's own entry (`payload.origin`, with its own
  * seq, ts and actor) is applied as if local, the run is marked as running on that machine, and the link run's cursor
@@ -195,23 +207,23 @@ const MIRRORED: ReadonlySet<string> = new Set(MIRRORABLE_TYPES);
 export function applyMirrored(db: Db, e: LedgerEntry): void {
   const p = e.payload as Payload;
   const inner = p.origin as LedgerEntry;
-  if (!MIRRORED.has(inner.type)) throw new Error("mirrored entry of a type that is not mirrored");
+  if (!MIRRORED.has(inner.type)) throw new MirroredEntryRefusedError("mirrored entry of a type that is not mirrored");
   const ip = inner.payload as Payload;
   const runId = ip.runId as string;
   const link = db
     .prepare("SELECT project_id, state FROM link_runs WHERE run_id = ? AND machine_id = ? AND direction = 'requested'")
     .get(runId, p.machineId) as { project_id: string; state: LinkRunState } | undefined;
-  if (!link) throw new Error("mirrored entry for a run not requested of that machine");
+  if (!link) throw new MirroredEntryRefusedError("mirrored entry for a run not requested of that machine");
   const projectOk = inner.projectId === link.project_id || (inner.type === "connection.used" && inner.projectId === null);
-  if (!projectOk || e.projectId !== inner.projectId) throw new Error("mirrored entry outside the run's project");
+  if (!projectOk || e.projectId !== inner.projectId) throw new MirroredEntryRefusedError("mirrored entry outside the run's project");
   if (inner.type === "agent.action.requested" || inner.type === "agent.action.decided" || inner.type === "agent.action.completed") {
     const owner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?").get(ip.actionId) as { run_id: string } | undefined;
     const ok = inner.type === "agent.action.requested" ? owner === undefined : owner?.run_id === runId;
-    if (!ok) throw new Error("mirrored entry about an action of another run");
+    if (!ok) throw new MirroredEntryRefusedError("mirrored entry about an action of another run");
   }
   if (inner.type !== "agent.started" && inner.type !== "connection.used") {
     const run = db.prepare("SELECT machine_id FROM agent_runs WHERE id = ?").get(runId) as { machine_id: string | null } | undefined;
-    if (run && run.machine_id !== p.machineId) throw new Error("mirrored entry about a run of another machine");
+    if (run && run.machine_id !== p.machineId) throw new MirroredEntryRefusedError("mirrored entry about a run of another machine");
   }
 
   applyEvent(db, inner); // an existing run id fails agent.started's INSERT and rolls the commit back

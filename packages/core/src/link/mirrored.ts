@@ -1,10 +1,10 @@
 import type { AgentAction, AgentRun, LedgerEntry, MirroredOrigin } from "@theterminal/shared";
 import type { Db } from "../db.js";
-import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
+import type { Ledger } from "../ledger/ledger.js";
 import { commitEvent } from "../events/commit.js";
-import { getLinkRun, getMachine } from "../events/projections.js";
+import { getLinkRun, getMachine, MirroredEntryRefusedError } from "../events/projections.js";
 import { redact } from "../agents/redact.js";
-import { checkFrame, cleanStrings, displayOrigin, type FrameCheck } from "./mirror.js";
+import { checkFrame, cleanStrings, displayOrigin, type FrameCheck, type FrameRefusal } from "./mirror.js";
 
 /**
  * The requester's side of a mirrored run, where it touches the ledger: committing one untrusted line of a worker's
@@ -24,35 +24,67 @@ function seenFor(db: Db, runId: string): (originId: string) => boolean {
 }
 
 /**
+ * Refusals a correct worker never causes: the run ends at the first one (`link.run_failed`, committed with the
+ * refusal), because the stream can no longer be trusted. `out_of_order` and `duplicate` can follow from a reconnect
+ * and only skip the frame; `conflict` is this machine's state, not the worker's fault.
+ */
+export const FATAL_REFUSALS: ReadonlySet<FrameRefusal> = new Set<FrameRefusal>([
+  "bad_signature", "wrong_run", "wrong_project", "foreign_action", "invalid_payload", "not_mirrorable", "too_large", "invalid_frame",
+]);
+
+/** A constraint the projection's own tables enforce (a run or action id that already exists, a missing project). */
+const PROJECTION_CONSTRAINTS = new Set(["SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_NOTNULL"]);
+
+function projectionRefused(err: unknown): boolean {
+  if (err instanceof MirroredEntryRefusedError) return true;
+  const code = (err as { code?: unknown } | null)?.code;
+  return err instanceof Error && err.name === "SqliteError" && typeof code === "string" && PROJECTION_CONSTRAINTS.has(code);
+}
+
+/**
  * Checks one line of the stream of `runId` with `checkFrame`, against this machine's own records only, and commits it
  * as `link.mirrored` when it passes; check and commit happen in one transaction, one line at a time, so a decision
- * frame sees the request committed just before it. Nothing is committed for a refusal.
+ * frame sees the request committed just before it.
  *
- * - The run must be one this machine requested (`link_runs`, direction `requested`); otherwise `wrong_run`.
+ * - The run must be one this machine requested (`link_runs`, direction `requested`); otherwise `wrong_run`, and nothing
+ *   is recorded. Once the link run has failed, every frame is refused (`run_failed`) and nothing is recorded.
  * - The key is the one pinned in the `machines` row of `link_runs.machine_id`, never one a connection presents; an
  *   unpaired machine has no key, so its frames are `bad_signature`.
  * - The cursor is `link_runs.last_seq`, duplicates are looked up in the ledger, and an action's owner is
  *   `agent_actions.run_id`.
- * - When the projection still refuses a checked frame (a run id that already exists here, say), the commit rolls back
- *   and the answer is `conflict`. A read-only ledger throws.
+ * - A fatal refusal (`FATAL_REFUSALS`) commits `link.run_failed { runId, machineId, error: reason }` in the same
+ *   transaction, which fails the link run and the mirrored run. Any other refusal commits nothing.
+ * - When the projection refuses a checked frame (a run id that already exists here, say), the commit rolls back and
+ *   the answer is `conflict`. Any other error, a read-only ledger included, is thrown.
  */
 export function acceptMirroredLine(db: Db, ledger: Ledger, runId: string, line: string): FrameCheck {
   try {
     return commitEvent(db, ledger, () => {
       const link = getLinkRun(db, runId);
       if (!link || link.direction !== "requested") return { result: (): FrameCheck => ({ ok: false, reason: "wrong_run" }) };
+      if (link.state === "failed") return { result: (): FrameCheck => ({ ok: false, reason: "run_failed" }) };
       const machine = getMachine(db, link.machineId);
-      if (!machine) return { result: (): FrameCheck => ({ ok: false, reason: "bad_signature" }) };
       const actionOwner = db.prepare("SELECT run_id FROM agent_actions WHERE id = ?");
-      const check = checkFrame(line, {
-        publicKeyDer: Buffer.from(machine.publicKey, "base64"),
-        runId,
-        projectId: link.projectId,
-        lastSeq: link.lastSeq,
-        seen: seenFor(db, runId),
-        actionRunOf: (actionId) => (actionOwner.get(actionId) as { run_id: string } | undefined)?.run_id ?? null,
-      });
-      if (!check.ok) return { result: () => check };
+      const check: FrameCheck = machine
+        ? checkFrame(line, {
+          publicKeyDer: Buffer.from(machine.publicKey, "base64"),
+          runId,
+          projectId: link.projectId,
+          lastSeq: link.lastSeq,
+          seen: seenFor(db, runId),
+          actionRunOf: (actionId) => (actionOwner.get(actionId) as { run_id: string } | undefined)?.run_id ?? null,
+        })
+        : { ok: false, reason: "bad_signature" };
+      if (!check.ok) {
+        if (!FATAL_REFUSALS.has(check.reason)) return { result: () => check };
+        return {
+          event: {
+            projectId: link.projectId, actor: LINK_ACTOR, type: "link.run_failed",
+            payload: { runId, machineId: link.machineId, error: check.reason },
+          },
+          result: () => check,
+        };
+      }
       const { origin, signature } = check.frame;
       return {
         event: { projectId: origin.projectId, actor: LINK_ACTOR, type: "link.mirrored", payload: { machineId: link.machineId, origin, signature } },
@@ -60,8 +92,8 @@ export function acceptMirroredLine(db: Db, ledger: Ledger, runId: string, line: 
       };
     });
   } catch (err) {
-    if (err instanceof LedgerReadOnlyError) throw err;
-    return { ok: false, reason: "conflict" };
+    if (projectionRefused(err)) return { ok: false, reason: "conflict" };
+    throw err;
   }
 }
 

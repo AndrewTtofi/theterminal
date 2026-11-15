@@ -78,6 +78,17 @@ export class LocalModelUnsupportedError extends Error {
   }
 }
 
+/**
+ * The run executes on a linked machine: it is stopped and decided there, through the remote-run service, never by
+ * this machine's runner.
+ */
+export class RemoteRunError extends Error {
+  constructor(readonly runId: string) {
+    super("This run executes on a linked machine; stop it or decide for it there, through the link.");
+    this.name = "RemoteRunError";
+  }
+}
+
 /** How long all of a run's cloud grants together may take to mint, by default. */
 export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
 /** An MCP env or header value this long or longer is redacted from the run's output. */
@@ -158,7 +169,7 @@ type Session = {
   secrets: string[];
 };
 type Payload = Record<string, unknown>;
-type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string };
+type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string; machine_id: string | null };
 type GateOutcome = GateResult & { actionId: string };
 
 const POLICY: Actor = { kind: "system", id: "policy" };
@@ -393,6 +404,7 @@ export class AgentRunner {
     const runId = commitEvent(db, ledger, () => {
       const row = this.actionRow(actionId);
       if (!row) throw new NotFoundError("action", actionId);
+      if (row.machine_id !== null) throw new RemoteRunError(row.run_id);
       if (row.status !== "pending" || !broker.pendingIds().includes(actionId)) throw new AlreadyDecidedError(actionId);
       const s = this.sessions.get(row.run_id);
       why = this.clean(reason, MAX.reason, s?.scrub ?? this.scrub, s?.secrets);
@@ -417,7 +429,9 @@ export class AgentRunner {
   }
 
   stop(_actor: Actor, runId: string): void {
-    if (!getRun(this.deps.db, runId)) throw new NotFoundError("run", runId);
+    const run = getRun(this.deps.db, runId);
+    if (!run) throw new NotFoundError("run", runId);
+    if (run.machineId !== null) throw new RemoteRunError(runId);
     this.close(runId, "stopped", null, "run stopped");
   }
 
@@ -696,7 +710,8 @@ export class AgentRunner {
     s?.abort.abort();
     this.sessions.delete(runId); // even if its adapter never returns
     const run = getRun(db, runId);
-    if (!run || run.status !== "running") return;
+    // A run on a linked machine is never ended here: its end arrives mirrored (the last fail-safe behind stop/decide).
+    if (!run || run.status !== "running" || run.machineId !== null) return;
     for (const a of listActions(db, runId)) {
       if (a.status === "pending") this.settle(run.projectId, runId, a.id, "deny", pendingReason);
     }
@@ -719,7 +734,7 @@ export class AgentRunner {
   private actionRow(actionId: string): ActionRow | undefined {
     return this.deps.db
       .prepare(
-        `SELECT a.run_id, a.status, a.reason, r.project_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
+        `SELECT a.run_id, a.status, a.reason, r.project_id, r.machine_id FROM agent_actions a JOIN agent_runs r ON r.id = a.run_id
          WHERE a.id = ?`,
       )
       .get(actionId) as ActionRow | undefined;

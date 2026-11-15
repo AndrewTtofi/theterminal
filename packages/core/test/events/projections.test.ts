@@ -595,6 +595,20 @@ describe("mirrored remote runs (applyMirrored)", () => {
     expect(mirroredIds(db, "another-run")).toEqual(new Set());
   });
 
+  it("link.run_failed fails the mirrored run while it is running, and leaves a finished one and this machine's runs alone", () => {
+    mirror(remote.started());
+    mirror(remote.requested("act-1"));
+    script(); // a local run r1
+    const failed = emit("link.run_failed", { runId: remote.runId, machineId: remote.machineId, error: "bad_signature" }, link, PROJECT);
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "failed", error: "bad_signature", finishedAt: failed.ts });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: "bad_signature" });
+    emit("link.run_failed", { runId: "r1", machineId: remote.machineId, error: "unreachable" }, link, PROJECT);
+    expect(getRun(db, "r1")).toMatchObject({ status: "completed", error: null });
+    const live = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+  });
+
   it("rebuild with mirrored entries equals the live tables", () => {
     mirror(remote.started());
     mirror(remote.connectionUsed());

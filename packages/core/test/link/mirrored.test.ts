@@ -65,19 +65,39 @@ describe("acceptMirroredLine", () => {
     expect(getLinkRun(db, remote.runId)!.state).toBe("finished");
   });
 
+  /** The line ends the run: exactly one link.run_failed naming `reason`, the link run and the run failed, nothing mirrored. */
+  function fatal(line: string, reason: string) {
+    const mirroredBefore = mirroredEntries().length;
+    expect(accept(line)).toEqual({ ok: false, reason });
+    const failed = ledger.list().filter((e) => e.type === "link.run_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({
+      projectId, actor: { kind: "system", id: "link" }, payload: { runId: remote.runId, machineId: remote.machineId, error: reason },
+    });
+    expect(getLinkRun(db, remote.runId)).toMatchObject({ state: "failed", error: reason });
+    expect(mirroredEntries()).toHaveLength(mirroredBefore);
+    // Once failed, every frame is refused, a good one too, and nothing more is recorded.
+    refused(remote.line(remote.message("after")), "run_failed");
+    expect(getLinkRun(db, remote.runId)!.state).toBe("failed");
+  }
+
   it("checks the signature with the key pinned in the machines row of the run's machine", async () => {
     const impostor = await remoteRun(remote.runId, projectId);
-    refused(impostor.line(impostor.started()), "bad_signature");
     accept(remote.line(remote.started()));
-    // Unpaired: the key is gone, so nothing more from that machine is accepted.
+    fatal(impostor.line(impostor.message("hi")), "bad_signature");
+    expect(getRun(db, remote.runId)).toMatchObject({ status: "failed", error: "bad_signature" });
+  });
+
+  it("refuses everything from an unpaired machine: its key is gone", () => {
+    accept(remote.line(remote.started()));
     commitEvent(db, ledger, () => ({
       event: { projectId: null, actor: owner, type: "machine.unpaired", payload: { machineId: remote.machineId, name: "GPU box" } },
       result: () => undefined,
     }));
-    refused(remote.line(remote.message("still here")), "bad_signature");
+    fatal(remote.line(remote.message("still here")), "bad_signature");
   });
 
-  it("refuses a frame for a run that is not a run requested here", async () => {
+  it("refuses a frame for a run that is not a run requested here, recording nothing", async () => {
     refused(remote.line(remote.started()), "wrong_run", "never-requested");
     commitEvent(db, ledger, () => ({
       event: { projectId, actor: { kind: "system", id: "link" }, type: "link.run_accepted", payload: { runId: "accepted-1", machineId: remote.machineId, projectId } },
@@ -87,29 +107,38 @@ describe("acceptMirroredLine", () => {
     refused(accepted.line(accepted.started()), "wrong_run", "accepted-1");
   });
 
-  it("refuses the Review Focus 2 frames: another key, an unlisted type, another run, a duplicate id, an oversize message", async () => {
+  const FATAL_FRAMES: [string, () => Promise<string> | string][] = [
+    ["bad_signature", async () => {
+      const third = await remoteRun(remote.runId, projectId);
+      return third.line(third.message("hi"));
+    }],
+    ["not_mirrorable", () => signed({ ...originOf(remote.message("x")), type: "card.moved", payload: { runId: remote.runId, cardId: "c1", from: "plan", to: "build" } })],
+    ["wrong_run", () => remote.line(remote.record("agent.message", { runId: "another-run", text: "hi" }))],
+    ["wrong_project", () => signed({ ...originOf(remote.message("x")), projectId: "another-project" })],
+    ["invalid_payload", () => signed({ ...originOf(remote.message("x")), payload: { runId: remote.runId, text: "y".repeat(4001) } })],
+    ["foreign_action", () => remote.line(remote.decided("never-requested-action"))],
+    ["invalid_frame", () => "{not json"],
+    ["too_large", () => "x".repeat(300_000)],
+  ];
+  for (const [reason, make] of FATAL_FRAMES) {
+    it(`a ${reason} frame ends the run: one link.run_failed, and nothing more is accepted`, async () => {
+      accept(remote.line(remote.started()));
+      fatal(await make(), reason);
+    });
+  }
+
+  it("an out-of-order or duplicate frame is refused without recording anything, and the next good frame is committed", () => {
     accept(remote.line(remote.started()));
-    const third = await remoteRun(remote.runId, projectId);
-    refused(third.line(third.message("hi")), "bad_signature");
-
-    const card = { ...originOf(remote.message("x")), type: "card.moved", payload: { runId: remote.runId, cardId: "c1", from: "plan", to: "build" } };
-    refused(signed(card), "not_mirrorable");
-
-    const otherRun = remote.record("agent.message", { runId: "another-run", text: "hi" });
-    refused(remote.line(otherRun), "wrong_run");
-
     const message = remote.message("once");
     expect(accept(remote.line(message)).ok).toBe(true);
     refused(remote.line(message), "out_of_order");
     refused(signed({ ...originOf(message), seq: 1000 }), "duplicate");
-
-    refused(signed({ ...originOf(remote.message("x")), payload: { runId: remote.runId, text: "y".repeat(4001) } }), "invalid_payload");
-
-    // The next good frame is committed.
     expect(accept(remote.line(remote.message("after"))).ok).toBe(true);
+    expect(getLinkRun(db, remote.runId)!.state).toBe("running");
+    expect(ledger.list().filter((e) => e.type === "link.run_failed")).toEqual([]);
   });
 
-  it("refuses a frame about an action of another run, and leaves that action alone", async () => {
+  it("refuses a frame about an action of another run, ends this run, and leaves that action alone", async () => {
     // A second run on the same machine owns act-9.
     const two = await remoteRun("run-remote-2", projectId, remote.identity);
     requestRun(db, ledger, two);
@@ -117,10 +146,9 @@ describe("acceptMirroredLine", () => {
     expect(accept(two.line(two.requested("act-9")), two.runId).ok).toBe(true);
 
     accept(remote.line(remote.started()));
-    refused(remote.line(remote.decided("act-9")), "foreign_action");
-    refused(remote.line(remote.completed("act-9")), "foreign_action");
-    refused(remote.line(remote.requested("act-9")), "foreign_action");
+    fatal(remote.line(remote.decided("act-9")), "foreign_action");
     expect(listAllPendingActions(db).map((a) => [a.id, a.runId, a.status])).toEqual([["act-9", two.runId, "pending"]]);
+    expect(getLinkRun(db, two.runId)!.state).toBe("running");
   });
 
   it("answers conflict, committing nothing, when the projection refuses a checked frame", () => {
@@ -133,6 +161,12 @@ describe("acceptMirroredLine", () => {
       result: () => undefined,
     }));
     refused(remote.line(remote.started()), "conflict");
+  });
+
+  it("rethrows an error it does not know rather than calling it a conflict", () => {
+    accept(remote.line(remote.started()));
+    db.exec("CREATE TRIGGER boom BEFORE INSERT ON ledger BEGIN SELECT RAISE(ABORT, 'disk on fire'); END;");
+    expect(() => accept(remote.line(remote.message("hi")))).toThrow(/disk on fire/);
   });
 
   it("does not swallow a read-only ledger", () => {

@@ -110,11 +110,11 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
 
   app.post<{ Params: { id: string } }>("/api/runs/:id/stop", async (req) => {
     runner.stop(actor, req.params.id);
-    return runner.getRun(req.params.id).run;
+    return shown.run(runner.getRun(req.params.id).run);
   });
 
   app.post<{ Params: { id: string } }>("/api/actions/:id/decision", async (req) => {
     const body = decisionBody.parse(req.body);
-    return runner.decide(actor, req.params.id, body.decision, body.reason);
+    return shown.action(runner.decide(actor, req.params.id, body.decision, body.reason));
   });
 }

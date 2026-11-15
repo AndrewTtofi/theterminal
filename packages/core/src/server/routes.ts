@@ -5,7 +5,7 @@ import { LedgerReadOnlyError, type Ledger, type VerifyResult } from "../ledger/l
 import { BoardService, NotFoundError } from "../board/board-service.js";
 import { AlreadyDecidedError } from "../agents/approvals.js";
 import {
-  AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, ShuttingDownError,
+  AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
 } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, RunActiveError, WorktreeMissingError } from "../changes/changes.js";
@@ -104,6 +104,7 @@ export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLog
   if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
   // A fixed sentence chosen by the code that threw, never request text.
   if (err instanceof RunActiveError) return reply.code(409).send({ error: "run_active", message: err.message });
+  if (err instanceof RemoteRunError) return reply.code(409).send({ error: "remote_run", message: err.message });
   // A fixed sentence: the repository's configuration includes other files, or the like. Never a path.
   if (err instanceof OverrideBusyError) return reply.code(409).send({ error: "override_busy" });
   if (err instanceof ProgramNotFoundError) return reply.code(400).send({ error: "program_not_found" });

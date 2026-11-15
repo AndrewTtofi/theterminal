@@ -11,7 +11,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, ShuttingDownError,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
   type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
@@ -481,6 +481,24 @@ describe("AgentRunner with the FakeAdapter", () => {
     expect(ledger.list({ afterSeq: before }).filter((e) => JSON.stringify(e.payload).includes(remote.runId))).toEqual([]);
     expect(getRun(db, remote.runId)!.status).toBe("running");
     expect(listActions(db, remote.runId)[0]!.status).toBe("pending");
+  });
+
+  it("refuses to stop or decide for a run on a linked machine, recording nothing", async () => {
+    const remote = await remoteRun("run-on-gpu-box", projectId);
+    pairAndRequest(db, ledger, remote);
+    for (const e of [remote.started(), remote.requested("remote-act-1")]) {
+      expect(acceptMirroredLine(db, ledger, remote.runId, remote.line(e)).ok).toBe(true);
+    }
+    const runner = makeRunner({});
+    const head = ledger.headSeq();
+    expect(() => runner.stop(owner, remote.runId)).toThrow(RemoteRunError);
+    expect(() => runner.decide(owner, "remote-act-1", "allow", "fine")).toThrow(RemoteRunError);
+    expect(ledger.headSeq()).toBe(head);
+    expect(getRun(db, remote.runId)!.status).toBe("running");
+    expect(listActions(db, remote.runId)[0]!.status).toBe("pending");
+    // The last fail-safe: closing it directly records nothing either.
+    (runner as unknown as { close: (id: string, s: string, e: null, r: string) => void }).close(remote.runId, "stopped", null, "run stopped");
+    expect(ledger.headSeq()).toBe(head);
   });
 
   it("recoverOnStartup does nothing when the ledger is read-only", async () => {
