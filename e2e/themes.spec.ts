@@ -42,6 +42,32 @@ test("the gear opens Settings; a chosen theme applies at once and is still appli
   await expect(layout).toHaveValue("preset:guided");
 });
 
+test("the panel tab strip follows the theme", async ({ page }) => {
+  await page.goto(process.env.TT_E2E_URL!);
+  await operatorLayout(page);
+  await openSettings(page);
+  await card(page, "Light").click();
+  await expect(card(page, "Light")).toHaveAttribute("aria-pressed", "true");
+
+  // Each value as the browser computes it, so a hex token and dockview's rgb() compare equal.
+  const computed = (prop: string, selector: string) =>
+    page.evaluate(([p, s]) => getComputedStyle(document.querySelector(s!)!).getPropertyValue(p!), [prop, selector] as const);
+  const token = (name: string) =>
+    page.evaluate((n) => {
+      const probe = document.createElement("div");
+      probe.style.color = `var(${n})`;
+      document.body.append(probe);
+      const v = getComputedStyle(probe).color;
+      probe.remove();
+      return v;
+    }, name);
+
+  expect(await computed("background-color", ".dv-tabs-and-actions-container")).toBe(await token("--panel"));
+  expect(await computed("background-color", ".dv-groupview")).toBe(await token("--bg"));
+  expect(await computed("background-color", ".dv-tab.dv-active-tab")).toBe(await token("--bg"));
+  expect(await computed("color-scheme", ".dockview-theme-dark")).toBe("light");
+});
+
 test("imports a theme file, selects it, and exports it again", async ({ page }) => {
   await page.goto(process.env.TT_E2E_URL!);
   await openSettings(page);

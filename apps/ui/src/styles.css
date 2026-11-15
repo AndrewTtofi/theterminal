@@ -268,14 +268,41 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .decision-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .warning { background: var(--warning-bg); color: var(--warning-fg); border: 1px solid var(--warning-line); border-radius: 2px; padding: 6px; margin-top: 6px; }
 
-/* dockview: match the chrome */
-.dock-host.dockview-theme-dark {
+/* dockview: match the chrome. dockview puts its theme classes on its shell element (an ancestor of .dock-host), so the
+   override selects that element by the extra class Dock.tsx adds, and outranks .dockview-theme-dark. Every colour
+   variable comes from a theme token. */
+.dockview-theme-dark.tt-dock-theme {
+  color-scheme: inherit;
   --dv-group-view-background-color: var(--bg);
   --dv-tabs-and-actions-container-background-color: var(--panel);
   --dv-activegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--panel);
   --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--panel);
+  --dv-activegroup-visiblepanel-tab-color: var(--fg-strong);
+  --dv-activegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-tab-divider-color: var(--line);
   --dv-separator-border: var(--line);
   --dv-paneview-header-border-color: var(--line);
+  --dv-paneview-active-outline-color: var(--focus);
+  --dv-icon-hover-background-color: var(--hover);
+  --dv-tabs-container-scrollbar-color: var(--line-strong);
+  --dv-scrollbar-background-color: var(--line-strong);
+  --dv-drag-over-background-color: var(--glow);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-edge-dock-indicator-color: var(--accent);
+  --dv-active-sash-color: var(--focus);
+  --dv-floating-border: 1px solid var(--line-strong);
+  --dv-context-menu-background-color: var(--panel);
+  --dv-context-menu-color: var(--fg);
+  --dv-dnd-compass-color: var(--accent);
+  --dv-dnd-compass-cell-color: var(--glow);
+  --dv-dnd-compass-edge-cell-color: var(--hover);
+  --dv-dnd-compass-active-cell-color: var(--glow);
+  --dv-smart-guides-color: var(--accent);
+  --dv-smart-guides-preview-color: var(--glow);
 }
 .status-bar a.status-item { color: inherit; text-decoration: none; }
 .status-bar a.status-item:hover { text-decoration: underline; }
