@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { describe, it, expect } from "vitest";
 import {
@@ -60,7 +60,24 @@ describe("rpFor", () => {
   });
 });
 
+describe("rpFor default ports", () => {
+  it("drops :443 from a remote origin and :80 from a local one, as browsers do, and keeps any other port", () => {
+    expect(rpFor(req("tt-test.local:443", true))).toEqual({ rpId: "tt-test.local", origin: "https://tt-test.local" });
+    expect(rpFor(req("theterminal.localhost:80", false))).toEqual({ rpId: "theterminal.localhost", origin: "http://theterminal.localhost" });
+    expect(rpFor(req("tt-test.local:80", true))?.origin).toBe("https://tt-test.local:80");
+    expect(rpFor(req("theterminal.localhost:443", false))?.origin).toBe("http://theterminal.localhost:443");
+  });
+});
+
 describe("options", () => {
+  it("uses the person id as the user handle, hashed to 32 bytes when it would exceed WebAuthn's 64", async () => {
+    const short = await registrationOptions(RP, USER, [], challenge());
+    expect(Buffer.from(short.user.id, "base64url").toString("utf8")).toBe("person-1");
+    const long = await registrationOptions(RP, { id: "p".repeat(65), name: "Ada" }, [], challenge());
+    expect(Buffer.from(long.user.id, "base64url")).toEqual(createHash("sha256").update("p".repeat(65)).digest());
+    const exact = await registrationOptions(RP, { id: "q".repeat(64), name: "Ada" }, [], challenge());
+    expect(Buffer.from(exact.user.id, "base64url").toString("utf8")).toBe("q".repeat(64));
+  });
   it("registration requires a resident key and user verification, ES256 and Ed25519, no attestation", async () => {
     const c = challenge();
     const o = await registrationOptions(RP, USER, [{ kind: "passkey", credentialId: "AAAA", publicKey: "AAAA", transports: ["internal"], label: "x" }], c);

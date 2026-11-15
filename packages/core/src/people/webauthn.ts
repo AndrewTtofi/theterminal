@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import type { TLSSocket } from "node:tls";
 import type { FastifyRequest } from "fastify";
@@ -72,6 +73,12 @@ export function rpFor(request: FastifyRequest): Rp | null {
   return { rpId: hostname, origin };
 }
 
+/** WebAuthn caps a user handle at 64 bytes: a longer person id is given as its sha256 (32 bytes) instead. */
+function userHandle(id: string): Uint8Array<ArrayBuffer> {
+  const bytes = Buffer.from(id, "utf8");
+  return Uint8Array.from(bytes.length <= 64 ? bytes : createHash("sha256").update(bytes).digest());
+}
+
 export async function registrationOptions(
   rp: Rp,
   user: { id: string; name: string },
@@ -81,7 +88,7 @@ export async function registrationOptions(
   return generateRegistrationOptions({
     rpName: RP_NAME,
     rpID: rp.rpId,
-    userID: Uint8Array.from(Buffer.from(user.id, "utf8")),
+    userID: userHandle(user.id),
     userName: user.name,
     userDisplayName: user.name,
     challenge: challengeBytes(challenge),
