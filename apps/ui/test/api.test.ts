@@ -650,6 +650,17 @@ describe("a collaborator's run without an API key", () => {
   });
 });
 
+describe("an own-plan sign-in the server has turned off", () => {
+  it("names the provider and says to use an API key", () => {
+    expect(errorMessage(new ApiError(409, "restricted_signin_off", { provider: "claude" }))).toBe(
+      "Signing in with your own Claude plan is turned off on this server. Use an API key.",
+    );
+    expect(errorMessage(new ApiError(409, "restricted_signin_off", { provider: "<b>x</b>" }))).toBe(
+      "Signing in with your own plan is turned off on this server. Use an API key.",
+    );
+  });
+});
+
 describe("people api and the signed-out redirect", () => {
   afterEach(() => setUnauthorizedHandler(null));
   const reply = (status: number, body: unknown) =>
