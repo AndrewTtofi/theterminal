@@ -38,6 +38,11 @@ async function afterPack(context) {
 
 /**
  * The electron-builder configuration for an environment.
+ *
+ * Plan 9B also flips Electron's fuses (with @electron/fuses, in afterPack, before signing): RunAsNode off,
+ * EnableNodeOptionsEnvironmentVariable off, OnlyLoadAppFromAsar on, EnableEmbeddedAsarIntegrityValidation on.
+ * EnableNodeCliInspectArguments must stay on, or the window smoke test has to change: Playwright drives the app over
+ * `--inspect`.
  * @param {NodeJS.ProcessEnv} env
  * @returns {import("electron-builder").Configuration}
  */
@@ -55,9 +60,10 @@ export function builderConfig(env) {
     electronVersion,
     ...(version !== undefined && { extraMetadata: { version } }),
     directories: { output: "release" },
-    // The shell only: core, Node and the UI run outside Electron, from Resources (never inside asar).
+    // The shell only: core, Node and the UI run outside Electron, from Resources (never inside asar). Source maps
+    // would only name build-machine paths.
     asar: true,
-    files: ["dist/**/*", "package.json"],
+    files: ["dist/**/*", "!dist/**/*.map", "package.json"],
     // stage/{core,node,ui} -> Resources/{core,node,ui}. One mapping from stage/ itself: electron-builder always drops
     // a node_modules directly under a mapping's `from`, which would drop core's.
     extraResources: [{ from: "stage", to: ".", filter: ["core/**/*", "node/**/*", "ui/**/*"] }],

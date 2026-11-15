@@ -52,7 +52,7 @@ The desktop app is a macOS dmg (Apple Silicon and Intel) and a Windows installer
   xattr -dr com.apple.quarantine "/Applications/The Terminal.app"
   ```
 
-  macOS may ask for keychain access again after you install each new build.
+  On first launch macOS asks whether The Terminal may use your keychain: click **Allow** within a minute, or the app gives up starting and you have to open it again. It may ask again after you install each new build.
 - **Windows:** when SmartScreen warns you, click **More info**, then **Run anyway**. The installer is per-user, so it does not need admin rights.
 
 **Claude Code is not included in these test builds yet.** Install Claude Code yourself to use Claude in the desktop app; Codex and Gemini CLI are included.
