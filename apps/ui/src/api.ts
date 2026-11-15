@@ -281,6 +281,9 @@ export const CODEX_MCP_NOTE =
 export const GEMINI_MCP_NOTE =
   "Gemini cannot use MCP servers in The Terminal yet: Gemini only starts MCP servers in a trusted folder, and The Terminal never trusts agent worktrees.";
 
+/** Why a run on a local model needs Codex; the run picker shows it too. */
+export const LOCAL_MODEL_NOTE = "Only Codex can run on a local model in The Terminal yet.";
+
 /** A string field of an error's detail, or undefined. */
 function detailString(e: ApiError, key: string): string | undefined {
   const d = e.detail;
@@ -338,6 +341,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (context === "run" && e.status === 400 && e.code === "connection_unsupported") return "That connection cannot be given to a run";
     if (e.status === 400 && e.code === "connection_disabled") return "That connection is disabled";
     if (e.status === 400 && e.code === "mcp_unsupported") return detailString(e, "adapter") === "gemini" ? GEMINI_MCP_NOTE : CODEX_MCP_NOTE;
+    if (e.status === 400 && e.code === "local_model_unsupported") return LOCAL_MODEL_NOTE;
     if (e.status === 400 && e.code === "duplicate_mcp_server") {
       return "Two of the selected MCP servers would get the same name in this run. Untick one of them.";
     }

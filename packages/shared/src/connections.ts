@@ -200,7 +200,7 @@ export const CONNECTION_CATALOG: readonly CatalogEntry[] = [
       {
         name: "wireApi", label: "API style", storage: "config", required: false, input: "text",
         pattern: "^(chat|responses)$",
-        help: "chat works with Ollama and llama.cpp; responses only with servers that offer it. Default chat.",
+        help: "responses works with Ollama and llama.cpp server; the bundled Codex no longer accepts chat. Default responses.",
       },
       { name: "apiKey", label: "API key (if the server wants one)", storage: "secret", required: false, input: "password" },
     ],

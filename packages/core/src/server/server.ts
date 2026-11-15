@@ -36,8 +36,9 @@ import { RecordedText } from "../intake/recorded-text.js";
 import { ChunkedSecretStore, type SecretStore } from "../secrets/store.js";
 import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
-import { ADAPTERS, PROVIDERS, type AdapterId, type HardwareInfo, type Provider } from "@theterminal/shared";
+import { ADAPTERS, PROVIDERS, type AdapterId, type HardwareInfo, type LocalEngine, type Provider } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
+import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
@@ -281,11 +282,16 @@ function fakeGitHub(owner: string, name: string, path: string): unknown {
  *   Azure, a `client_secret` containing `TESTKEY`), and 401 otherwise;
  * - a GET to `https://api.github.com/repos/<owner>/<name>…` answers canned bodies for that repository when the
  *   Bearer token contains `TESTKEY` (401 otherwise), and 404 when `<name>` is `missing`;
+ * - this computer's model servers: Ollama's `/api/version` and `/api/tags` answer one fake model, anything on the
+ *   llama.cpp port is refused (`ECONNREFUSED`), and a GET to `/v1/models` on any loopback address lists that model, so
+ *   the detector and the connection tester agree;
  * - anything else answers 200 `{}` when any request header value contains `TESTKEY`, and 401 otherwise.
  */
 const fakeHttp: typeof fetch = async (input, init) => {
   const url = input instanceof Request ? input.url : String(input);
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const local = fakeLocalModels(url, method);
+  if (local !== undefined) return local;
   const google = url === "https://oauth2.googleapis.com/token";
   const azure = AZURE_TOKEN_URL.test(url);
   if (method === "POST" && (google || azure)) {
@@ -308,6 +314,23 @@ const fakeHttp: typeof fetch = async (input, init) => {
   });
   return accepted ? jsonResponse(200, {}) : jsonResponse(401, { error: "unauthorized" });
 };
+
+/** Tests only: the one model the fake model servers hold. */
+const FAKE_LOCAL_MODEL = { name: "fake-coder:7b", size: 4 * 1024 ** 3, details: { parameter_size: "7B", quantization_level: "Q4_K_M" } };
+
+/** The fake HTTP's answer for this computer's model servers (see fakeHttp), or undefined for any other URL. */
+function fakeLocalModels(url: string, method: string): Response | undefined {
+  if (url.startsWith(`${LLAMACPP_URL}/`) || url === LLAMACPP_URL) {
+    throw Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED", cause: { code: "ECONNREFUSED" } });
+  }
+  if (method !== "GET") return undefined;
+  if (url === `${OLLAMA_URL}/api/version`) return jsonResponse(200, { version: "0.0.0-fake" });
+  if (url === `${OLLAMA_URL}/api/tags`) return jsonResponse(200, { models: [FAKE_LOCAL_MODEL] });
+  if (isLoopbackUrl(url) && new URL(url).pathname.replace(/\/+$/, "").endsWith("/v1/models")) {
+    return jsonResponse(200, { object: "list", data: [{ id: FAKE_LOCAL_MODEL.name, object: "model" }] });
+  }
+  return undefined;
+}
 
 /**
  * The fetch connection tests use: the injected one, else the real fetch. Under THETERMINAL_FAKE_AGENT=1,
@@ -354,6 +377,23 @@ export function selectHardware(env: NodeJS.ProcessEnv = process.env, injected?: 
   return realHardware;
 }
 
+/** Detects this computer's model servers with the plain fetch: loopback probes are never observed or proxied. */
+const realLocalEngines = (): Promise<LocalEngine[]> => detectLocalEngines({ fetch: globalThis.fetch });
+/** Tests only: the model servers the fake HTTP serves. */
+const fakeLocalEngines = (): Promise<LocalEngine[]> => detectLocalEngines({ fetch: fakeHttp });
+
+/**
+ * The local model detector: the injected one, else the real probes. Under THETERMINAL_FAKE_AGENT=1,
+ * THETERMINAL_FAKE_HTTP=1 selects a detector over the fake HTTP; it is ignored otherwise.
+ */
+export function selectLocalEngines(
+  env: NodeJS.ProcessEnv = process.env, injected?: () => Promise<LocalEngine[]>,
+): () => Promise<LocalEngine[]> {
+  if (injected) return injected;
+  if (env.THETERMINAL_FAKE_AGENT === "1" && env.THETERMINAL_FAKE_HTTP === "1") return fakeLocalEngines;
+  return realLocalEngines;
+}
+
 /** The server's own variable per provider: a development and live-test fallback when no connection holds a key. */
 const API_KEY_ENV: Record<Provider, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
 
@@ -381,6 +421,8 @@ export async function createServer(opts: {
   sts?: StsCaller;
   /** Detects this computer's hardware. Default: the real programs (see selectHardware). */
   hardware?: () => Promise<HardwareInfo>;
+  /** Detects the model servers on this computer. Default: the real probes (see selectLocalEngines). */
+  localEngines?: () => Promise<LocalEngine[]>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -510,6 +552,7 @@ export async function createServer(opts: {
       registerGitHubRoutes(app, { github });
       registerCapacityRoutes(app, {
         db, connections, modes: (p) => settings.getMode(p), hardware: selectHardware(process.env, opts.hardware),
+        localEngines: selectLocalEngines(process.env, opts.localEngines),
       });
       if (opts.uiDir) registerStaticUi(app, opts.uiDir);
       await app.ready();

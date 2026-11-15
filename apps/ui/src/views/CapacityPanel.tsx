@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { CapacitySource, Figure } from "@theterminal/shared";
+import type { CapacitySource, Figure, LocalEngine } from "@theterminal/shared";
 import { OWN_LABEL, PROVIDER_NAMES } from "../components/ProviderAuthSettings";
 import { useShell } from "../shell/model";
 
@@ -19,6 +19,41 @@ const count = (n: number) => n.toLocaleString("en-US");
 export const providerName = (s: CapacitySource) => PROVIDER_NAMES[s.provider];
 export const planText = (s: CapacitySource) => s.plan ?? "no plan set";
 const modeText = (s: CapacitySource) => (s.mode === "api_key" ? "API key" : (OWN_LABEL[s.mode] ?? s.mode));
+
+/** An engine as the Owner knows it, with its version when it reports one. */
+export const engineText = (e: LocalEngine) => `${e.engine === "ollama" ? "Ollama" : "llama.cpp"}${e.version === null ? "" : ` ${e.version}`}`;
+/** Decimal gigabytes, as Ollama lists model sizes. */
+const sizeText = (bytes: number | null) => (bytes === null ? "not reported" : `${(bytes / 1e9).toFixed(1)} GB`);
+
+/** Every model of every detected server, one row each. */
+function LocalModelsTable({ engines }: { engines: LocalEngine[] }) {
+  return (
+    <table className="local-models-table" aria-label="Local models">
+      <thead>
+        <tr>
+          {["Engine", "Model", "Size", "Parameters", "Quantization"].map((h) => (
+            <th key={h} scope="col">
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {engines.flatMap((e) =>
+          e.models.map((m) => (
+            <tr key={`${e.engine}/${m.id}`}>
+              <td>{engineText(e)}</td>
+              <td>{m.id}</td>
+              <td>{sizeText(m.sizeBytes)}</td>
+              <td>{m.parameters ?? "not reported"}</td>
+              <td>{m.quantization ?? "not reported"}</td>
+            </tr>
+          )),
+        )}
+      </tbody>
+    </table>
+  );
+}
 
 /** Loads the report while mounted: on open, then every 60 s. */
 export function useCapacityRefresh(refresh: () => void): void {
@@ -109,6 +144,12 @@ export function CapacityPanel(_props: { id: string }) {
           ))}
         </tbody>
       </table>
+      {report.localModels.some((e) => e.models.length > 0) && (
+        <>
+          <h3>Local models</h3>
+          <LocalModelsTable engines={report.localModels} />
+        </>
+      )}
       <p className="capacity-footer">{FOOTER}</p>
     </div>
   );

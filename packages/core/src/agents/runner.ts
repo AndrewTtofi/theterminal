@@ -70,6 +70,14 @@ export class DuplicateCloudProviderError extends Error {
   }
 }
 
+/** A run on a local model was asked of an agent other than Codex: only Codex has a custom model provider. */
+export class LocalModelUnsupportedError extends Error {
+  constructor() {
+    super("Only Codex can run on a local model in The Terminal yet");
+    this.name = "LocalModelUnsupportedError";
+  }
+}
+
 /** How long all of a run's cloud grants together may take to mint, by default. */
 export const DEFAULT_GRANT_TIMEOUT_MS = 10_000;
 /** An MCP env or header value this long or longer is redacted from the run's output. */
@@ -113,7 +121,7 @@ export type AgentRunnerDeps = {
 
 function defaultSelect(ids: string[]): RunSelection {
   if (ids.length > 0) throw new UnsupportedConnectionError();
-  return { cloud: [], mcp: [] };
+  return { cloud: [], mcp: [], localModel: null };
 }
 
 /**
@@ -269,6 +277,8 @@ export class AgentRunner {
     }
     // Every selected connection is checked before anything is minted or created; errors propagate as they are.
     const selection = (this.deps.selectConnections ?? defaultSelect)(input.connectionIds ?? []);
+    const localModel = selection.localModel ?? null;
+    if (localModel !== null && input.adapter !== "codex") throw new LocalModelUnsupportedError();
     if ((input.adapter === "codex" || input.adapter === "gemini") && selection.mcp.length > 0) throw new McpUnsupportedError(input.adapter);
     const serverNames = selection.mcp.map((m) => m.serverName);
     if (new Set(serverNames).size !== serverNames.length) throw new DuplicateMcpServerError();
@@ -277,17 +287,22 @@ export class AgentRunner {
     const grants = await this.mintAll(selection.cloud);
     const names = grants.flatMap((g) => Object.keys(g.env));
     if (new Set(names).size !== names.length) throw new DuplicateCloudProviderError("two cloud grants would set the same variable");
-    const runSecrets = [...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp)];
+    const runSecrets = [
+      ...grants.flatMap((g) => g.secrets), ...mcpSecrets(selection.mcp), ...(localModel?.apiKey ? [localModel.apiKey] : []),
+    ];
 
+    // A local model needs no login: the provider's own mode and connection are not used.
     const authMode: AuthMode =
-      input.adapter === "fake" ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
-    const creds = input.adapter === "fake" ? null : (this.deps.credentials?.(input.adapter) ?? null);
+      input.adapter === "fake" || localModel !== null ? "none" : new ProviderSettings(db, ledger).getMode(input.adapter);
+    const creds = input.adapter === "fake" || localModel !== null ? null : (this.deps.credentials?.(input.adapter) ?? null);
     // Only what the mode uses: the key in api_key mode, the CLI home in a login mode; the Gemini project in both.
     const env: Record<string, string> = Object.assign({}, ...grants.map((g) => g.env));
     const credentials: RunCredentials = { env, mcpServers: selection.mcp };
     if (authMode === "api_key" && creds?.apiKey) credentials.apiKey = creds.apiKey;
     if (authMode !== "api_key" && creds?.cliHome) credentials.cliHome = creds.cliHome;
     if (creds?.googleCloudProject) credentials.googleCloudProject = creds.googleCloudProject;
+    // Its key stays in `localModel`, never in `env`: Codex lets every `env` name through to the agent's commands.
+    if (localModel !== null) credentials.localModel = localModel;
     // What the run takes from the connection: its key in api_key mode, its CLI home in a login mode.
     const purpose = authMode === "api_key" ? (creds?.apiKey ? "api_key" : null) : creds?.cliHome ? "cli_home" : null;
 
@@ -315,6 +330,7 @@ export class AgentRunner {
       uses.push({ connectionId: source.connectionId, name: source.name, runId, purpose: "cloud_credentials", credential, expiresAt });
     });
     for (const m of selection.mcp) uses.push({ connectionId: m.connectionId, name: m.name, runId, purpose: "mcp_server" });
+    if (localModel !== null) uses.push({ connectionId: localModel.connectionId, name: localModel.name, runId, purpose: "local_model" });
     try {
       for (const payload of uses) {
         commitEvent(db, ledger, () => ({

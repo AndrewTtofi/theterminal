@@ -107,7 +107,7 @@ describe("connection catalog", () => {
         "http://127.0.0.1:11434/v1 for Ollama, http://127.0.0.1:8080/v1 for llama.cpp server. Only this computer: to use another computer's model, run the agent there.",
       ],
       ["Model", "The model name the server lists, for example qwen2.5-coder:14b."],
-      ["API style", "chat works with Ollama and llama.cpp; responses only with servers that offer it. Default chat."],
+      ["API style", "responses works with Ollama and llama.cpp server; the bundled Codex no longer accepts chat. Default responses."],
       ["API key (if the server wants one)", undefined],
     ]);
     expect(entry("mcp_stdio").fields[2]!.format).toBe("pairs");

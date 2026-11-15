@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { KIND_LABELS, visibleControls } from "@theterminal/shared";
 import type { AdapterId, AuthMode, Card, Connection, Provider } from "@theterminal/shared";
-import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE } from "../api";
+import { CODEX_MCP_NOTE, GEMINI_MCP_NOTE, LOCAL_MODEL_NOTE } from "../api";
 
 export const ADAPTER_NAMES: Record<AdapterId, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", fake: "Fake" };
 
@@ -11,7 +11,7 @@ type Props = {
   providers?: Partial<Record<Provider, { mode: AuthMode; available: boolean }>>;
   /** The project's cards; the run can be tied to one of them. */
   cards: Card[];
-  /** Every connection; the enabled cloud accounts and MCP servers are offered to the run. */
+  /** Every connection; the enabled cloud accounts, MCP servers and local models are offered to the run. */
   connections: Connection[];
   /** The card chosen when the form opens; one no longer in `cards` is not sent. */
   defaultCardId?: string | null;
@@ -44,7 +44,13 @@ export function StartRunForm({
   // Codex and Gemini get no MCP server: a ticked one stays ticked for another agent, but is never sent.
   const noMcpNote = chosen === "codex" ? CODEX_MCP_NOTE : chosen === "gemini" ? GEMINI_MCP_NOTE : null;
   const usable = (c: Connection) => !(noMcpNote !== null && c.kind === "mcp");
-  const connectionIds = offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id);
+  // A local model runs only with Codex, and a run uses at most one: choosing one replaces the other.
+  const locals = connections.filter((c) => c.enabled && c.provider === "local_model");
+  const localUsable = chosen === "codex";
+  const connectionIds = [
+    ...offered.filter((c) => picked.includes(c.id) && usable(c)).map((c) => c.id),
+    ...(localUsable ? locals.filter((c) => picked.includes(c.id)).map((c) => c.id) : []),
+  ];
 
   return (
     <form
@@ -114,6 +120,27 @@ export function StartRunForm({
             </label>
           ))}
           {noMcpNote !== null && offered.some((c) => c.kind === "mcp") && <p className="note">{noMcpNote}</p>}
+        </fieldset>
+      )}
+      {locals.length > 0 && (
+        <fieldset className="run-connections">
+          <legend>Run on a local model</legend>
+          {locals.map((c) => (
+            <label key={c.id}>
+              <input
+                type="checkbox"
+                checked={picked.includes(c.id) && localUsable}
+                disabled={!localUsable}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  const others = new Set(locals.map((l) => l.id));
+                  setPicked((prev) => (on ? [...prev.filter((id) => !others.has(id)), c.id] : prev.filter((id) => id !== c.id)));
+                }}
+              />
+              {c.name}
+            </label>
+          ))}
+          {!localUsable && <p className="note">{LOCAL_MODEL_NOTE}</p>}
         </fieldset>
       )}
       <button type="submit" disabled={!chosen || !prompt.trim() || starting}>

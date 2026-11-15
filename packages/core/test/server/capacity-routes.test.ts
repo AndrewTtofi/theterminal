@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CapacityReport, Connection, HardwareInfo, LedgerEntry } from "@theterminal/shared";
+import type { CapacityReport, Connection, HardwareInfo, LedgerEntry, LocalEngine } from "@theterminal/shared";
 import { fakeHardware } from "../../src/capacity/hardware.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
-import { createServer, selectHardware, type RunningServer } from "../../src/server/server.js";
+import { createServer, selectHardware, selectLocalEngines, type RunningServer } from "../../src/server/server.js";
 
-const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_HARDWARE", "THETERMINAL_FAKE_SCRIPT"] as const;
+const ENV_KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_HARDWARE", "THETERMINAL_FAKE_HTTP", "THETERMINAL_FAKE_SCRIPT"] as const;
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const KEY = "sk-ant-TESTKEY-0000000000";
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -52,6 +52,57 @@ describe("selectHardware", () => {
     expect(fake).not.toBe(real);
     expect(await fake()).toMatchObject({ cpu: "Fake CPU", gpu: "Fake GPU" });
     expect(selectHardware({ THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_HARDWARE: "1" }, injected)).toBe(injected);
+  });
+});
+
+describe("selectLocalEngines", () => {
+  it("returns the injected detector, else the fake HTTP one only under both fake flags, else the real probe", async () => {
+    const injected = async (): Promise<LocalEngine[]> => [];
+    expect(selectLocalEngines({ THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_HTTP: "1" }, injected)).toBe(injected);
+    const real = selectLocalEngines({});
+    expect(selectLocalEngines({ THETERMINAL_FAKE_HTTP: "1" })).toBe(real);
+    expect(selectLocalEngines({ THETERMINAL_FAKE_AGENT: "1" })).toBe(real);
+    expect(selectLocalEngines({ THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_HTTP: "1" })).not.toBe(real);
+    const fake = await selectLocalEngines({ THETERMINAL_FAKE_AGENT: "1", THETERMINAL_FAKE_HTTP: "1" })();
+    expect(fake).toEqual([{
+      engine: "ollama", baseUrl: "http://127.0.0.1:11434/v1", version: "0.0.0-fake", detectedAt: expect.any(String),
+      models: [{ id: "fake-coder:7b", sizeBytes: 4 * 1024 ** 3, parameters: "7B", quantization: "Q4_K_M" }],
+    }]);
+  });
+});
+
+describe("local models in the capacity API", { timeout: 15000 }, () => {
+  it("lists what the fake HTTP serves on this computer, and the connection tester agrees", async () => {
+    process.env.THETERMINAL_FAKE_AGENT = "1";
+    process.env.THETERMINAL_FAKE_HTTP = "1";
+    const s = await start();
+    const report = await json<CapacityReport>(send(s, "GET", "/api/capacity"));
+    expect(report.localModels.map((e) => [e.engine, e.models.map((m) => m.id)])).toEqual([["ollama", ["fake-coder:7b"]]]);
+    const add = await send(s, "POST", "/api/connections", {
+      kind: "llm", provider: "local_model", name: "Fake coder", config: { baseUrl: report.localModels[0]!.baseUrl, model: "fake-coder:7b" },
+    });
+    expect(add.status).toBe(201);
+    const id = ((await add.json()) as Connection).id;
+    expect(await json(send(s, "POST", `/api/connections/${id}/test`))).toEqual({ ok: true, message: "Connected (model available)" });
+  });
+
+  it("caches the detection, and POST /api/capacity/detect refreshes it", async () => {
+    let n = 0;
+    const localEngines = async (): Promise<LocalEngine[]> => [{
+      engine: "llamacpp", baseUrl: "http://127.0.0.1:8080/v1", version: null, detectedAt: new Date().toISOString(),
+      models: [{ id: `model-${++n}`, sizeBytes: null, parameters: null, quantization: null }],
+    }];
+    const s = await start({ localEngines, hardware: async () => fakeHardware });
+    const ids = async () => (await json<CapacityReport>(send(s, "GET", "/api/capacity"))).localModels[0]!.models.map((m) => m.id);
+    expect(await ids()).toEqual(["model-1"]);
+    expect(await ids()).toEqual(["model-1"]);
+    expect((await send(s, "POST", "/api/capacity/detect")).status).toBe(200);
+    expect(await ids()).toEqual(["model-2"]);
+  });
+
+  it("answers with no local models when detection fails", async () => {
+    const s = await start({ localEngines: async () => { throw new Error("boom"); } });
+    expect((await json<CapacityReport>(send(s, "GET", "/api/capacity"))).localModels).toEqual([]);
   });
 });
 

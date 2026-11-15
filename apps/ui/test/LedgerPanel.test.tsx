@@ -70,6 +70,7 @@ describe("describeEntry connections", () => {
       'Agent abcdef12 was given the Azure client secret from "Ops"',
     );
     expect(used("mcp_server")).toBe('Agent abcdef12 was given the MCP server "Ops"');
+    expect(used("local_model")).toBe('Agent abcdef12 was given the local model "Ops"');
   });
 
   it("describes a sign-in with only the provider and the outcome", () => {

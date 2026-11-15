@@ -11,7 +11,7 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, ShuttingDownError,
   type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
@@ -975,5 +975,81 @@ describe("AgentRunner.settling", () => {
     release();
     await vi.waitFor(() => expect(runner.settling(run.id)).toBe(false));
     expect(runner.settling("no-such-run")).toBe(false);
+  });
+});
+
+describe("AgentRunner with a local model", () => {
+  const LOCAL_KEY = "TESTKEY-local-000000";
+  const local = {
+    connectionId: "conn-local-0001", name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b",
+    wireApi: "responses" as const,
+  };
+  const mint = vi.fn(async () => {
+    throw new Error("never minted");
+  });
+  const localRunner = (adapters: Partial<Record<AdapterId, AgentAdapter>>, withKey: boolean, credentials?: (p: Provider) => null | { connectionId: string; name: string; apiKey?: string }) => {
+    const runner = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters, dataDir, extraSecrets: () => [],
+      selectConnections: () => ({ cloud: [], mcp: [], localModel: withKey ? { ...local, apiKey: LOCAL_KEY } : local }),
+      mintCloud: mint, credentials,
+    });
+    runners.push(runner);
+    return runner;
+  };
+  const used = () => ledger.list().filter((e) => e.type === "connection.used");
+
+  it.each(["claude", "gemini", "fake"] as const)("refuses %s before anything is minted or created", async (id) => {
+    const start = vi.fn(async () => ({ status: "completed" as const }));
+    const runner = localRunner({ [id]: { id, start } }, true);
+    const err = await runner.start(owner, { projectId, adapter: id, prompt: "p", connectionIds: ["conn-local-0001"] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LocalModelUnsupportedError);
+    expect((err as Error).message).toBe("Only Codex can run on a local model in The Terminal yet");
+    expect(mint).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM agent_runs").get()).toEqual({ n: 0 });
+  });
+
+  it("Codex runs with no login: authMode none, one connection.used for the local model, the key outside the agent's env and redacted", async () => {
+    // Codex is set to api_key mode with a connection key: neither is used for a local-model run.
+    new ProviderSettings(db, ledger).setMode(owner, "codex", "api_key");
+    const seen: { authMode: string; credentials: RunCredentials }[] = [];
+    const adapter: AgentAdapter = {
+      id: "codex",
+      async start(o) {
+        seen.push({ authMode: o.authMode, credentials: o.credentials });
+        o.emit({ type: "message", text: `the server key is ${LOCAL_KEY}` });
+        return { status: "failed", error: `refused ${LOCAL_KEY}` };
+      },
+    };
+    const credentials = vi.fn(() => ({ connectionId: "conn-codex-0001", name: "Codex", apiKey: FAKE_KEY }));
+    const runner = localRunner({ codex: adapter }, true, credentials);
+    const run = await runner.start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-local-0001"] });
+    await untilFinished(run.id);
+
+    const started = ledger.list().find((e) => e.type === "agent.started")!;
+    expect((started.payload as { authMode: string }).authMode).toBe("none");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.authMode).toBe("none");
+    expect(seen[0]!.credentials.localModel).toEqual({ ...local, apiKey: LOCAL_KEY });
+    expect(seen[0]!.credentials.apiKey).toBeUndefined();
+    // Never a grant variable: Codex hands every env name to the agent's shell commands.
+    expect(seen[0]!.credentials.env).toEqual({});
+    expect(used().map((e) => e.payload)).toEqual([
+      { connectionId: "conn-local-0001", name: "Qwen on Ollama", runId: run.id, purpose: "local_model" },
+    ]);
+    const message = ledger.list().find((e) => e.type === "agent.message")!;
+    expect((message.payload as { text: string }).text).toBe("the server key is [REDACTED]");
+    expect(getRun(db, run.id)!.error).toBe("refused [REDACTED]");
+    expect(JSON.stringify(ledger.list())).not.toContain(LOCAL_KEY);
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it("without a stored key the local model carries none", async () => {
+    const seen: RunCredentials[] = [];
+    const adapter: AgentAdapter = { id: "codex", async start(o) { seen.push(o.credentials); return { status: "completed" }; } };
+    const run = await localRunner({ codex: adapter }, false).start(owner, { projectId, adapter: "codex", prompt: "p", connectionIds: ["conn-local-0001"] });
+    await untilFinished(run.id);
+    expect(seen[0]!.localModel).toEqual(local);
+    expect("apiKey" in seen[0]!.localModel!).toBe(false);
   });
 });

@@ -14,6 +14,7 @@ vi.mock("../src/api", async (importOriginal) => {
       updateConnection: vi.fn(),
       removeConnection: vi.fn(),
       testConnection: vi.fn(),
+      getCapacity: vi.fn(),
     },
   };
 });
@@ -21,6 +22,7 @@ vi.mock("../src/api", async (importOriginal) => {
 import { api, ApiError } from "../src/api";
 import { ConnectionEditor } from "../src/views/ConnectionEditor";
 import { AGENTS, connection, renderWithConnections } from "./connections-harness";
+import { localEngines, report } from "./capacity-fixtures";
 
 const m = vi.mocked(api);
 const KEY = "sk-ant-TESTKEY-0000000000";
@@ -266,5 +268,41 @@ describe("ConnectionEditor", () => {
     await userEvent.type(keyInput(), KEY);
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByRole("alert")).textContent).toBe("This connection cannot be used that way");
+  });
+
+  describe("a local model", () => {
+    it("lists the model servers detected on this computer, and Use fills the server URL and the model", async () => {
+      m.getCapacity.mockResolvedValue(report({ localModels: localEngines }));
+      m.addConnection.mockResolvedValue(connection({ id: "lm1", provider: "local_model", name: "Local model" }));
+      renderWithConnections(<ConnectionEditor id="connection:new:local_model" />);
+      const found = await screen.findByRole("region", { name: "Detected on this computer" });
+      expect(m.getCapacity).toHaveBeenCalledTimes(1);
+      const items = within(found).getAllByRole("listitem").map((li) => li.textContent);
+      expect(items).toEqual(["qwen2.5-coder:14bUse", "llama3.2:3bUse", "gpt-oss-20bUse"]);
+      expect(within(found).getByText("Ollama 0.12.3")).toBeTruthy();
+      expect(within(found).getByText("llama.cpp")).toBeTruthy();
+
+      await userEvent.click(within(found).getByRole("button", { name: "Use gpt-oss-20b" }));
+      expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe("http://127.0.0.1:8080/v1");
+      expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("gpt-oss-20b");
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(m.addConnection).toHaveBeenCalledWith({
+        kind: "llm", provider: "local_model", name: "Local model", config: { baseUrl: "http://127.0.0.1:8080/v1", model: "gpt-oss-20b" },
+      });
+    });
+
+    it("says when no model server was detected", async () => {
+      m.getCapacity.mockResolvedValue(report());
+      renderWithConnections(<ConnectionEditor id="connection:new:local_model" />);
+      const found = await screen.findByRole("region", { name: "Detected on this computer" });
+      await waitFor(() => expect(found.textContent).toContain("No local model server detected. Install Ollama or llama.cpp server and detect again."));
+    });
+
+    it("never asks for capacity in another provider's editor", async () => {
+      renderWithConnections(<ConnectionEditor id="connection:new:claude" />);
+      await waitFor(() => expect(m.listConnections).toHaveBeenCalled());
+      expect(m.getCapacity).not.toHaveBeenCalled();
+      expect(screen.queryByRole("region", { name: "Detected on this computer" })).toBeNull();
+    });
   });
 });

@@ -27,6 +27,7 @@ import { MAX_SECRET_BYTES, SecretStoreUnavailableError, type SecretStore } from 
 import { pairValueSecrets, pairsKind, parsePairs, toMcpSpec, type McpServerSpec } from "./mcp.js";
 import { privateKeySecrets } from "./cloud/gcp.js";
 import { hardwareConfig, hardwareFromConfig } from "../capacity/hardware.js";
+import { isLoopbackUrl } from "../capacity/local-models.js";
 
 /** A provider that allows one connection already has one. */
 export class ConflictError extends Error {
@@ -75,7 +76,16 @@ export type CloudSource = {
   config: Record<string, string>;
   secrets: Record<string, string>;
 };
-export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[] };
+/** A model server on this computer (a `local_model` connection), with its key when the server wants one. */
+export type LocalModelSource = {
+  connectionId: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  wireApi: "chat" | "responses";
+  apiKey?: string;
+};
+export type RunSelection = { cloud: CloudSource[]; mcp: McpServerSpec[]; localModel: LocalModelSource | null };
 export type GitHubSource = { connectionId: string; token: string; repo: string } | null;
 export type Budget = { connectionId: string; provider: Provider; name: string; plan: string | null; monthlyBudgetUsd: number | null };
 
@@ -140,7 +150,15 @@ const MANAGED_BY_DETECTION = "this connection is managed by detection";
 /** Kinds whose connections a run may be given. */
 const RUN_KINDS: ReadonlySet<ConnectionKind> = new Set(["cloud", "mcp"]);
 const NUMBER_VALUE = /^\d{1,9}(\.\d{1,2})?$/;
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
+/** URL.hostname keeps the brackets of an IPv6 address. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const LOCAL_MODEL: ConnectionProvider = "local_model";
+const NOT_LOOPBACK = "Only this computer's own address is allowed";
+/**
+ * The API style a local model gets when its connection names none. Codex 0.169.0 refuses `wire_api = "chat"`
+ * ("no longer supported"), and Ollama and llama.cpp server both offer the Responses API.
+ */
+const DEFAULT_WIRE_API = "responses";
 
 const accountFor = (connectionId: string, field: string): string => `connection/${connectionId}/${field}`;
 
@@ -220,6 +238,8 @@ function urlProblem(value: string): string | null {
  * A "pairs" field is parsed, so a bad line is refused at [field, line] before anything is stored.
  */
 function checkFormat(provider: ConnectionProvider, field: ConnectionField, value: string, path: (string | number)[]): void {
+  // A local model server is this computer's only: another computer's model is used by running the agent there.
+  if (provider === LOCAL_MODEL && field.name === "baseUrl" && !isLoopbackUrl(value)) invalid(path, NOT_LOOPBACK);
   if (field.input === "number" && !NUMBER_VALUE.test(value)) invalid(path, "must be a number with at most 2 decimals");
   const badUrl = field.input === "url" ? urlProblem(value) : null;
   if (badUrl !== null) invalid(path, badUrl);
@@ -528,24 +548,34 @@ export class ConnectionService {
 
   /**
    * What a run is given for `ids`, from the cache: cloud accounts with their secrets and MCP server specs, in the order
-   * asked, duplicates collapsed. Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
+   * asked, duplicates collapsed, and at most one local model (more is a ZodError at `connectionIds`). Refuses unknown, wrong-kind and disabled ids, and an unavailable keychain (a run must
    * not start with half its secrets), before anything is returned.
    */
   selectForRun(ids: string[]): RunSelection {
     const rows = [...new Set(ids)].map((id) => this.requireRow(id));
     for (const row of rows) {
-      if (!RUN_KINDS.has(row.kind)) throw new UnsupportedConnectionError();
+      if (!RUN_KINDS.has(row.kind) && row.provider !== LOCAL_MODEL) throw new UnsupportedConnectionError();
       if (row.enabled !== 1) throw new ConnectionDisabledError();
     }
+    if (rows.filter((r) => r.provider === LOCAL_MODEL).length > 1) invalid(["connectionIds"], "a run can use only one local model");
     if (rows.length > 0 && this.keychainState() !== "ok") throw new SecretStoreUnavailableError();
     // Every field the projection lists must be in the cache: a run never gets an incomplete source.
     for (const row of rows) {
       const values = this.cache.get(row.id) ?? {};
       if (this.storedFields(row).some(([f]) => values[f] === undefined)) throw new SecretStoreUnavailableError();
     }
-    const selection: RunSelection = { cloud: [], mcp: [] };
+    const selection: RunSelection = { cloud: [], mcp: [], localModel: null };
     for (const row of rows) {
       const values = this.cache.get(row.id) ?? {};
+      if (row.provider === LOCAL_MODEL) {
+        const config = JSON.parse(row.config) as Record<string, string>;
+        const wireApi = config.wireApi === "chat" || config.wireApi === "responses" ? config.wireApi : DEFAULT_WIRE_API;
+        selection.localModel = {
+          connectionId: row.id, name: row.name, baseUrl: config.baseUrl ?? "", model: config.model ?? "", wireApi,
+          ...(values.apiKey ? { apiKey: values.apiKey } : {}),
+        };
+        continue;
+      }
       if (row.kind === "mcp") {
         selection.mcp.push(toMcpSpec(this.toConnection(row), values));
         continue;

@@ -2,7 +2,7 @@ import { useId, useState } from "react";
 import type { CapacitySource, HardwareInfo } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
 import { useShell } from "../shell/model";
-import { Estimate, planText, providerName, usd, useCapacityRefresh } from "./CapacityPanel";
+import { Estimate, engineText, planText, providerName, usd, useCapacityRefresh } from "./CapacityPanel";
 
 /** The month's spend: against the budget when both exist, else alone, else `not reported` (never $0). */
 function Spend({ s }: { s: CapacitySource }) {
@@ -106,6 +106,18 @@ export function CapacitySideBar() {
           Detect this computer
         </button>
         {detectError && <p className="capacity-error">{detectError}</p>}
+      </section>
+      <section aria-labelledby={`${uid}-local`}>
+        <h3 id={`${uid}-local`}>Local models</h3>
+        {report.localModels.length === 0 ? (
+          <p className="empty">No local model server detected. Install Ollama or llama.cpp server and detect again.</p>
+        ) : (
+          <ul>
+            {report.localModels.map((e) => (
+              <li key={e.engine}>{`${engineText(e)} · ${e.models.length} ${e.models.length === 1 ? "model" : "models"}`}</li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   );

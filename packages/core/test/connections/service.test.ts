@@ -893,7 +893,7 @@ describe("cloud, MCP and hardware connections", () => {
       serverName: "tt-00000002", connectionId: mcp.id, name: "Docs", transport: "http",
       url: "https://mcp.example.com/mcp", headers: { Authorization: HEADER },
     }]);
-    expect(svc.selectForRun([])).toEqual({ cloud: [], mcp: [] });
+    expect(svc.selectForRun([])).toEqual({ cloud: [], mcp: [], localModel: null });
   });
 
   it("selectForRun includes a local MCP server with its private command and args", async () => {
@@ -1015,6 +1015,82 @@ describe("cloud, MCP and hardware connections", () => {
     expect(() => svc.selectForRun(["hw-00000001"])).toThrow(UnsupportedConnectionError);
     await svc.remove(owner, "hw-00000001");
     expect(svc.list()).toEqual([]);
+  });
+});
+
+describe("local model connections", () => {
+  const LOCAL_KEY = "TESTKEY-local-000000";
+  const addLocal = (svc: ConnectionService, config: Record<string, string> = {}, secrets: Record<string, string> = {}) =>
+    svc.add(owner, {
+      kind: "llm", provider: "local_model", name: "Qwen on Ollama",
+      config: { baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b", ...config }, secrets,
+    });
+
+  it("refuses a server URL that is not this computer, at config.baseUrl, without writing anything", async () => {
+    const svc = make();
+    for (const baseUrl of ["http://192.168.1.5:11434/v1", "https://models.example.com/v1", "https://localhost:11434/v1"]) {
+      const err = await addLocal(svc, { baseUrl }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ZodError);
+      expect((err as ZodError).issues[0]!.path).toEqual(["config", "baseUrl"]);
+      expect((err as ZodError).issues[0]!.message).toBe("Only this computer's own address is allowed");
+    }
+    expect(ledger.list()).toEqual([]);
+  });
+
+  it("accepts the three loopback forms, [::1] included", async () => {
+    const svc = make();
+    for (const baseUrl of ["http://127.0.0.1:11434/v1", "http://localhost:8080/v1", "http://[::1]:11434/v1"]) {
+      await expect(addLocal(svc, { baseUrl })).resolves.toMatchObject({ provider: "local_model", config: { baseUrl } });
+    }
+  });
+
+  // Codex 0.169.0 refuses `wire_api = "chat"` ("no longer supported"), so the default is the Responses API.
+  it("selectForRun gives the local model, the responses API style by default and the key from the cache", async () => {
+    const svc = make();
+    const plain = await addLocal(svc);
+    expect(svc.selectForRun([plain.id])).toEqual({
+      cloud: [], mcp: [],
+      localModel: { connectionId: plain.id, name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b", wireApi: "responses" },
+    });
+    const keyed = await addLocal(svc, { wireApi: "chat" }, { apiKey: LOCAL_KEY });
+    expect(svc.selectForRun([keyed.id]).localModel).toEqual({
+      connectionId: keyed.id, name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b",
+      wireApi: "chat", apiKey: LOCAL_KEY,
+    });
+    expect(svc.secretValues()).toContain(LOCAL_KEY);
+    expect(JSON.stringify(ledger.list())).not.toContain(LOCAL_KEY);
+  });
+
+  it("selectForRun refuses two local models, a disabled one and a missing key", async () => {
+    const svc = make();
+    const a = await addLocal(svc);
+    const b = await addLocal(svc, { model: "llama3.2:3b" });
+    const err = (() => {
+      try {
+        svc.selectForRun([a.id, b.id]);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(ZodError);
+    expect((err as ZodError).issues[0]!.path).toEqual(["connectionIds"]);
+    expect(svc.selectForRun([a.id, a.id]).localModel?.connectionId).toBe(a.id);
+    await svc.update(owner, b.id, { enabled: false });
+    expect(() => svc.selectForRun([b.id])).toThrow(ConnectionDisabledError);
+
+    const keyed = await addLocal(svc, {}, { apiKey: LOCAL_KEY });
+    const fresh = make();
+    await store.delete(`connection/${keyed.id}/apiKey`);
+    await fresh.load();
+    expect(() => fresh.selectForRun([keyed.id])).toThrow(SecretStoreUnavailableError);
+  });
+
+  it("other model connections are still refused, and credentialsFor never returns a local model", async () => {
+    const svc = make();
+    const claude = await addClaude(svc);
+    await addLocal(svc);
+    expect(() => svc.selectForRun([claude.id])).toThrow(UnsupportedConnectionError);
+    expect(svc.credentialsFor("codex")).toBeNull();
   });
 });
 

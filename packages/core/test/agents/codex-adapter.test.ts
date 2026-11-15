@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
-import { CODEX_COMMAND_EXCLUDES, CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
+import { CODEX_COMMAND_EXCLUDES, CODEX_QUIET_ARGS, CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
 import { classify } from "../../src/agents/policy.js";
 import { AgentRunner } from "../../src/agents/runner.js";
@@ -244,7 +244,7 @@ describe("CodexAdapter (fake app-server)", () => {
       threadId: "thread-1", input: [{ type: "text", text: "do the thing", text_elements: [] }],
     });
     expect(fakeLog().find((e) => e.start).cwd).toBe(dir);
-    expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server"]);
+    expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...CODEX_QUIET_ARGS]);
   });
 
   it("reports a failed command as a failed result", async () => {
@@ -726,7 +726,7 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(start.env).toEqual({ OPENAI_API_KEY: FAKE_KEY, CODEX_API_KEY: FAKE_KEY, CODEX_HOME: home });
       expect(existsSync(home)).toBe(true);
       expect(received("mcpServerStatus/list").map((e) => e.params)).toEqual([{}, { threadId: "thread-1" }]);
-      expect(start.argv).toEqual(["app-server", "-c", "cli_auth_credentials_store=ephemeral"]);
+      expect(start.argv).toEqual(["app-server", ...CODEX_QUIET_ARGS, "-c", "cli_auth_credentials_store=ephemeral"]);
       expect(received("account/login/start")[0].params).toEqual({ type: "apiKey", apiKey: FAKE_KEY });
     });
 
@@ -758,7 +758,7 @@ describe("CodexAdapter (fake app-server)", () => {
         "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", ...names,
       ])}`,
       "-c", `shell_environment_policy.exclude=${JSON.stringify([
-        "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN",
+        "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_*", "CODEX_*", "NODE_REPL_AUTH_TOKEN", "LOCAL_MODEL_*",
       ])}`,
     ];
 
@@ -773,7 +773,7 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(await result).toEqual({ status: "completed" });
       expect(envs[0]!.AZURE_CLIENT_SECRET).toBe(GRANT.AZURE_CLIENT_SECRET);
       const login = authMode === "api_key" ? ["-c", "cli_auth_credentials_store=ephemeral"] : [];
-      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...login, ...policyArgs(Object.keys(GRANT))]);
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...CODEX_QUIET_ARGS, ...login, ...policyArgs(Object.keys(GRANT))]);
       expect(CODEX_COMMAND_EXCLUDES).toContain("NODE_REPL_AUTH_TOKEN");
     });
 
@@ -810,7 +810,7 @@ describe("CodexAdapter (fake app-server)", () => {
       script([]);
       const { result } = run(make(), undefined, { authMode: "chatgpt" });
       expect(await result).toEqual({ status: "completed" });
-      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server"]);
+      expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...CODEX_QUIET_ARGS]);
     });
 
     it("api_key mode keeps a separate Codex home per project", async () => {
@@ -849,6 +849,134 @@ describe("CodexAdapter (fake app-server)", () => {
     });
   });
 
+  describe("on a local model", () => {
+    const LOCAL_KEY = "TESTKEY-local-000000";
+    const local = {
+      connectionId: "conn-local-0001", name: "Qwen on Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:14b",
+      wireApi: "responses" as const,
+    };
+    const PROVIDER_KEYS = {
+      model: "qwen2.5-coder:14b",
+      model_provider: "theterminal_local",
+      "model_providers.theterminal_local.name": "Local model",
+      "model_providers.theterminal_local.base_url": "http://127.0.0.1:11434/v1",
+      "model_providers.theterminal_local.wire_api": "responses",
+      "model_providers.theterminal_local.requires_openai_auth": false,
+    };
+    beforeEach(() => {
+      vi.stubEnv("OPENAI_API_KEY", "sk-INHERITED-TESTKEY");
+      vi.stubEnv("CODEX_API_KEY", "sk-INHERITED-TESTKEY");
+      vi.stubEnv("CODEX_HOME", join(dir, "users-codex-home"));
+    });
+    const envs: NodeJS.ProcessEnv[] = [];
+    const spawn = ((file: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => {
+      envs.push(opts.env);
+      return nodeSpawn(file, args, opts as never);
+    }) as unknown as typeof nodeSpawn;
+    beforeEach(() => {
+      envs.length = 0;
+    });
+
+    it("starts the thread on the local provider, with no login, no provider key and an empty Codex home of its own", async () => {
+      script([{ message: "done" }]);
+      const { result } = run(make({ spawn }), undefined, { authMode: "none", credentials: { env: {}, mcpServers: [], localModel: local } });
+      expect(await result).toEqual({ status: "completed" });
+      const config = received("thread/start")[0].params.config as Record<string, unknown>;
+      expect(config).toMatchObject(PROVIDER_KEYS);
+      expect(config).not.toHaveProperty("model_providers.theterminal_local.env_key");
+      const start = fakeLog().find((e) => e.start);
+      const home = join(dir, "projects", "p1", "codex-home");
+      expect(start.env).toEqual({ OPENAI_API_KEY: null, CODEX_API_KEY: null, CODEX_HOME: home });
+      expect(existsSync(home)).toBe(true);
+      expect(envs[0]).not.toHaveProperty("OPENAI_API_KEY");
+      expect(envs[0]).not.toHaveProperty("CODEX_API_KEY");
+      expect(envs[0]).not.toHaveProperty("LOCAL_MODEL_API_KEY");
+      expect(start.argv.join(" ")).not.toContain("cli_auth_credentials_store");
+      expect(received("account/login/start")).toEqual([]);
+      expect(received("account/read")).toEqual([]);
+    });
+
+    it("names the key variable only when the server wants a key, and hands the key to Codex alone", async () => {
+      script([]);
+      const { result } = run(make({ spawn }), undefined, {
+        authMode: "none", credentials: { env: {}, mcpServers: [], localModel: { ...local, apiKey: LOCAL_KEY } },
+      });
+      expect(await result).toEqual({ status: "completed" });
+      const config = received("thread/start")[0].params.config as Record<string, unknown>;
+      expect(config).toMatchObject({ ...PROVIDER_KEYS, "model_providers.theterminal_local.env_key": "LOCAL_MODEL_API_KEY" });
+      expect(envs[0]!.LOCAL_MODEL_API_KEY).toBe(LOCAL_KEY);
+      const argv = fakeLog().find((e) => e.start).argv as string[];
+      const include = argv.find((a) => a.startsWith("shell_environment_policy.include_only="))!;
+      const exclude = argv.find((a) => a.startsWith("shell_environment_policy.exclude="))!;
+      expect(include).not.toContain("LOCAL_MODEL");
+      expect(JSON.parse(exclude.slice(exclude.indexOf("=") + 1))).toContain("LOCAL_MODEL_*");
+      expect(JSON.stringify(fakeLog())).not.toContain(LOCAL_KEY);
+    });
+
+    it("an approved command never sees the key, with or without a cloud grant", async () => {
+      const probe = "process.stdout.write(JSON.stringify({ k: process.env.LOCAL_MODEL_API_KEY ?? null, s: process.env.AZURE_CLIENT_SECRET ?? null }))";
+      for (const env of [{}, { AZURE_CLIENT_SECRET: "TESTKEY-azure-secret-0000000000" }]) {
+        rmSync(logFile, { force: true });
+        script([{ approve: "command", command: "node probe", itemId: "i1", run: [process.execPath, "-e", probe] }]);
+        const { result, events } = run(make(), undefined, {
+          authMode: "none", credentials: { env, mcpServers: [], localModel: { ...local, apiKey: LOCAL_KEY } },
+        });
+        expect(await result).toEqual({ status: "completed" });
+        const out = JSON.parse((events.find((e) => e.type === "action_result") as { output: string }).output);
+        expect(out).toEqual({ k: null, s: (env as Record<string, string>).AZURE_CLIENT_SECRET ?? null });
+      }
+    });
+
+    it("passes the API style the connection names", async () => {
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "none", credentials: { env: {}, mcpServers: [], localModel: { ...local, wireApi: "chat" } } });
+      // Codex 0.169.0 refuses wire_api "chat" outright, so the run says so before Codex starts.
+      expect(await result).toEqual({
+        status: "failed",
+        error: "Codex no longer supports the chat API style: set the local model connection's API style to responses",
+      });
+      expect(fakeLog()).toEqual([]);
+    });
+
+    it("refuses mode none without a local model, as before", async () => {
+      const { result } = run(make(), undefined, { authMode: "none" });
+      expect(await result).toEqual({ status: "failed", error: "Unsupported auth mode for Codex: none" });
+      expect(fakeLog()).toEqual([]);
+    });
+
+    it("fails with Codex's own words when the model server cannot be reached", async () => {
+      script([{ exit: 1, stderr: "stream error: error sending request: connection refused" }]);
+      const { result } = run(make(), undefined, { authMode: "none", credentials: { env: {}, mcpServers: [], localModel: local } });
+      const r = await result;
+      expect(r.status).toBe("failed");
+      expect(r.error).toContain("connection refused");
+    });
+
+    it("checks its own Codex home for rules, like api_key mode", async () => {
+      const rules = join(dir, "projects", "p1", "codex-home", "rules");
+      mkdirSync(rules, { recursive: true });
+      writeFileSync(join(rules, "default.rules"), "");
+      script([]);
+      const { result } = run(make(), undefined, { authMode: "none", credentials: { env: {}, mcpServers: [], localModel: local } });
+      expect((await result).error).toMatch(/'always allow' rules/);
+    });
+  });
+
+  it("turns off Codex's update check, analytics, feedback and telemetry exporters for every run and thread", async () => {
+    script([]);
+    const { result } = run(make(), undefined, { authMode: "chatgpt" });
+    expect(await result).toEqual({ status: "completed" });
+    expect(fakeLog().find((e) => e.start).argv).toEqual(["app-server", ...CODEX_QUIET_ARGS]);
+    expect(CODEX_QUIET_ARGS).toEqual([
+      "-c", "check_for_update_on_startup=false", "-c", "analytics.enabled=false", "-c", "feedback.enabled=false",
+      "-c", 'otel.exporter="none"', "-c", 'otel.metrics_exporter="none"', "-c", 'otel.trace_exporter="none"',
+    ]);
+    expect(received("thread/start")[0].params.config).toMatchObject({
+      check_for_update_on_startup: false, "analytics.enabled": false, "feedback.enabled": false,
+      "otel.exporter": "none", "otel.metrics_exporter": "none", "otel.trace_exporter": "none",
+    });
+  });
+
   describe("locating the CLI", () => {
     const NO_CLI = "Codex CLI is unavailable: its bundled program is missing and none is on PATH";
     const noBundled = () => null;
@@ -865,7 +993,7 @@ describe("CodexAdapter (fake app-server)", () => {
       const native = { file: join(dir, "node_modules", "@openai", "codex-x", "vendor", "bin", "codex"), args: [] };
       const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => native, bin, spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
-      expect(spawn).toHaveBeenCalledWith(native.file, ["app-server"], expect.objectContaining({ shell: false }));
+      expect(spawn).toHaveBeenCalledWith(native.file, ["app-server", ...CODEX_QUIET_ARGS], expect.objectContaining({ shell: false }));
       expect(bin).not.toHaveBeenCalled();
     });
 
@@ -885,7 +1013,7 @@ describe("CodexAdapter (fake app-server)", () => {
       const { result } = run(new CodexAdapter({ dataDir: dir, bundled: () => bundledCodex({ coreDir, platform, arch }), bin, spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
       expect(bin).toHaveBeenCalledOnce();
-      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server", ...CODEX_QUIET_ARGS], expect.anything());
     });
 
     it("uses the package's own bundled Codex when none is injected", async () => {
@@ -896,7 +1024,7 @@ describe("CodexAdapter (fake app-server)", () => {
       const bin = vi.fn(() => null);
       const { result } = run(new CodexAdapter({ dataDir: dir, bin, spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
-      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, "app-server"], expect.anything());
+      expect(spawn).toHaveBeenCalledWith(expected.file, [...expected.args, "app-server", ...CODEX_QUIET_ARGS], expect.anything());
       expect(bin).not.toHaveBeenCalled();
     });
 
@@ -909,7 +1037,7 @@ describe("CodexAdapter (fake app-server)", () => {
       expect(await result).toEqual({ status: "completed" });
       expect(bundled).toHaveBeenCalledOnce();
       expect(bin).toHaveBeenCalledOnce();
-      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server"], expect.anything());
+      expect(spawn).toHaveBeenCalledWith("/opt/codex/bin/codex", ["app-server", ...CODEX_QUIET_ARGS], expect.anything());
     });
 
     it("a test command wins over the bundled program", async () => {
@@ -939,7 +1067,7 @@ describe("CodexAdapter (fake app-server)", () => {
       const exists = vi.fn((p: string) => p === target);
       const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => shim, spawn: spawn as never, exists }));
       expect(await result).toEqual({ status: "completed" });
-      expect(spawn).toHaveBeenCalledWith(process.execPath, [target, "app-server"], expect.objectContaining({ shell: false }));
+      expect(spawn).toHaveBeenCalledWith(process.execPath, [target, "app-server", ...CODEX_QUIET_ARGS], expect.objectContaining({ shell: false }));
     });
 
     it("refuses a .cmd shim with no npm package script behind it", async () => {
@@ -956,7 +1084,7 @@ describe("CodexAdapter (fake app-server)", () => {
       const { result } = run(new CodexAdapter({ dataDir: dir, bundled: noBundled, bin: () => "/opt/codex/bin/codex", spawn: spawn as never }));
       expect(await result).toEqual({ status: "completed" });
       expect(spawn).toHaveBeenCalledWith(
-        "/opt/codex/bin/codex", ["app-server"], expect.objectContaining({ cwd: dir, stdio: ["pipe", "pipe", "pipe"], shell: false }),
+        "/opt/codex/bin/codex", ["app-server", ...CODEX_QUIET_ARGS], expect.objectContaining({ cwd: dir, stdio: ["pipe", "pipe", "pipe"], shell: false }),
       );
     });
   });

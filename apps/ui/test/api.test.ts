@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
+import { api, ApiError, LOCAL_MODEL_NOTE, blockedGates, errorMessage, exportLedgerUrl } from "../src/api";
 
 function respond(status: number, body?: unknown) {
   const fetchMock = vi.fn().mockImplementation(async () =>
@@ -33,6 +33,11 @@ describe("error detail", () => {
     expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "not_found", detail: undefined });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
     expect(await api.moveCard("c1", "ship").catch((e: unknown) => e)).toMatchObject({ code: "internal", detail: undefined });
+  });
+
+  it("words a run on a local model with an agent other than Codex", () => {
+    expect(errorMessage(new ApiError(400, "local_model_unsupported"), "run")).toBe("Only Codex can run on a local model in The Terminal yet.");
+    expect(LOCAL_MODEL_NOTE).toBe("Only Codex can run on a local model in The Terminal yet.");
   });
 
   it("ignores a detail of the wrong type when wording a message", () => {

@@ -294,9 +294,9 @@ details.raw pre { overflow: auto; max-height: 200px; background: var(--panel); p
 .capacity-bar-fill.attention { background: var(--attention); }
 .capacity-error { margin: 0; color: var(--attention); }
 .capacity-panel { padding: 8px 12px; overflow: auto; }
-.capacity-table { border-collapse: collapse; width: 100%; }
-.capacity-table th, .capacity-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.capacity-table th { color: var(--muted); font-weight: normal; }
+.capacity-table, .local-models-table { border-collapse: collapse; width: 100%; }
+.capacity-table th, .capacity-table td, .local-models-table th, .local-models-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.capacity-table th, .local-models-table th { color: var(--muted); font-weight: normal; }
 .capacity-footer { color: var(--muted); margin: 8px 0 0; }
 .status-item .attention { color: var(--attention); }
 abbr[title] { text-decoration: underline dotted; cursor: help; }

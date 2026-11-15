@@ -3,7 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacityPanel } from "../src/views/CapacityPanel";
-import { report } from "./capacity-fixtures";
+import { localEngines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const TITLE = "Not a figure from the provider. Computed by The Terminal from observed usage.";
@@ -67,5 +67,22 @@ describe("CapacityPanel", () => {
   it("says when the report is loading or failed", () => {
     renderPanel({ error: "request_failed" });
     expect(screen.getByText("Could not load capacity")).toBeTruthy();
+  });
+
+  it("adds a Local models table with one row per model, and nothing when none was detected", () => {
+    renderPanel({ report: report({ localModels: localEngines }) });
+    const table = screen.getByRole("table", { name: "Local models" });
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Engine", "Model", "Size", "Parameters", "Quantization"]);
+    const rows = within(table).getAllByRole("row").slice(1).map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["Ollama 0.12.3", "qwen2.5-coder:14b", "9.0 GB", "14.8B", "Q4_K_M"],
+      ["Ollama 0.12.3", "llama3.2:3b", "not reported", "not reported", "not reported"],
+      ["llama.cpp", "gpt-oss-20b", "not reported", "not reported", "not reported"],
+    ]);
+  });
+
+  it("has no Local models table without a detected server", () => {
+    renderPanel({ report: report() });
+    expect(screen.queryByRole("table", { name: "Local models" })).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AuthMode, HardwareInfo, Provider } from "@theterminal/shared";
+import type { AuthMode, HardwareInfo, LocalEngine, Provider } from "@theterminal/shared";
 import { capacityReport } from "../../src/capacity/report.js";
 import type { Budget } from "../../src/connections/service.js";
 import { openDatabase, type Db } from "../../src/db.js";
@@ -35,6 +35,17 @@ describe("capacityReport", () => {
     expect(source(r, "codex")).toMatchObject({ connectionId: null, name: "Codex", mode: "chatgpt", plan: null, monthlyBudgetUsd: null });
     expect(r.generatedAt).toBe(NOW.toISOString());
     expect(r.hardware).toBeNull();
+  });
+
+  it("lists the local model servers it is given, and none without them", () => {
+    const { db } = seed();
+    expect(report(db).localModels).toEqual([]);
+    const engines: LocalEngine[] = [{
+      engine: "ollama", baseUrl: "http://127.0.0.1:11434/v1", version: "0.12.3", detectedAt: NOW.toISOString(),
+      models: [{ id: "qwen2.5-coder:14b", sizeBytes: 9_000_000_000, parameters: "14.8B", quantization: "Q4_K_M" }],
+    }];
+    const r = capacityReport(db, { budgets: () => [], modes: (p) => MODES[p], hardware: () => null, localModels: () => engines, now: () => NOW });
+    expect(r.localModels).toEqual(engines);
   });
 
   it("sums Claude's cost as an estimate over today and this month, excluding last month", () => {

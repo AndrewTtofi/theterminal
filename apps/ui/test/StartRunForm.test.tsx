@@ -68,4 +68,40 @@ describe("StartRunForm", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
     expect(screen.getByRole("status").textContent).toBe("");
   });
+
+  describe("on a local model", () => {
+    const qwen = { id: "lm1", kind: "llm", provider: "local_model", name: "Qwen on Ollama", enabled: true } as unknown as Connection;
+    const llama = { id: "lm2", kind: "llm", provider: "local_model", name: "Llama", enabled: true } as unknown as Connection;
+    const off = { id: "lm3", kind: "llm", provider: "local_model", name: "Off", enabled: false } as unknown as Connection;
+    const claude = { id: "c-1", kind: "llm", provider: "claude", name: "Claude key", enabled: true } as unknown as Connection;
+
+    it("lists the enabled local models under their own heading, and sends the one chosen with Codex", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(<StartRunForm adapters={["codex", "claude"]} cards={[]} connections={[aws, qwen, llama, off, claude]} onStart={onStart} />);
+      expect(screen.getByRole("group", { name: "Run on a local model" })).toBeTruthy();
+      expect(screen.queryByLabelText("Off")).toBeNull();
+      expect(screen.queryByLabelText(/Claude key/)).toBeNull();
+      await userEvent.click(screen.getByLabelText("Qwen on Ollama"));
+      // Only one local model per run: choosing another replaces it.
+      await userEvent.click(screen.getByLabelText("Llama"));
+      expect((screen.getByLabelText("Qwen on Ollama") as HTMLInputElement).checked).toBe(false);
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("codex", "go", ["lm2"]);
+    });
+
+    it("disables the local models for any agent but Codex, says why, and never sends one", async () => {
+      const onStart = vi.fn().mockResolvedValue(true);
+      render(<StartRunForm adapters={["codex", "claude"]} cards={[]} connections={[qwen]} onStart={onStart} />);
+      await userEvent.click(screen.getByLabelText("Qwen on Ollama"));
+      await userEvent.selectOptions(screen.getByLabelText("Agent"), "claude");
+      const box = screen.getByLabelText("Qwen on Ollama") as HTMLInputElement;
+      expect(box.disabled).toBe(true);
+      expect(box.checked).toBe(false);
+      expect(screen.getByText("Only Codex can run on a local model in The Terminal yet.")).toBeTruthy();
+      await userEvent.type(screen.getByLabelText("Prompt"), "go");
+      await userEvent.click(screen.getByRole("button", { name: "Start agent" }));
+      expect(onStart).toHaveBeenCalledWith("claude", "go", []);
+    });
+  });
 });

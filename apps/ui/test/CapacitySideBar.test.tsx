@@ -12,7 +12,7 @@ import { api } from "../src/api";
 import { ShellContext } from "../src/shell/model";
 import type { WorkbenchModel } from "../src/shell/model";
 import { CapacitySideBar } from "../src/views/CapacitySideBar";
-import { hardware, report } from "./capacity-fixtures";
+import { hardware, localEngines, report } from "./capacity-fixtures";
 import { fakeDock, shellNav } from "./connections-harness";
 
 const m = vi.mocked(api);
@@ -106,6 +106,18 @@ describe("CapacitySideBar", () => {
     expect(within(section).getByText("Turned off in Connections")).toBeTruthy();
     expect(within(section).queryByText("Not detected yet")).toBeNull();
     expect(section.textContent).not.toContain("CPU:");
+  });
+
+  it("lists each local model server with its version and model count", () => {
+    renderSideBar({ report: report({ localModels: localEngines }) });
+    const section = screen.getByRole("region", { name: "Local models" });
+    expect(within(section).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ollama 0.12.3 · 2 models", "llama.cpp · 1 model"]);
+  });
+
+  it("says how to get a local model server when none was detected", () => {
+    renderSideBar({ report: report() });
+    const section = screen.getByRole("region", { name: "Local models" });
+    expect(section.textContent).toContain("No local model server detected. Install Ollama or llama.cpp server and detect again.");
   });
 
   it("says when the report could not be loaded", () => {

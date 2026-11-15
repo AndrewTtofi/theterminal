@@ -171,6 +171,21 @@ describe("buildChildEnv extraEnv", () => {
     );
   });
 
+  it("admits the local model's key variable, and nothing that only looks like it", () => {
+    const env = buildChildEnv("codex", "none", { dataDir: DATA_DIR, base, extraEnv: { LOCAL_MODEL_API_KEY: "TESTKEY-local-000000" } });
+    expect(env.LOCAL_MODEL_API_KEY).toBe("TESTKEY-local-000000");
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(() => buildChildEnv("codex", "none", { dataDir: DATA_DIR, base, extraEnv: { LOCAL_MODEL_KEY: "x" } })).toThrow(
+      new TypeError("variable not allowed for a child: LOCAL_MODEL_KEY"),
+    );
+  });
+
+  it("never copies the local model's key from the base environment", () => {
+    const env = buildChildEnv("codex", "none", { dataDir: DATA_DIR, base: { ...base, LOCAL_MODEL_API_KEY: "from-base" } });
+    expect(env.LOCAL_MODEL_API_KEY).toBeUndefined();
+  });
+
   it("never copies cloud variables from the base environment", () => {
     const env = buildChildEnv("claude", "api_key", {
       apiKey: "k", dataDir: DATA_DIR, base: { ...base, AWS_SECRET_ACCESS_KEY: "base-secret", AWS_PROFILE: "x" },
