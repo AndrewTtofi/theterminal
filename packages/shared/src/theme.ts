@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { visibleControls } from "./text.js";
 
 export const THEME_KEYS = [
   "bg", "fg", "fg-strong", "muted", "line", "line-strong", "panel", "input", "activity", "activity-fg", "activity-active",
@@ -41,10 +42,25 @@ export function isThemeColor(key: ThemeKey, value: string): boolean {
 }
 const font = z.string().regex(FONT, "a font name may use letters, digits, spaces and hyphens (up to 64)");
 
+const NAME_MAX = 40;
+/** No control, bidi or zero-width character (the ones `visibleControls` escapes), and no line break or tab. */
+const plainText = (s: string) => visibleControls(s) === s && !/[\n\t]/.test(s);
+
+/** A theme name: 1 to 40 characters after trimming, with nothing hidden that could reorder or disguise it. */
+export function isThemeName(name: string): boolean {
+  const t = name.trim();
+  return t.length > 0 && t.length <= NAME_MAX && plainText(name);
+}
+
 export const themeSchema = z.strictObject({
   version: z.literal(1),
   id: z.string().regex(/^[a-z0-9-]{1,40}$/, "the id must be 1 to 40 characters: a-z, 0-9 and hyphens"),
-  name: z.string().trim().min(1, "the name is required").max(40, "the name is at most 40 characters"),
+  name: z
+    .string()
+    .refine(plainText, "the name may not contain control, bidi or zero-width characters")
+    .trim()
+    .min(1, "the name is required")
+    .max(NAME_MAX, "the name is at most 40 characters"),
   base: z.enum(["dark", "light"]),
   colors: z.strictObject(
     Object.fromEntries(THEME_KEYS.map((k) => [k, colorFor(k).optional()])) as Record<ThemeKey, z.ZodOptional<typeof solidColor>>,

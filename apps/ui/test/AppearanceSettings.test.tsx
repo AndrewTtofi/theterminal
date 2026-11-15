@@ -131,6 +131,15 @@ describe("AppearanceSettings", () => {
     expect(warning?.textContent).toContain("4.5:1");
   });
 
+  it("refuses a name with hidden characters, so the theme is not lost on reload", async () => {
+    render(<AppearanceSettings />);
+    await userEvent.click(screen.getByRole("button", { name: "Duplicate & edit" }));
+    const name = screen.getByLabelText("Theme name");
+    fireEvent.change(name, { target: { value: "Nice\u202ecopy" } });
+    expect(name.getAttribute("aria-invalid")).toBe("true");
+    expect(loadUserThemes()[0]!.name).toBe("Ice copy");
+  });
+
   it("setting Override equal to the background shows the fallback note and keeps Ice's override", async () => {
     render(<AppearanceSettings />);
     await userEvent.click(screen.getByRole("button", { name: "Duplicate & edit" }));

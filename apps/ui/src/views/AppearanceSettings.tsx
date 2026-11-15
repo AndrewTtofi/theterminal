@@ -6,6 +6,7 @@ import {
   ALPHA_KEYS,
   THEME_KEYS,
   isThemeColor,
+  isThemeName,
   parseTheme,
   readabilityIssues,
   resolveColors,
@@ -163,7 +164,7 @@ function Editor({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => voi
   const nameId = useId();
   const [name, setName] = useState(theme.name);
   useEffect(() => setName(theme.name), [theme.name]);
-  const nameValid = name.trim().length > 0 && name.trim().length <= NAME_MAX;
+  const nameValid = isThemeName(name);
   const colors = filled(theme);
   const setColour = (k: ThemeKey, v: string) => onChange({ ...theme, colors: { ...theme.colors, [k]: v } });
   return (
@@ -179,7 +180,7 @@ function Editor({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => voi
           onChange={(e) => {
             setName(e.target.value);
             const v = e.target.value.trim();
-            if (v.length > 0 && v !== theme.name) onChange({ ...theme, name: v });
+            if (isThemeName(e.target.value) && v !== theme.name) onChange({ ...theme, name: v });
           }}
         />
       </div>

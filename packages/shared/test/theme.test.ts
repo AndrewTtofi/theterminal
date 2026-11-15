@@ -6,6 +6,7 @@ import {
   THEME_KEYS,
   contrastRatio,
   isThemeColor,
+  isThemeName,
   parseTheme,
   readabilityIssues,
   resolveColors,
@@ -79,6 +80,10 @@ describe("parseTheme", () => {
     ["bad id", JSON.stringify(base({ id: "Bad Id" }))],
     ["empty name", JSON.stringify(base({ name: "" }))],
     ["not an object", "42"],
+    ["name with a bidi override", JSON.stringify(base({ name: "Nice\u202eemeht" }))],
+    ["name with a zero-width space", JSON.stringify(base({ name: "Ice\u200b" }))],
+    ["name with a control character", JSON.stringify(base({ name: "Ice\u0007" }))],
+    ["name with a line break", JSON.stringify(base({ name: "Ice\nTwo" }))],
     ["alpha on override", JSON.stringify(base({ colors: { override: "#ff000000" } }))],
     ["alpha on bg", JSON.stringify(base({ colors: { bg: "#0d1016ff" } }))],
     ["alpha on attention", JSON.stringify(base({ colors: { attention: "#e3a33b00" } }))],
@@ -100,6 +105,16 @@ describe("readabilityIssues", () => {
     expect(pairs(flat(["status-fg", "status"], "#777777"))).toContain("status-fg on status");
     expect(pairs(flat(["badge-fg", "badge"], "#777777"))).toContain("badge-fg on badge");
     expect(pairs(flat(["badge-fg", "danger"], "#777777"))).toContain("badge-fg on danger");
+  });
+});
+
+describe("isThemeName", () => {
+  it("accepts a plain name and refuses hidden characters", () => {
+    expect(isThemeName("Ice copy")).toBe(true);
+    expect(isThemeName("Café – night")).toBe(true);
+    for (const bad of ["", "   ", "x".repeat(41), "a\u202eb", "a\u2066b", "a\u200db", "a\ufeff", "a\u0000", "a\tb"]) {
+      expect(isThemeName(bad), JSON.stringify(bad)).toBe(false);
+    }
   });
 });
 
