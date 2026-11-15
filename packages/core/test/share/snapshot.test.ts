@@ -220,7 +220,9 @@ describe("buildSnapshot cleaning", () => {
     ).run(base.seq, base.id, base.ts, pid, "human", "owner", type, canonicalJson(payload), base.prevHash, hash);
   }
 
-  it("cleans and caps narration of a hostile share.confirmed entry", async () => {
+  // The hostile entry carries about 100 MB of text to hash, verify and clean, which takes CI runners 2.5 to 4 s while
+  // the other packages' suites load the same machine; the default 5 s has cut it off. The cap is what is tested.
+  it("cleans and caps narration of a hostile share.confirmed entry", { timeout: 30_000 }, async () => {
     projectId = w.board.createProject(human, { name: "Club" }).id;
     const huge = "x".repeat(20_000);
     appendRaw("share.confirmed", {

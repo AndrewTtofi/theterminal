@@ -517,7 +517,11 @@ describe("Workbench", () => {
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
   });
 
-  it("resizes the side bar with the keyboard within 200 to 480 px", async () => {
+  // Each of the 81 keystrokes waits on three zero-delay timers (user-event's two and testing-library's one), and the
+  // Windows runner's timers fire about 15 ms apart, so this test alone takes close to the default 5 s there. A test
+  // that times out keeps running: its stray arrow keys reach the inputs of the tests after it. The range is what is
+  // tested, not the speed.
+  it("resizes the side bar with the keyboard within 200 to 480 px", { timeout: 30_000 }, async () => {
     render(<Workbench model={model()} />);
     const handle = screen.getByRole("separator", { name: "Resize side bar" });
     const side = screen.getByRole("complementary", { name: "Side bar" });

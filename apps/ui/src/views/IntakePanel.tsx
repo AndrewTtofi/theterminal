@@ -53,7 +53,7 @@ export function IntakePanel(_props: { id: string }) {
 
 type BodyProps = {
   model: WorkbenchModel;
-  answersRef: RefObject<HTMLDivElement>;
+  answersRef: RefObject<HTMLDivElement | null>;
   expanded: boolean;
   onExpand: (expanded: boolean) => void;
 };
@@ -210,7 +210,7 @@ function NumberInput({ id, helpId, q, onSave }: InputProps) {
 }
 
 /** Takes up a newly recorded answer, unless the Owner is typing in the field. */
-function useTakeUp(recorded: string, ref: RefObject<HTMLElement>, setDraft: (v: string) => void): void {
+function useTakeUp(recorded: string, ref: RefObject<HTMLElement | null>, setDraft: (v: string) => void): void {
   useEffect(() => {
     if (document.activeElement !== ref.current) setDraft(recorded);
   }, [recorded]);

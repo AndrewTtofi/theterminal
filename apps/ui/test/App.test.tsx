@@ -494,7 +494,10 @@ describe("App connections", () => {
   });
 });
 
-describe("App ledger scope", () => {
+// The paging tests paint 500 to 1,001 ledger rows several times over, which takes the Windows runner past the default
+// 5 s (it was at about 2.5 s with React 18). A test that times out keeps running and interferes with the tests after
+// it, so the block gets the same cap as the other heavy painting tests. The paging is what is tested, not the speed.
+describe("App ledger scope", { timeout: 30_000 }, () => {
   const entry = (seq: number, projectId: string, name: string): LedgerEntry => ({
     seq, id: `e${seq}`, ts: "2026-01-01T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
     type: "project.created", payload: { name }, prevHash: "", hash: "",

@@ -15,3 +15,16 @@ allowBuilds:
 overrides:
   dockview: 8.8.3
   dockview-core: 8.8.3
+  # Vite 8's bundler and its plugin helpers would resolve to releases younger than the 14 days this repository waits
+  # before adopting one (see .github/dependabot.yml). Hold the newest mature releases instead. The selectors are
+  # scoped to these lines, so a future Vite that needs a newer line is not pinned down; drop them once the current
+  # picks are old enough.
+  "rolldown@~1.2": 1.2.16
+  "@rolldown/pluginutils@^1": 1.0.1
+  # GHSA (Dependabot alert 10): minimatch before 11.0.1 can be slowed by crafted glob patterns. Only electron-builder
+  # and @electron/universal pull it in, with patterns from our own build config, so it is not reachable from input;
+  # the patched line is used anyway. 11.0.3 is the newest release at least 14 days old.
+  "minimatch@>=7 <11.0.1": 11.0.3
+  # minimatch 11's own dependencies would resolve to releases younger than 14 days; hold the newest mature ones.
+  "brace-expansion@^5": 5.0.12
+  "@isaacs/nonrecursive-glob-match@^1": 1.0.3
