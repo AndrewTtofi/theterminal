@@ -10,5 +10,4 @@ export type { SnapshotDeps } from "./snapshot.js";
 export {
   countActiveShareLinks, getShareSnapshot, listProjectGateDecisions, listShareLinks, listShareSnapshots,
 } from "../events/projections.js";
-// The renderer (share/render.ts) arrives with Task 3; enable this line when it lands:
-// export * from "./render.js";
+export * from "./render.js";
