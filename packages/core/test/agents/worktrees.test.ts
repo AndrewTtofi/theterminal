@@ -6,7 +6,8 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../../src/agents/child-env.js";
 import {
-  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, SharedGitconfigModifiedError, WorktreeManager, ensureEmptyGitconfig, gitEnv,
+  EMPTY_GITCONFIG, GIT_COMMON_ARGS, GitOutputTooLargeError, SharedGitconfigModifiedError, UnsafeGitConfigError, WorktreeManager,
+  ensureEmptyGitconfig, gitEnv,
   type GitRunner,
 } from "../../src/agents/worktrees.js";
 
@@ -400,7 +401,9 @@ describe("WorktreeManager", () => {
         expect(c.args.slice(0, GIT_COMMON_ARGS.length)).toEqual([...GIT_COMMON_ARGS]);
         expect(c.args).toContain(`core.hooksPath=${join(dataDir, ".theterminal-empty-hooks")}`);
         expect(c.args).toContain("commit.gpgsign=false");
-        expect(c.opts).toMatchObject({ timeoutMs: 30000, maxBuffer: 2 * 1024 * 1024 });
+        // Listing HEAD's tree for .gitattributes files has its own larger, still bounded, buffer.
+        const maxBuffer = c.args.includes("ls-tree") ? 32 * 1024 * 1024 : c.args.includes("cat-file") ? 256 * 1024 : 2 * 1024 * 1024;
+        expect(c.opts).toMatchObject({ timeoutMs: 30000, maxBuffer });
         expect(c.opts!.env!.TT_TEST_PLANTED_VAR).toBeUndefined();
       }
     });
@@ -444,6 +447,94 @@ describe("WorktreeManager", () => {
       await git(repo, "worktree", "add", join(outside, "control-wt"));
       expect(ran("post-checkout")).toBe(true);
       expect(ran("smudge")).toBe(true);
+    });
+  });
+
+  describe("included configuration and attributes (R2, re-review)", () => {
+    const smudge = () => {
+      const f = join(outside, "smudge.sh");
+      writeFileSync(f, `#!/bin/sh\necho ran >> "${join(outside, "smudge.ran")}"\ncat\n`);
+      chmodSync(f, 0o755);
+      const cfg = join(outside, "evil.cfg");
+      writeFileSync(cfg, `[filter "hid"]\n\tsmudge = ${f}\n\tclean = cat\n`);
+      return cfg;
+    };
+    /** A project repository whose HEAD holds a nested .gitattributes that uses the `hid` filter. */
+    const withNestedAttributes = async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      mkdirSync(join(repo, "sub"));
+      writeFileSync(join(repo, "sub", ".gitattributes"), "*.txt filter=hid\n");
+      writeFileSync(join(repo, "sub", "a.txt"), "hello\n");
+      await mgr.runGit(repo, ["add", "-A"]);
+      await mgr.runGit(repo, ["commit", "-m", "nested attributes"]);
+      return repo;
+    };
+
+    for (const condition of ["gitdir:**/.git/worktrees/**", "onbranch:run/**"]) {
+      it.skipIf(process.platform === "win32")(`refuses a conditional include (${condition}) and never runs its filter; plain git does`, async () => {
+        const repo = await withNestedAttributes();
+        await git(repo, "config", `includeIf.${condition}.path`, smudge());
+        await expect(mgr.createRunWorktree("proj1", "run-a")).rejects.toThrow(
+          "This repository's git configuration includes other files, which The Terminal does not allow",
+        );
+        expect(existsSync(join(outside, "smudge.ran"))).toBe(false);
+        // Control: plain git applies the included filter on checkout.
+        await git(repo, "worktree", "add", "-b", "run/control", join(outside, "control-wt"));
+        expect(existsSync(join(outside, "smudge.ran"))).toBe(true);
+      });
+    }
+
+    it("refuses a plain include.path too, and an include in the worktree's own configuration", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      const wt = await mgr.createRunWorktree("proj1", "run-a");
+      await git(repo, "config", "extensions.worktreeConfig", "true");
+      await git(wt.absPath, "config", "--worktree", "include.path", join(outside, "x.cfg"));
+      await expect(mgr.runGit(wt.absPath, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+      await git(wt.absPath, "config", "--worktree", "--unset", "include.path");
+      await mgr.runGit(wt.absPath, ["status"]);
+      await git(repo, "config", "include.path", join(outside, "x.cfg"));
+      await expect(mgr.runGit(repo, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it("refuses a repository with a non-empty info/attributes", async () => {
+      const repo = await mgr.ensureProjectRepo("proj1");
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+      writeFileSync(join(repo, ".git", "info", "attributes"), "* filter=x\n");
+      await expect(mgr.runGit(repo, ["status"])).rejects.toBeInstanceOf(UnsafeGitConfigError);
+    });
+
+    it("neutralises attribute files: core.attributesFile, and --attr-source when git supports it", async () => {
+      const argsFor = async (version: string) => {
+        const calls: string[][] = [];
+        const fake: GitRunner = async (args) => {
+          calls.push(args);
+          return args.includes("version") ? version : "";
+        };
+        const m = new WorktreeManager(dataDir, fake);
+        await m.runGit(outside, ["status"]);
+        await m.runGit(outside, ["status"]);
+        expect(calls.filter((a) => a.at(-1) === "version")).toHaveLength(1); // detected once
+        return calls.at(-1)!;
+      };
+      const modern = await argsFor("git version 2.45.1\n");
+      expect(modern).toContain(`core.attributesFile=${join(dataDir, ".theterminal-empty-attributes")}`);
+      expect(modern).toContain("--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+      const old = await argsFor("git version 2.39.3 (Apple Git-146)\n");
+      expect(old).toContain(`core.attributesFile=${join(dataDir, ".theterminal-empty-attributes")}`);
+      expect(old.some((a) => a.startsWith("--attr-source"))).toBe(false);
+    });
+
+    it("neutralises filters named by any .gitattributes in HEAD's tree", async () => {
+      const calls: string[][] = [];
+      const fake: GitRunner = async (args) => {
+        calls.push(args);
+        if (args.includes("ls-tree")) return "README\0sub/deep/.gitattributes\0.gitattributes\0";
+        if (args.includes("cat-file")) return args.at(-1)!.endsWith("sub/deep/.gitattributes") ? "*.bin filter=deep\n" : "* filter=top\n";
+        return "";
+      };
+      await new WorktreeManager(dataDir, fake).runGit(outside, ["status"]);
+      const last = calls.at(-1)!;
+      for (const n of ["deep", "top"]) expect(last).toContain(`filter.${n}.smudge=`);
     });
   });
 });

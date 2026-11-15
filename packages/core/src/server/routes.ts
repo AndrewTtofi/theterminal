@@ -7,6 +7,7 @@ import { AlreadyDecidedError } from "../agents/approvals.js";
 import { AdapterUnavailableError, DuplicateCloudProviderError, DuplicateMcpServerError, McpUnsupportedError, ShuttingDownError } from "../agents/runner.js";
 import { CloudCredentialError } from "../connections/cloud/grant.js";
 import { NoBaseError, WorktreeMissingError } from "../changes/changes.js";
+import { UnsafeGitConfigError } from "../agents/worktrees.js";
 import { redact } from "../agents/redact.js";
 import {
   ConflictError, ConnectionDisabledError, SecretInConfigError, UnknownFieldError, UnsupportedConnectionError,
@@ -89,6 +90,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (err instanceof NotFoundError) return reply.code(404).send({ error: "not_found" });
     if (err instanceof WorktreeMissingError) return reply.code(404).send({ error: "worktree_missing" });
     if (err instanceof NoBaseError) return reply.code(409).send({ error: "no_base" });
+    // A fixed sentence: the repository's configuration includes other files, or the like. Never a path.
+    if (err instanceof UnsafeGitConfigError) return reply.code(409).send({ error: "unsafe_repository", message: err.message });
     if (err instanceof NoIntakeError) return reply.code(404).send({ error: "no_intake" });
     if (err instanceof HumanRequiredError) return reply.code(403).send({ error: "human_required" });
     // The explanation is a fixed sentence naming a field, never the text.

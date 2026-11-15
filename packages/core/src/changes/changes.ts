@@ -1,5 +1,5 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   MAX_CHANGED_FILES, MAX_DIFF_BYTES, MAX_DIFF_LINES, MAX_DIR_ENTRIES, MAX_FILE_BYTES,
   type AgentRun, type ChangeStatus, type ChangedFile, type DirEntry, type DirListing, type FileContent, type FileDiff,
@@ -111,29 +111,56 @@ function confine(deps: ChangesDeps, runId: string, abs: string, path: string): {
 }
 
 /**
- * Opens a regular file (never through a symlink) and reads it only if it is at most `max` bytes, reading at most
- * `max + 1` bytes so a file that grows meanwhile is still caught. `buf` is null when it is over `max`; null overall
- * when it is not a regular file.
+ * Opens `resolved` (what resolveInside gave for `rel`) only if it is a regular file, never through a symlink and
+ * never blocking, then checks that what was opened is still what the path names: the descriptor's device and inode
+ * match an lstat of the path taken before and after opening, and resolveInside still gives the same path (so a
+ * parent directory swapped for a symlink in between is caught). Null, with nothing left open, otherwise.
  */
-function readCapped(file: string, max: number): { size: number; buf: Buffer | null } | null {
+function openChecked(deps: ChangesDeps, abs: string, rel: string, resolved: string): { fd: number; size: number } | null {
+  let before;
+  try {
+    before = lstatSync(resolved);
+  } catch {
+    return null;
+  }
+  if (!before.isFile()) return null; // never open a FIFO, socket or device
   let fd: number;
   try {
-    if (!lstatSync(file).isFile()) return null; // never open a FIFO, socket or device
-    fd = openSync(file, OPEN_FLAGS);
+    fd = openSync(resolved, OPEN_FLAGS);
   } catch {
     return null;
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) return null;
-    if (st.size > max) return { size: st.size, buf: null };
+    const after = lstatSync(resolved);
+    const same = (a: { dev: number; ino: number }) => a.dev === st.dev && a.ino === st.ino;
+    if (st.isFile() && same(before) && same(after) && deps.worktrees.resolveInside(abs, rel) === resolved) {
+      return { fd, size: st.size };
+    }
+  } catch {
+    // fall through: refused
+  }
+  closeSync(fd);
+  return null;
+}
+
+/**
+ * Reads a checked regular file (openChecked) only if it is at most `max` bytes, reading at most `max + 1` bytes so
+ * a file that grows meanwhile is still caught. `buf` is null when it is over `max`; null overall when it is refused.
+ */
+function readCapped(deps: ChangesDeps, abs: string, rel: string, resolved: string, max: number): { size: number; buf: Buffer | null } | null {
+  const opened = openChecked(deps, abs, rel, resolved);
+  if (opened === null) return null;
+  const { fd, size } = opened;
+  try {
+    if (size > max) return { size, buf: null };
     const buf = Buffer.alloc(max + 1);
     let n = 0;
     for (;;) {
       const got = readSync(fd, buf, n, buf.length - n, n);
       if (got === 0) break;
       n += got;
-      if (n > max) return { size: Math.max(st.size, n), buf: null };
+      if (n > max) return { size: Math.max(size, n), buf: null };
     }
     return { size: n, buf: buf.subarray(0, n) };
   } catch {
@@ -149,17 +176,15 @@ const hasNul = (buf: Buffer): boolean => buf.subarray(0, SNIFF_BYTES).includes(0
 function sniffBinary(deps: ChangesDeps, abs: string, rel: string): boolean {
   const resolved = deps.worktrees.resolveInside(abs, rel);
   if (resolved === null) return false;
+  const opened = openChecked(deps, abs, rel, resolved);
+  if (opened === null) return false;
   try {
-    if (!lstatSync(resolved).isFile()) return false;
-    const fd = openSync(resolved, OPEN_FLAGS);
-    try {
-      const buf = Buffer.alloc(SNIFF_BYTES);
-      return hasNul(buf.subarray(0, readSync(fd, buf, 0, SNIFF_BYTES, 0)));
-    } finally {
-      closeSync(fd);
-    }
+    const buf = Buffer.alloc(SNIFF_BYTES);
+    return hasNul(buf.subarray(0, readSync(opened.fd, buf, 0, SNIFF_BYTES, 0)));
   } catch {
     return false;
+  } finally {
+    closeSync(opened.fd);
   }
 }
 
@@ -168,24 +193,29 @@ type WorktreeGit = (args: string[]) => Promise<string>;
 
 const isWindows = process.platform === "win32";
 const fold = (p: string): string => (isWindows ? p.toLowerCase() : p);
-const isUnder = (child: string, parent: string): boolean => {
-  const rel = relative(fold(parent), fold(child));
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-};
 
 /**
  * Checks that git sees the worktree as itself before anything is read through git: its top level is the worktree,
- * and its git directory is one of the project repository's own worktree entries. A planted `core.worktree`, or a
+ * its git directory is exactly the project repository's entry for it (`<repo>/.git/worktrees/<name>`), and its
+ * common directory is the project repository's own `.git`. A planted `core.worktree`, or a
  * `.git` file pointing anywhere else, fails with WorktreeMissingError. Every later call passes the verified
  * `--git-dir` and `--work-tree`, so neither can change in between.
  */
 async function verifiedGit(deps: ChangesDeps, run: AgentRun, abs: string): Promise<WorktreeGit> {
   let gitDir: string;
   try {
-    const top = realpathSync.native((await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel"])).trim());
-    gitDir = realpathSync.native((await deps.worktrees.runGit(abs, ["rev-parse", "--absolute-git-dir"])).trim());
-    const entries = realpathSync.native(join(deps.worktrees.repoPath(run.projectId), ".git", "worktrees"));
-    if (fold(top) !== fold(realpathSync.native(abs)) || !isUnder(gitDir, entries)) throw new WorktreeMissingError();
+    const out = (await deps.worktrees.runGit(abs, ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"]))
+      .split(/\r?\n/)
+      .map((l) => l.trim());
+    if (out.length < 3 || !out[0] || !out[1] || !out[2]) throw new WorktreeMissingError();
+    const top = realpathSync.native(out[0]);
+    gitDir = realpathSync.native(out[1]);
+    const common = realpathSync.native(resolve(abs, out[2]));
+    const repoGit = realpathSync.native(join(deps.worktrees.repoPath(run.projectId), ".git"));
+    const entry = realpathSync.native(join(repoGit, "worktrees", basename(abs)));
+    if (fold(top) !== fold(realpathSync.native(abs)) || fold(gitDir) !== fold(entry) || fold(common) !== fold(repoGit)) {
+      throw new WorktreeMissingError();
+    }
   } catch (e) {
     if (isRefusal(e)) throw e;
     throw new WorktreeMissingError();
@@ -311,7 +341,7 @@ export async function fileDiff(deps: ChangesDeps, runId: string, path: string): 
 
   if ((await untrackedPaths(git, rel)).includes(rel)) {
     const status = "untracked" as const;
-    const file = readCapped(resolved, MAX_FILE_BYTES);
+    const file = readCapped(deps, abs, rel, resolved, MAX_FILE_BYTES);
     if (file === null) return answer({ status, binary: false, tooLarge: false, added: null, deleted: null, text: null });
     if (file.buf === null) return answer({ status, binary: false, tooLarge: true, added: null, deleted: null, text: null });
     if (hasNul(file.buf)) return answer({ status, binary: true, tooLarge: false, added: null, deleted: null, text: null });
@@ -360,7 +390,7 @@ export function listDir(deps: ChangesDeps, runId: string, path: string): DirList
 export function readFile(deps: ChangesDeps, runId: string, path: string): FileContent {
   const { abs } = runWorktree(deps, runId);
   const { resolved, rel } = confine(deps, runId, abs, path);
-  const file = readCapped(resolved, MAX_FILE_BYTES);
+  const file = readCapped(deps, abs, rel, resolved, MAX_FILE_BYTES);
   if (file === null) throw notFound();
   const out = { runId, path: deps.clean(runId, rel, PATH_MAX), size: file.size };
   if (file.buf === null) return { ...out, binary: false, tooLarge: true, text: null };

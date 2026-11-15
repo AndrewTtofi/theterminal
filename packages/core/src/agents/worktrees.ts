@@ -26,10 +26,17 @@ export class GitTimeoutError extends Error {
   }
 }
 
-/** The repository configures a filter driver whose name cannot be neutralised on the command line. */
+/** The message for a repository whose configuration includes other files. */
+export const GIT_INCLUDES_REFUSED = "This repository's git configuration includes other files, which The Terminal does not allow";
+
+/**
+ * The repository is set up in a way git could be made to run a program through, so nothing is run in it: its
+ * configuration includes other files, it has repository-wide attributes, or it names a filter driver that cannot
+ * be neutralised on the command line.
+ */
 export class UnsafeGitConfigError extends Error {
-  constructor() {
-    super("the repository configures a filter driver that cannot be disabled");
+  constructor(message = "the repository configures a filter driver that cannot be disabled") {
+    super(message);
     this.name = "UnsafeGitConfigError";
   }
 }
@@ -48,6 +55,14 @@ export const GIT_TIMEOUT_MS = 30_000;
 export const GIT_MAX_BUFFER = 2 * 1024 * 1024;
 /** An always-empty directory inside dataDir that runGit names as `core.hooksPath`, so no hook ever runs. */
 export const EMPTY_HOOKS_DIR = ".theterminal-empty-hooks";
+/** An always-empty file inside dataDir that runGit names as `core.attributesFile`. */
+export const EMPTY_ATTRIBUTES = ".theterminal-empty-attributes";
+/** The empty tree: with `--attr-source` (git 2.40+), no `.gitattributes` in the tree is read at all. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/** At most this many `.gitattributes` files in HEAD's tree are read for filter names; more is refused. */
+const MAX_ATTRIBUTE_FILES = 500;
+/** Buffer for listing HEAD's tree when looking for `.gitattributes` files. */
+const TREE_LIST_BUFFER = 32 * 1024 * 1024;
 /** Attribute files read for filter driver names, beside the configuration's own `filter.*` sections. */
 const MAX_ATTRIBUTES_BYTES = 256 * 1024;
 /** `filter=<name>` in a gitattributes line. */
@@ -215,7 +230,10 @@ export class WorktreeManager {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly emptyGlobalConfig: string;
   private readonly emptyHooks: string;
+  private readonly emptyAttributes: string;
   private readonly git: GitRunner;
+  /** `--attr-source=<empty tree>` when the installed git supports it; detected once. */
+  private attrSource: Promise<string[]> | null = null;
 
   constructor(
     private readonly dataDir: string,
@@ -223,6 +241,7 @@ export class WorktreeManager {
   ) {
     this.emptyGlobalConfig = join(dataDir, EMPTY_GITCONFIG);
     this.emptyHooks = join(dataDir, EMPTY_HOOKS_DIR);
+    this.emptyAttributes = join(dataDir, EMPTY_ATTRIBUTES);
     try {
       ensureEmptyGitconfig(dataDir);
     } catch (e) {
@@ -252,8 +271,12 @@ export class WorktreeManager {
   /**
    * Runs git in `cwd`, which may be a tree or repository an agent controlled, so nothing in it may make git run a
    * program: GIT_COMMON_ARGS (no pager, no fsmonitor), `core.hooksPath` set to an always-empty directory,
-   * `commit.gpgsign=false` (no signing program), and every filter driver named in the repository's configuration or
-   * its attribute files set to empty commands and not required. The environment is the allowlisted one
+   * `commit.gpgsign=false` (no signing program), `core.attributesFile` set to an always-empty file, `--attr-source`
+   * set to the empty tree when git supports it (2.40+), and every filter driver named in the repository's
+   * configuration or in any `.gitattributes` (the top level of `cwd`, and every one in HEAD's tree) set to empty
+   * commands and not required. A repository whose configuration (shared or the worktree's own) has any `include.*`
+   * or `includeIf.*` key, or whose info/attributes is not empty, is refused with UnsafeGitConfigError before
+   * anything else runs in it. The environment is the allowlisted one
    * (safeGitEnv), never the server's. Diff callers add `--no-ext-diff --no-textconv`. `gitDir` and `workTree`, when
    * given, are passed as `--git-dir`/`--work-tree`, so a planted `core.worktree` or `.git` file cannot redirect the
    * call. Every call this manager makes goes through here, repository setup included. Bounded by `timeoutMs`
@@ -266,16 +289,29 @@ export class WorktreeManager {
   ): Promise<string> {
     assertEmptyGitconfig(this.dataDir);
     this.assertEmptyHooks();
+    this.assertEmptyAttributes();
     const run: GitRunOptions = {
       timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
       maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
       env: safeGitEnv(cwd, this.emptyGlobalConfig),
     };
-    const hardened = [...GIT_COMMON_ARGS, "-c", `core.hooksPath=${this.emptyHooks}`, "-c", "commit.gpgsign=false"];
+    const base = [
+      ...GIT_COMMON_ARGS, "-c", `core.hooksPath=${this.emptyHooks}`, "-c", "commit.gpgsign=false",
+      "-c", `core.attributesFile=${this.emptyAttributes}`,
+    ];
+    this.attrSource ??= this.git([...base, "version"], this.dataDir, { ...run, env: safeGitEnv(this.dataDir, this.emptyGlobalConfig) }).then(
+      (out) => {
+        const m = /git version (\d+)\.(\d+)/.exec(out);
+        return m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 40)) ? [`--attr-source=${EMPTY_TREE}`] : [];
+      },
+      () => [],
+    );
+    const hardened = [...base, ...(await this.attrSource)];
     const location = [
       ...(opts.gitDir !== undefined ? [`--git-dir=${opts.gitDir}`] : []),
       ...(opts.workTree !== undefined ? [`--work-tree=${opts.workTree}`] : []),
     ];
+    await this.assertSafeRepository([...hardened, ...location], cwd, run);
     const names = await this.filterDrivers(opts.workTree ?? cwd, [...hardened, ...location], cwd, run);
     const filters = names.flatMap((n) =>
       [`filter.${n}.clean=`, `filter.${n}.smudge=`, `filter.${n}.process=`, `filter.${n}.required=false`].flatMap((kv) => ["-c", kv]),
@@ -284,9 +320,44 @@ export class WorktreeManager {
   }
 
   /**
-   * Every filter driver name the repository could apply: its configuration's `filter.<name>.*` keys (includes
-   * followed), and `filter=<name>` in the worktree's top-level .gitattributes and the repository's info/attributes.
-   * A name that `-c name=value` could not carry unambiguously is refused (UnsafeGitConfigError), never skipped.
+   * Refuses a repository (UnsafeGitConfigError) whose shared configuration or worktree configuration has any
+   * `include.*` or `includeIf.*` key (an included file, possibly conditional on the branch or git directory, could
+   * define a filter this manager never sees), or whose info/attributes is anything but missing or empty. Nothing is
+   * checked where there is no repository yet (before `git init`).
+   */
+  private async assertSafeRepository(hardened: string[], cwd: string, run: GitRunOptions): Promise<void> {
+    const dirs = await this.git([...hardened, "rev-parse", "--absolute-git-dir", "--git-common-dir"], cwd, run).then(
+      (out) => out.split(/\r?\n/).map((l) => l.trim()),
+      () => null,
+    );
+    if (dirs === null || !dirs[0] || !dirs[1]) return;
+    const gitDir = resolve(cwd, dirs[0]);
+    const common = resolve(cwd, dirs[1]);
+    for (const file of [join(common, "config"), join(gitDir, "config.worktree")]) {
+      let exists = true;
+      try {
+        lstatSync(file);
+      } catch {
+        exists = false;
+      }
+      if (!exists) continue;
+      const keys = await this.git([...hardened, "config", "--file", file, "--null", "--name-only", "--list"], cwd, run);
+      if (keys.split("\0").some((k) => /^include(if)?\./i.test(k.trim()))) throw new UnsafeGitConfigError(GIT_INCLUDES_REFUSED);
+    }
+    const info = join(common, "info", "attributes");
+    let st;
+    try {
+      st = lstatSync(info);
+    } catch {
+      return;
+    }
+    if (!st.isFile() || st.size > 0) throw new UnsafeGitConfigError("This repository has repository-wide git attributes, which The Terminal does not allow");
+  }
+
+  /**
+   * Every filter driver name the repository could apply: its configuration's `filter.<name>.*` keys, and
+   * `filter=<name>` in the top-level .gitattributes of `top` and in every .gitattributes in HEAD's tree. A name
+   * that `-c name=value` could not carry unambiguously is refused (UnsafeGitConfigError), never skipped.
    */
   private async filterDrivers(top: string, hardened: string[], cwd: string, run: GitRunOptions): Promise<string[]> {
     const names = new Set<string>();
@@ -301,19 +372,36 @@ export class WorktreeManager {
       const dot = k.lastIndexOf(".");
       if (k.toLowerCase().startsWith("filter.") && dot > "filter.".length) names.add(k.slice("filter.".length, dot));
     }
-    const attrFiles = [join(top, ".gitattributes")];
-    const common = await this.git([...hardened, "rev-parse", "--git-common-dir"], cwd, run).then(
-      (out) => resolve(cwd, out.trim()),
-      () => null,
+    const texts = [readSmallRegularFile(join(top, ".gitattributes"), MAX_ATTRIBUTES_BYTES)];
+    const tree = await this.git([...hardened, "ls-tree", "-r", "-z", "--name-only", "HEAD"], cwd, { ...run, maxBuffer: TREE_LIST_BUFFER }).catch(
+      (e: unknown) => {
+        if (e instanceof GitOutputTooLargeError || e instanceof GitTimeoutError) throw e; // cannot be checked: refuse
+        return ""; // no HEAD yet
+      },
     );
-    if (common !== null) attrFiles.push(join(common, "info", "attributes"));
-    for (const file of attrFiles) {
-      for (const m of readSmallRegularFile(file, MAX_ATTRIBUTES_BYTES).matchAll(ATTR_FILTER)) names.add(m[1]!);
+    const attrPaths = tree.split("\0").filter((p) => p === ".gitattributes" || p.endsWith("/.gitattributes"));
+    if (attrPaths.length > MAX_ATTRIBUTE_FILES) throw new UnsafeGitConfigError("This repository has too many .gitattributes files to check");
+    for (const p of attrPaths) {
+      texts.push(await this.git([...hardened, "cat-file", "blob", `HEAD:${p}`], cwd, { ...run, maxBuffer: MAX_ATTRIBUTES_BYTES }).catch(() => ""));
+    }
+    for (const text of texts) {
+      for (const m of text.matchAll(ATTR_FILTER)) names.add(m[1]!);
     }
     for (const n of names) {
       if (n === "" || /[=\0\r\n]/.test(n)) throw new UnsafeGitConfigError();
     }
     return [...names].sort();
+  }
+
+  /** Creates the empty attributes file if it is missing; refuses it once anything was written to it or linked. */
+  private assertEmptyAttributes(): void {
+    try {
+      writeFileSync(this.emptyAttributes, "", { flag: "wx", mode: 0o444 });
+    } catch (e) {
+      if (errCode(e) !== "EEXIST") throw e;
+    }
+    const st = lstatSync(this.emptyAttributes);
+    if (!st.isFile() || st.size > 0 || st.nlink > 1) throw new UnsafeGitConfigError("the empty attributes file was modified");
   }
 
   /** Creates the empty hooks directory if it is missing; throws HooksDirModifiedError if anything is in it. */

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -110,6 +110,18 @@ describe("changes routes", { timeout: 20000 }, () => {
       expect(res.status, route).toBe(404);
       expect(await res.json()).toEqual({ error: "worktree_missing" });
     }
+  });
+
+  it("409 unsafe_repository when the repository's configuration includes other files", async () => {
+    const { s, run, dataDir } = await start();
+    const config = join(dataDir, "projects", run.projectId, "repo", ".git", "config");
+    appendFileSync(config, "[include]\n\tpath = elsewhere.cfg\n");
+    const res = await get(s, `/api/runs/${run.id}/changes`);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "unsafe_repository",
+      message: "This repository's git configuration includes other files, which The Terminal does not allow",
+    });
   });
 
   it("401 without the cookie", async () => {

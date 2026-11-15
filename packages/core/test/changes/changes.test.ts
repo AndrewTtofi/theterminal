@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -200,6 +200,17 @@ describe("listDir and readFile", () => {
     expect(fits.text).toHaveLength(MAX_FILE_BYTES / 2);
   });
 
+  it("refuses a file whose path resolves differently once it is open", () => {
+    write("notes.txt", "hello\n");
+    write("other.txt", "other\n");
+    const real = worktrees.resolveInside.bind(worktrees);
+    const spy = vi.spyOn(worktrees, "resolveInside");
+    spy.mockImplementationOnce(real).mockImplementationOnce((root) => join(root, "other.txt"));
+    expect(() => readFile(deps, run.id, "notes.txt")).toThrow(NotFoundError);
+    spy.mockRestore();
+    expect(readFile(deps, run.id, "notes.txt").text).toBe("hello\n");
+  });
+
   it("a NUL byte in the first 8 KiB makes a file binary with no text", () => {
     write("blob.bin", Buffer.from([0x41, 0, 0x42]));
     expect(readFile(deps, run.id, "blob.bin")).toMatchObject({ size: 3, binary: true, tooLarge: false, text: null });
@@ -327,6 +338,23 @@ describe.skipIf(process.platform === "win32")("agent-planted git configuration n
     mkdirSync(other);
     await exec("git", ["init"], { cwd: other, env: testEnv() });
     writeFileSync(join(wt, ".git"), `gitdir: ${join(other, ".git")}\n`);
+    await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
+  });
+
+  it("refuses a .git file pointing at another run's entry, and an entry whose commondir points outside", async () => {
+    const second = await runner.start(owner, { projectId: run.projectId, adapter: "fake", prompt: "again" });
+    await vi.waitFor(() => expect(getRun(db, second.id)!.status).not.toBe("running"), { timeout: 5000 });
+    const repoGit = join(worktrees.repoPath(run.projectId), ".git");
+    const original = readFileSync(join(wt, ".git"), "utf8");
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(repoGit, "worktrees", second.id)}\n`);
+    await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
+    writeFileSync(join(wt, ".git"), original);
+    await listChanges(deps, run.id);
+
+    const other = join(outside, "other");
+    mkdirSync(other);
+    await exec("git", ["init"], { cwd: other, env: testEnv() });
+    writeFileSync(join(repoGit, "worktrees", run.id, "commondir"), `${join(other, ".git")}\n`);
     await expect(listChanges(deps, run.id)).rejects.toBeInstanceOf(WorktreeMissingError);
   });
 
