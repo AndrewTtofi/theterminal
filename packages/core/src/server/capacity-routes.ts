@@ -22,8 +22,15 @@ export type CapacityRouteDeps = {
 
 const LOCAL_ENGINES_TTL_MS = 30_000;
 
-/** The report as anyone but the Owner gets it: each source without its plan, budget and sign-in mode. */
-export type CollaboratorCapacityReport = Omit<CapacityReport, "sources"> & { sources: Omit<CapacitySource, "plan" | "monthlyBudgetUsd" | "mode">[] };
+/** A source as anyone but the Owner gets it: without its plan, budget and sign-in mode. */
+export type CollaboratorCapacitySource = Omit<CapacitySource, "plan" | "monthlyBudgetUsd" | "mode">;
+/** The report as anyone but the Owner gets it: every source, on the report and on each linked machine, reduced the same way. */
+export type CollaboratorCapacityReport = Omit<CapacityReport, "sources" | "machines"> & {
+  sources: CollaboratorCapacitySource[];
+  machines: (Omit<MachineCapacity, "sources"> & { sources: CollaboratorCapacitySource[] })[];
+};
+
+const collaboratorSource = ({ plan: _plan, monthlyBudgetUsd: _budget, mode: _mode, ...rest }: CapacitySource): CollaboratorCapacitySource => rest;
 
 /** Capacity: usage per provider, budgets, observed rate limits and this computer. Errors are mapped in routes.ts. */
 export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRouteDeps): { report: () => Promise<CapacityReport> } {
@@ -50,12 +57,17 @@ export function registerCapacityRoutes(app: FastifyInstance, deps: CapacityRoute
   };
 
   // Usage, this computer and the linked machines; connections appear by id, kind, provider and name only. What the
-  // Owner pays for (plan, budget) and how they sign in (mode) is theirs alone: a collaborator's sources go without.
+  // Owner pays for (plan, budget) and how they sign in (mode) is theirs alone, on this computer and on every linked
+  // machine alike: a collaborator's sources go without.
   app.get("/api/capacity", needs("viewer"), async (req): Promise<CapacityReport | CollaboratorCapacityReport> => {
     const [machines, engines] = await Promise.all([deps.machines?.() ?? Promise.resolve([]), localEngines()]);
     const report = await local(machines, engines);
     if (req.principal?.personId === OWNER_ID) return report;
-    return { ...report, sources: report.sources.map(({ plan: _plan, monthlyBudgetUsd: _budget, mode: _mode, ...rest }) => rest) };
+    return {
+      ...report,
+      sources: report.sources.map(collaboratorSource),
+      machines: report.machines.map((m) => ({ ...m, sources: m.sources.map(collaboratorSource) })),
+    };
   });
 
   // The UI sends this with no body and no content-type. It detects the model servers again too.

@@ -268,7 +268,7 @@ describe("linked machines in the capacity API", { timeout: 30_000 }, () => {
   });
 });
 
-describe("GET /api/capacity for a collaborator", { timeout: 15000 }, () => {
+describe("GET /api/capacity for a collaborator", { timeout: 30_000 }, () => {
   it("names each source by provider, connection and usage, never its plan, budget or sign-in mode", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "tt-capacity-roles-"));
     dirs.push(dataDir);
@@ -288,6 +288,33 @@ describe("GET /api/capacity for a collaborator", { timeout: 15000 }, () => {
         owners.sources.map(() => ["connectionId", "month", "name", "provider", "rateLimits", "today"]),
       );
       expect(theirs.sources.find((x) => x.provider === "claude")).toMatchObject({ connectionId: claude.connectionId, name: "Claude" });
+    }
+  });
+
+  it("trims every linked machine's sources the same way: no plan, budget or sign-in mode of another computer's Owner", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "tt-capacity-roles-"));
+    dirs.push(dataDir);
+    const cookies = seedPeople(dataDir);
+    const requester = await start({ dataDir });
+    const worker = await start();
+    await send(worker, "POST", "/api/connections", { kind: "llm", provider: "claude", name: "Box Claude", secrets: { apiKey: KEY }, config: { plan: "Max 20x", monthlyBudgetUsd: "120" } });
+    await pairServers(requester, worker);
+    const owners = await json<CapacityReport>(send(requester, "GET", "/api/capacity"));
+    expect(owners.machines).toHaveLength(1);
+    const theirsOnBox = owners.machines[0]!.sources.find((x) => x.provider === "claude")!;
+    expect(theirsOnBox).toMatchObject({ plan: "Max 20x", monthlyBudgetUsd: 120, mode: "api_key" });
+    for (const p of COLLABORATORS) {
+      const res = await fetch(`http://127.0.0.1:${requester.port}/api/capacity`, { headers: { cookie: cookies[p.id]! } });
+      expect(res.status, p.role).toBe(200);
+      const text = await res.text();
+      for (const word of ["plan", "monthlyBudgetUsd", "mode", "Max 20x", KEY]) expect(text, `${p.role}: ${word}`).not.toContain(word);
+      const theirs = JSON.parse(text) as CapacityReport;
+      expect(theirs.machines).toHaveLength(1);
+      expect(theirs.machines[0]!.sources.map((x) => Object.keys(x).sort())).toEqual(
+        owners.machines[0]!.sources.map(() => ["connectionId", "month", "name", "provider", "rateLimits", "today"]),
+      );
+      expect(theirs.machines[0]!.sources.find((x) => x.provider === "claude")).toMatchObject({ connectionId: theirsOnBox.connectionId, name: "Box Claude" });
+      expect(theirs.machines[0]!.connections).toEqual(owners.machines[0]!.connections);
     }
   });
 });
