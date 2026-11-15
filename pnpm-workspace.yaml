@@ -25,3 +25,6 @@ overrides:
   # and @electron/universal pull it in, with patterns from our own build config, so it is not reachable from input;
   # the patched line is used anyway. 11.0.3 is the newest release at least 14 days old.
   "minimatch@>=7 <11.0.1": 11.0.3
+  # minimatch 11's own dependencies would resolve to releases younger than 14 days; hold the newest mature ones.
+  "brace-expansion@^5": 5.0.12
+  "@isaacs/nonrecursive-glob-match@^1": 1.0.3
