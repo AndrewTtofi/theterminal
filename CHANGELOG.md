@@ -27,6 +27,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Rich workspace: a read-only Changes view with diff and file tabs (limits shown plainly, secret-looking names hidden, nothing from the repository is ever run), agent feed, Terminal and Conversation tabs, Learn topics with context, Guided and Operator layouts with up to 10 saved layouts, and paging for the ledger.
 - Emergency override: run one program as you, outside the approval gate and sandbox, after a confirm step and a reason that is checked for secrets. It is always recorded, in red with an OVERRIDE label, and can discard a run's uncommitted work.
 - Documentation: `docs/workspace.md`.
+- Share view: a one-file share page (no script, no external request) built from the ledger, with the plan, progress, decisions, tech stack, agent workforce and cost, readiness and audit status. Text is cleaned of secrets, paths, usernames and email addresses, and a page that cannot be proven clean is never produced.
+- Preview and confirm: you read the exact page, with a list of what is not included, before it is saved. Prompts and hardware are included only if you choose. Confirming is recorded in the ledger, and the saved file is checked against the ledger every time it is used.
+- Downloads of a confirmed share page, and printing it to PDF from your browser.
+- Temporary share links on an address you choose, for 1 hour to 7 days: shown once, revocable, ended after 20 wrong guesses, closed when The Terminal shuts down and shown as stopped after a restart.
+- Daily digests: a plain-language summary of each UTC day, built from the ledger without a model, in the Share view and on the share page.
+- Documentation: `docs/share-view.md`.
 
 ### Changed
 - The Guided layout is now the default: the board with the Conversation next to it, and no bottom panel. Choose Operator from the Layout menu in the status bar for the Terminal, agent feed and ledger below the board.
@@ -56,9 +62,3 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Secret redaction for everything agents report: key/value forms, PEM blocks, URL credentials, JSON, YAML and headers, plus scrubbing of personal paths.
 - "Needs you" strip showing pending decisions from every project.
 - CI on macOS and Windows.
-- Share view: a one-file share page (no script, no external request) built from the ledger, with the plan, progress, decisions, tech stack, agent workforce and cost, readiness and audit status. Text is cleaned of secrets, paths, usernames and email addresses, and a page that cannot be proven clean is never produced.
-- Preview and confirm: you read the exact page, with a list of what is not included, before it is saved. Prompts and hardware are included only if you choose. Confirming is recorded in the ledger, and the saved file is checked against the ledger every time it is used.
-- Downloads of a confirmed share page, and printing it to PDF from your browser.
-- Temporary share links on an address you choose, for 1 hour to 7 days: shown once, revocable, ended after 20 wrong guesses, closed when The Terminal shuts down and shown as stopped after a restart.
-- Daily digests: a plain-language summary of each UTC day, built from the ledger without a model, in the Share view and on the share page.
-- Documentation: `docs/share-view.md`.

@@ -64,7 +64,7 @@ export const SHARE_SECTION_TITLES: Record<ShareSection, string> = {
 /** The hidden line that `includePrompts` removes. */
 export const HIDDEN_PROMPTS_LINE = "Your prompts to agents (shown only when you tick Include my prompts)";
 /** The hidden line that `includeHardware` removes. */
-export const HIDDEN_HARDWARE_LINE = "This computer's hardware (shown only when you tick Include this computer)";
+export const HIDDEN_HARDWARE_LINE = "This computer's hardware (shown only when you tick Include this computer's hardware)";
 
 /** What a share page never carries by default, shown to the Owner before confirming and on the page itself. */
 export const HIDDEN_BY_DEFAULT: readonly string[] = [

@@ -65,7 +65,7 @@ Everything on the page is text that has been cleaned (see the next section). Som
 3. Raw agent output and the raw input of every action
 4. What agents said (their messages)
 5. Your prompts to agents (shown only when you tick Include my prompts)
-6. This computer's hardware (shown only when you tick Include this computer)
+6. This computer's hardware (shown only when you tick Include this computer's hardware)
 7. Connection names and account details: regions, project ids, repository names
 8. File paths outside the project, your username and email addresses
 9. Anything from other projects
