@@ -380,11 +380,14 @@ export async function createServer(opts: {
     token,
     integrity,
     async close() {
-      await runner.shutdown(); // stops runs and denies pending actions while the db is still open
-      await signin.shutdown(); // kills every login and status check before the db closes
-      for (const client of app.websocketServer.clients) client.terminate();
-      await app.close();
-      db.close();
+      try {
+        await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+        await signin.shutdown(); // kills every login and status check before the db closes
+        for (const client of app.websocketServer.clients) client.terminate();
+        await app.close();
+      } finally {
+        db.close(); // always: a db left open keeps its files locked, and a restart in this process could not take them
+      }
     },
   };
 }

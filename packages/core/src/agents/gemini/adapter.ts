@@ -103,6 +103,12 @@ const SETUP_TIMEOUT_MS = 60 * 1000;
 /** A prompt turn waits on humans: longer than the runner's gate timeout, so a slow decision never ends the turn. */
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const KILL_GRACE_MS = 5000;
+/**
+ * How long an early exit waits for stderr to end before it is reported. The OS gives no order between the stdout and
+ * stderr pipes, so the last stderr can arrive after stdout ends; a grandchild holding stderr open can keep it from
+ * ever ending, hence the bound.
+ */
+const STDERR_GRACE_MS = 500;
 
 const TOOL_KINDS: Record<string, ActionKind> = { edit: "file_edit", delete: "file_write", execute: "shell", read: "file_read", fetch: "web" };
 const isWindows = process.platform === "win32";
@@ -335,6 +341,8 @@ class GeminiRun {
   private child!: ChildProcess;
   private peer!: JsonRpcPeer;
   private exited!: Promise<void>;
+  /** Settles once stderr has ended, closed or failed. */
+  private stderrEnded!: Promise<void>;
   private readonly tracker: ToolCallTracker;
   private readonly terminals: Terminals;
   /** Terminal id -> the allowed action it runs for. */
@@ -375,8 +383,12 @@ class GeminiRun {
     }
     this.exited = new Promise((resolve) => this.child.on("close", () => resolve()));
     this.child.on("error", (e) => this.fail(`Gemini could not be started: ${redact(errorMessage(e))}`));
-    this.child.stderr!.on("data", (chunk: Buffer) => {
+    const stderr = this.child.stderr!;
+    stderr.on("data", (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_KEEP);
+    });
+    this.stderrEnded = new Promise((resolve) => {
+      for (const event of ["end", "close", "error"]) stderr.once(event, () => resolve());
     });
     this.peer = new JsonRpcPeer(
       { input: this.child.stdout!, output: this.child.stdin! },
@@ -388,7 +400,7 @@ class GeminiRun {
     try {
       result = await this.converse();
     } catch (e) {
-      result = { status: "failed", error: this.describe(e) };
+      result = { status: "failed", error: await this.describe(e) };
     } finally {
       this.o.signal.removeEventListener("abort", stop);
       this.flushText("end");
@@ -449,9 +461,10 @@ class GeminiRun {
     }
   }
 
-  private describe(e: unknown): string {
+  private async describe(e: unknown): Promise<string> {
     const msg = errorMessage(e);
     if (msg === "rpc closed: eof") {
+      await this.stderrSettled();
       // Cleaned before the tail is cut, so the cut never leaves part of a secret behind; no tail if that fails.
       let tail = "";
       try {
@@ -464,6 +477,19 @@ class GeminiRun {
     if (msg === "rpc closed: protocol error") return "Gemini sent a malformed message";
     if (msg === "rpc closed: output error") return "Gemini stopped reading";
     return redact(msg.replace(/^rpc error: /, ""));
+  }
+
+  /** Waits, at most STDERR_GRACE_MS, for the rest of stderr: it can still be arriving after stdout has ended. */
+  private async stderrSettled(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, STDERR_GRACE_MS);
+    });
+    try {
+      await Promise.race([this.stderrEnded, grace]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Fails the run (first reason wins) and stops Gemini, once the response to the offending request has been queued. */
