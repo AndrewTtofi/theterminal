@@ -15,3 +15,11 @@ apps/desktop/stage
 apps/desktop/release
 apps/desktop/.cache
 **/*.db
+# Never send credentials or keys into the build context.
+.env*
+**/.env*
+*.pem
+**/*.pem
+*.key
+**/*.key
+**/secret*.key

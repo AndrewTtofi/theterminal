@@ -9,7 +9,7 @@ import WebSocket from "ws";
 import { createServer, selectFetch, selectSecretStore, selectSts, type RunningServer } from "../../src/server/server.js";
 import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
-import { ChunkedSecretStore } from "../../src/secrets/store.js";
+import { ChunkedSecretStore, SecretStoreUnavailableError } from "../../src/secrets/store.js";
 import { FileSecretStore, KeyInsideDataDirError } from "../../src/secrets/file-store.js";
 import { RemoteStartError } from "../../src/server/remote.js";
 import { LINKING_ACK, LINK_DEFAULT_PORT } from "@theterminal/shared";
@@ -464,6 +464,16 @@ describe("the file secret store", () => {
     expect(statSync(keyFile).size).toBe(32);
     if (process.platform !== "win32") expect(statSync(keyFile).mode & 0o777).toBe(0o600);
     expect(existsSync(join(dataDir, "secret.key"))).toBe(false);
+  });
+
+  it("a server refuses to start when the file store's key is unusable, and releases the lock", async () => {
+    const { dataDir, keyFile } = dirs();
+    mkdirSync(join(keyFile, ".."), { recursive: true });
+    writeFileSync(keyFile, Buffer.alloc(31, 7));
+    const err = await createServer({ dataDir, port: 0, discovery: fakeDiscovery(), secretStore: "file", secretKeyFile: keyFile }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect((err as Error).message).toBe("secret key file unavailable");
+    expect(existsSync(join(dataDir, "server.lock"))).toBe(false);
   });
 
   it("a server refuses to start with the key file inside its data folder, and releases the lock", async () => {

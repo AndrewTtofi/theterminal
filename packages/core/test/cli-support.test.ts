@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataDirInUseError } from "../src/server/data-dir-lock.js";
 import { KeyInsideDataDirError } from "../src/secrets/file-store.js";
+import { SecretStoreUnavailableError } from "../src/secrets/store.js";
 import { RemoteStartError } from "../src/server/remote.js";
 import { CertificateError } from "../src/server/certs.js";
 import {
@@ -40,6 +41,12 @@ describe("startErrorLine", () => {
     expect(startErrorLine(new RemoteStartError())).toBe("The Terminal could not start: the remote listener could not start");
     const cert = new CertificateError("unreadable");
     expect(startErrorLine(cert)).toBe(`The Terminal could not start: ${cert.message}`);
+  });
+
+  it("keeps the secret store's fixed unavailable message", () => {
+    expect(startErrorLine(new SecretStoreUnavailableError("secret key file unavailable"))).toBe(
+      "The Terminal could not start: secret key file unavailable",
+    );
   });
 
   it("prints a fixed line for every other error, never its message", () => {

@@ -43,9 +43,14 @@ FROM node:24.22.2-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3
 # git for project worktrees; the one shell step, at build time only. The volume folders belong to the node user.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /key && chown node:node /data /key && chmod 0700 /data /key
+# Only what runs: each package's dist, package.json and node_modules (no src or test), and the built UI.
 COPY --from=prod --chown=node:node /app/node_modules /app/node_modules
-COPY --from=prod --chown=node:node /app/packages/shared /app/packages/shared
-COPY --from=prod --chown=node:node /app/packages/core /app/packages/core
+COPY --from=prod --chown=node:node /app/packages/shared/package.json /app/packages/shared/package.json
+COPY --from=prod --chown=node:node /app/packages/shared/dist /app/packages/shared/dist
+COPY --from=prod --chown=node:node /app/packages/shared/node_modules /app/packages/shared/node_modules
+COPY --from=prod --chown=node:node /app/packages/core/package.json /app/packages/core/package.json
+COPY --from=prod --chown=node:node /app/packages/core/dist /app/packages/core/dist
+COPY --from=prod --chown=node:node /app/packages/core/node_modules /app/packages/core/node_modules
 COPY --from=prod --chown=node:node /app/apps/ui/dist /app/apps/ui/dist
 USER node
 VOLUME ["/data", "/key"]

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,6 +181,15 @@ describe("theterminal start as a host's child process", () => {
     expect(stderr()).toBe("Refusing to start: the secret key file is inside the data directory\n");
     expect(stdout()).toBe("");
     expect(existsSync(keyFile)).toBe(false);
+  });
+
+  it("an unusable key file exits 1 with a fixed line", { timeout: TIMEOUT }, async () => {
+    const keyFile = join(tmp(), "secret.key");
+    writeFileSync(keyFile, Buffer.alloc(31, 7));
+    const { exit, stderr, stdout } = startCli(["start", "--data-dir", tmp(), "--port", "0", "--secret-store", "file", "--secret-key-file", keyFile]);
+    expect(await exit).toBe(1);
+    expect(stderr()).toBe("The Terminal could not start: secret key file unavailable\n");
+    expect(stdout()).toBe("");
   });
 
   it("--secret-store file creates the key file at startup, outside the data folder", { timeout: TIMEOUT }, async () => {

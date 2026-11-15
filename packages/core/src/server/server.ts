@@ -556,9 +556,10 @@ export async function createServer(opts: {
       dataDir: opts.dataDir,
       allowKeyInDataDir: opts.allowKeyInDataDir,
     });
-    // One read at startup creates the file store's key, so it exists before the first secret is saved. A key that
-    // cannot be used is reported like an unavailable keychain (connections.load below); the server still starts.
-    if (secretStoreKind === "file") await secrets.get(STARTUP_PROBE).catch(() => undefined);
+    // One read at startup creates the file store's key, so it exists before the first secret is saved. The operator
+    // chose this store explicitly: a key (or ciphertext file) it cannot use refuses the start with
+    // SecretStoreUnavailableError, unlike the keychain, which is reported and lets the server start.
+    if (secretStoreKind === "file") await secrets.get(STARTUP_PROBE);
     const connections = new ConnectionService({
       db,
       ledger,

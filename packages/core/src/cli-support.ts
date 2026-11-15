@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { domainSchema, type TlsMode } from "@theterminal/shared";
 import { DataDirInUseError } from "./server/data-dir-lock.js";
 import { KeyInsideDataDirError, assertKeyOutsideDataDir } from "./secrets/file-store.js";
+import { SecretStoreUnavailableError } from "./secrets/store.js";
 import { RemoteStartError } from "./server/remote.js";
 import { CertificateError } from "./server/certs.js";
 import { redact, secretEnvValues } from "./agents/redact.js";
@@ -23,11 +24,16 @@ export const SHUTDOWN_TIMEOUT_MS = 10_000;
 /**
  * The one stderr line for a failed start. Console output ends up in bug reports and host logs, so only errors whose
  * messages are fixed text (no path, pid or value) are shown: the data folder in use, the key file inside the data
- * folder, the remote listener and its certificate. Every other error gets a fixed line.
+ * folder, an unusable secret store, the remote listener and its certificate. Every other error gets a fixed line.
  */
 export function startErrorLine(err: unknown): string {
   if (err instanceof KeyInsideDataDirError) return err.message;
-  if (err instanceof DataDirInUseError || err instanceof RemoteStartError || err instanceof CertificateError) {
+  if (
+    err instanceof DataDirInUseError ||
+    err instanceof RemoteStartError ||
+    err instanceof CertificateError ||
+    err instanceof SecretStoreUnavailableError
+  ) {
     return `The Terminal could not start: ${err.message}`;
   }
   return START_FAILED;
