@@ -21,9 +21,24 @@ export type Theme = {
   fonts?: { ui?: string; mono?: string };
 };
 
-const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+/**
+ * The only keys that may be translucent (`#rrggbbaa`): overlays drawn over another colour. Every other key is used
+ * as a solid text or background colour, and contrast is measured on it as written, so alpha could make a safety
+ * colour invisible while it still "passes".
+ */
+export const ALPHA_KEYS: readonly ThemeKey[] = ["glow", "status-hover", "diff-add", "diff-del", "diff-hunk"];
+
+const SOLID_HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const ALPHA_HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const FONT = /^[A-Za-z0-9 -]{1,64}$/;
-const color = z.string().regex(HEX, "a colour must be #rgb, #rrggbb or #rrggbbaa");
+const solidColor = z.string().regex(SOLID_HEX, "a colour must be #rgb or #rrggbb");
+const alphaColor = z.string().regex(ALPHA_HEX, "a colour must be #rgb, #rrggbb or #rrggbbaa");
+const colorFor = (k: ThemeKey) => (ALPHA_KEYS.includes(k) ? alphaColor : solidColor);
+
+/** Whether `value` is an allowed colour for `key`: alpha only on the overlay keys. */
+export function isThemeColor(key: ThemeKey, value: string): boolean {
+  return (ALPHA_KEYS.includes(key) ? ALPHA_HEX : SOLID_HEX).test(value);
+}
 const font = z.string().regex(FONT, "a font name may use letters, digits, spaces and hyphens (up to 64)");
 
 export const themeSchema = z.strictObject({
@@ -31,7 +46,9 @@ export const themeSchema = z.strictObject({
   id: z.string().regex(/^[a-z0-9-]{1,40}$/, "the id must be 1 to 40 characters: a-z, 0-9 and hyphens"),
   name: z.string().trim().min(1, "the name is required").max(40, "the name is at most 40 characters"),
   base: z.enum(["dark", "light"]),
-  colors: z.strictObject(Object.fromEntries(THEME_KEYS.map((k) => [k, color.optional()])) as Record<ThemeKey, z.ZodOptional<typeof color>>),
+  colors: z.strictObject(
+    Object.fromEntries(THEME_KEYS.map((k) => [k, colorFor(k).optional()])) as Record<ThemeKey, z.ZodOptional<typeof solidColor>>,
+  ),
   fonts: z.strictObject({ ui: font.optional(), mono: font.optional() }).optional(),
 });
 
@@ -85,7 +102,7 @@ function luminance(hex: string): number {
   }) as [number, number, number];
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
-/** WCAG contrast ratio. Alpha is ignored: the caller composites translucent colours over bg first. */
+/** WCAG contrast ratio. Alpha is ignored: only overlay keys may carry it, and they are never measured. */
 export function contrastRatio(a: string, b: string): number {
   const la = luminance(a);
   const lb = luminance(b);

@@ -97,6 +97,21 @@ describe("AppearanceSettings", () => {
     expect(loadUserThemes()[0]!.colors.accent).toBe(ice.colors.accent);
   });
 
+  it("an 8-digit hex on a solid key is marked invalid and not applied, but is fine on an overlay key", async () => {
+    render(<AppearanceSettings />);
+    await userEvent.click(screen.getByRole("button", { name: "Duplicate & edit" }));
+    const hex = screen.getByLabelText("--override hex");
+    // Pasted in one go: typed key by key, the 6-digit prefix would be a valid colour on the way.
+    fireEvent.change(hex, { target: { value: "#ff000000" } });
+    expect(hex.getAttribute("aria-invalid")).toBe("true");
+    expect(prop("override")).toBe(ice.colors.override);
+    const glow = screen.getByLabelText("--glow hex");
+    await userEvent.clear(glow);
+    await userEvent.type(glow, "#11223344");
+    expect(glow.getAttribute("aria-invalid")).toBe("false");
+    expect(prop("glow")).toBe("#11223344");
+  });
+
   it("Advanced lists every colour key", async () => {
     render(<AppearanceSettings />);
     await userEvent.click(screen.getByRole("button", { name: "Duplicate & edit" }));
@@ -152,7 +167,7 @@ describe("AppearanceSettings", () => {
     render(<AppearanceSettings />);
     await userEvent.upload(screen.getByLabelText("Import theme file"), themeFile('{"version":1,"id":"x","name":"X","base":"dark","colors":{"bg":"red"}}'));
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("That theme is not valid. colors.bg: a colour must be #rgb, #rrggbb or #rrggbbaa");
+    expect(alert.textContent).toContain("That theme is not valid. colors.bg: a colour must be #rgb or #rrggbb");
     expect(loadUserThemes()).toEqual([]);
     expect(localStorage.getItem(THEMES_KEY)).toBeNull();
     expect(prop("bg")).not.toBe("red");

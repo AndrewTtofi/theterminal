@@ -3,7 +3,9 @@ import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
 import {
   BUILTIN_THEMES,
   DEFAULT_THEME_ID,
+  ALPHA_KEYS,
   THEME_KEYS,
+  isThemeColor,
   parseTheme,
   readabilityIssues,
   resolveColors,
@@ -14,7 +16,6 @@ import { MAX_USER_THEMES, allThemes, useTheme } from "../theme/theme-store";
 
 /** A file larger than this is refused before it is read; `parseTheme` then holds the theme itself to 8 KB. */
 const IMPORT_MAX_BYTES = 64 * 1024;
-const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const NAME_MAX = 40;
 const ID_MAX = 40;
 
@@ -84,14 +85,15 @@ function exportTheme(t: Theme) {
   setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
-type RowProps = { label: string; hexLabel: string; value: string; mono?: boolean; onChange: (hex: string) => void };
+type RowProps = { colourKey: ThemeKey; label: string; hexLabel: string; value: string; mono?: boolean; onChange: (hex: string) => void };
 
 /** One colour: the native picker and a text field for the exact hex value. Only a valid hex value is applied. */
-function ColourRow({ label, hexLabel, value, mono, onChange }: RowProps) {
+function ColourRow({ colourKey, label, hexLabel, value, mono, onChange }: RowProps) {
   const id = useId();
   const [text, setText] = useState(value);
   useEffect(() => setText(value), [value]);
-  const valid = HEX.test(text);
+  const alpha = ALPHA_KEYS.includes(colourKey);
+  const valid = isThemeColor(colourKey, text);
   return (
     <div className="colour-row">
       <label htmlFor={id} className={mono ? "colour-label mono" : "colour-label"}>
@@ -109,7 +111,7 @@ function ColourRow({ label, hexLabel, value, mono, onChange }: RowProps) {
         className="colour-hex"
         aria-label={hexLabel}
         aria-invalid={!valid}
-        title={valid ? undefined : "Use #rgb, #rrggbb or #rrggbbaa"}
+        title={valid ? undefined : alpha ? "Use #rgb, #rrggbb or #rrggbbaa" : "Use #rgb or #rrggbb"}
         spellCheck={false}
         autoComplete="off"
         maxLength={9}
@@ -117,7 +119,7 @@ function ColourRow({ label, hexLabel, value, mono, onChange }: RowProps) {
         onChange={(e) => {
           const v = e.target.value.trim();
           setText(v);
-          if (HEX.test(v) && v !== value) onChange(v);
+          if (isThemeColor(colourKey, v) && v !== value) onChange(v);
         }}
       />
     </div>
@@ -174,7 +176,7 @@ function Editor({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => voi
       </div>
       <div className="colour-grid">
         {MAIN.map((m) => (
-          <ColourRow key={m.key} label={m.label} hexLabel={`${m.label} hex`} value={colors[m.key]} onChange={(v) => setColour(m.key, v)} />
+          <ColourRow key={m.key} colourKey={m.key} label={m.label} hexLabel={`${m.label} hex`} value={colors[m.key]} onChange={(v) => setColour(m.key, v)} />
         ))}
       </div>
       <details className="theme-advanced">
@@ -182,7 +184,7 @@ function Editor({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => voi
         <p className="note">Every colour the interface uses, by its property name.</p>
         <div className="colour-grid">
           {THEME_KEYS.map((k) => (
-            <ColourRow key={k} label={`--${k}`} hexLabel={`--${k} hex`} mono value={colors[k]} onChange={(v) => setColour(k, v)} />
+            <ColourRow key={k} colourKey={k} label={`--${k}`} hexLabel={`--${k} hex`} mono value={colors[k]} onChange={(v) => setColour(k, v)} />
           ))}
         </div>
       </details>

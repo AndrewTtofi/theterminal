@@ -66,7 +66,7 @@ test("refuses a hostile theme file with a plain message and changes nothing", as
   await openSettings(page);
   const hostile = JSON.stringify({ version: 1, id: "x", name: "X", base: "dark", colors: { bg: "red; background:url(x)" } });
   await appearance(page).getByLabel("Import theme file").setInputFiles({ name: "x.theme.json", mimeType: "application/json", buffer: Buffer.from(hostile) });
-  await expect(appearance(page).getByRole("alert")).toContainText("colors.bg: a colour must be #rgb, #rrggbb or #rrggbbaa");
+  await expect(appearance(page).getByRole("alert")).toContainText("colors.bg: a colour must be #rgb or #rrggbb");
   await expect(card(page, "X")).toHaveCount(0);
   expect(await themeProp(page, "--bg")).toBe("#0d1016");
 });

@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - No new runtime or dev dependencies.
-- Colours in themes: `#rgb`, `#rrggbb` or `#rrggbbaa` only. Font names: `^[A-Za-z0-9 -]{1,64}$`. Unknown keys are rejected. A serialised theme is at most 8 KB.
+- Colours in themes: `#rgb` or `#rrggbb` only; `#rrggbbaa` is allowed only on the overlay keys `glow`, `status-hover`, `diff-add`, `diff-del` and `diff-hunk` (`ALPHA_KEYS`). Font names: `^[A-Za-z0-9 -]{1,64}$`. Unknown keys are rejected. A serialised theme is at most 8 KB.
 - Theme values are applied only through `style.setProperty(name, value)` on `document.documentElement`, never as stylesheet text, `innerHTML` or inline `<style>`. The CSP is unchanged.
 - **Readability (WCAG 2.x contrast):**
   - `fg` on `bg` is at least 4.5:1;

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALPHA_KEYS,
   BUILTIN_THEMES,
   DEFAULT_THEME_ID,
   THEME_KEYS,
   contrastRatio,
+  isThemeColor,
   parseTheme,
   readabilityIssues,
   resolveColors,
@@ -77,10 +79,33 @@ describe("parseTheme", () => {
     ["bad id", JSON.stringify(base({ id: "Bad Id" }))],
     ["empty name", JSON.stringify(base({ name: "" }))],
     ["not an object", "42"],
+    ["alpha on override", JSON.stringify(base({ colors: { override: "#ff000000" } }))],
+    ["alpha on bg", JSON.stringify(base({ colors: { bg: "#0d1016ff" } }))],
+    ["alpha on attention", JSON.stringify(base({ colors: { attention: "#e3a33b00" } }))],
+    ["alpha on danger", JSON.stringify(base({ colors: { danger: "#e5534b10" } }))],
+    ["alpha on fg", JSON.stringify(base({ colors: { fg: "#cdd3df00" } }))],
   ])("rejects %s", (_n, json) => {
     const r = parseTheme(json);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.length).toBeGreaterThan(3);
+  });
+});
+
+describe("alpha", () => {
+  it("is allowed only on translucent overlay keys", () => {
+    expect(ALPHA_KEYS).toEqual(["glow", "status-hover", "diff-add", "diff-del", "diff-hunk"]);
+    for (const k of ALPHA_KEYS) expect(parseTheme(JSON.stringify(base({ colors: { [k]: "#11223344" } }))).ok, k).toBe(true);
+    for (const k of THEME_KEYS.filter((k) => !ALPHA_KEYS.includes(k))) {
+      expect(parseTheme(JSON.stringify(base({ colors: { [k]: "#11223344" } }))).ok, k).toBe(false);
+      expect(isThemeColor(k, "#11223344"), k).toBe(false);
+      expect(isThemeColor(k, "#112233"), k).toBe(true);
+      expect(isThemeColor(k, "#123"), k).toBe(true);
+    }
+  });
+  it("refuses an invisible override with a plain message", () => {
+    const r = parseTheme(JSON.stringify(base({ colors: { override: "#ff000000" } })));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("colors.override: a colour must be #rgb or #rrggbb");
   });
 });
 

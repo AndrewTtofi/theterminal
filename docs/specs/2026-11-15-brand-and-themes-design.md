@@ -66,7 +66,7 @@ A theme is a small JSON document:
 
 Rules:
 
-- A colour is a hex value (`#rgb`, `#rrggbb` or `#rrggbbaa`) and nothing else.
+- A colour is a hex value (`#rgb` or `#rrggbb`) and nothing else. Only the translucent overlay keys (`glow`, `status-hover`, `diff-add`, `diff-del`, `diff-hunk`) may also use `#rrggbbaa`: alpha on a solid colour could make a safety colour invisible while its contrast still passes.
 - A font name is a plain family name, matched against a safe pattern (letters, digits, spaces, hyphens). The app's own fallback stack is always appended.
 - Unknown keys are rejected.
 - A missing colour falls back to the theme's base (dark falls back to Ice, light to Light).
