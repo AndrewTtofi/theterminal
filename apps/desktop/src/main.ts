@@ -20,6 +20,7 @@ import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
+import { loadWindowColor, parseWindowColor, saveWindowColor } from "./window-color.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
 import { writeReadyFile } from "./ready-file.js";
@@ -193,6 +194,7 @@ function run(args: DesktopArgs, dataDir: string): void {
       width: 1400,
       height: 900,
       title: TITLE,
+      backgroundColor: loadWindowColor(windowColorFile()),
       webPreferences: {
         contextIsolation: true,
         sandbox: true,
@@ -208,11 +210,35 @@ function run(args: DesktopArgs, dataDir: string): void {
     });
     w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
     w.once("ready-to-show", () => w.show());
+    // Best effort: remember the theme's background so the next window opens in it. A failure keeps the old colour.
+    // The main process reads it itself; no preload or IPC is added to the sandboxed window.
+    w.on("close", () => void rememberWindowColor(w));
     w.on("closed", () => {
       if (win === w) win = null;
     });
     void w.loadURL(r.url);
     return w;
+  }
+}
+
+function windowColorFile(): string {
+  return join(app.getPath("userData"), "window.json");
+}
+
+/** Reads `--bg` from the page (500 ms at most) and saves it when it is a plain hex colour. Never throws. */
+async function rememberWindowColor(w: BrowserWindow): Promise<void> {
+  try {
+    if (w.isDestroyed()) return;
+    const read = w.webContents.executeJavaScript('getComputedStyle(document.documentElement).getPropertyValue("--bg")') as Promise<unknown>;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), 500);
+    });
+    const value = await Promise.race([read, timeout]).finally(() => clearTimeout(timer));
+    const color = parseWindowColor(value);
+    if (color) saveWindowColor(windowColorFile(), color);
+  } catch {
+    // keep the old colour
   }
 }
 

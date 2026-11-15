@@ -53,7 +53,7 @@ const STATE_WORDS: Record<ReadinessRow["state"], string> = {
 };
 
 const CSS = [
-  ":root { color-scheme: dark; --bg: #16181b; --panel: #1f2226; --line: #33373d; --text: #e6e7e9; --muted: #9aa0a8; --accent: #8fb3d9 }",
+  ":root { color-scheme: dark; --bg: #0d1016; --panel: #121620; --line: #1f2533; --text: #cdd3df; --muted: #8a93a6; --accent: #4fc3d9 }",
   "* { box-sizing: border-box }",
   "html { background: var(--bg) }",
   'body { margin: 0 auto; max-width: 960px; padding: 24px 16px 48px; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif }',
