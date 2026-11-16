@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemorySecretStore, createServer, fakeDiscovery } from "../packages/core/dist/index.js";
+import { HOME_APP_TEXT } from "./support.js";
 
 const fixture = (name: string) => join(import.meta.dirname, "..", "packages", "core", "test", "fixtures", name);
 
@@ -58,6 +59,28 @@ const COLLAB_SCRIPT = JSON.stringify([
   { message: "I wrote notes.txt." },
 ]);
 
+// The Home server's fake agent (home.spec.ts, sources.spec.ts): a plan of three steps, step 1 done, then step 2
+// ("Change") writes src/app.txt once allowed, step 3 ("Check") runs a command that asks too, so the 67% between the
+// two decisions stays on screen until the second one. Each marker is a line of its own, as STEP_PLAN_INSTRUCTION asks.
+const HOME_SCRIPT = JSON.stringify([
+  { message: "I will work in three steps.\n[[plan: Read | Change | Check]]" },
+  { message: "[[step 1/3 started]]" },
+  { message: "[[step 1/3 done]]" },
+  { message: "[[step 2/3 started]]" },
+  {
+    propose: { tool: "Write", kind: "file_write", summary: "Write src/app.txt", input: { path: "src/app.txt" }, paths: ["src/app.txt"] },
+    result: { ok: true, output: "wrote src/app.txt" },
+    write: { path: "src/app.txt", content: HOME_APP_TEXT },
+  },
+  { message: "[[step 2/3 done]]" },
+  { message: "[[step 3/3 started]]" },
+  {
+    propose: { tool: "Bash", kind: "shell", summary: "Run: npm test", input: { command: "npm test" }, paths: [] },
+    result: { ok: true, output: "(fake) tests passed" },
+  },
+  { message: "I changed src/app.txt." },
+]);
+
 // Read once, when the agent server is created: the fake adapter and the provider CLI overrides.
 const AT_CREATE = {
   THETERMINAL_FAKE_AGENT: "1",
@@ -112,18 +135,20 @@ const offlineFetch: typeof fetch = async (input) => {
   return json(404, {});
 };
 
-// Starts five core servers (serving the built UI) for the whole run and exposes their urls to the tests:
+// Starts six core servers (serving the built UI) for the whole run and exposes their urls to the tests:
 // TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled),
 // TT_E2E_PEER_URL for a second agent computer with no internet, which link.spec.ts pairs with the agent server and
 // offline.spec.ts uses offline, and two collaboration servers with the fake agent: TT_E2E_PEOPLE_URL (remote access
 // off, people.spec.ts) and TT_E2E_REMOTE_OWNER_URL (remote.spec.ts), whose remote TLS listener is on from the start at
-// TT_E2E_REMOTE_URL with the self-signed certificate TT_E2E_FINGERPRINT. Each spec gets a workspace of its own, so the
-// people it invites, removes and re-roles, and remote access going off, touch no other spec.
+// TT_E2E_REMOTE_URL with the self-signed certificate TT_E2E_FINGERPRINT, and TT_E2E_HOME_URL, the fake agent with
+// step reports (home.spec.ts, sources.spec.ts), whose Home counts no other spec's runs or decisions. Each spec gets a
+// workspace of its own, so the people it invites, removes and re-roles, and remote access going off, touch no other
+// spec.
 type Server = Awaited<ReturnType<typeof createServer>>;
 
 export default async function globalSetup() {
   const uiDir = join(import.meta.dirname, "..", "apps", "ui", "dist");
-  const dirs = ["tt-e2e-", "tt-e2e-agent-", "tt-e2e-peer-", "tt-e2e-people-", "tt-e2e-remote-"].map((p) => mkdtempSync(join(tmpdir(), p)));
+  const dirs = ["tt-e2e-", "tt-e2e-agent-", "tt-e2e-peer-", "tt-e2e-people-", "tt-e2e-remote-", "tt-e2e-home-"].map((p) => mkdtempSync(join(tmpdir(), p)));
   const servers: Server[] = [];
   let restoreRunEnv = () => {};
   const teardown = async () => {
@@ -176,6 +201,15 @@ export default async function globalSetup() {
         process.env.TT_E2E_FINGERPRINT = remote.fingerprint;
       } finally {
         restoreCollabEnv();
+      }
+
+      const restoreHomeEnv = setEnv({ THETERMINAL_FAKE_SCRIPT: HOME_SCRIPT });
+      try {
+        const home = await createServer({ dataDir: dirs[5]!, port: 0, uiDir, ...linkOpts() });
+        servers.push(home);
+        process.env.TT_E2E_HOME_URL = home.url;
+      } finally {
+        restoreHomeEnv();
       }
     } finally {
       restoreCreateEnv();
