@@ -18,6 +18,16 @@ describe("STEP_PLAN_INSTRUCTION", () => {
     expect(STEP_PLAN_INSTRUCTION).toMatch(/80 characters/);
     expect(STEP_PLAN_INSTRUCTION).toMatch(/secret/i);
   });
+
+  it("describes every marker in one block", () => {
+    for (const m of ["[[card: ", "[[card-stage:", "[[card-done]]", "[[preview:", "| port ", "[[app: ios ", "[[app: android ", "[[noted]]"]) {
+      expect(STEP_PLAN_INSTRUCTION).toContain(m);
+    }
+    for (const stage of ["plan", "design", "build", "ship", "operate"]) expect(STEP_PLAN_INSTRUCTION).toContain(stage);
+    expect(STEP_PLAN_INSTRUCTION).toContain("only if this run has no card yet");
+    expect(STEP_PLAN_INSTRUCTION).toContain("after you read notes from people");
+    expect(STEP_PLAN_INSTRUCTION).toMatch(/npm run.*pnpm run.*yarn run.*npx/);
+  });
 });
 
 describe("parseProgressLine", () => {
@@ -48,6 +58,14 @@ describe("ProgressTracker", () => {
     expect(t.feed("[[step 2/4 started]]")).toBeNull(); // wrong total
     expect(t.feed("[[plan: Other | Plan | Here]]")).toBeNull(); // the first plan wins
     expect(t.feed("[[step 3/3 done]]")).toEqual({ steps: ["Read", "Fix", "Test"], done: [1, 3], current: null });
+  });
+
+  it("applies a parsed line and returns a snapshot only when it changes something", () => {
+    const t = tracker();
+    expect(t.apply({ kind: "step", n: 1, of: 3, state: "started" })).toBeNull();
+    expect(t.apply({ kind: "plan", steps: ["a", "b", "c"] })).toEqual({ steps: ["a", "b", "c"], done: [], current: null });
+    expect(t.apply({ kind: "step", n: 1, of: 3, state: "started" })).toEqual({ steps: ["a", "b", "c"], done: [], current: 1 });
+    expect(t.apply({ kind: "step", n: 1, of: 3, state: "started" })).toBeNull();
   });
 
   it("ignores a step before any plan", () => {
