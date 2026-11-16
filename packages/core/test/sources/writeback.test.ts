@@ -278,6 +278,65 @@ describe("apply", () => {
     expect(existsSync(join(folder, "a.txt"))).toBe(false);
   });
 
+  it("writes only what the preview showed, even when files are added between the freshness check and the diff", async () => {
+    const projectId = await folderProject({ "keep.txt": "keep\n" });
+    await run(projectId, "run-pin11111", { "a.txt": "a\n" });
+    const w = writeback();
+    await w.accept(owner, "run-pin11111");
+    const preview = await w.preview(projectId);
+    // Right after apply has checked HEAD, an upload commits another file.
+    const holder = wt as unknown as { git: GitRunner };
+    const real = holder.git;
+    let fired = false;
+    holder.git = async (args, cwd, opts) => {
+      const out = await real(args, cwd, opts);
+      if (!fired && args.includes("rev-parse") && args.includes("HEAD^{commit}")) {
+        fired = true;
+        const stagingDir = join(base, "staged-late");
+        put(stagingDir, "late.txt", "late\n");
+        await wt.commitFiles(projectId, stagingDir, ["late.txt"], "Added 1 file");
+      }
+      return out;
+    };
+    const result = await w.apply(owner, projectId, preview.head);
+    holder.git = real;
+    expect(fired).toBe(true);
+    expect(result).toEqual({ written: 1, deleted: 0, skipped: [] });
+    expect(existsSync(join(folder, "late.txt"))).toBe(false);
+    expect(entriesOf("project.folder_applied")[0]!.payload).toMatchObject({ to: preview.head });
+  });
+
+  it("publishes only what the preview showed, even when files are added between the freshness check and the diff", async () => {
+    const { project } = await sources(
+      fakeSourceGitHub([
+        { name: ROOT, type: "5", mode: 0o755 },
+        { name: `${ROOT}README.md`, body: "# Site\n" },
+      ]),
+    ).createFromGitHub(owner, { repo: "octo/site" });
+    await run(project.id, "run-pin22222", { "README.md": "# Site, better\n" });
+    const gh = fakePublisher();
+    const w = writeback(gh);
+    await w.accept(owner, "run-pin22222");
+    const preview = await w.preview(project.id);
+    const holder = wt as unknown as { git: GitRunner };
+    const real = holder.git;
+    let fired = false;
+    holder.git = async (args, cwd, opts) => {
+      const out = await real(args, cwd, opts);
+      if (!fired && args.includes("rev-parse") && args.includes("HEAD^{commit}")) {
+        fired = true;
+        const stagingDir = join(base, "staged-late");
+        put(stagingDir, "late.txt", "late\n");
+        await wt.commitFiles(project.id, stagingDir, ["late.txt"], "Added 1 file");
+      }
+      return out;
+    };
+    await w.publish(owner, project.id, preview.head);
+    holder.git = real;
+    expect(fired).toBe(true);
+    expect(gh.calls[0]!.i.files.map((f) => f.path)).toEqual(["README.md"]);
+  });
+
   it("a folder renamed away is FolderUnavailableError, and nothing is written", async () => {
     const projectId = await folderProject({ "keep.txt": "keep\n" });
     await run(projectId, "run-gone1111", { "a.txt": "a\n" });

@@ -203,7 +203,8 @@ export class WritebackService {
   async preview(projectId: string): Promise<WritebackPreview> {
     return this.locked(projectId, async () => {
       const source = this.source(projectId, null);
-      const { head, files } = await this.changes(projectId, source, new GitScope());
+      const scope = new GitScope();
+      const { head, files } = await this.changes(projectId, source, await this.head(this.deps.worktrees.repoPath(projectId), scope), scope);
       this.previews.set(projectId, { head, synced: source.syncedCommit });
       return { kind: source.kind, head, files };
     });
@@ -222,7 +223,7 @@ export class WritebackService {
       const scope = new GitScope();
       await this.assertFresh(projectId, source, head, scope);
       const root = this.folderRoot(source.path);
-      const { files } = await this.changes(projectId, source, scope);
+      const { files } = await this.changes(projectId, source, head, scope);
       const repo = this.deps.worktrees.repoPath(projectId);
       const algorithm = source.syncedCommit.length === 64 ? "sha256" : "sha1";
       const synced = await this.tree(repo, source.syncedCommit, scope);
@@ -288,7 +289,7 @@ export class WritebackService {
       const scope = new GitScope();
       await this.assertFresh(projectId, source, head, scope);
       if (source.repo === null || source.branch === null || source.remoteCommit === null) throw new NoSourceError();
-      const { files } = await this.changes(projectId, source, scope);
+      const { files } = await this.changes(projectId, source, head, scope);
       const repo = this.deps.worktrees.repoPath(projectId);
       const now = await this.tree(repo, head, scope);
       const sent: { path: string; mode: "100644" | "100755"; content: Buffer | null }[] = [];
@@ -359,10 +360,12 @@ export class WritebackService {
     if ((await this.head(this.deps.worktrees.repoPath(projectId), scope)) !== head) throw new WritebackStaleError();
   }
 
-  /** The change from the synced commit to HEAD, checked against IMPORT_LIMITS. */
-  private async changes(projectId: string, source: ProjectSource, scope: GitScope): Promise<{ head: string; files: Change[] }> {
+  /**
+   * The change from the synced commit to `head`, checked against IMPORT_LIMITS. Apply and Publish pass the head the
+   * preview showed (checked by assertFresh), never HEAD read again, so a commit landing in between adds nothing.
+   */
+  private async changes(projectId: string, source: ProjectSource, head: string, scope: GitScope): Promise<{ head: string; files: Change[] }> {
     const repo = this.deps.worktrees.repoPath(projectId);
-    const head = await this.head(repo, scope);
     const out = await this.deps.worktrees.runGit(
       repo,
       ["diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", source.syncedCommit, head],
