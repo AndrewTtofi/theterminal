@@ -285,6 +285,16 @@ describe("uploads", () => {
     expect(() => s.openUpload(maintainer, projectId, { files: 1, bytes: 1, includeSecrets: false })).toThrow(UploadBusyError);
   });
 
+  it("caps open uploads at four per person and sixteen in all, so one person cannot block the others", () => {
+    const s = makeService();
+    const open = (id: string) => s.openUpload({ kind: "human", id }, projectId, { files: 1, bytes: 1, includeSecrets: false });
+    for (let i = 0; i < 4; i++) open("p-one");
+    expect(() => open("p-one")).toThrow(UploadBusyError);
+    // Another person still gets theirs.
+    for (const id of ["p-two", "p-three", "p-four"]) for (let i = 0; i < 4; i++) open(id);
+    expect(() => open("p-five")).toThrow(UploadBusyError);
+  });
+
   it("counts streamed bytes, not content-length", async () => {
     const s = makeService();
     // Declared as one byte; the stream sends more than the per-file limit.

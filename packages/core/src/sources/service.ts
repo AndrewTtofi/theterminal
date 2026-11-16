@@ -52,7 +52,10 @@ export type SourceServiceDeps = {
   recorded?: RecordedText;
 };
 
-const MAX_OPEN_UPLOADS = 4;
+/** Open uploads one person may have at once. */
+const MAX_OPEN_UPLOADS_PER_PERSON = 4;
+/** Open uploads on the whole server at once. */
+const MAX_OPEN_UPLOADS = 16;
 const UPLOAD_TTL_MS = 60 * 60 * 1000;
 /** Files, links and anything else in an archive; staging still holds the files to IMPORT_LIMITS.files. */
 const TAR_MAX_ENTRIES = IMPORT_LIMITS.files * 2;
@@ -169,6 +172,9 @@ export class SourceService {
     this.requireProject(projectId);
     this.expire(this.now());
     if (this.uploads.size >= MAX_OPEN_UPLOADS) throw new UploadBusyError();
+    let own = 0;
+    for (const u of this.uploads.values()) if (u.owner === actor.id) own += 1;
+    if (own >= MAX_OPEN_UPLOADS_PER_PERSON) throw new UploadBusyError();
     const id = this.newId();
     const dir = join(this.deps.dataDir, "projects", projectId, STAGING, id);
     this.active.add(dir);
