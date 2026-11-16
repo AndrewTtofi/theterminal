@@ -122,7 +122,7 @@ export function sendGateError(err: unknown, reply: FastifyReply): FastifyReply |
  * workspace server and the link listener, so both answer the same way.
  */
 /** The refusal reasons a path may be answered with: fixed words of our own, never the path. */
-const PATH_REASONS: ReadonlySet<string> = new Set(["absolute", "dot_dot", "git", "unstorable", "empty", "too_long", "duplicate", "link"]);
+const PATH_REASONS: ReadonlySet<string> = new Set(["absolute", "dot_dot", "git", "unstorable", "empty", "too_long", "duplicate", "link", "conflict"]);
 /** The most possible-secret names one refusal lists. */
 const MAX_SECRET_NAMES = 20;
 

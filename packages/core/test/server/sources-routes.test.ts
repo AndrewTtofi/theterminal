@@ -296,6 +296,16 @@ describe("uploads", () => {
     expect(res.json()).toEqual({ error: "path_refused", reason: "dot_dot" });
   });
 
+  it("a PUT clashing with an earlier file is path_refused conflict, and the upload carries on", async () => {
+    await build();
+    const { uploadId } = await open();
+    expect((await putFile(uploadId, "a", "x")).statusCode).toBe(204);
+    const res = await putFile(uploadId, "a/b.txt", "y");
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: "path_refused", reason: "conflict" });
+    expect((await putFile(uploadId, "c.txt", "z")).statusCode).toBe(204);
+  });
+
   it("a PUT streaming one byte over the per-file limit is limit_exceeded, whatever it declared", async () => {
     await build();
     const { uploadId } = await open();

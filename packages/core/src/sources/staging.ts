@@ -70,7 +70,16 @@ export class ImportStaging {
 
   constructor(
     readonly dir: string,
-    private readonly o: { includeSecrets: boolean; redact: (s: string) => string; limits?: ImportLimits },
+    private readonly o: {
+      includeSecrets: boolean;
+      redact: (s: string) => string;
+      limits?: ImportLimits;
+      /**
+       * A refused path throws PathRefusedError and destroys its body instead of skipping it: for an HTTP body, which
+       * is never read to its end for nothing (the connection is closed instead).
+       */
+      refuse?: boolean;
+    },
   ) {
     this.limits = o.limits ?? IMPORT_LIMITS;
     mkdirSync(dir, { recursive: true });
@@ -88,7 +97,8 @@ export class ImportStaging {
   }
 
   /**
-   * Stages one file. A refused path or a case collision is skipped (its body drained) without counting; the file
+   * Stages one file. A refused path or a case collision is skipped (its body drained) without counting, or with
+   * `refuse` throws PathRefusedError; the file
    * count is checked before the body is read; then the body is streamed to its file, and passing `fileBytes` or the
    * running total destroys the body, removes the partial file and throws ImportLimitError. A body that fails
    * mid-stream also leaves no file behind.
@@ -138,8 +148,15 @@ export class ImportStaging {
     return "added";
   }
 
-  /** Skips a path and drains its body so a stream reader (an archive) can move on to the next entry. */
+  /**
+   * Skips a path and drains its body so a stream reader (an archive) can move on to the next entry; with `refuse`,
+   * destroys the body and throws PathRefusedError instead.
+   */
   private async drainSkipped(path: string, reason: string, body: Readable): Promise<"skipped"> {
+    if (this.o.refuse === true) {
+      body.destroy();
+      throw new PathRefusedError(reason);
+    }
     this.skip(path, reason);
     body.resume();
     return "skipped";

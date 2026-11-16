@@ -260,6 +260,21 @@ describe("uploads", () => {
     await expect(s.putUploadFile(maintainer, uploadId, "a.txt", body("a"))).rejects.toMatchObject({ reason: "duplicate" });
   });
 
+  it("refuses a put that clashes with an earlier file, without draining its body, and keeps the upload", async () => {
+    const s = makeService();
+    const { uploadId } = s.openUpload(maintainer, projectId, { files: 3, bytes: 3, includeSecrets: false });
+    await s.putUploadFile(maintainer, uploadId, "a", body("a"));
+    const b = body("never drained");
+    const err = await s.putUploadFile(maintainer, uploadId, "a/b.txt", b).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PathRefusedError);
+    expect((err as PathRefusedError).reason).toBe("conflict");
+    expect(b.destroyed).toBe(true);
+    await s.putUploadFile(maintainer, uploadId, "c.txt", body("c"));
+    const result = await s.commitUpload(maintainer, uploadId);
+    expect(result.files).toBe(2);
+    expect(await headTree(projectId)).toEqual(["a", "c.txt"]);
+  });
+
   it("checks the declared totals and refuses a fifth open upload", () => {
     const s = makeService();
     expect(() => s.openUpload(maintainer, projectId, { files: IMPORT_LIMITS.files + 1, bytes: 1, includeSecrets: false }))

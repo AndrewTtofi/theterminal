@@ -174,7 +174,7 @@ export class SourceService {
     this.active.add(dir);
     let staging: ImportStaging;
     try {
-      staging = new ImportStaging(dir, { includeSecrets: i.includeSecrets === true, redact: this.deps.redact });
+      staging = new ImportStaging(dir, { includeSecrets: i.includeSecrets === true, redact: this.deps.redact, refuse: true });
     } catch (e) {
       this.active.delete(dir);
       throw e;
@@ -188,7 +188,8 @@ export class SourceService {
 
   /**
    * Streams one file into the upload. A refused path (or one differing from an earlier put only by case) is refused
-   * before the body is read. Any failure while streaming (a broken limit, a dropped connection) ends the whole upload:
+   * before the body is read; one clashing with an earlier file (a file where a folder is needed) is refused with its
+   * body destroyed, never drained. Any failure while streaming (a broken limit, a dropped connection) ends the whole upload:
    * its staging folder is removed and nothing of it can be committed.
    */
   async putUploadFile(actor: Actor, uploadId: string, path: string, body: Readable): Promise<void> {
@@ -203,7 +204,8 @@ export class SourceService {
       await u.staging.add(checked.path, body);
       u.seen.add(key);
     } catch (e) {
-      this.drop(u);
+      // A refused path (one clashing with an earlier file) leaves nothing staged: the upload carries on.
+      if (!(e instanceof PathRefusedError)) this.drop(u);
       throw e;
     } finally {
       u.busy = false;
