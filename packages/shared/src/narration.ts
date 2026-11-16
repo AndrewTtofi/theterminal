@@ -344,6 +344,16 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
   const who = actorName(e.actor, ctx, agent);
   const cardId = idOf(p.cardId);
   const stage = (v: unknown) => show(cap(v), 20);
+  /** The card's title in curly quotes, else `a card`. */
+  const board = (id: string | undefined) => {
+    const title = lookup(ctx.cardTitle, id);
+    return title ? `\u201c${show(title, 80)}\u201d` : "a card";
+  };
+  /** The agent that did it, by adapter name when the context knows the run. */
+  const claude = (id: string | undefined) => {
+    const name = lookup(ctx.adapterName, id);
+    return name ? (own(ADAPTER_LABELS, name) ?? show(name, 20)) : "The agent";
+  };
   /** The first eight characters of a run id, as 5B wrote them. */
   const run8 = () => `Agent ${show(str(p.runId).slice(0, 8), 16)}`;
 
@@ -356,6 +366,26 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `${who} moved ${cardRef(cardId, ctx)} from ${stage(p.from)} to ${stage(p.to)}` };
     case "card.status_changed":
       return { headline: `${who} marked ${cardRef(cardId, ctx)} ${show(p.to, 20)}` };
+
+    case "card.run_linked":
+      return { headline: `${claude(runId)} took on ${board(cardId)}` };
+    case "card.comment":
+      return { headline: `${who} left a note on ${board(cardId)}` };
+    case "card.comments_given": {
+      const count = Array.isArray(p.commentIds) ? p.commentIds.length : 0;
+      return {
+        headline:
+          count === 1
+            ? `1 note on ${board(cardId)} was given to Claude`
+            : `${count} notes on ${board(cardId)} were given to Claude`,
+      };
+    }
+    case "card.comments_read":
+      return { headline: `${claude(runId)} read the notes on ${board(cardId)}` };
+    case "card.move_requested":
+      return { headline: `${claude(runId)} wants to move ${board(cardId)} to ${stage(p.to)}` };
+    case "card.move_declined":
+      return { headline: `${who} said not yet to moving ${board(cardId)} to ${stage(p.to)}` };
 
     case "agent.started": {
       const adapter = adapterLabel(p.adapter);

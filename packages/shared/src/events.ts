@@ -7,6 +7,7 @@ import { gatePayloadSchemas, type GateEventType } from "./gates.js";
 import { overridePayloadSchemas, type OverrideEventType } from "./override.js";
 import { linkPayloadSchemas, type LinkEventType } from "./link.js";
 import { sharePayloadSchemas, type ShareEventType } from "./share.js";
+import { agentBoardPayloadSchemas, type AgentBoardEventType } from "./agent-board.js";
 import { sourcePayloadSchemas, type SourceEventType } from "./sources.js";
 import { peoplePayloadSchemas, type PeopleEventType } from "./people.js";
 
@@ -44,7 +45,8 @@ export type EventType =
   | LinkEventType
   | ShareEventType
   | PeopleEventType
-  | SourceEventType;
+  | SourceEventType
+  | AgentBoardEventType;
 
 const nonEmptyId = z.string().min(1);
 
@@ -64,4 +66,5 @@ export const eventPayloadSchemas: Record<EventType, z.ZodType> = {
   ...sharePayloadSchemas,
   ...peoplePayloadSchemas,
   ...sourcePayloadSchemas,
+  ...agentBoardPayloadSchemas,
 };
