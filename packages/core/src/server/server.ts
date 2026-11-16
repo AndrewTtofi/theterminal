@@ -72,6 +72,7 @@ import {
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
+import type { PreviewHost } from "./preview-host.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
 import { fakeAgentEnv } from "../agents/child-env.js";
@@ -564,6 +565,11 @@ export async function createServer(opts: {
    * `folder_picker_unavailable`.
    */
   pickFolder?: () => Promise<string | null>;
+  /**
+   * Shows and captures a website preview's device views through the host (the desktop app). Set by the CLI only when
+   * it runs under a host with an IPC channel; absent on a headless server.
+   */
+  previewHost?: PreviewHost;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
