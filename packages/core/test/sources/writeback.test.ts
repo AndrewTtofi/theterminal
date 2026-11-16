@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -77,6 +77,16 @@ const git = (projectId: string, args: string[]) => wt.runGit(wt.repoPath(project
 const head = async (projectId: string) => (await git(projectId, ["rev-parse", "HEAD"])).trim();
 const headTree = async (projectId: string) =>
   (await git(projectId, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])).split("\0").filter(Boolean).sort();
+/** Whether the temporary folder's file system ignores case (macOS and Windows by default). */
+function caseInsensitive(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), "case-"));
+  try {
+    writeFileSync(join(dir, "Probe"), "");
+    return existsSync(join(dir, "probe"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 const entriesOf = (type: string): LedgerEntry[] => ledger.list({ afterSeq: 0, limit: 1000 }).filter((e) => e.type === type);
 
 /** A run whose working copy gets `files` (null deletes), finished unless `running`. */
@@ -349,6 +359,47 @@ describe("apply", () => {
     expect(existsSync(folder)).toBe(false);
     expect(existsSync(join(moved, "a.txt"))).toBe(false);
     expect(entriesOf("project.folder_applied")).toHaveLength(0);
+  });
+
+  describe.skipIf(!caseInsensitive())("on a case-insensitive file system", () => {
+    /** Commits a case-only rename of `from` to `to` with `content`, as git records it: an add and a delete. */
+    async function caseRename(projectId: string, from: string, to: string, content: string): Promise<void> {
+      const blobFile = join(base, "blob.tmp");
+      writeFileSync(blobFile, content);
+      const blob = (await git(projectId, ["hash-object", "-w", blobFile])).trim();
+      await git(projectId, ["rm", "--cached", "-q", from]);
+      await git(projectId, ["update-index", "--add", "--cacheinfo", `100644,${blob},${to}`]);
+      await git(projectId, ["commit", "--no-verify", "-q", "-m", "Rename"]);
+    }
+
+    it("a case-only rename keeps the file: it is written under the new name, never deleted", async () => {
+      const projectId = await folderProject({ "readme.md": "hello\n", "keep.txt": "keep\n" });
+      await caseRename(projectId, "readme.md", "README.md", "hello, better\n");
+      const w = writeback();
+      const preview = await w.preview(projectId);
+      expect([...preview.files].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+        { path: "README.md", change: "add" },
+        { path: "readme.md", change: "delete" },
+      ]);
+      const result = await w.apply(owner, projectId, preview.head);
+      expect(result).toEqual({ written: 1, deleted: 0, skipped: [] });
+      expect(readdirSync(folder).sort()).toEqual(["README.md", "keep.txt"]);
+      expect(readFileSync(join(folder, "README.md"), "utf8")).toBe("hello, better\n");
+    });
+
+    it("a case-only rename of a file changed in the folder skips both sides and keeps the file", async () => {
+      const projectId = await folderProject({ "readme.md": "hello\n" });
+      await caseRename(projectId, "readme.md", "README.md", "hello, better\n");
+      put(folder, "readme.md", "my own edit\n");
+      const w = writeback();
+      const preview = await w.preview(projectId);
+      const result = await w.apply(owner, projectId, preview.head);
+      expect(result.written).toBe(0);
+      expect(result.deleted).toBe(0);
+      expect([...result.skipped].sort()).toEqual(["README.md", "readme.md"]);
+      expect(readdirSync(folder)).toEqual(["readme.md"]);
+      expect(readFileSync(join(folder, "readme.md"), "utf8")).toBe("my own edit\n");
+    });
   });
 
   it.skipIf(process.platform === "win32")("never follows a symlink in the folder", async () => {

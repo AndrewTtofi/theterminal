@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, constants, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { IMPORT_LIMITS, type Actor, type ApplyResult, type WritebackPreview } from "@theterminal/shared";
+import { IMPORT_LIMITS, foldKey, type Actor, type ApplyResult, type WritebackPreview } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import {
@@ -120,6 +120,13 @@ export async function gitBlobId(file: string, algorithm: "sha1" | "sha256" = "sh
   }
 }
 
+/** Whether two paths name the same existing file (same device and inode), as on a case-insensitive file system. */
+function sameFile(a: string, b: string): boolean {
+  const x = lstatSync(a, { bigint: true, throwIfNoEntry: false });
+  const y = lstatSync(b, { bigint: true, throwIfNoEntry: false });
+  return x !== undefined && y !== undefined && x.dev === y.dev && x.ino === y.ino && x.ino !== 0n;
+}
+
 /** Whether `inner` is `outer` or inside it; both already canonical. */
 function within(outer: string, inner: string): boolean {
   const rel = relative(outer, inner);
@@ -214,7 +221,9 @@ export class WritebackService {
    * Writes the previewed change into the person's folder. Only the listed paths are touched. A path is skipped (and
    * reported) when the folder's file differs from the file as it was copied in (compared by git blob id, hashed
    * here), when a file was added to the folder at a path the change adds, or when the target or any folder on its way
-   * is a symlink or not where the path says. Files are written through a temporary file and a rename. Then
+   * is a symlink or not where the path says. A case-only rename (an add and a delete folding to the same path) that
+   * names one file in a case-insensitive folder is written in place and renamed, never deleted. Files are written
+   * through a temporary file and a rename. Then
    * `project.folder_applied` moves the synced commit to HEAD.
    */
   async apply(actor: Actor, projectId: string, head: string): Promise<ApplyResult> {
@@ -236,32 +245,62 @@ export class WritebackService {
       const skipped: string[] = [];
       try {
         await this.deps.worktrees.materialise(projectId, head, writes, dir);
-        for (const f of files) {
+        /** The staged copy of `path` and whether it is executable, or null when it is not a regular file at HEAD. */
+        const stagedFile = (path: string): { staged: string; executable: boolean } | null => {
+          const staged = join(dir, ...path.split("/"));
+          const entry = now.get(path);
+          const st = lstatSync(staged, { throwIfNoEntry: false });
+          if (entry === undefined || !REGULAR_MODES.has(entry.mode) || st === undefined || !st.isFile()) return null;
+          return { staged, executable: entry.mode === "100755" };
+        };
+        const one = async (f: Change): Promise<void> => {
           const target = this.target(root, f.path);
           const before = synced.get(f.path);
           if (target === null || !(await this.unchanged(target, before, algorithm))) {
             skipped.push(f.path);
-            continue;
+            return;
           }
           if (f.change === "delete") {
             if (target.exists) {
               unlinkSync(target.abs);
               deleted += 1;
             }
-            continue;
+            return;
           }
-          const staged = join(dir, ...f.path.split("/"));
-          const entry = now.get(f.path);
-          const st = lstatSync(staged, { throwIfNoEntry: false });
-          if (entry === undefined || !REGULAR_MODES.has(entry.mode) || st === undefined || !st.isFile()) {
+          const file = stagedFile(f.path);
+          if (file === null || !this.write(root, target.abs, f.path, file.staged, file.executable)) {
             skipped.push(f.path);
-            continue;
-          }
-          if (!this.write(root, target.abs, f.path, staged, entry.mode === "100755")) {
-            skipped.push(f.path);
-            continue;
+            return;
           }
           written += 1;
+        };
+        // A case-only rename arrives as an add and a delete whose paths fold to the same key. On a case-insensitive
+        // folder both name the same file, so it is written in place and renamed, never deleted.
+        const added = new Map(files.filter((f) => f.change === "add").map((f) => [foldKey(f.path), f.path]));
+        const renames = new Map<string, string>();
+        for (const f of files) {
+          const to = f.change === "delete" ? added.get(foldKey(f.path)) : undefined;
+          if (to !== undefined && to !== f.path) renames.set(f.path, to);
+        }
+        const renamedFrom = new Map([...renames].map(([from, to]) => [to, from]));
+        const handled = new Set<string>();
+        for (const f of files) {
+          if (handled.has(f.path)) continue;
+          const from = f.change === "delete" ? f.path : f.change === "add" ? renamedFrom.get(f.path) : undefined;
+          const to = from === undefined ? undefined : renames.get(from);
+          if (from === undefined || to === undefined) {
+            await one(f);
+            continue;
+          }
+          handled.add(from).add(to);
+          const outcome = await this.renameCase(root, from, to, synced.get(from), algorithm, stagedFile(to));
+          if (outcome === "written") written += 1;
+          else if (outcome === "skipped") skipped.push(to, from);
+          else {
+            // Two different files (a case-sensitive folder): the add and the delete each go as usual.
+            await one({ path: to, change: "add" });
+            await one({ path: from, change: "delete" });
+          }
         }
       } finally {
         rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -472,6 +511,30 @@ export class WritebackService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * A case-only rename of `from` to `to`. "separate" when the folder holds them as two different files (or `to` is
+   * absent), so each is handled as usual. Otherwise, when the folder's file is unchanged since the import, the new
+   * content is written to it in place, then it is renamed to the new case: "written". "skipped" when it changed, or
+   * cannot be written safely.
+   */
+  private async renameCase(
+    root: string, from: string, to: string, before: TreeEntry | undefined, algorithm: "sha1" | "sha256",
+    file: { staged: string; executable: boolean } | null,
+  ): Promise<"written" | "skipped" | "separate"> {
+    const old = this.target(root, from);
+    if (old === null || !old.exists) return old === null ? "skipped" : "separate";
+    const toAbs = join(root, ...to.split("/"));
+    if (!sameFile(old.abs, toAbs)) return "separate";
+    if (!(await this.unchanged(old, before, algorithm)) || file === null) return "skipped";
+    if (!this.write(root, old.abs, from, file.staged, file.executable)) return "skipped";
+    try {
+      renameSync(old.abs, toAbs);
+    } catch {
+      return "skipped";
+    }
+    return "written";
   }
 
   /**
