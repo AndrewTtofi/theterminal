@@ -1,30 +1,16 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, extname, isAbsolute, join, posix } from "node:path";
+import type { NativeTools, PreviewFailure, ToolId } from "@theterminal/shared";
 import { which } from "../agents/which.js";
 
 // Phone app previews: which native tools this computer has, which app a working copy holds, and the argument-array
 // plans that build and open it (spec "Phone app preview"; plan 12 Rulings 14, 15 and 24). Nothing here runs a shell.
-//
-// The NativeTools, ToolId and PreviewFailure shapes match the shared types of plan 12 Task 3, which lands in parallel;
-// they are declared here until then.
 
-/** A native tool the person may need to install (shared `ToolId`). */
-export type ToolId = "xcode" | "xcode_cli" | "simulator" | "android_sdk" | "adb" | "emulator" | "avd" | "gradle_wrapper";
+export type { NativeTools, PreviewFailure, ToolId };
 
 /** An iPhone simulator `xcrun simctl list devices --json` lists. */
-export type Simulator = { udid: string; name: string; state: string; runtime: string };
-
-/** What this computer has for phone app previews (shared `NativeTools`). */
-export type NativeTools = {
-  platform: "darwin" | "win32" | "linux";
-  ios: { supported: boolean; xcode: string | null; simulators: Simulator[]; missing: ToolId[] };
-  android: { supported: boolean; sdk: boolean; avds: string[]; missing: ToolId[] };
-};
-
-/** Why a preview failed (shared `PreviewFailure`). */
-export type PreviewFailure =
-  | "timed_out" | "exited" | "install_failed" | "build_failed" | "boot_failed" | "install_app_failed" | "launch_failed" | "start_failed";
+export type Simulator = NativeTools["ios"]["simulators"][number];
 
 /** A preview stage failed; `reason` is the fixed code shown to the person. */
 export class PreviewFailedError extends Error {

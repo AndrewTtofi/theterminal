@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
-import { visibleControls } from "@theterminal/shared";
+import { visibleControls, type PreviewKind } from "@theterminal/shared";
 import { REDACTED } from "../agents/redact.js";
 import { which as defaultWhich } from "../agents/which.js";
 import { canonicalJson } from "../ledger/canonical.js";
@@ -13,7 +13,7 @@ import { canonicalJson } from "../ledger/canonical.js";
  * a native executable), never through a shell and never as a `.cmd`, `.bat` or `.ps1` file.
  */
 
-export type PreviewKind = "web" | "ios" | "android";
+export type { PreviewKind };
 export type Manager = "npm" | "pnpm" | "yarn";
 export type PackageManager = Manager | "npx";
 

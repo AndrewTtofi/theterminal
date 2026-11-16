@@ -1,9 +1,11 @@
 import {
-  DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID, PROGRESS_LIMITS, nowLine, progressPercent, visibleControls,
+  ANDROID_STEPS, DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, IOS_STEPS, MIRRORABLE_TYPES, OWNER_ID, PROGRESS_LIMITS, WEB_INSTALL_STEP, WEB_STEPS,
+  nowLine, progressPercent, visibleControls,
 } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, CardComment, CardInfo, CardMoveRequest, CommentState, Stage, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
-  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, ProjectSourceKind, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
+  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, PreviewFailure, PreviewKind, PreviewState, PreviewView,
+  ProjectSourceKind, QuestionId, Screenshot, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
   ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -355,6 +357,50 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
     case "run.accepted":
       db.prepare("UPDATE agent_runs SET accepted_commit = ? WHERE id = ?").run(p.commit, p.runId);
       break;
+    case "preview.offered":
+      db.prepare(
+        `INSERT INTO preview_offers (run_id, kind, command, port, target) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(run_id, kind) DO UPDATE SET command = excluded.command, port = excluded.port, target = excluded.target`,
+      ).run(p.runId, p.kind, p.command ?? null, p.port ?? null, p.target ?? null);
+      break;
+    case "preview.requested":
+      db.prepare(
+        `INSERT INTO previews (id, run_id, project_id, kind, key, state, progress, origin, frameable, exposed, reason, tail, started_by, started_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, 'requested', ?, NULL, NULL, 0, NULL, NULL, ?, ?, NULL)`,
+      ).run(
+        p.previewId, p.runId, e.projectId, p.kind, p.key,
+        canonicalJson({ steps: previewSteps(p.kind, p.install), done: [], current: 1 }), e.actor.id, e.ts,
+      );
+      break;
+    case "preview.started":
+      db.prepare("UPDATE previews SET state = 'starting' WHERE id = ? AND ended_at IS NULL").run(p.previewId);
+      break;
+    case "preview.progress":
+      db.prepare("UPDATE previews SET progress = ? WHERE id = ? AND ended_at IS NULL").run(
+        canonicalJson({ steps: p.steps, done: p.done, current: p.current }), p.previewId,
+      );
+      break;
+    case "preview.ready":
+      db.prepare("UPDATE previews SET state = 'ready', origin = ?, frameable = ?, exposed = ? WHERE id = ? AND ended_at IS NULL").run(
+        p.origin ?? null, p.frameable === undefined ? null : p.frameable ? 1 : 0, p.exposed ? 1 : 0, p.previewId,
+      );
+      break;
+    case "preview.failed":
+      db.prepare("UPDATE previews SET state = 'failed', reason = ?, tail = ?, ended_at = ? WHERE id = ? AND ended_at IS NULL").run(
+        p.reason, JSON.stringify(p.tail), e.ts, p.previewId,
+      );
+      break;
+    case "preview.stopped":
+      db.prepare("UPDATE previews SET state = 'stopped', reason = ?, ended_at = ? WHERE id = ? AND ended_at IS NULL").run(p.reason, e.ts, p.previewId);
+      break;
+    case "preview.screenshot":
+      // One row per image and run; the same image again moves it to the front.
+      db.prepare(
+        `INSERT INTO preview_screenshots (sha256, run_id, project_id, preview_id, device, width, height, bytes, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(sha256, run_id) DO UPDATE SET preview_id = excluded.preview_id, device = excluded.device, at = excluded.at`,
+      ).run(p.sha256, p.runId, e.projectId, p.previewId, p.device, p.width, p.height, p.bytes, e.ts);
+      break;
     case "project.folder_applied":
       db.prepare("UPDATE project_sources SET synced_commit = ? WHERE project_id = ?").run(p.to, p.projectId);
       break;
@@ -514,6 +560,7 @@ const PROJECTION_TABLES = [
   // Not sessions or credential_state: neither is in the ledger.
   "people", "credentials", "invites", "remote_state", "gate_requirements", "project_sources", "project_imports",
   "card_comments", "card_move_requests",
+  "preview_offers", "previews", "preview_screenshots",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -1008,8 +1055,8 @@ export function listMoveRequests(db: Db, projectId?: string): CardMoveRequest[] 
 /**
  * What the Board shows on each of the project's cards (in board order): its latest run (by start) with the run's
  * own progress, what it is doing now and whether it waits on a decision; its note counts; and its pending move.
- * A run on a linked machine is shown through `clean` (redaction by default), as Home shows it. `screenshots` is 0
- * until previews fill it.
+ * A run on a linked machine is shown through `clean` (redaction by default), as Home shows it. `screenshots` counts the
+ * card's runs' screenshots.
  */
 export function cardInfos(db: Db, projectId: string, clean: (s: string) => string = (s) => redact(s)): CardInfo[] {
   const cards = db.prepare("SELECT id FROM cards WHERE project_id = ? ORDER BY created_at, rowid").all(projectId) as { id: string }[];
@@ -1025,7 +1072,7 @@ export function cardInfos(db: Db, projectId: string, clean: (s: string) => strin
     const c = counts.get(id) as { n: number; waiting: number };
     const req = request.get(id) as { to_stage: Stage } | undefined;
     const base = {
-      cardId: id, comments: c.n, commentsWaiting: c.waiting, screenshots: 0, moveRequest: req ? { to: req.to_stage } : null,
+      cardId: id, comments: c.n, commentsWaiting: c.waiting, screenshots: countCardScreenshots(db, id), moveRequest: req ? { to: req.to_stage } : null,
     };
     if (!row) return { ...base, runId: null, adapter: null, runStatus: null, progress: null, percent: null, now: null, waiting: false };
     const run = toRun(row);
@@ -1044,4 +1091,102 @@ export function cardInfos(db: Db, projectId: string, clean: (s: string) => strin
       now: nowLine(action), waiting: running && pending.get(run.id) !== undefined,
     };
   });
+}
+
+/** A preview's fixed stage plan (Ruling 15). */
+export function previewSteps(kind: PreviewKind, install: boolean): string[] {
+  if (kind === "ios") return [...IOS_STEPS];
+  if (kind === "android") return [...ANDROID_STEPS];
+  return install ? [WEB_INSTALL_STEP, ...WEB_STEPS] : [...WEB_STEPS];
+}
+
+type PreviewRow = {
+  id: string; run_id: string; project_id: string; kind: PreviewKind; key: string; state: PreviewState; progress: string;
+  origin: string | null; frameable: number | null; exposed: number; reason: string | null; tail: string | null;
+  started_by: string; started_at: string; ended_at: string | null;
+};
+
+/** A preview as recorded, with its confirmation key and who started it; `liveCount` is the service's own. */
+export type PreviewRecord = PreviewView & { key: string; startedBy: string; endedAt: string | null };
+
+const toPreview = (r: PreviewRow): PreviewRecord => {
+  const progress = JSON.parse(r.progress) as RunProgress;
+  return {
+    id: r.id, runId: r.run_id, projectId: r.project_id, kind: r.kind, state: r.state, progress,
+    percent: progressPercent(progress) ?? 0, origin: r.origin, frameable: r.frameable === null ? null : r.frameable === 1,
+    exposed: r.exposed === 1, error: r.state === "failed" ? (r.reason as PreviewFailure) : null,
+    tail: r.tail === null ? [] : (JSON.parse(r.tail) as string[]), liveCount: null, startedAt: r.started_at,
+    key: r.key, startedBy: r.started_by, endedAt: r.ended_at,
+  };
+};
+
+export function getPreview(db: Db, id: string): PreviewRecord | null {
+  const r = db.prepare("SELECT * FROM previews WHERE id = ?").get(id) as PreviewRow | undefined;
+  return r ? toPreview(r) : null;
+}
+
+/** Previews not yet ended (requested, starting or ready), oldest first; of one project when given. */
+export function livePreviews(db: Db, projectId?: string): PreviewRecord[] {
+  const rows = (projectId === undefined
+    ? db.prepare("SELECT * FROM previews WHERE ended_at IS NULL ORDER BY started_at, rowid").all()
+    : db.prepare("SELECT * FROM previews WHERE ended_at IS NULL AND project_id = ? ORDER BY started_at, rowid").all(projectId)) as PreviewRow[];
+  return rows.map(toPreview);
+}
+
+/** Whether the run has a preview, ended or not, confirmed with this key. */
+export function previewKeyConfirmed(db: Db, runId: string, key: string): boolean {
+  return db.prepare("SELECT 1 FROM previews WHERE run_id = ? AND key = ? LIMIT 1").get(runId, key) !== undefined;
+}
+
+type ScreenshotRow = {
+  sha256: string; run_id: string; project_id: string; preview_id: string; device: string; width: number; height: number; bytes: number; at: string;
+};
+
+/** A run's screenshots, newest first; at most `limit` when given. */
+export function listScreenshots(db: Db, runId: string, limit?: number): Screenshot[] {
+  const rows = db
+    .prepare("SELECT * FROM preview_screenshots WHERE run_id = ? ORDER BY at DESC, rowid DESC LIMIT ?")
+    .all(runId, limit ?? -1) as ScreenshotRow[];
+  return rows.map((r) => ({
+    sha256: r.sha256, runId: r.run_id, previewId: r.preview_id, device: r.device, width: r.width, height: r.height, bytes: r.bytes, at: r.at,
+  }));
+}
+
+/** The project a run's screenshot belongs to, or null when the run has no such screenshot. */
+export function screenshotProject(db: Db, runId: string, sha256: string): string | null {
+  const r = db.prepare("SELECT project_id FROM preview_screenshots WHERE run_id = ? AND sha256 = ?").get(runId, sha256) as
+    | { project_id: string }
+    | undefined;
+  return r?.project_id ?? null;
+}
+
+/** How many screenshots the runs of a card have (for its CardInfo). */
+export function countCardScreenshots(db: Db, cardId: string): number {
+  return (
+    db
+      .prepare("SELECT COUNT(*) AS n FROM preview_screenshots s JOIN agent_runs r ON r.id = s.run_id WHERE r.card_id = ?")
+      .get(cardId) as { n: number }
+  ).n;
+}
+
+/**
+ * Who started a run (Ruling 13): the actor id of its `agent.started` entry when that actor is a person, else null.
+ * Read from the ledger, so it never depends on a projection.
+ */
+export function runStarter(db: Db, runId: string): string | null {
+  const r = db
+    .prepare(
+      `SELECT actor_kind, actor_id FROM ledger WHERE type = 'agent.started'
+       AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.runId') = ? ELSE 0 END ORDER BY seq LIMIT 1`,
+    )
+    .get(runId) as { actor_kind: string; actor_id: string } | undefined;
+  return r?.actor_kind === "human" ? r.actor_id : null;
+}
+
+/** The run's latest offer of `kind` (Ruling 8), or null. */
+export function latestOffer(db: Db, runId: string, kind: PreviewKind): { command: string | null; port: number | null; target: string | null } | null {
+  const r = db.prepare("SELECT command, port, target FROM preview_offers WHERE run_id = ? AND kind = ?").get(runId, kind) as
+    | { command: string | null; port: number | null; target: string | null }
+    | undefined;
+  return r ? { command: r.command, port: r.port, target: r.target } : null;
 }
