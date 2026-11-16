@@ -4,9 +4,20 @@ import "./progress.css";
 
 /**
  * A run's progress as the agent reports it. A number draws a progressbar; `null` (no plan) shows "Working…" with no
- * number and no progressbar value, because a made-up percentage would be fake progress.
+ * number and no progressbar value, because a made-up percentage would be fake progress. `compact` draws the bar alone
+ * (a Board card shows its own percent), and nothing at all without a number.
  */
-export function ProgressBar({ percent, label }: { percent: number | null; label: string }) {
+export function ProgressBar({ percent, label, compact = false }: { percent: number | null; label: string; compact?: boolean }) {
+  if (compact) {
+    if (percent === null) return null;
+    return (
+      <div className="progress progress-compact">
+        <div className="progress-track" role="progressbar" aria-label={label} aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+          <div className="progress-fill" style={{ width: `${percent}%` }} />
+        </div>
+      </div>
+    );
+  }
   if (percent === null) {
     return (
       <div className="progress progress-indeterminate">

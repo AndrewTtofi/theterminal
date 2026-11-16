@@ -128,7 +128,7 @@ describe("HomeView", () => {
     const box = screen.getByPlaceholderText("Tell an agent what you want…");
     await userEvent.type(box, "Fix the form");
     await userEvent.click(screen.getByRole("button", { name: "Go" }));
-    expect(onStartRun).toHaveBeenCalledWith("claude", "Fix the form", [], null);
+    expect(onStartRun).toHaveBeenCalledWith("claude", "Fix the form", [], null, undefined, { autoCard: true });
     expect((box as HTMLTextAreaElement).value).toBe("Fix the form");
   });
 

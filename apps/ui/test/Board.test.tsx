@@ -1,49 +1,138 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { screen, within } from "@testing-library/react";
-import { renderAsOwner as render } from "./as-owner";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { Board as BoardData } from "@theterminal/shared";
+import type { Board as BoardData, Card, CardInfo } from "@theterminal/shared";
 import { Board } from "../src/components/Board";
+import { RoleContext } from "../src/shell/model";
+
+const card = (id: string, title: string, over: Partial<Card> = {}): Card => ({
+  id, projectId: "p1", title, stage: "plan", status: "todo", createdAt: "", updatedAt: "", ...over,
+});
 
 const board: BoardData = {
   project: { id: "p1", name: "Demo", pitch: "", createdAt: "2026-01-01T00:00:00Z" },
   columns: {
-    plan: [
-      { id: "c1", projectId: "p1", title: "Existing", stage: "plan", status: "todo", createdAt: "", updatedAt: "" },
-    ],
+    plan: [card("c0", "Add a blog section")],
     design: [],
-    build: [],
+    build: [card("c1", "Fix the contact form", { stage: "build", status: "active" }), card("c2", "Newsletter sign-up", { stage: "build" })],
     ship: [],
-    operate: [],
+    operate: [card("c3", "Dark mode", { stage: "operate", status: "done" })],
   },
 };
 
+export const info = (cardId: string, over: Partial<CardInfo> = {}): CardInfo => ({
+  cardId, runId: "r1", adapter: "claude", runStatus: "running", progress: null, percent: null, now: null, waiting: false,
+  comments: 0, commentsWaiting: 0, screenshots: 0, moveRequest: null, ...over,
+});
+
+const infos: Record<string, CardInfo> = {
+  c0: info("c0", { runId: null, adapter: null, runStatus: null, comments: 1, commentsWaiting: 1 }),
+  c1: info("c1", { percent: 72, now: "Checking the fix works", comments: 2 }),
+  c2: info("c2", { percent: 40, waiting: true }),
+  c3: info("c3", { adapter: "gemini", runStatus: "completed", percent: 100, screenshots: 3 }),
+};
+
+const renderBoard = (role: "viewer" | "owner" = "owner", onOpen = vi.fn()) =>
+  render(
+    <RoleContext.Provider value={role}>
+      <Board board={board} infos={infos} selectedId={null} onOpen={onOpen} />
+    </RoleContext.Provider>,
+  );
+
+const cardButton = (title: string) => screen.getByRole("button", { name: `Open ${title}` });
+
 describe("Board", () => {
-  it("renders the five column headings in order", () => {
-    render(<Board board={board} onAddCard={vi.fn()} onMoveCard={vi.fn()} />);
-    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
-    expect(headings).toEqual(["Plan", "Design", "Build", "Ship", "Operate"]);
+  it("renders the five columns in order, each with its count", () => {
+    renderBoard();
+    const columns = screen.getAllByRole("region");
+    expect(columns.map((c) => c.getAttribute("aria-label"))).toEqual(["Plan", "Design", "Build", "Ship", "Operate"]);
+    const build = screen.getByRole("region", { name: "Build" });
+    expect(within(build).getByRole("heading", { level: 3 }).querySelector(".num")?.textContent).toBe("2");
   });
 
-  it("adds a card from the Plan column input", async () => {
-    const onAddCard = vi.fn();
-    render(<Board board={board} onAddCard={onAddCard} onMoveCard={vi.fn()} />);
-    const plan = screen.getByRole("region", { name: "Plan" });
-    await userEvent.type(within(plan).getByPlaceholderText("+ Add"), "Detect GPU{Enter}");
-    expect(onAddCard).toHaveBeenCalledWith("plan", "Detect GPU");
+  it("offers no way to add, edit, drag or move a card, whatever the role", () => {
+    const owner = renderBoard("owner");
+    const { container } = owner;
+    expect(container.querySelector("select")).toBeNull();
+    expect(container.querySelector("input")).toBeNull();
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.querySelector('[draggable="true"]')).toBeNull();
+    expect(screen.queryByText("+ Add")).toBeNull();
+    expect(screen.queryByPlaceholderText("+ Add")).toBeNull();
+    const ownerHtml = container.innerHTML;
+    owner.unmount();
+    const viewer = renderBoard("viewer");
+    expect(viewer.container.innerHTML).toBe(ownerHtml);
   });
 
-  it("moves a card via the Move select", async () => {
-    const onMoveCard = vi.fn();
-    render(<Board board={board} onAddCard={vi.fn()} onMoveCard={onMoveCard} />);
-    await userEvent.selectOptions(screen.getByLabelText("Move Existing to"), "Build");
-    expect(onMoveCard).toHaveBeenCalledWith("c1", "build");
+  it("shows the percent, the Now line, the agent and the note count of a working card", () => {
+    renderBoard();
+    const c1 = cardButton("Fix the contact form");
+    expect(c1.tagName).toBe("BUTTON");
+    expect(c1.className).toContain("agent-card");
+    expect(within(c1).getByText("72%").className).toContain("num");
+    expect(within(c1).getByText("Now: Checking the fix works")).toBeTruthy();
+    expect(within(c1).getByText("Claude")).toBeTruthy();
+    expect(within(c1).getByText("2 notes")).toBeTruthy();
+    expect(within(c1).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("72");
+    expect(c1.querySelector(".dot")?.className).toContain("live");
   });
 
-  it("opens a card's story from its title", async () => {
-    const onOpenStory = vi.fn();
-    render(<Board board={board} onAddCard={vi.fn()} onMoveCard={vi.fn()} onOpenStory={onOpenStory} />);
-    await userEvent.click(screen.getByRole("button", { name: "Open the story of Existing" }));
-    expect(onOpenStory).toHaveBeenCalledWith("c1");
+  it("says when a card waits for approval, for an agent, or has notes waiting", () => {
+    renderBoard();
+    const c2 = cardButton("Newsletter sign-up");
+    expect(within(c2).getByText("Waiting for your approval").className).toContain("attention");
+    expect(c2.querySelector(".dot")?.className).toContain("waiting");
+    const c0 = cardButton("Add a blog section");
+    expect(within(c0).getByText("Waiting for an agent")).toBeTruthy();
+    expect(within(c0).queryByRole("progressbar")).toBeNull();
+    expect(within(c0).getByText("1 note waiting").className).toContain("attention");
+    expect(c0.querySelector(".dot")?.className).toContain("idle");
+  });
+
+  it("marks a done card green and counts its screenshots", () => {
+    renderBoard();
+    const c3 = cardButton("Dark mode");
+    expect(c3.querySelector(".dot")?.className).toContain("done");
+    expect(within(c3).getByText("Gemini")).toBeTruthy();
+    expect(within(c3).getByText("3 screenshots")).toBeTruthy();
+  });
+
+  it("shows a plain card when its information has not loaded", () => {
+    render(<Board board={board} infos={{}} selectedId={null} onOpen={vi.fn()} />);
+    const c1 = cardButton("Fix the contact form");
+    expect(within(c1).queryByRole("progressbar")).toBeNull();
+    expect(within(c1).getByText("Fix the contact form")).toBeTruthy();
+  });
+
+  it("opens a card when clicked and marks the selected one", async () => {
+    const onOpen = vi.fn();
+    render(<Board board={board} infos={infos} selectedId="c1" onOpen={onOpen} />);
+    expect(cardButton("Fix the contact form").getAttribute("aria-pressed")).toBe("true");
+    expect(cardButton("Dark mode").getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(cardButton("Dark mode"));
+    expect(onOpen).toHaveBeenCalledWith("c3");
+  });
+
+  it("escapes control characters in titles", () => {
+    const odd: BoardData = { ...board, columns: { ...board.columns, plan: [card("cx", "a\u001bb")] } };
+    render(<Board board={odd} infos={{}} selectedId={null} onOpen={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Open a\\u001bb" })).toBeTruthy();
+  });
+});
+
+describe("board.css", () => {
+  const css = readFileSync(join(__dirname, "..", "src", "components", "board.css"), "utf8");
+  const values = (prop: string) => [...css.matchAll(new RegExp(`(?<![-\\w])${prop}\\s*:\\s*([^;}]+)`, "g"))].map((m) => m[1]!.trim());
+  it("uses the shape tokens only", () => {
+    expect(values("border-radius").filter((v) => /\d+(\.\d+)?px/.test(v))).toEqual([]);
+    expect(values("font-size").filter((v) => !/^var\(--text-/.test(v))).toEqual([]);
+    for (const p of ["padding", "margin", "gap"]) {
+      expect(values(p).filter((v) => [...v.matchAll(/(-?\d+(?:\.\d+)?)px/g)].some((m) => Number(m[1]) % 4 !== 0)), p).toEqual([]);
+    }
+    expect(values("box-shadow").filter((v) => !/^(none|0 0 0 1px var\(--[\w-]+\))$/.test(v))).toEqual([]);
+    expect([...values("transition"), ...values("animation")].filter((v) => /\b\d*\.?\d+m?s\b/.test(v))).toEqual([]);
   });
 });

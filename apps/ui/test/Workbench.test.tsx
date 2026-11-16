@@ -469,11 +469,12 @@ describe("Workbench", () => {
     expect(m.onCancelGate).toHaveBeenCalled();
   });
 
-  it("opens a card's story tab from its title on the board", async () => {
+  it("opens a card's story tab from its panel on the board", async () => {
     const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
     const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
     const { container } = render(<Workbench model={m} />);
-    await userEvent.click(screen.getByRole("button", { name: "Open the story of Login" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Login" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open the full story" }));
     expect(container.querySelector('[data-panel="story:c1"]')?.getAttribute("data-active")).toBe("true");
     expect(m.story).toHaveBeenCalledWith("c1");
   });
@@ -789,8 +790,9 @@ describe("Workbench", () => {
       const name = screen.getByLabelText("New project name") as HTMLInputElement;
       expect(name.disabled).toBe(true);
       expect(name.title).toBe("Your role (Viewer) cannot do this.");
+      // The Board belongs to the agents: nobody adds or moves a card there.
       const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
-      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      expect(panel.querySelector("input, select")).toBeNull();
       // The decision card stays in the strip, without Allow or Deny.
       const strip = screen.getByRole("region", { name: "Needs you" });
       expect(within(strip).getByText(/nvidia-smi/)).toBeTruthy();
@@ -811,12 +813,13 @@ describe("Workbench", () => {
       expect(within(side).queryByRole("heading", { name: "Files" })).toBeNull();
     });
 
-    it("lets a reviewer decide and move cards, but not add cards or start agents", async () => {
+    it("lets a reviewer decide, but not add cards or start agents", async () => {
       render(<Workbench model={model({ ...as("reviewer"), pending: [pendingAction] })} />);
       const strip = screen.getByRole("region", { name: "Needs you" });
       expect(within(strip).getByRole("button", { name: "Allow" })).toBeTruthy();
+      // The Board belongs to the agents: nobody adds or moves a card there.
       const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
-      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      expect(panel.querySelector("input, select")).toBeNull();
       expect((screen.getByLabelText("New project name") as HTMLInputElement).disabled).toBe(true);
     });
 

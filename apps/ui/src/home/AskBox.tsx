@@ -8,7 +8,8 @@ import { filesFromInput } from "../upload";
 import type { PickedFile } from "../upload";
 
 /**
- * "Tell an agent what you want…": starts a run exactly as the Agents view does (same call, same rules). Not shown
+ * "Tell an agent what you want…": starts a run as the Agents view does (same call, same rules), and asks the server to
+ * give the job a card on the Board (`autoCard`) unless the agent names one. Not shown
  * below maintainer. Add files picks files and adds them to the selected project at once, with a progress bar.
  */
 export function AskBox() {
@@ -44,7 +45,7 @@ export function AskBox() {
     if (!canGo) return;
     setStarting(true);
     void model
-      .onStartRun(chosen, prompt.trim(), [], null)
+      .onStartRun(chosen, prompt.trim(), [], null, undefined, { autoCard: true })
       .then((ok) => {
         if (ok === false) return;
         setPrompt("");

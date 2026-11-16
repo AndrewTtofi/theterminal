@@ -311,11 +311,86 @@ export async function waive(gate: Locator, reason: string) {
 export const moveButton = (page: Page, card: string, stage: string) =>
   page.getByRole("region", { name: "Needs you" }).getByRole("button", { name: `Move "${card}" to ${stage}` });
 
-/** Adds a card to a column of the Board and waits until it shows there. */
-export async function addCard(page: Page, stage: string, title: string) {
-  await page.getByLabel(`Add card to ${stage}`).fill(title);
-  await page.getByLabel(`Add card to ${stage}`).press("Enter");
-  await expect(page.getByRole("region", { name: stage }).getByRole("button", { name: `Open the story of ${title}` })).toBeVisible();
+/** A card on the Board (the button that opens its panel), in the column of `stage` ("Build") when given. */
+export const boardCard = (page: Page, title: string, stage?: string) =>
+  (stage === undefined ? page.locator(".agent-board") : page.getByRole("region", { name: stage })).getByRole("button", {
+    name: `Open ${title}`,
+    exact: true,
+  });
+
+/**
+ * Adds a card to the selected project through the API, as the intake and the agents do (the Board has no add box),
+ * waits until it shows in its column of the Board, and returns its id.
+ */
+export async function addCard(page: Page, stage: string, title: string): Promise<string> {
+  const name = (await page.getByRole("navigation", { name: "Projects" }).locator("button.selected").innerText()).trim();
+  const id = await projectId(page, name);
+  const res = await page.evaluate(
+    async ({ pid, title, stage }) => {
+      const r = await fetch(`/api/projects/${encodeURIComponent(pid)}/cards`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, stage }),
+      });
+      return { status: r.status, body: (await r.json()) as { id?: string } };
+    },
+    { pid: id, title, stage: stage.toLowerCase() },
+  );
+  expect(res.status, `add card ${title}`).toBe(201);
+  await expect(boardCard(page, title, stage)).toBeVisible();
+  return res.body.id!;
+}
+
+/** A gate decision as the move route takes it. */
+export type GateDecisionBody = { gateId: string; decision: "sign_off" | "waive"; reason?: string; acknowledgement: string };
+
+/**
+ * Moves a card through `POST /api/cards/:id/move`, read in the page (it carries the cookie): people no longer move
+ * cards on the Board, and a move a gate stops answers 409 `gate_blocked` with the gates' evaluations.
+ */
+export function moveCardViaApi(
+  request: Page,
+  cardId: string,
+  to: string,
+  gates?: GateDecisionBody[],
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return request.evaluate(
+    async ({ cardId, to, gates }) => {
+      const r = await fetch(`/api/cards/${encodeURIComponent(cardId)}/move`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(gates ? { to, gates } : { to }),
+      });
+      return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+    },
+    { cardId, to, gates },
+  );
+}
+
+type GateView = { id: string; acknowledgement: string; outcome: string; conditions: { label: string; met: boolean }[] };
+
+/** The gates of a move's 409 answer, or of `GET /api/cards/:id/gates`. */
+export const gatesOf = (body: unknown): GateView[] => (Array.isArray(body) ? body : ((body as { gates?: GateView[] }).gates ?? [])) as GateView[];
+
+/** Whether the condition labelled `label` of the gate `gateId` holds. */
+export function conditionMet(gates: GateView[], gateId: string, label: string): boolean | undefined {
+  return gates.find((g) => g.id === gateId)?.conditions.find((c) => c.label === label)?.met;
+}
+
+/** Waivers, with `reason`, for every gate of `gates` that did not pass. */
+export const waivers = (gates: GateView[], reason: string): GateDecisionBody[] =>
+  gates.filter((g) => g.outcome !== "pass").map((g) => ({ gateId: g.id, decision: "waive", reason, acknowledgement: g.acknowledgement }));
+
+/** `GET /api/cards/:id/gates?to=`, read in the page. */
+export function cardGates(page: Page, cardId: string, to: string): Promise<GateView[]> {
+  return page.evaluate(
+    async ({ cardId, to }) => {
+      const r = await fetch(`/api/cards/${encodeURIComponent(cardId)}/gates?to=${encodeURIComponent(to)}`);
+      if (!r.ok) throw new Error(`GET gates: ${r.status}`);
+      return (await r.json()) as GateView[];
+    },
+    { cardId, to },
+  );
 }
 
 /** The People panel in the dock (the dock group holding it carries the same name, so it is found by its class). */

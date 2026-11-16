@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError } from "../src/api";
-import { ApprovalsBlock } from "../src/home/ApprovalsBlock";
+import { ApprovalsBlock, waitingCount } from "../src/home/ApprovalsBlock";
+import type { CardMoveRequest } from "@theterminal/shared";
 import { asRole, homeModel, homeRun, pendingAction, renderInShell } from "./home-fixtures";
 import { shipBlocked } from "./gate-fixtures";
 
@@ -87,5 +88,52 @@ describe("ApprovalsBlock", () => {
     expect(screen.getByText("The plan for Photos needs 2 decisions")).toBeTruthy();
     await userEvent.click(reviews[0]!);
     expect(dock.focus).toHaveBeenCalledWith("needs_you");
+  });
+
+  describe("move requests", () => {
+    const request = (over: Partial<CardMoveRequest> = {}): CardMoveRequest => ({
+      cardId: "c1", projectId: "p1", projectName: "Website", title: "Fix the form", runId: "r1", adapter: "claude",
+      from: "build", to: "ship", at: "", ...over,
+    });
+    const withRequests = (moveRequests: CardMoveRequest[]) => ({ working: [], finishedToday: [], moveRequests });
+
+    it("says which agent wants to move which card where", () => {
+      renderInShell(<ApprovalsBlock />, homeModel({}, withRequests([request()])));
+      expect(screen.getByText("Claude wants to move “Fix the form” to Ship")).toBeTruthy();
+      expect(screen.queryByText("Nothing needs you right now.")).toBeNull();
+      expect(screen.queryByText("Website")).toBeNull();
+    });
+
+    it("names another project", () => {
+      renderInShell(<ApprovalsBlock />, homeModel({}, withRequests([request({ projectId: "p2", projectName: "Photos", adapter: null })])));
+      const item = screen.getByRole("listitem");
+      expect(within(item).getByText("Photos")).toBeTruthy();
+      expect(within(item).getByText("Agent wants to move “Fix the form” to Ship")).toBeTruthy();
+    });
+
+    it("Review hands the request to onReviewMove; Not yet declines it", async () => {
+      const onReviewMove = vi.fn().mockResolvedValue(undefined);
+      const onDeclineMove = vi.fn().mockResolvedValue(true);
+      const r = request();
+      renderInShell(<ApprovalsBlock />, homeModel({ onReviewMove, onDeclineMove }, withRequests([r])));
+      await userEvent.click(screen.getByRole("button", { name: "Review" }));
+      expect(onReviewMove).toHaveBeenCalledWith(r);
+      await userEvent.click(screen.getByRole("button", { name: "Not yet" }));
+      expect(onDeclineMove).toHaveBeenCalledWith("c1");
+      expect(onDeclineMove).toHaveBeenCalledTimes(1);
+    });
+
+    it("a viewer sees the sentence and no buttons", () => {
+      renderInShell(<ApprovalsBlock />, homeModel({ me: asRole("viewer") }, withRequests([request()])));
+      expect(screen.getByText("Claude wants to move “Fix the form” to Ship")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Review" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Not yet" })).toBeNull();
+    });
+
+    it("are counted as waiting", () => {
+      const model = homeModel({ pending: [pendingAction()] }, withRequests([request(), request({ cardId: "c2" })]));
+      expect(waitingCount(model)).toBe(3);
+      expect(waitingCount(homeModel({}, null))).toBe(0);
+    });
   });
 });

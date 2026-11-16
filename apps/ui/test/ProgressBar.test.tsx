@@ -12,6 +12,14 @@ describe("ProgressBar", () => {
     expect(screen.getByText("33%")).toBeTruthy();
     expect(screen.getByText("as the agent reports it")).toBeTruthy();
   });
+  it("draws the bar alone when compact, and nothing without a number", () => {
+    const { container, rerender } = render(<ProgressBar percent={72} label="Fix login" compact />);
+    expect(screen.getByRole("progressbar", { name: "Fix login" }).getAttribute("aria-valuenow")).toBe("72");
+    expect(screen.queryByText("72%")).toBeNull();
+    expect(screen.queryByText("as the agent reports it")).toBeNull();
+    rerender(<ProgressBar percent={null} label="Fix login" compact />);
+    expect(container.innerHTML).toBe("");
+  });
   it("shows Working… and no number without a plan", () => {
     const { container } = render(<ProgressBar percent={null} label="Fix login" />);
     expect(screen.getByText("Working…")).toBeTruthy();
