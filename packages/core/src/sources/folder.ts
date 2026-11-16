@@ -80,33 +80,44 @@ export async function listFolder(wt: WorktreeManager, dataDir: string, folder: s
   }
 }
 
+/** Whether two stats are of the same file: the same device and inode (file index on Windows). */
+export function sameIdentity(a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bigint }): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+type Identity = { dev: bigint; ino: bigint };
+
 /**
  * Whether every segment of `rel` under `root` is a real directory or, for the last, a regular file, checked with
- * `lstat` so no symlink (or junction) anywhere on the way is followed. "missing" when a segment is gone.
+ * `lstat` so no symlink (or junction) anywhere on the way is followed. "missing" when a segment is gone. For a file,
+ * its identity (device and inode), which the opened handle must still have.
  */
-function regularFileKind(root: string, segments: string[]): "file" | "link" | "missing" {
+function regularFileKind(root: string, segments: string[]): { kind: "file"; id: Identity } | { kind: "link" | "missing" } {
   let at = root;
   for (const [i, s] of segments.entries()) {
     at = join(at, s);
     let st;
     try {
-      st = lstatSync(at);
+      st = lstatSync(at, { bigint: true });
     } catch (e) {
-      return errCode(e) === "ENOENT" || errCode(e) === "ENOTDIR" ? "missing" : "link";
+      return { kind: errCode(e) === "ENOENT" || errCode(e) === "ENOTDIR" ? "missing" : "link" };
     }
     const last = i === segments.length - 1;
-    if (last ? !st.isFile() : !st.isDirectory()) return "link";
+    if (last ? !st.isFile() : !st.isDirectory()) return { kind: "link" };
+    if (last) return { kind: "file", id: { dev: st.dev, ino: st.ino } };
   }
-  return "file";
+  return { kind: "link" };
 }
 
 /**
  * Stages the listed files of `folder`. Each path is checked first; then every segment is `lstat`ed, and a symlink or
  * anything but a regular file is skipped as `"link"`. Each regular file is opened without following a link (where
- * the platform supports it), checked again as a regular file on the open handle, and streamed into staging, which
- * enforces the limits while it reads. A file gone since the listing is skipped as `"missing"`.
+ * the platform supports it: Windows has no O_NOFOLLOW), and the open handle must be a regular file with the same
+ * device and inode the `lstat` saw, on every platform, so a file or folder swapped for a link in between is skipped as
+ * `"link"`; then it is streamed into staging, which enforces the limits while it reads. A file gone since the listing
+ * is skipped as `"missing"`. `openFile` is for tests.
  */
-export async function stageFolder(staging: ImportStaging, folder: string, files: string[]): Promise<void> {
+export async function stageFolder(staging: ImportStaging, folder: string, files: string[], openFile: typeof open = open): Promise<void> {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
   for (const f of files) {
     const checked = checkImportPath(f);
@@ -115,20 +126,21 @@ export async function stageFolder(staging: ImportStaging, folder: string, files:
       continue;
     }
     const segments = checked.path.split("/");
-    const kind = regularFileKind(folder, segments);
-    if (kind !== "file") {
-      staging.skip(f, kind);
+    const found = regularFileKind(folder, segments);
+    if (found.kind !== "file") {
+      staging.skip(f, found.kind);
       continue;
     }
     let handle;
     try {
-      handle = await open(join(folder, ...segments), flags);
+      handle = await openFile(join(folder, ...segments), flags);
     } catch (e) {
       staging.skip(f, errCode(e) === "ENOENT" ? "missing" : "link");
       continue;
     }
     try {
-      if (!(await handle.stat()).isFile()) {
+      const st = await handle.stat({ bigint: true });
+      if (!st.isFile() || !sameIdentity(st, found.id)) {
         staging.skip(f, "link");
         continue;
       }

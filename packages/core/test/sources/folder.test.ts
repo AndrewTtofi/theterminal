@@ -1,9 +1,10 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { chmodSync, lstatSync, renameSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
-import { FolderRefusedError, FolderUnavailableError, listFolder, stageFolder } from "../../src/sources/folder.js";
+import { FolderRefusedError, FolderUnavailableError, listFolder, sameIdentity, stageFolder } from "../../src/sources/folder.js";
 import { ImportStaging } from "../../src/sources/staging.js";
 import { plainGit } from "../fixtures/submodule-trap.js";
 
@@ -147,5 +148,37 @@ describe("stageFolder", () => {
     const staging = new ImportStaging(join(dataDir, "staging", "s2"), { includeSecrets: false, redact: (s) => s });
     await stageFolder(staging, folder, ["d/x.txt"]);
     expect(staging.finish().skipped).toEqual([{ path: "d/x.txt", reason: "link" }]);
+  });
+
+  it.skipIf(process.platform === "win32")("skips a file whose folder was swapped for a link between the check and the open", async () => {
+    write("d/x.txt", "mine");
+    mkdirSync(join(outside, "dir"));
+    writeFileSync(join(outside, "dir", "x.txt"), "outside");
+    const stagingDir = join(dataDir, "staging", "swap");
+    const staging = new ImportStaging(stagingDir, { includeSecrets: false, redact: (t) => t });
+    const swapping: typeof open = async (path, flags) => {
+      renameSync(join(folder, "d"), join(folder, "d-moved"));
+      symlinkSync(join(outside, "dir"), join(folder, "d"), "dir");
+      return open(path, flags);
+    };
+    await stageFolder(staging, folder, ["d/x.txt"], swapping);
+    const r = staging.finish();
+    expect(r.files).toEqual([]);
+    expect(r.skipped).toEqual([{ path: "d/x.txt", reason: "link" }]);
+    expect(existsSync(join(stagingDir, "d", "x.txt"))).toBe(false);
+  });
+});
+
+describe("sameIdentity", () => {
+  it("is true only for the same device and inode", () => {
+    write("a.txt", "a");
+    write("b.txt", "b");
+    const a = lstatSync(join(folder, "a.txt"), { bigint: true });
+    const b = lstatSync(join(folder, "b.txt"), { bigint: true });
+    expect(sameIdentity(a, lstatSync(join(folder, "a.txt"), { bigint: true }))).toBe(true);
+    expect(sameIdentity(a, b)).toBe(false);
+    expect(sameIdentity({ dev: 1n, ino: 2n }, { dev: 1n, ino: 2n })).toBe(true);
+    expect(sameIdentity({ dev: 1n, ino: 2n }, { dev: 3n, ino: 2n })).toBe(false);
+    expect(sameIdentity({ dev: 1n, ino: 2n }, { dev: 1n, ino: 3n })).toBe(false);
   });
 });
