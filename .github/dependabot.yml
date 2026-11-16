@@ -40,6 +40,10 @@ updates:
       # until engines moves.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # Electron 45.2.1 crashed the desktop app's main process on macOS (a native segfault while freeing a
+      # Node handle). Stay on 44 until a 45 release is tried by hand and runs cleanly.
+      - dependency-name: "electron"
+        versions: [">=45"]
 
   - package-ecosystem: github-actions
     directory: /
