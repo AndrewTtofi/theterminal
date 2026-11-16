@@ -2,7 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, constants, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { IMPORT_LIMITS, foldKey, type Actor, type ApplyResult, type WritebackPreview } from "@theterminal/shared";
+import {
+  IMPORT_LIMITS, checkImportPath, foldKey, type Actor, type ApplyResult, type PublishResult, type WritebackPreview, type WritebackSkipped,
+} from "@theterminal/shared";
 import type { Db } from "../db.js";
 import type { Ledger } from "../ledger/ledger.js";
 import {
@@ -223,7 +225,8 @@ export class WritebackService {
    * here), when a file was added to the folder at a path the change adds, or when the target or any folder on its way
    * is a symlink or not where the path says. A case-only rename (an add and a delete folding to the same path) that
    * names one file in a case-insensitive folder is written in place and renamed, never deleted. Files are written
-   * through a temporary file and a rename. Then
+   * through a temporary file and a rename. A path this computer cannot store is skipped ("unstorable"); each skip
+   * carries its reason. Then
    * `project.folder_applied` moves the synced commit to HEAD.
    */
   async apply(actor: Actor, projectId: string, head: string): Promise<ApplyResult> {
@@ -242,9 +245,16 @@ export class WritebackService {
       mkdirSync(dir, { recursive: true });
       let written = 0;
       let deleted = 0;
-      const skipped: string[] = [];
+      const skipped: WritebackSkipped[] = [];
+      const skip = (path: string, reason: WritebackSkipped["reason"]): void => {
+        skipped.push({ path, reason });
+      };
       try {
-        await this.deps.worktrees.materialise(projectId, head, writes, dir);
+        const unstorable = new Set<string>();
+        for (const r of await this.deps.worktrees.materialise(projectId, head, writes, dir)) {
+          unstorable.add(r.path);
+          skip(r.path, "unstorable");
+        }
         /** The staged copy of `path` and whether it is executable, or null when it is not a regular file at HEAD. */
         const stagedFile = (path: string): { staged: string; executable: boolean } | null => {
           const staged = join(dir, ...path.split("/"));
@@ -254,12 +264,11 @@ export class WritebackService {
           return { staged, executable: entry.mode === "100755" };
         };
         const one = async (f: Change): Promise<void> => {
+          if (unstorable.has(f.path)) return;
+          if (!checkImportPath(f.path).ok) return skip(f.path, "unstorable");
           const target = this.target(root, f.path);
-          const before = synced.get(f.path);
-          if (target === null || !(await this.unchanged(target, before, algorithm))) {
-            skipped.push(f.path);
-            return;
-          }
+          if (target === null) return skip(f.path, "unsafe");
+          if (!(await this.unchanged(target, synced.get(f.path), algorithm))) return skip(f.path, "changed");
           if (f.change === "delete") {
             if (target.exists) {
               unlinkSync(target.abs);
@@ -268,10 +277,7 @@ export class WritebackService {
             return;
           }
           const file = stagedFile(f.path);
-          if (file === null || !this.write(root, target.abs, f.path, file.staged, file.executable)) {
-            skipped.push(f.path);
-            return;
-          }
+          if (file === null || !this.write(root, target.abs, f.path, file.staged, file.executable)) return skip(f.path, "unsafe");
           written += 1;
         };
         // A case-only rename arrives as an add and a delete whose paths fold to the same key. On a case-insensitive
@@ -288,15 +294,17 @@ export class WritebackService {
           if (handled.has(f.path)) continue;
           const from = f.change === "delete" ? f.path : f.change === "add" ? renamedFrom.get(f.path) : undefined;
           const to = from === undefined ? undefined : renames.get(from);
-          if (from === undefined || to === undefined) {
+          if (from === undefined || to === undefined || unstorable.has(from) || unstorable.has(to)) {
             await one(f);
             continue;
           }
           handled.add(from).add(to);
           const outcome = await this.renameCase(root, from, to, synced.get(from), algorithm, stagedFile(to));
           if (outcome === "written") written += 1;
-          else if (outcome === "skipped") skipped.push(to, from);
-          else {
+          else if (outcome !== "separate") {
+            skip(to, outcome);
+            skip(from, outcome);
+          } else {
             // Two different files (a case-sensitive folder): the add and the delete each go as usual.
             await one({ path: to, change: "add" });
             await one({ path: from, change: "delete" });
@@ -320,9 +328,10 @@ export class WritebackService {
   /**
    * Publishes the previewed change as one commit on a new branch `the-terminal/<8 hex>` whose parent is the imported
    * `remoteCommit`, and a pull request against the recorded branch. Never writes to an existing branch. The synced
-   * commit stays where it is (the pull request is not merged); `project.published` records the pull request.
+   * commit stays where it is (the pull request is not merged); `project.published` records the pull request. A path
+   * this computer cannot store cannot be read out of the repo, so it is left out and reported ("unstorable").
    */
-  async publish(actor: Actor, projectId: string, head: string): Promise<{ branch: string; pullUrl: string }> {
+  async publish(actor: Actor, projectId: string, head: string): Promise<PublishResult> {
     return this.locked(projectId, async () => {
       const source = this.source(projectId, "github");
       const scope = new GitScope();
@@ -335,9 +344,15 @@ export class WritebackService {
       const writes = files.filter((f) => f.change !== "delete" && REGULAR_MODES.has(now.get(f.path)?.mode ?? "")).map((f) => f.path);
       const dir = join(this.deps.dataDir, "projects", projectId, APPLY_DIR, this.newId());
       mkdirSync(dir, { recursive: true });
+      const skipped: WritebackSkipped[] = [];
       try {
-        await this.deps.worktrees.materialise(projectId, head, writes, dir);
+        const unstorable = new Set<string>();
+        for (const r of await this.deps.worktrees.materialise(projectId, head, writes, dir)) {
+          unstorable.add(r.path);
+          skipped.push({ path: r.path, reason: "unstorable" });
+        }
         for (const f of files) {
+          if (unstorable.has(f.path)) continue;
           if (f.change === "delete") {
             sent.push({ path: f.path, mode: "100644", content: null });
             continue;
@@ -370,7 +385,7 @@ export class WritebackService {
         result: () => undefined,
       }));
       this.previews.delete(projectId);
-      return { branch: out.branch, pullUrl: out.pullUrl };
+      return { branch: out.branch, pullUrl: out.pullUrl, skipped };
     });
   }
 
@@ -516,23 +531,24 @@ export class WritebackService {
   /**
    * A case-only rename of `from` to `to`. "separate" when the folder holds them as two different files (or `to` is
    * absent), so each is handled as usual. Otherwise, when the folder's file is unchanged since the import, the new
-   * content is written to it in place, then it is renamed to the new case: "written". "skipped" when it changed, or
-   * cannot be written safely.
+   * content is written to it in place, then it is renamed to the new case: "written". "changed" when it changed since
+   * the import; "unsafe" when it cannot be written safely.
    */
   private async renameCase(
     root: string, from: string, to: string, before: TreeEntry | undefined, algorithm: "sha1" | "sha256",
     file: { staged: string; executable: boolean } | null,
-  ): Promise<"written" | "skipped" | "separate"> {
+  ): Promise<"written" | "changed" | "unsafe" | "separate"> {
     const old = this.target(root, from);
-    if (old === null || !old.exists) return old === null ? "skipped" : "separate";
+    if (old === null) return "unsafe";
+    if (!old.exists) return "separate";
     const toAbs = join(root, ...to.split("/"));
     if (!sameFile(old.abs, toAbs)) return "separate";
-    if (!(await this.unchanged(old, before, algorithm)) || file === null) return "skipped";
-    if (!this.write(root, old.abs, from, file.staged, file.executable)) return "skipped";
+    if (!(await this.unchanged(old, before, algorithm))) return "changed";
+    if (file === null || !this.write(root, old.abs, from, file.staged, file.executable)) return "unsafe";
     try {
       renameSync(old.abs, toAbs);
     } catch {
-      return "skipped";
+      return "unsafe";
     }
     return "written";
   }

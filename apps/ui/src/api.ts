@@ -43,6 +43,7 @@ import type {
   ShareSnapshotRecord,
   Stage,
   ApplyResult,
+  PublishResult,
   GitHubRepoChoice,
   HomeRuns,
   ImportedProject,
@@ -280,7 +281,7 @@ export const api = {
   applyToFolder: (id: string, head: string) =>
     request<ApplyResult>(`/api/projects/${enc(id)}/apply`, { method: "POST", body: { head } }),
   publishToGitHub: (id: string, head: string) =>
-    request<{ branch: string; pullUrl: string }>(`/api/projects/${enc(id)}/publish`, { method: "POST", body: { head } }),
+    request<PublishResult>(`/api/projects/${enc(id)}/publish`, { method: "POST", body: { head } }),
   createProject: (i: { name: string; pitch?: string }) =>
     request<Project>("/api/projects", { method: "POST", body: i }),
   getBoard: (id: string) => request<Board>(`/api/projects/${encodeURIComponent(id)}/board`),

@@ -86,7 +86,15 @@ export type WritebackPreview = {
   head: string;
   files: { path: string; change: "add" | "modify" | "delete" }[];
 };
-export type ApplyResult = { written: number; deleted: number; skipped: string[] };
+/**
+ * Why write-back left a file out: "changed" (the folder's file changed since it was copied in, or a file was added
+ * there), "unsafe" (a link, or not where the path says, or it could not be written safely), "unstorable" (a name this
+ * computer cannot store, or another refused path).
+ */
+export type WritebackSkipReason = "changed" | "unsafe" | "unstorable";
+export type WritebackSkipped = { path: string; reason: WritebackSkipReason };
+export type ApplyResult = { written: number; deleted: number; skipped: WritebackSkipped[] };
+export type PublishResult = { branch: string; pullUrl: string; skipped: WritebackSkipped[] };
 
 const sha = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 const id = z.string().min(1);

@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { checkImportPath } from "@theterminal/shared";
+import { checkImportPath, type PathRefusal } from "@theterminal/shared";
 import { PathRefusedError } from "../sources/staging.js";
 import { allowlistedEnv } from "./env-allowlist.js";
 
@@ -876,17 +876,21 @@ export class WorktreeManager {
    * Writes the files `paths` as they are at `commit` into `dir` (`checkout <commit> -- <paths>` with `--work-tree`
    * set to `dir` and a scratch index), without touching the project repo's own working tree or index. The bytes are
    * written exactly: no end-of-line conversion and no attributes from the tree (runGit's empty attribute source).
+   * A path `checkImportPath` refuses (one this computer cannot store, say) is never written: it is returned with the
+   * reason, and the rest are still written.
    */
-  async materialise(projectId: string, commit: string, paths: string[], dir: string): Promise<void> {
+  async materialise(projectId: string, commit: string, paths: string[], dir: string): Promise<{ path: string; reason: PathRefusal }[]> {
     assertId("projectId", projectId);
     if (!COMMIT_PATTERN.test(commit)) throw new Error("invalid commit");
-    const checked = paths.map((p) => {
+    const checked: string[] = [];
+    const refused: { path: string; reason: PathRefusal }[] = [];
+    for (const p of paths) {
       const c = checkImportPath(p);
-      if (!c.ok) throw new PathRefusedError(c.reason);
-      return c.path;
-    });
+      if (c.ok) checked.push(c.path);
+      else refused.push({ path: p, reason: c.reason });
+    }
     return this.serialize(projectId, async () => {
-      if (checked.length === 0) return;
+      if (checked.length === 0) return refused;
       const repo = this.repoPath(projectId);
       const scope = new GitScope();
       await this.withScratch(async (scratch) => {
@@ -898,6 +902,7 @@ export class WorktreeManager {
           { scope, gitDir: join(repo, ".git"), workTree: dir, indexFile: join(scratch, "index"), timeoutMs: IMPORT_GIT_TIMEOUT_MS },
         );
       });
+      return refused;
     });
   }
 

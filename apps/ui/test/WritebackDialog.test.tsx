@@ -28,7 +28,7 @@ function setup(kind: "folder" | "github") {
 describe("WritebackDialog", () => {
   it("lists the files and asks before writing them to the folder, sending the preview's head", async () => {
     vi.spyOn(api, "writebackPreview").mockResolvedValue(preview("folder"));
-    const apply = vi.spyOn(api, "applyToFolder").mockResolvedValue({ written: 2, deleted: 0, skipped: ["old.txt"] });
+    const apply = vi.spyOn(api, "applyToFolder").mockResolvedValue({ written: 2, deleted: 0, skipped: [{ path: "old.txt", reason: "changed" }] });
     const { dialog } = setup("folder");
     expect(await within(dialog).findByText("Write these 3 files to your folder?")).toBeTruthy();
     const list = within(dialog).getByRole("list", { name: "Files to write" });
@@ -52,7 +52,7 @@ describe("WritebackDialog", () => {
 
   it("opens a pull request and links to it", async () => {
     vi.spyOn(api, "writebackPreview").mockResolvedValue(preview("github"));
-    const publish = vi.spyOn(api, "publishToGitHub").mockResolvedValue({ branch: "the-terminal/0a1b2c3d", pullUrl: "https://github.com/you/site/pull/7" });
+    const publish = vi.spyOn(api, "publishToGitHub").mockResolvedValue({ branch: "the-terminal/0a1b2c3d", pullUrl: "https://github.com/you/site/pull/7", skipped: [] });
     const { dialog } = setup("github");
     expect(await within(dialog).findByText("Open a pull request with these 3 files?")).toBeTruthy();
     await userEvent.click(within(dialog).getByRole("button", { name: "Publish to GitHub" }));

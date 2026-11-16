@@ -78,7 +78,7 @@ export function WritebackDialog({ projectId, kind, onClose }: { projectId: strin
               </p>
               {done.result.skipped.length > 0 && (
                 <p className="writeback-skipped">
-                  {`Skipped because they changed in your folder: ${done.result.skipped.map((p) => clip(visibleControls(p), 160)).join(", ")}`}
+                  {`Skipped because they changed in your folder: ${done.result.skipped.map((s) => clip(visibleControls(s.path), 160)).join(", ")}`}
                 </p>
               )}
             </div>

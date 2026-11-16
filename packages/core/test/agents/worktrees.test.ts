@@ -965,6 +965,21 @@ describe("imports, materialising and run snapshots", () => {
     expect(await git(mgr.repoPath("proj1"), "status", "--porcelain")).toBe("");
   });
 
+  it("materialise skips a path this computer cannot store, reports it, and still writes the rest", async () => {
+    const commit = await mgr.commitFiles("proj1", stage({ "ok.txt": "ok\n" }), ["ok.txt"], "Added 1 file");
+    const out = join(dataDir, "projects", "proj1", "apply", "a2");
+    mkdirSync(out, { recursive: true });
+    const skipped = await mgr.materialise("proj1", commit, ["notes: v2.md", "ok.txt", "aux.c", "name."], out);
+    expect(skipped).toEqual([
+      { path: "notes: v2.md", reason: "unstorable" },
+      { path: "aux.c", reason: "unstorable" },
+      { path: "name.", reason: "unstorable" },
+    ]);
+    expect(readFileSync(join(out, "ok.txt"), "utf8")).toBe("ok\n");
+    // Every path refused: nothing runs, nothing is written.
+    expect(await mgr.materialise("proj1", commit, ["aux.c"], out)).toEqual([{ path: "aux.c", reason: "unstorable" }]);
+  });
+
   it("snapshotRun captures the run's untracked, modified and deleted files on top of its HEAD", async () => {
     await mgr.commitFiles("proj1", stage({ "keep.txt": "keep\n", "gone.txt": "gone\n" }), ["keep.txt", "gone.txt"], "Added 2 files");
     const wt = await mgr.createRunWorktree("proj1", "run-12345678abc");

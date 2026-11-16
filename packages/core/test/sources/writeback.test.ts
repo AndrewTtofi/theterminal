@@ -233,7 +233,7 @@ describe("apply", () => {
       { path: "old.txt", change: "delete" },
     ]);
     const result = await w.apply(owner, projectId, preview.head);
-    expect(result).toEqual({ written: 1, deleted: 2, skipped: ["edited.txt"] });
+    expect(result).toEqual({ written: 1, deleted: 2, skipped: [{ path: "edited.txt", reason: "changed" }] });
     expect(readFileSync(join(folder, "a.txt")).equals(binary)).toBe(true);
     expect(readFileSync(join(folder, "edited.txt"), "utf8")).toBe("my own edit\n");
     expect(existsSync(join(folder, "old.txt"))).toBe(false);
@@ -258,7 +258,10 @@ describe("apply", () => {
     const result = await w.apply(owner, projectId, preview.head);
     expect(result.written).toBe(0);
     expect(result.deleted).toBe(0);
-    expect([...result.skipped].sort()).toEqual(["new.txt", "old.txt"]);
+    expect([...result.skipped].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: "new.txt", reason: "changed" },
+      { path: "old.txt", reason: "changed" },
+    ]);
     expect(readFileSync(join(folder, "new.txt"), "utf8")).toBe("person's\n");
     expect(readFileSync(join(folder, "old.txt"), "utf8")).toBe("changed\n");
   });
@@ -396,10 +399,30 @@ describe("apply", () => {
       const result = await w.apply(owner, projectId, preview.head);
       expect(result.written).toBe(0);
       expect(result.deleted).toBe(0);
-      expect([...result.skipped].sort()).toEqual(["README.md", "readme.md"]);
+      expect(result.skipped).toEqual([
+        { path: "README.md", reason: "changed" },
+        { path: "readme.md", reason: "changed" },
+      ]);
       expect(readdirSync(folder)).toEqual(["readme.md"]);
       expect(readFileSync(join(folder, "readme.md"), "utf8")).toBe("my own edit\n");
     });
+  });
+
+  it.skipIf(process.platform === "win32")("skips and reports a path that cannot be stored, and still writes the rest", async () => {
+    const projectId = await folderProject({ "keep.txt": "keep\n" });
+    await run(projectId, "run-store111", { "a.txt": "a\n", "aux.c": "int x;\n", "notes: v2.md": "n\n" });
+    const w = writeback();
+    await w.accept(owner, "run-store111");
+    const preview = await w.preview(projectId);
+    const result = await w.apply(owner, projectId, preview.head);
+    expect(result.written).toBe(1);
+    expect([...result.skipped].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: "aux.c", reason: "unstorable" },
+      { path: "notes: v2.md", reason: "unstorable" },
+    ]);
+    expect(readFileSync(join(folder, "a.txt"), "utf8")).toBe("a\n");
+    expect(existsSync(join(folder, "aux.c"))).toBe(false);
+    expect(entriesOf("project.folder_applied")[0]!.payload).toMatchObject({ written: 1, skipped: 2 });
   });
 
   it.skipIf(process.platform === "win32")("never follows a symlink in the folder", async () => {
@@ -417,7 +440,10 @@ describe("apply", () => {
     symlinkSync(join(outside, "target.txt"), join(folder, "keep.txt"));
     const preview = await w.preview(projectId);
     const result = await w.apply(owner, projectId, preview.head);
-    expect([...result.skipped].sort()).toEqual(["keep.txt", "sub/x.txt"]);
+    expect([...result.skipped].sort((a, b) => (a.path < b.path ? -1 : 1))).toEqual([
+      { path: "keep.txt", reason: "unsafe" },
+      { path: "sub/x.txt", reason: "unsafe" },
+    ]);
     expect(existsSync(join(outside, "x.txt"))).toBe(false);
     expect(readFileSync(join(outside, "target.txt"), "utf8")).toBe("outside\n");
   });
@@ -458,6 +484,23 @@ describe("publish", () => {
     const published = entriesOf("project.published");
     expect(published).toHaveLength(1);
     expect(published[0]!.payload).toMatchObject({ projectId: project.id, branch: out.branch, pullUrl: out.pullUrl, to: preview.head, files: 2 });
+  });
+
+  it.skipIf(process.platform === "win32")("leaves out and reports a path that cannot be stored, and publishes the rest", async () => {
+    const { project } = await sources(
+      fakeSourceGitHub([
+        { name: ROOT, type: "5", mode: 0o755 },
+        { name: `${ROOT}README.md`, body: "# Site\n" },
+      ]),
+    ).createFromGitHub(owner, { repo: "octo/site" });
+    await run(project.id, "run-store222", { "README.md": "# Better\n", "aux.c": "int x;\n" });
+    const gh = fakePublisher();
+    const w = writeback(gh);
+    await w.accept(owner, "run-store222");
+    const preview = await w.preview(project.id);
+    const out = await w.publish(owner, project.id, preview.head);
+    expect(out.skipped).toEqual([{ path: "aux.c", reason: "unstorable" }]);
+    expect(gh.calls[0]!.i.files.map((f) => f.path)).toEqual(["README.md"]);
   });
 
   it("a project without a source is NoSourceError", async () => {
