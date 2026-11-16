@@ -470,7 +470,9 @@ class CodexSession {
     this.o.signal.addEventListener("abort", onAbort, { once: true });
     void this.handshake().catch(async (e: unknown) => {
       // A Codex that exits at startup closes the pipe first: let its stderr arrive, so a known refusal is explained.
-      if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.stdout.readable) {
+      // A closed peer counts too: a write to it can fail ("output error") before its exit or stderr is seen.
+      const piped = /^rpc closed:/.test(errorMessage(e));
+      if (piped || this.child.exitCode !== null || this.child.signalCode !== null || !this.child.stdout.readable) {
         await Promise.race([this.exited, sleep(EXIT_WAIT_MS)]);
       }
       this.fail(this.policyConflict() ? POLICY_CONFLICT : redact(errorMessage(e)));

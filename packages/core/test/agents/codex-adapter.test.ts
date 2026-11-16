@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterEvent, AdapterStartOptions, GateResult, ProposedAction } from "../../src/agents/adapter.js";
 import { spawn as nodeSpawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import { CHILD_ENV_ALLOWLIST, WIN32_ALLOWLIST, fakeAgentEnv } from "../../src/agents/child-env.js";
 import { CODEX_COMMAND_EXCLUDES, CODEX_QUIET_ARGS, CodexAdapter, codexApprovalToAction } from "../../src/agents/codex/adapter.js";
 import { ApprovalBroker } from "../../src/agents/approvals.js";
@@ -822,6 +824,33 @@ describe("CodexAdapter (fake app-server)", () => {
     it("explains a user shell_environment_policy with filters, which Codex refuses to mix with ours", async () => {
       script({ userFilters: true, steps: [] });
       const { result } = run(make(), undefined, { authMode: "chatgpt", credentials: { env: GRANT, mcpServers: [] } });
+      expect(await result).toEqual({
+        status: "failed",
+        error: "Your Codex configuration's shell_environment_policy conflicts with The Terminal's credential passing; remove `filters` from it",
+      });
+    });
+
+    it("still explains the refusal when the broken pipe is seen before Codex's exit and its stderr", async () => {
+      // The order a loaded machine can produce: writing to the exiting Codex fails (closing the peer with "output
+      // error") while its exit code is not yet known, its stdout has not ended and its stderr has not been read.
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null as number | null, signalCode: null, pid: 4242, kill: () => true,
+        stdin: new Writable({
+          write: (_chunk, _enc, done) => {
+            done();
+            setImmediate(() => child.stdin.destroy());
+            setTimeout(() => {
+              child.stderr.end("Error: cannot mix `filters` with legacy `exclude` or `include_only`\n");
+              child.stdout.end();
+              child.exitCode = 1;
+              child.emit("exit", 1, null);
+              child.emit("close", 1, null);
+            }, 100);
+          },
+        }),
+      });
+      const spawn = (() => child) as unknown as typeof nodeSpawn;
+      const { result } = run(make({ spawn }), undefined, { authMode: "chatgpt", credentials: { env: GRANT, mcpServers: [] } });
       expect(await result).toEqual({
         status: "failed",
         error: "Your Codex configuration's shell_environment_policy conflicts with The Terminal's credential passing; remove `filters` from it",
