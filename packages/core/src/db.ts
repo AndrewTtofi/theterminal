@@ -185,6 +185,11 @@ const MIGRATIONS = [
   // last commit written back to it; and how many files were added to each project.
   `CREATE TABLE project_sources (project_id TEXT PRIMARY KEY, kind TEXT NOT NULL, repo TEXT, branch TEXT, remote_commit TEXT, path TEXT, synced_commit TEXT NOT NULL);
   CREATE TABLE project_imports (project_id TEXT PRIMARY KEY, files INTEGER NOT NULL);`,
+  // The Board run by agents: notes people leave on cards for the next run (waiting, given to a run, read by it), and
+  // the one pending move per card that a gate held.
+  `CREATE TABLE card_comments (id TEXT PRIMARY KEY, card_id TEXT NOT NULL, project_id TEXT NOT NULL, author_name TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL, run_id TEXT);
+  CREATE INDEX card_comments_card ON card_comments (card_id);
+  CREATE TABLE card_move_requests (card_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, run_id TEXT NOT NULL, from_stage TEXT NOT NULL, to_stage TEXT NOT NULL, at TEXT NOT NULL);`,
 ];
 
 export type Db = Database.Database;

@@ -1,12 +1,16 @@
-import { DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID } from "@theterminal/shared";
+import {
+  DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID, PROGRESS_LIMITS, nowLine, progressPercent, visibleControls,
+} from "@theterminal/shared";
 import type {
-  AgentAction, AgentRun, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
+  AgentAction, AgentRun, CardComment, CardInfo, CardMoveRequest, CommentState, Stage, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
   LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, ProjectSourceKind, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
   ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { canonicalJson } from "../ledger/canonical.js";
 import type { Ledger } from "../ledger/ledger.js";
+import { redact, truncate } from "../agents/redact.js";
+import { cleanStrings } from "../link/mirror.js";
 
 type Payload = Record<string, any>;
 
@@ -30,6 +34,47 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       break;
     case "card.moved":
       db.prepare("UPDATE cards SET stage = ?, updated_at = ? WHERE id = ?").run(p.to, e.ts, p.cardId);
+      // Any move settles the card's pending request, whoever made it and wherever it went.
+      db.prepare("DELETE FROM card_move_requests WHERE card_id = ?").run(p.cardId);
+      break;
+    case "card.run_linked":
+      db.prepare("UPDATE agent_runs SET card_id = ? WHERE id = ?").run(p.cardId, p.runId);
+      break;
+    case "card.comment":
+      // The author's name and role as recorded, so the rebuild never needs the people table.
+      db.prepare(
+        `INSERT INTO card_comments (id, card_id, project_id, author_name, role, text, at, state, run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', NULL)`,
+      ).run(p.commentId, p.cardId, e.projectId, p.authorName, p.role, p.text, e.ts);
+      break;
+    case "card.comments_given": {
+      const ids = p.commentIds as string[];
+      db.prepare(
+        `UPDATE card_comments SET state = 'given', run_id = ? WHERE card_id = ? AND state = 'waiting'
+         AND id IN (${ids.map(() => "?").join(", ")})`,
+      ).run(p.runId, p.cardId, ...ids);
+      break;
+    }
+    case "card.comments_read": {
+      // Only notes given to that very run become read.
+      const ids = p.commentIds as string[];
+      db.prepare(
+        `UPDATE card_comments SET state = 'read' WHERE card_id = ? AND run_id = ? AND state = 'given'
+         AND id IN (${ids.map(() => "?").join(", ")})`,
+      ).run(p.cardId, p.runId, ...ids);
+      break;
+    }
+    case "card.move_requested":
+      // One request per card: a newer one replaces it.
+      db.prepare(
+        `INSERT INTO card_move_requests (card_id, project_id, run_id, from_stage, to_stage, at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(card_id) DO UPDATE SET project_id = excluded.project_id, run_id = excluded.run_id,
+           from_stage = excluded.from_stage, to_stage = excluded.to_stage, at = excluded.at`,
+      ).run(p.cardId, e.projectId, p.runId, p.from, p.to, e.ts);
+      break;
+    case "card.move_declined":
+      // A decline settles only the request it answered, not a newer one to another stage.
+      db.prepare("DELETE FROM card_move_requests WHERE card_id = ? AND to_stage = ?").run(p.cardId, p.to);
       break;
     case "card.status_changed":
       db.prepare("UPDATE cards SET status = ?, updated_at = ? WHERE id = ?").run(p.to, e.ts, p.cardId);
@@ -468,6 +513,7 @@ const PROJECTION_TABLES = [
   "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
   // Not sessions or credential_state: neither is in the ledger.
   "people", "credentials", "invites", "remote_state", "gate_requirements", "project_sources", "project_imports",
+  "card_comments", "card_move_requests",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -918,4 +964,84 @@ export function getGateRequirement(db: Db, projectId: string, gateId: GateId): G
     | { requirement: string }
     | undefined;
   return r ? (JSON.parse(r.requirement) as GateRequirement) : { ...DEFAULT_GATE_REQUIREMENT[gateId] };
+}
+
+type CommentRow = {
+  id: string; card_id: string; author_name: string; role: Role; text: string; at: string; state: CommentState;
+  run_id: string | null; adapter: AgentRun["adapter"] | null;
+};
+
+/** The notes on a card, oldest first, each with its state and the adapter of the run it was given to. */
+export function listCardComments(db: Db, cardId: string): CardComment[] {
+  const rows = db
+    .prepare(
+      `SELECT c.*, r.adapter AS adapter FROM card_comments c LEFT JOIN agent_runs r ON r.id = c.run_id
+       WHERE c.card_id = ? ORDER BY c.at, c.rowid`,
+    )
+    .all(cardId) as CommentRow[];
+  return rows.map((r) => ({
+    id: r.id, cardId: r.card_id, authorName: r.author_name, role: r.role, text: r.text, at: r.at, state: r.state,
+    runId: r.run_id, adapter: r.run_id === null ? null : r.adapter,
+  }));
+}
+
+type MoveRequestRow = {
+  card_id: string; project_id: string; project_name: string; title: string; run_id: string;
+  adapter: AgentRun["adapter"] | null; from_stage: Stage; to_stage: Stage; at: string;
+};
+
+/** Moves a gate held, waiting for a person (oldest first), across every project or of one. */
+export function listMoveRequests(db: Db, projectId?: string): CardMoveRequest[] {
+  const rows = db
+    .prepare(
+      `SELECT m.*, p.name AS project_name, c.title AS title, r.adapter AS adapter FROM card_move_requests m
+       JOIN cards c ON c.id = m.card_id JOIN projects p ON p.id = m.project_id LEFT JOIN agent_runs r ON r.id = m.run_id
+       ${projectId === undefined ? "" : "WHERE m.project_id = ?"} ORDER BY m.at, m.rowid`,
+    )
+    .all(...(projectId === undefined ? [] : [projectId])) as MoveRequestRow[];
+  return rows.map((r) => ({
+    cardId: r.card_id, projectId: r.project_id, projectName: r.project_name, title: r.title, runId: r.run_id,
+    adapter: r.adapter, from: r.from_stage, to: r.to_stage, at: r.at,
+  }));
+}
+
+/**
+ * What the Board shows on each of the project's cards (in board order): its latest run (by start) with the run's
+ * own progress, what it is doing now and whether it waits on a decision; its note counts; and its pending move.
+ * A run on a linked machine is shown through `clean` (redaction by default), as Home shows it. `screenshots` is 0
+ * until previews fill it.
+ */
+export function cardInfos(db: Db, projectId: string, clean: (s: string) => string = (s) => redact(s)): CardInfo[] {
+  const cards = db.prepare("SELECT id FROM cards WHERE project_id = ? ORDER BY created_at, rowid").all(projectId) as { id: string }[];
+  const latestRun = db.prepare("SELECT * FROM agent_runs WHERE card_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1");
+  const latestAction = db.prepare("SELECT * FROM agent_actions WHERE run_id = ? ORDER BY requested_at DESC, rowid DESC LIMIT 1");
+  const pending = db.prepare("SELECT 1 FROM agent_actions WHERE run_id = ? AND status = 'pending' LIMIT 1");
+  const counts = db.prepare(
+    "SELECT COUNT(*) AS n, COALESCE(SUM(state = 'waiting'), 0) AS waiting FROM card_comments WHERE card_id = ?",
+  );
+  const request = db.prepare("SELECT to_stage FROM card_move_requests WHERE card_id = ?");
+  return cards.map(({ id }) => {
+    const row = latestRun.get(id) as RunRow | undefined;
+    const c = counts.get(id) as { n: number; waiting: number };
+    const req = request.get(id) as { to_stage: Stage } | undefined;
+    const base = {
+      cardId: id, comments: c.n, commentsWaiting: c.waiting, screenshots: 0, moveRequest: req ? { to: req.to_stage } : null,
+    };
+    if (!row) return { ...base, runId: null, adapter: null, runStatus: null, progress: null, percent: null, now: null, waiting: false };
+    const run = toRun(row);
+    const remote = run.machineId !== null;
+    const progress = run.progress && remote
+      ? { ...run.progress, steps: run.progress.steps.map((s) => truncate(visibleControls(clean(s)), PROGRESS_LIMITS.stepChars)) }
+      : (run.progress ?? null);
+    const running = run.status === "running";
+    const actionRow = running ? (latestAction.get(run.id) as ActionRow | undefined) : undefined;
+    let action = actionRow ? toAction(actionRow) : null;
+    if (action && remote) {
+      action = { ...action, tool: clean(action.tool), summary: clean(action.summary), input: cleanStrings(action.input, clean) };
+    }
+    return {
+      ...base, runId: run.id, adapter: run.adapter, runStatus: run.status, progress, percent: progressPercent(progress),
+      now: nowLine(action), waiting: running && pending.get(run.id) !== undefined,
+    };
+  });
 }
