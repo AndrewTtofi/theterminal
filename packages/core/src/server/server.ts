@@ -54,6 +54,7 @@ import { SourceService } from "../sources/service.js";
 import { WritebackService } from "../sources/writeback.js";
 import { registerSourcesRoutes } from "./sources-routes.js";
 import { registerHomeRoutes } from "./home-routes.js";
+import { installRequestDeadlines, type RequestDeadlines } from "./request-deadlines.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
@@ -120,9 +121,11 @@ const CLI_ACTOR: Actor = { kind: "system", id: "cli" };
 /**
  * Timeouts on the shared HTTP server, which the TLS listener's decrypted sockets go through too: the whole request
  * (headers and body) within a minute, the headers within half of it, and an idle keep-alive connection closed after
- * thirty seconds. Loopback requests never come near them; a slow or silent network client does.
+ * thirty seconds. One file of an upload (up to 50 MiB, perhaps over a slow link) is spared the whole-request minute
+ * and is cut off instead after a minute without a byte (installRequestDeadlines). Loopback requests never come near
+ * them; a slow or silent network client does.
  */
-const REQUEST_TIMEOUT_MS = 60_000;
+const REQUEST_DEADLINES: RequestDeadlines = { wholeMs: 60_000, idleMs: 60_000, checkMs: 1_000 };
 const HEADERS_TIMEOUT_MS = 30_000;
 const KEEP_ALIVE_TIMEOUT_MS = 30_000;
 
@@ -540,6 +543,8 @@ export async function createServer(opts: {
   discovery?: Discovery;
   /** Tests only: shorter reconnect waits (and stream idle timeout) for runs on linked machines. */
   remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
+  /** Tests only: shorter whole-request and upload idle limits. Default: a minute each (REQUEST_DEADLINES). */
+  requestDeadlines?: RequestDeadlines;
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
   /**
@@ -778,7 +783,10 @@ export async function createServer(opts: {
     });
     const shareLinks = (): number => links.activeCount();
 
-    const app = Fastify({ requestTimeout: REQUEST_TIMEOUT_MS, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
+    // Node's own whole-request timeout is off (0): it would cut off a large upload file, so installRequestDeadlines
+    // enforces it instead for every other request. The headers timeout stays Node's.
+    const app = Fastify({ requestTimeout: 0, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
+    installRequestDeadlines(app.server, opts.requestDeadlines ?? REQUEST_DEADLINES);
     let boundPort = 0;
     let stopBootstrapWatch = (): void => undefined;
     // The network listener: off until the ledger or the command line says otherwise. Its decrypted sockets go to this

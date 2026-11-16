@@ -755,3 +755,55 @@ describe("createServer link listener", { timeout: 30_000 }, () => {
     expect(rows[0]!.payload).not.toContain("PRIVATE");
   });
 });
+
+/**
+ * Sends a request head with a bearer token, then one byte of body every `everyMs` until `bytes` are sent. Resolves
+ * with the status line, or "closed" when the server closed the connection without answering.
+ */
+function trickle(port: number, token: string, head: string, type: string, bytes: number, everyMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    const c = net.connect(port, "127.0.0.1");
+    let answer = "";
+    let timer: NodeJS.Timeout | undefined;
+    c.on("connect", () => {
+      c.write(
+        `${head}\r\nhost: 127.0.0.1:${port}\r\nauthorization: Bearer ${token}\r\nconnection: close\r\n` +
+          `content-type: ${type}\r\ncontent-length: ${bytes}\r\n\r\n`,
+      );
+      let sent = 0;
+      timer = setInterval(() => {
+        if (sent >= bytes || c.destroyed) return clearInterval(timer);
+        c.write("a");
+        sent += 1;
+      }, everyMs);
+    });
+    c.on("data", (d) => (answer += String(d)));
+    c.on("error", () => undefined);
+    c.on("close", () => {
+      clearInterval(timer);
+      resolve(answer === "" ? "closed" : answer.split("\r\n")[0]!);
+    });
+    c.on("end", () => c.end());
+  });
+}
+
+describe("request deadlines", { timeout: 30_000 }, () => {
+  // Short limits: a request in full within 300 ms of its headers; an upload file cut off after 300 ms without a byte.
+  const requestDeadlines = { wholeMs: 300, idleMs: 300, checkMs: 50 };
+
+  it("cut off a slow JSON body, but let an upload file stream past the whole-request limit, and cut off a silent one", async () => {
+    const s = await start({ dataDir: tmp(), port: 0, requestDeadlines });
+    const p = (await (await post(s, "/api/projects", { name: "Club" })).json()) as { id: string };
+    // 20 bytes, one every 40 ms: about 800 ms, past the whole-request limit, though never idle.
+    const json = '{"name":"Slow club..."}'.length;
+    expect(await trickle(s.port, s.token, "POST /api/projects HTTP/1.1", "application/json", json, 40)).toBe("closed");
+
+    const open = await post(s, `/api/projects/${p.id}/uploads`, { files: 2, bytes: 40, includeSecrets: false });
+    expect(open.status).toBe(201);
+    const { uploadId } = (await open.json()) as { uploadId: string };
+    const put = (path: string) => `PUT /api/uploads/${uploadId}/file?path=${path} HTTP/1.1`;
+    expect(await trickle(s.port, s.token, put("a.txt"), "application/octet-stream", 20, 40)).toBe("HTTP/1.1 204 No Content");
+    // One byte every 700 ms: each gap is more than twice the idle limit.
+    expect(await trickle(s.port, s.token, put("b.txt"), "application/octet-stream", 5, 700)).toBe("closed");
+  });
+});
