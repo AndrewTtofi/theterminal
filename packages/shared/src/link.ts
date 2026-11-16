@@ -64,6 +64,7 @@ export type LinkRun = {
 export const MIRRORABLE_TYPES = [
   "agent.started",
   "agent.message",
+  "agent.progress",
   "agent.action.requested",
   "agent.action.decided",
   "agent.action.completed",
@@ -93,6 +94,7 @@ const originActorSchema = z.object({ kind: z.enum(["human", "agent", "system"]),
 const MIRRORED_PAYLOADS: Record<MirrorableType, z.ZodType> = {
   "agent.started": agentPayloadSchemas["agent.started"],
   "agent.message": agentPayloadSchemas["agent.message"],
+  "agent.progress": agentPayloadSchemas["agent.progress"],
   "agent.action.requested": agentPayloadSchemas["agent.action.requested"],
   "agent.action.decided": agentPayloadSchemas["agent.action.decided"],
   "agent.action.completed": agentPayloadSchemas["agent.action.completed"],

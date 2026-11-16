@@ -1,8 +1,9 @@
-import { visibleControls } from "@theterminal/shared";
+import { jobTitle, progressPercent, visibleControls } from "@theterminal/shared";
 import type {
   ActionKind, AdapterId, AgentAction, AgentRun, AuthMode, Card, ConnectionSummary, MachineCapacity, MachinePresence, Provider, Role,
 } from "@theterminal/shared";
 import { runCost } from "./cost";
+import { ProgressBar } from "./ProgressBar";
 import { StartRunForm } from "./StartRunForm";
 import { gateFor } from "../shell/model";
 
@@ -84,6 +85,7 @@ export function AgentPanel({
               {onMachine(r, machineName)}: {r.prompt.slice(0, 40)} ({r.status}
               {cost(r)})
             </button>
+            {r.status === "running" && <ProgressBar percent={progressPercent(r.progress)} label={jobTitle(r)} />}
             {r.status === "running" && (
               <button type="button" disabled={mayStop.disabled} title={mayStop.title} onClick={() => onStop(r.id)}>
                 Stop

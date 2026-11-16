@@ -72,6 +72,9 @@ vi.mock("../src/api", () => ({
     listPeople: vi.fn(),
     listInvites: vi.fn(),
     getRemote: vi.fn(),
+    getHome: vi.fn(),
+    projectFiles: vi.fn(),
+    acceptRun: vi.fn(),
   },
   setUnauthorizedHandler: (fn: (() => void) | null) => {
     h.unauthorized = fn;
@@ -106,7 +109,7 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { ApiError, api, errorMessage } from "../src/api";
 import type { AgentsInfo } from "../src/api";
 import { App } from "../src/App";
-import { testDock } from "./test-dock";
+import { WITH_BOARD, testDock } from "./test-dock";
 import { intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked, shipMet } from "./gate-fixtures";
 import { changes, fileDiff, listing, run1, runEntry } from "./changes-fixtures";
@@ -137,6 +140,7 @@ async function operatorLayout() {
 beforeEach(() => {
   vi.resetAllMocks();
   testDock.api = null;
+  testDock.restore = WITH_BOARD;
   h.onEntry = undefined;
   h.subs.clear();
   m.getStatus.mockResolvedValue({
@@ -162,6 +166,8 @@ beforeEach(() => {
   m.listPeople.mockResolvedValue([]);
   m.listInvites.mockResolvedValue([]);
   m.getRemote.mockResolvedValue({ enabled: false, listening: false });
+  m.getHome.mockResolvedValue({ working: [], finishedToday: [] });
+  m.projectFiles.mockResolvedValue({ source: null, added: false, head: "h", entries: [], truncated: false });
 });
 
 describe("App status polling", () => {
@@ -342,7 +348,7 @@ describe("App needs-you strip", () => {
     await waitFor(() => expect([...h.subs].map((x) => x.after)).toContain(7));
     expect(screen.queryByText("Needs you")).toBeNull();
     act(() => h.onEntry?.(agentEntry(8, "B")));
-    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    expect(await within(await screen.findByRole("region", { name: "Needs you" })).findByText('Agent wants to run the command "run make"')).toBeTruthy();
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Project B");
   });
 
@@ -361,14 +367,14 @@ describe("App needs-you strip", () => {
         payload: { machineId: "b".repeat(32), origin: inner, signature: "c".repeat(128) },
       } as LedgerEntry),
     );
-    expect(await screen.findByText('Agent wants to run the command "run make"')).toBeTruthy();
+    expect(await within(await screen.findByRole("region", { name: "Needs you" })).findByText('Agent wants to run the command "run make"')).toBeTruthy();
     act(() =>
       h.onEntry?.({
         ...agentEntry(9, "B"), type: "link.run_failed", actor: { kind: "system", id: "link" },
         payload: { runId: "r1", machineId: "b".repeat(32), error: "machine_unpaired" },
       } as LedgerEntry),
     );
-    await waitFor(() => expect(screen.queryByText('Agent wants to run the command "run make"')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
     expect(m.listAllPendingActions).toHaveBeenCalledTimes(3);
   });
 
@@ -1369,5 +1375,36 @@ describe("App: who is signed in, and who is here", () => {
       });
     });
     await waitFor(() => expect(m.listPeople.mock.calls.length).toBeGreaterThan(before));
+  });
+});
+
+describe("App Home data", () => {
+  const entry = (type: string, projectId = "A"): LedgerEntry => ({
+    seq: 50, id: "50", ts: "2026-11-16T00:00:00Z", projectId, actor: { kind: "agent", id: "r1" },
+    type: type as LedgerEntry["type"], payload: { runId: "r1" }, prevHash: "", hash: "",
+  });
+
+  it("reloads Home once, debounced, after an agent.progress entry", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const before = m.getHome.mock.calls.length;
+      await act(async () => {
+        h.onEntry!(entry("agent.progress"));
+        h.onEntry!(entry("agent.progress"));
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(m.getHome.mock.calls.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks for the selected project's Home", async () => {
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await waitFor(() => expect(m.getHome).toHaveBeenLastCalledWith("A"));
+    await waitFor(() => expect(m.projectFiles).toHaveBeenLastCalledWith("A"));
   });
 });

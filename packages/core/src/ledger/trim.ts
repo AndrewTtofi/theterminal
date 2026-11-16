@@ -6,20 +6,21 @@ const CONNECTION_FIELDS = ["config", "secretFields", "privateFields"] as const;
 const CHANGE_FIELDS = ["config", "secretsSet", "secretsRemoved", "privateSet", "privateRemoved"] as const;
 /**
  * Payload keys only the Owner sees, by entry type: a tester's message may name what it looked for; a paired machine's
- * address and the remote listener's interface are the Owner's LAN.
+ * address and the remote listener's interface are the Owner's LAN; a project's folder path is on the Owner's computer.
  */
 const FIELDS_BY_TYPE: Record<string, readonly string[]> = {
   "connection.tested": ["message"],
   "machine.paired": ["address"],
   "remote.enabled": ["bind"],
+  "project.source_set": ["path"],
 };
 
 /**
  * A ledger entry as `principal` may see it. The Owner sees every entry whole. Anyone else (and nobody, failing
  * closed) sees a connection entry without its config, its secret field names and its private field names, a
  * `connection.updated` without `changes.config` or the names of the secret and private fields that changed, a
- * `connection.tested` without its message, a `machine.paired` without the machine's address and a `remote.enabled`
- * without its bind: those are the Owner's business, as the connection details and the Owner's network are.
+ * `connection.tested` without its message, a `machine.paired` without the machine's address, a `remote.enabled`
+ * without its bind and a `project.source_set` without its folder path: those are the Owner's business, as the connection details and the Owner's network are.
  * Every other entry is returned as it is. The given entry is never changed.
  */
 export function trimForRole(e: LedgerEntry, principal: Pick<Principal, "personId"> | null): LedgerEntry {

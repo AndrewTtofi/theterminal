@@ -256,4 +256,22 @@ describe("AgentPanel for a collaborator", () => {
     render(<AgentPanel adapters={["claude"]} runs={[]} selectedRunId={null} onStart={vi.fn()} onSelectRun={vi.fn()} onStop={vi.fn()} />);
     expect(screen.queryByText(/use the Owner's API key/)).toBeNull();
   });
+
+  describe("progress", () => {
+    const plan = { steps: ["a", "b", "c"], done: [1], current: 2 };
+    const props = { selectedRunId: null, onStart: vi.fn(), onSelectRun: vi.fn(), onStop: vi.fn() };
+    it("shows the bar on a running run with progress", () => {
+      render(<AgentPanel adapters={["fake"]} runs={[{ ...run, status: "running", progress: plan }]} {...props} />);
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
+    });
+    it("shows Working… without a number when a running run has no plan", () => {
+      render(<AgentPanel adapters={["fake"]} runs={[{ ...run, status: "running" }]} {...props} />);
+      expect(screen.queryByRole("progressbar")).toBeNull();
+      expect(screen.getByText("Working…")).toBeTruthy();
+    });
+    it("shows no bar on a finished run", () => {
+      render(<AgentPanel adapters={["fake"]} runs={[{ ...run, progress: plan }]} {...props} />);
+      expect(screen.queryByRole("progressbar")).toBeNull();
+    });
+  });
 });

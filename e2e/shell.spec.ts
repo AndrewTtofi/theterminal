@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { operatorLayout } from "./support.js";
+import { enableBoard, openBoard, operatorLayout } from "./support.js";
 
 const views = (page: Page) => page.getByRole("navigation", { name: "Views" });
 
@@ -10,23 +10,39 @@ async function createProject(page: Page, url: string, name: string) {
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
 }
 
-test("the activity bar shows the twelve views and the Board is home with the five columns", async ({ page }) => {
+test("the activity bar shows Home and the twelve views, with the Board hidden, and Home is the default tab", async ({ page }) => {
   await page.goto(process.env.TT_E2E_URL!);
   const buttons = views(page).getByRole("button");
   await expect(buttons).toHaveCount(12);
   // Icon buttons: their names are their aria-labels.
   const names = await buttons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
-  expect(names).toEqual(["Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "People", "Share", "Learn"]);
-  await expect(views(page).getByRole("button", { name: "Board" })).toHaveAttribute("aria-pressed", "true");
-  // The default layout is Guided: the Board and the Conversation, no bottom panel.
+  expect(names).toEqual(["Home", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "People", "Share", "Learn"]);
+  await expect(views(page).getByRole("button", { name: "Home" })).toHaveAttribute("aria-pressed", "true");
+  // The default layout is Guided: Home and the Conversation, no bottom panel.
   const tabs = await page.getByRole("tab").allInnerTexts();
-  expect(tabs.map((t) => t.trim())).toEqual(["Board", "Conversation"]);
+  expect(tabs.map((t) => t.trim())).toEqual(["Home", "Conversation"]);
   await expect(page.getByRole("contentinfo", { name: "Status bar" }).getByRole("combobox", { name: "Layout" })).toHaveValue("preset:guided");
+});
 
+test("with Show the Board on, the Board button opens the Board tab with the five columns", async ({ page }) => {
+  await enableBoard(page);
+  await page.goto(process.env.TT_E2E_URL!);
+  await expect(views(page).getByRole("button", { name: "Board" })).toBeVisible();
   await createProject(page, process.env.TT_E2E_URL!, "Shell Project");
+  await openBoard(page);
   for (const column of ["Plan", "Design", "Build", "Ship", "Operate"]) {
     await expect(page.getByRole("region", { name: column })).toBeVisible();
   }
+});
+
+test("Settings, Workspace turns the Board button on and keeps it after a reload", async ({ page }) => {
+  await page.goto(process.env.TT_E2E_URL!);
+  await expect(views(page).getByRole("button", { name: "Board" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("switch", { name: "Show the Board" }).click();
+  await expect(views(page).getByRole("button", { name: "Board" })).toBeVisible();
+  await page.reload();
+  await expect(views(page).getByRole("button", { name: "Board" })).toBeVisible();
 });
 
 test("a closed Ledger tab stays closed after a reload, and Reset layout goes back to Guided", async ({ page }) => {
@@ -39,7 +55,7 @@ test("a closed Ledger tab stays closed after a reload, and Reset layout goes bac
   await expect(layout.locator("option:checked")).toHaveText("Custom");
 
   await page.reload();
-  await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Home" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Agent feed" })).toBeVisible();
   await expect(ledgerTab).toHaveCount(0);
   await expect(layout.locator("option:checked")).toHaveText("Custom");
@@ -68,7 +84,7 @@ test("a saved layout is kept across a reload, and a restored diff tab of an unkn
   await expect(page.getByRole("tab", { name: "Ledger" })).toHaveCount(0);
   await expect(layout.locator("option:checked")).toHaveText("Mine");
 
-  // Plant a diff tab of a run the server does not know into the working layout, beside the Board.
+  // Plant a diff tab of a run the server does not know into the working layout, beside Home.
   await page.evaluate(() => {
     type Node = { type: string; data: unknown };
     const saved = JSON.parse(localStorage.getItem("tt.layout.v1")!) as {
@@ -83,14 +99,14 @@ test("a saved layout is kept across a reload, and a restored diff tab of an unkn
       }
       return null;
     };
-    leafWith(saved.grid.root, "board")!.views.push("diff:gone:x");
+    leafWith(saved.grid.root, "home")!.views.push("diff:gone:x");
     saved.panels["diff:gone:x"] = { id: "diff:gone:x", contentComponent: "diff", title: "x" };
     localStorage.setItem("tt.layout.v1", JSON.stringify(saved));
   });
   await page.reload();
   await expect(page.getByRole("tab", { name: "Terminal" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "x", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Home" })).toBeVisible();
   // Closing the stale tab on load is not the Owner changing the layout: it keeps its name.
   await expect(layout.locator("option:checked")).toHaveText("Mine");
 

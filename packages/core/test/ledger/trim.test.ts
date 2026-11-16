@@ -63,4 +63,21 @@ describe("trimForRole", () => {
     const oddChanges = entry("connection.updated", { connectionId: "c1", name: "GitHub", changes: "nope" });
     expect(trimForRole(oddChanges, principal("v", "viewer"))).toBe(oddChanges);
   });
+
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const folderSource = entry("project.source_set", { projectId: "p1", kind: "folder", path: "/Users/someone/my-folder", syncedCommit: SHA });
+  const githubSource = entry("project.source_set", { projectId: "p1", kind: "github", repo: "club/site", branch: "main", remoteCommit: SHA, syncedCommit: SHA });
+
+  it.each(ROLES)("for a %s drops the folder path of a project.source_set", (role) => {
+    const p = principal(`p-${role}`, role);
+    expect(trimForRole(folderSource, p).payload).toEqual({ projectId: "p1", kind: "folder", syncedCommit: SHA });
+    expect(JSON.stringify(trimForRole(folderSource, p))).not.toContain("my-folder");
+    expect(trimForRole(githubSource, p)).toBe(githubSource);
+  });
+
+  it("keeps the folder path for the Owner, and drops it with no principal", () => {
+    expect(trimForRole(folderSource, principal("owner", "owner"))).toBe(folderSource);
+    expect(trimForRole(folderSource, null).payload).not.toHaveProperty("path");
+    expect((folderSource.payload as { path: string }).path).toBe("/Users/someone/my-folder");
+  });
 });

@@ -697,3 +697,56 @@ describe("people api and the signed-out redirect", () => {
     expect(errorMessage(new ApiError(423, "ledger_read_only"))).toBe("Workspace is read-only");
   });
 });
+
+describe("project sources", () => {
+  it("putUploadFile sends the blob raw to the upload's file route", async () => {
+    const f = respond(204);
+    const blob = new Blob(["hello"]);
+    await api.putUploadFile("u1", "src/a.ts", blob);
+    const [url, init] = call(f, 0);
+    expect(url).toBe("/api/uploads/u1/file?path=src%2Fa.ts");
+    expect(init.method).toBe("PUT");
+    expect(init.body).toBe(blob);
+    expect(new Headers(init.headers).get("content-type")).toBe("application/octet-stream");
+  });
+
+  it("asks for Home with or without a project", async () => {
+    const f = respond(200, { working: [], finishedToday: [] });
+    await api.getHome("p 1");
+    await api.getHome(null);
+    expect(call(f, 0)[0]).toBe("/api/home?projectId=p%201");
+    expect(call(f, 1)[0]).toBe("/api/home");
+  });
+
+  it("names the files that may hold secrets", () => {
+    const text = errorMessage(new ApiError(409, "possible_secrets", { names: [".env", "k.pem"] }));
+    expect(text).toContain(".env");
+    expect(text).toContain("k.pem");
+    expect(text).toContain("include files that may contain secrets");
+  });
+
+  it("words the source refusals", () => {
+    expect(errorMessage(new ApiError(413, "limit_exceeded", { limit: "files" }))).toBe(
+      "That is more than The Terminal takes at once: up to 2,000 files, 200 MB in total and 50 MB per file.",
+    );
+    expect(errorMessage(new ApiError(409, "merge_conflict"))).toBe(
+      "These changes clash with newer work. Ask an agent to redo them on top of the latest files.",
+    );
+    expect(errorMessage(new ApiError(409, "preview_stale"), "sources")).toBe("The files changed since you looked. Review the list again.");
+    expect(errorMessage(new ApiError(409, "folder_unavailable"))).toBe("The original folder can't be found.");
+    expect(errorMessage(new ApiError(403, "local_only"))).toBe("This works only on the computer The Terminal runs on.");
+  });
+
+  it("posts the remaining source calls to their routes", async () => {
+    const f = respond(200, {});
+    await api.acceptRun("r1");
+    await api.applyToFolder("p1", "abc");
+    await api.publishToGitHub("p1", "abc");
+    await api.commitUpload("u1");
+    await api.pickFolder();
+    expect(f.mock.calls.map((c) => (c as [string, RequestInit])[0])).toEqual([
+      "/api/runs/r1/accept", "/api/projects/p1/apply", "/api/projects/p1/publish", "/api/uploads/u1/commit", "/api/host/pick-folder",
+    ]);
+    expect(JSON.parse(call(f, 1)[1].body as string)).toEqual({ head: "abc" });
+  });
+});

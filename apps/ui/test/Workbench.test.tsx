@@ -9,13 +9,14 @@ vi.mock("../src/shell/Dock", () => import("./test-dock"));
 import { Workbench } from "../src/shell/Workbench";
 import type { DockPanelId } from "../src/shell/Dock";
 import type { AppModel } from "../src/shell/model";
-import { testDock } from "./test-dock";
+import { WITH_BOARD, testDock } from "./test-dock";
 import { ALL_ANSWERS, intakeView } from "./intake-fixtures";
 import { planPassed, shipBlocked } from "./gate-fixtures";
 import type { Status } from "../src/api";
 import type { ConnectionsModel } from "../src/use-connections";
 import { digestsModel, preview, shareModel } from "./share-fixtures";
 import { OWNER_ME } from "./as-owner";
+import { saveWorkspace } from "../src/shell/workspace-store";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
   return {
@@ -64,6 +65,10 @@ function model(over: Partial<AppModel> = {}): AppModel {
     selectedId: "p1",
     onSelectProject: vi.fn(),
     onCreateProject: vi.fn(),
+    onProjectCreated: vi.fn(),
+    home: { data: null, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
+    projectFiles: { data: null, error: null, refresh: vi.fn() },
+    onAcceptRun: vi.fn().mockResolvedValue(true),
     board,
     onAddCard: vi.fn(),
     onMoveCard: vi.fn(),
@@ -141,13 +146,15 @@ const operator = () => act(() => testDock.api!.applyPreset("operator"));
 
 beforeEach(() => {
   localStorage.clear();
-  testDock.restore = null;
+  saveWorkspace({ showBoard: false });
+  testDock.restore = WITH_BOARD;
 });
 
 describe("Workbench", () => {
-  it("lays out the activity bar, side bar, dock and status bar, with the Board view first", () => {
+  it("lays out the activity bar, side bar, dock and status bar, with the Home view first", () => {
     render(<Workbench model={model()} />);
-    expect(view("Board").getAttribute("aria-pressed")).toBe("true");
+    expect(view("Home").getAttribute("aria-pressed")).toBe("true");
+    expect(within(views()).queryByRole("button", { name: "Board" })).toBeNull();
     const side = screen.getByRole("complementary", { name: "Side bar" });
     expect(within(side).getByRole("navigation", { name: "Projects" })).toBeTruthy();
     expect(within(side).getByLabelText("New project name")).toBeTruthy();
@@ -155,8 +162,10 @@ describe("Workbench", () => {
     expect(screen.getByText("Agents running: 1")).toBeTruthy();
   });
 
-  it("shows the five stage columns in the Board panel", () => {
+  it("shows the five stage columns in the Board panel once the Board is shown and opened", async () => {
+    act(() => saveWorkspace({ showBoard: true }));
     const { container } = render(<Workbench model={model()} />);
+    await userEvent.click(view("Board"));
     const panel = container.querySelector<HTMLElement>('[data-panel="board"]')!;
     for (const stage of ["Plan", "Design", "Build", "Ship", "Operate"]) {
       expect(within(panel).getByRole("region", { name: stage })).toBeTruthy();
@@ -174,16 +183,16 @@ describe("Workbench", () => {
     expect(agents.getByRole("button", { name: "Start agent" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Projects" })).toBeNull();
 
-    await userEvent.click(view("Board"));
+    await userEvent.click(view("Home"));
     expect(screen.getByRole("navigation", { name: "Projects" })).toBeTruthy();
   });
 
   it("collapses the side bar when the active view is clicked again", async () => {
     render(<Workbench model={model()} />);
-    await userEvent.click(view("Board"));
+    await userEvent.click(view("Home"));
     expect(screen.queryByRole("complementary", { name: "Side bar" })).toBeNull();
-    expect(view("Board").getAttribute("aria-pressed")).toBe("false");
-    await userEvent.click(view("Board"));
+    expect(view("Home").getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(view("Home"));
     expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
   });
 
@@ -386,15 +395,31 @@ describe("Workbench", () => {
     expect(view("Share").getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("reopens and focuses the Board tab when the Board view is selected", async () => {
+  it("reopens and focuses the Home tab when the Home view is selected", async () => {
     const { container } = render(<Workbench model={model()} />);
-    act(() => testDock.api!.close("board"));
-    expect(container.querySelector('[data-panel="board"]')).toBeNull();
+    act(() => testDock.api!.close("home"));
+    expect(container.querySelector('[data-panel="home"]')).toBeNull();
     await userEvent.click(view("Agents"));
+    await userEvent.click(view("Home"));
+    const home = container.querySelector('[data-panel="home"]');
+    expect(home).toBeTruthy();
+    expect(home!.getAttribute("data-active")).toBe("true");
+  });
+
+  it("reopens and focuses the Board tab when the Board view is selected, with the Board shown", async () => {
+    act(() => saveWorkspace({ showBoard: true }));
+    const { container } = render(<Workbench model={model()} />);
     await userEvent.click(view("Board"));
     const board = container.querySelector('[data-panel="board"]');
     expect(board).toBeTruthy();
     expect(board!.getAttribute("data-active")).toBe("true");
+  });
+
+  it("restores a saved layout that holds a Board tab, even with the Board hidden", () => {
+    testDock.restore = [{ id: "home", where: "main" }, { id: "board", where: "main" }];
+    const { container } = render(<Workbench model={model()} />);
+    expect(container.querySelector('[data-panel="board"]')).toBeTruthy();
+    expect(within(views()).queryByRole("button", { name: "Board" })).toBeNull();
   });
 
   it("toggles the bottom panel with Ctrl+J and Cmd+J, but not while typing", async () => {
@@ -555,11 +580,14 @@ describe("Workbench", () => {
 
   describe("layouts and new views", () => {
     const panels = (container: HTMLElement) => [...container.querySelectorAll("[data-panel]")].map((p) => p.getAttribute("data-panel"));
+    beforeEach(() => {
+      testDock.restore = null;
+    });
     const layoutSelect = () => screen.getByRole("combobox", { name: "Layout" }) as HTMLSelectElement;
 
-    it("opens on the Guided layout: the Board and the Conversation, no Ledger", () => {
+    it("opens on the Guided layout: Home and the Conversation, no Ledger", () => {
       const { container } = render(<Workbench model={model()} />);
-      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(panels(container)).toEqual(["home", "conversation"]);
       expect(container.querySelector('[data-panel="ledger"]')).toBeNull();
       expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
       const conversation = container.querySelector<HTMLElement>('[data-panel="conversation"]')!;
@@ -570,7 +598,7 @@ describe("Workbench", () => {
     it("keeps a decision in the strip with the Guided layout in the Connections view, and badges it", async () => {
       const { container } = render(<Workbench model={model({ pending: [pendingAction] })} />);
       await userEvent.click(view("Connections"));
-      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(panels(container)).toEqual(["home", "conversation"]);
       const strip = screen.getByRole("region", { name: "Needs you" });
       expect(strip.querySelector('article[aria-label="Decision: Run: nvidia-smi"]')).toBeTruthy();
       expect(within(view("Needs you")).getByText("1")).toBeTruthy();
@@ -579,7 +607,7 @@ describe("Workbench", () => {
     it("switches presets from the status bar, saves a layout under a name, and resets to Guided", async () => {
       const { container } = render(<Workbench model={model()} />);
       await userEvent.selectOptions(layoutSelect(), "Operator");
-      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed", "ledger"]);
+      expect(panels(container)).toEqual(["home", "capacity", "terminal", "agent_feed", "ledger"]);
       expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Operator");
 
       act(() => testDock.api!.close("ledger"));
@@ -591,10 +619,10 @@ describe("Workbench", () => {
       expect([...layoutSelect().options].map((o) => o.textContent)).toEqual(["Guided", "Operator", "Mine"]);
 
       await userEvent.click(screen.getByRole("button", { name: "Reset layout" }));
-      expect(panels(container)).toEqual(["board", "conversation"]);
+      expect(panels(container)).toEqual(["home", "conversation"]);
       expect(layoutSelect().selectedOptions[0]!.textContent).toBe("Guided");
       await userEvent.selectOptions(layoutSelect(), "Mine");
-      expect(panels(container)).toEqual(["board", "capacity", "terminal", "agent_feed"]);
+      expect(panels(container)).toEqual(["home", "capacity", "terminal", "agent_feed"]);
     });
 
     it("keeps the selected name and says so when browser storage refuses the save", async () => {
@@ -628,7 +656,7 @@ describe("Workbench", () => {
       act(() => testDock.shell!.openLearn("reading_a_diff"));
       expect(view("Learn").getAttribute("aria-pressed")).toBe("true");
       expect(testDock.shell!.learnTopic).toBe("reading_a_diff");
-      expect(testDock.shell!.contextView).toBe("board");
+      expect(testDock.shell!.contextView).toBe("home");
       act(() => testDock.shell!.openLearn("estimates"));
       expect(screen.getByRole("complementary", { name: "Side bar" })).toBeTruthy();
       expect(testDock.shell!.learnTopic).toBe("estimates");
@@ -650,7 +678,7 @@ describe("Workbench", () => {
       const { container } = render(<Workbench model={model()} />);
       act(() => testDock.shell!.model.onOpenDiff("run1", "src/a.ts"));
       act(() => testDock.shell!.model.onOpenFile("run1", "src/a.ts"));
-      expect(panels(container)).toEqual(["board", "conversation", "diff:run1:src%2Fa.ts", "file:run1:src%2Fa.ts"]);
+      expect(panels(container)).toEqual(["home", "conversation", "diff:run1:src%2Fa.ts", "file:run1:src%2Fa.ts"]);
       expect(container.querySelector('[data-panel="file:run1:src%2Fa.ts"]')?.getAttribute("data-active")).toBe("true");
     });
 

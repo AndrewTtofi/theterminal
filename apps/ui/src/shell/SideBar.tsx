@@ -28,6 +28,7 @@ function ConnectionsForViewer() {
 }
 
 const CONTENT: Record<ViewId, ComponentType> = {
+  home: ProjectsSideBar,
   board: ProjectsSideBar,
   agents: AgentsSideBar,
   changes: ChangesSideBar,

@@ -84,10 +84,10 @@ test("the Owner invites a reviewer who joins with a passkey, signs in again, dec
 
     // Presence: the Owner sees them in the project and on the view they look at.
     await reviewer.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: PROJECT }).click();
-    await openView(reviewer, "Board");
+    await openView(reviewer, "Home");
     await openView(owner, "People");
     const here = owner.locator(".people-side").getByRole("region", { name: "People here" });
-    await expect(here.getByRole("listitem").filter({ hasText: /^Reviewer One · Reviewer · Board in People Project$/ })).toHaveCount(1);
+    await expect(here.getByRole("listitem").filter({ hasText: /^Reviewer One · Reviewer · Home in People Project$/ })).toHaveCount(1);
     const everyone = owner.locator(".people-side").getByRole("region", { name: "Everyone" });
     await expect(everyone.getByRole("listitem").filter({ hasText: "Reviewer One" }).getByRole("img", { name: "Online" })).toBeVisible();
 

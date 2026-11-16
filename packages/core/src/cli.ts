@@ -4,6 +4,7 @@ import { releaseDataDirLock } from "./server/data-dir-lock.js";
 import { defaultDataDir, defaultUiDir } from "./paths.js";
 import { createShutdown, failAndExit, parseStartArgs, startErrorLine, writeStartLog } from "./cli-support.js";
 import { BOOTSTRAP_LINE } from "./server/bootstrap-invite.js";
+import { createFolderPicker } from "./server/folder-picker.js";
 import type { HostMessage, ReadyMessage } from "./host.js";
 
 async function main(): Promise<void> {
@@ -12,10 +13,21 @@ async function main(): Promise<void> {
   const options = parsed.options;
   const dataDir = options.dataDir;
 
+  // Under a host (the desktop app) the folder picker is its native dialog, asked for over the IPC channel.
+  const send = process.send?.bind(process);
+  const pickFolder = send
+    ? createFolderPicker({
+        // A closed channel reports through the callback, not as an uncaught error; `disconnect` shuts the server down.
+        send: (m) => void send(m, undefined, undefined, () => {}),
+        on: (listener) => void process.on("message", listener),
+      })
+    : undefined;
+
   let running: RunningServer;
   try {
     running = await createServer({
       ...options,
+      pickFolder,
       // The invite link is the only secret this process ever prints, once per start, until the Owner claims it.
       bootstrapInvite: (url) => console.log(`${BOOTSTRAP_LINE} ${url}`),
     });

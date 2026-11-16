@@ -19,6 +19,7 @@ type StartOpts = {
   env?: NodeJS.ProcessEnv;
   nodeFile?: string;
   extraArgs?: string[];
+  onPickFolder?: () => Promise<string | null>;
 };
 
 function start(mode: string, o: StartOpts = {}) {
@@ -179,6 +180,57 @@ describe("startServer", () => {
       loopbackUrl: "http://127.0.0.1:2/",
       port: 2,
     });
+  });
+
+  /** The fake child reports the picked_folder answers it received in its ready URL. */
+  const answers = (m: { url: string }) => JSON.parse(new URL(m.url).searchParams.get("answers") ?? "null") as unknown;
+
+  it("answers a valid pick_folder with onPickFolder's path and the same id, and ignores malformed ones", async () => {
+    const chosen = join(tmpdir(), "chosen-folder");
+    let calls = 0;
+    const h = start("pick", {
+      onPickFolder: async () => {
+        calls += 1;
+        return chosen;
+      },
+    });
+    const m = await h.ready;
+    expect(calls).toBe(1);
+    expect(answers(m)).toEqual([{ type: "picked_folder", id: "p1", path: chosen }]);
+  });
+
+  it("answers null when onPickFolder fails, or when there is no onPickFolder", async () => {
+    const failing = start("pick", { onPickFolder: () => Promise.reject(new Error("no window")) });
+    expect(answers(await failing.ready)).toEqual([{ type: "picked_folder", id: "p1", path: null }]);
+    const none = start("pick");
+    expect(answers(await none.ready)).toEqual([{ type: "picked_folder", id: "p1", path: null }]);
+  });
+
+  it("answers null when onPickFolder returns something other than an absolute path", async () => {
+    const h = start("pick", { onPickFolder: async () => "relative" });
+    expect(answers(await h.ready)).toEqual([{ type: "picked_folder", id: "p1", path: null }]);
+  });
+
+  it("shows one dialog at a time: a pick that arrives while one is open is answered null at once", async () => {
+    const chosen = join(tmpdir(), "chosen-folder");
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = start("pick-twice", {
+      onPickFolder: async () => {
+        calls += 1;
+        await gate;
+        return chosen;
+      },
+    });
+    // The second pick's null answer arrives first; then the dialog closes.
+    setTimeout(release, 200);
+    const m = await h.ready;
+    expect(calls).toBe(1);
+    expect(answers(m)).toEqual([
+      { type: "picked_folder", id: "p2", path: null },
+      { type: "picked_folder", id: "p1", path: chosen },
+    ]);
   });
 });
 

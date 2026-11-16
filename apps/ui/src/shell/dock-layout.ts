@@ -11,17 +11,18 @@ export type PresetId = "guided" | "operator";
 export const PRESET_LABELS: Record<PresetId, string> = { guided: "Guided", operator: "Operator" };
 
 /**
- * Guided: the Board and the Conversation in the main area, Board active. Operator: the Board and Capacity in the
- * main area; below it (30 %) the Terminal, the Agent feed and the Ledger, Ledger active.
+ * Guided: Home and the Conversation in the main area, Home active. Operator: Home and Capacity in the main
+ * area; below it (30 %) the Terminal, the Agent feed and the Ledger, Ledger active. The Board is not in a
+ * preset: it opens from the activity bar when "Show the Board" is on.
  */
 export function buildPreset(api: DockviewApi, preset: PresetId): void {
   if (preset === "guided") {
-    api.addPanel({ id: "board", component: "board", title: "Board" });
-    api.addPanel({ id: "conversation", component: "conversation", title: "Conversation", position: { referencePanel: "board", direction: "within" }, inactive: true });
+    api.addPanel({ id: "home", component: "home", title: "Home" });
+    api.addPanel({ id: "conversation", component: "conversation", title: "Conversation", position: { referencePanel: "home", direction: "within" }, inactive: true });
     return;
   }
-  api.addPanel({ id: "board", component: "board", title: "Board" });
-  api.addPanel({ id: "capacity", component: "capacity", title: "Capacity", position: { referencePanel: "board", direction: "within" }, inactive: true });
+  api.addPanel({ id: "home", component: "home", title: "Home" });
+  api.addPanel({ id: "capacity", component: "capacity", title: "Capacity", position: { referencePanel: "home", direction: "within" }, inactive: true });
   api.addPanel({
     id: "terminal",
     component: "terminal",

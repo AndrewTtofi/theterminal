@@ -276,7 +276,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     process.env.THETERMINAL_FAKE_AGENT = "1";
     process.env.THETERMINAL_FAKE_SCRIPT = JSON.stringify(script);
     const s = await start();
-    const empty = { runningAgents: 0, pendingDecisions: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok", secretStore: "memory" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
+    const empty = { runningAgents: 0, pendingDecisions: 0, doneToday: 0, todayCostUsd: 0, monthCostUsd: 0, monthlyBudgetUsd: null, connections: { enabled: 0, failed: 0, keychain: "ok", secretStore: "memory" }, ci: null, intakeDecisions: 0, intakeProjects: [], machines: { linked: 0, online: 0, keyChanged: 0 }, network: { state: "unknown", basis: "inferred", since: null, lastError: null }, shareLinks: 0, remote: { enabled: false, listening: false, label: "off" } };
     expect(await json(get(s, "/api/status"))).toEqual(empty);
 
     const project = await json<{ id: string }>(send(s, "POST", "/api/projects", { name: "P", pitch: "x" }));
@@ -292,7 +292,7 @@ describe("GET /api/status", { timeout: 15000 }, () => {
     await vi.waitFor(async () => {
       expect((await json<{ run: AgentRun }>(get(s, `/api/runs/${run.id}`))).run.status).toBe("completed");
     }, { timeout: 5000, interval: 25 });
-    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, todayCostUsd: 0.25, monthCostUsd: 0.25 });
+    expect(await json(get(s, "/api/status"))).toEqual({ ...empty, doneToday: 1, todayCostUsd: 0.25, monthCostUsd: 0.25 });
 
     await addClaude(s);
     expect((await json<{ connections: unknown }>(get(s, "/api/status"))).connections).toEqual({ enabled: 1, failed: 0, keychain: "ok", secretStore: "memory" });
@@ -529,7 +529,7 @@ describe("what a collaborator sees of connections", { timeout: 15000 }, () => {
       expect(JSON.stringify(body)).not.toContain("keychain");
       expect(JSON.stringify(body)).not.toContain("40");
       expect(Object.keys(body).sort()).toEqual(
-        ["ci", "connections", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
+        ["ci", "connections", "doneToday", "intakeDecisions", "intakeProjects", "machines", "monthCostUsd", "network", "pendingDecisions", "runningAgents", "shareLinks", "todayCostUsd"],
       );
     }
   });

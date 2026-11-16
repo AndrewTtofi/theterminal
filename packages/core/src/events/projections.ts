@@ -1,7 +1,7 @@
 import { DEFAULT_GATE_REQUIREMENT, DEFAULT_REMOTE, MIRRORABLE_TYPES, OWNER_ID } from "@theterminal/shared";
 import type {
   AgentAction, AgentRun, Credential, DecisionId, GateDecision, GateId, GateRequirement, IntakeAnswer, IntakeSession, Invite,
-  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, QuestionId, RemoteState, Role, ShareLink, ShareLinkState,
+  LedgerEntry, LinkRun, LinkRunState, Machine, PendingAgentAction, Person, ProjectSourceKind, QuestionId, RemoteState, Role, RunProgress, ShareLink, ShareLinkState,
   ShareSnapshotRecord, TlsMode,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
@@ -44,6 +44,15 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
       db.prepare(
         "UPDATE agent_runs SET status = ?, cost_usd = ?, input_tokens = ?, output_tokens = ?, error = ?, finished_at = ? WHERE id = ?",
       ).run(p.status, p.costUsd, p.inputTokens ?? null, p.outputTokens ?? null, p.error, e.ts, p.runId);
+      break;
+    case "agent.message":
+      db.prepare("UPDATE agent_runs SET last_message = ? WHERE id = ?").run(p.text, p.runId);
+      break;
+    case "agent.progress":
+      // The latest snapshot only; every earlier one stays in the ledger.
+      db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ?").run(
+        canonicalJson({ steps: p.steps, done: p.done, current: p.current }), p.runId,
+      );
       break;
     case "agent.rate_limited":
       // The adapter comes from the run; an entry for an unknown run projects nothing.
@@ -285,7 +294,26 @@ export function applyEvent(db: Db, e: LedgerEntry): void {
         ).run(e.projectId, p.gateId, canonicalJson(p.requirement));
       }
       break;
-    default: // gate.blocked, person.locked, conversation entries, link.project_received and link.decision_received project nothing
+    case "project.source_set":
+      db.prepare(
+        `INSERT INTO project_sources (project_id, kind, repo, branch, remote_commit, path, synced_commit) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET kind = excluded.kind, repo = excluded.repo, branch = excluded.branch,
+           remote_commit = excluded.remote_commit, path = excluded.path, synced_commit = excluded.synced_commit`,
+      ).run(p.projectId, p.kind, p.repo ?? null, p.branch ?? null, p.remoteCommit ?? null, p.path ?? null, p.syncedCommit);
+      break;
+    case "project.files_imported":
+      db.prepare(
+        `INSERT INTO project_imports (project_id, files) VALUES (?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET files = files + excluded.files`,
+      ).run(p.projectId, p.files);
+      break;
+    case "run.accepted":
+      db.prepare("UPDATE agent_runs SET accepted_commit = ? WHERE id = ?").run(p.commit, p.runId);
+      break;
+    case "project.folder_applied":
+      db.prepare("UPDATE project_sources SET synced_commit = ? WHERE project_id = ?").run(p.to, p.projectId);
+      break;
+    default: // project.published (the pull request is not merged, so the source stays where it was), gate.blocked, person.locked, conversation entries, link.project_received and link.decision_received project nothing
       break;
   }
 }
@@ -439,7 +467,7 @@ const PROJECTION_TABLES = [
   "cards", "projects", "agent_actions", "agent_runs", "settings", "connections", "rate_limits",
   "intakes", "intake_answers", "intake_decisions", "gate_decisions", "share_snapshots", "share_links", "machines", "link_runs",
   // Not sessions or credential_state: neither is in the ledger.
-  "people", "credentials", "invites", "remote_state", "gate_requirements",
+  "people", "credentials", "invites", "remote_state", "gate_requirements", "project_sources", "project_imports",
 ];
 
 /** Rebuilds every projection table from the ledger; with `beforeSeq`, only from entries with seq < beforeSeq. */
@@ -457,6 +485,33 @@ export function rebuildAllProjections(db: Db, ledger: Ledger, opts: { beforeSeq?
   }).immediate();
 }
 
+/** Where a project's files came from; `path` is the Owner's folder path, never shown to anyone else. */
+export type ProjectSource = {
+  projectId: string;
+  kind: ProjectSourceKind;
+  repo: string | null;
+  branch: string | null;
+  remoteCommit: string | null;
+  path: string | null;
+  syncedCommit: string;
+};
+
+export function getProjectSource(db: Db, projectId: string): ProjectSource | null {
+  const r = db.prepare("SELECT * FROM project_sources WHERE project_id = ?").get(projectId) as
+    | { project_id: string; kind: ProjectSourceKind; repo: string | null; branch: string | null; remote_commit: string | null; path: string | null; synced_commit: string }
+    | undefined;
+  if (!r) return null;
+  return {
+    projectId: r.project_id, kind: r.kind, repo: r.repo, branch: r.branch, remoteCommit: r.remote_commit, path: r.path, syncedCommit: r.synced_commit,
+  };
+}
+
+/** How many files were added to the project (uploads and imports together); 0 when none. */
+export function countImportedFiles(db: Db, projectId: string): number {
+  const r = db.prepare("SELECT files FROM project_imports WHERE project_id = ?").get(projectId) as { files: number } | undefined;
+  return r?.files ?? 0;
+}
+
 export function getSetting(db: Db, key: string): string | null {
   const r = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
   return r ? r.value : null;
@@ -467,6 +522,7 @@ type RunRow = {
   auth_mode: AgentRun["authMode"]; prompt: string; status: AgentRun["status"]; worktree: string; base: string | null;
   cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; error: string | null;
   started_at: string; finished_at: string | null; machine_id: string | null;
+  progress: string | null; last_message: string | null; accepted_commit: string | null;
 };
 type ActionRow = {
   id: string; run_id: string; kind: AgentAction["kind"]; tool: string; summary: string; input: string;
@@ -479,6 +535,8 @@ const toRun = (r: RunRow): AgentRun => ({
   prompt: r.prompt, status: r.status, worktree: r.worktree, base: r.base, costUsd: r.cost_usd,
   inputTokens: r.input_tokens, outputTokens: r.output_tokens, error: r.error,
   startedAt: r.started_at, finishedAt: r.finished_at, machineId: r.machine_id,
+  progress: r.progress === null ? null : (JSON.parse(r.progress) as RunProgress), lastMessage: r.last_message,
+  acceptedCommit: r.accepted_commit,
 });
 const toAction = (r: ActionRow): AgentAction => ({
   id: r.id, runId: r.run_id, kind: r.kind, tool: r.tool, summary: r.summary, input: JSON.parse(r.input),
@@ -542,6 +600,8 @@ export type WorkspaceCounts = {
   monthCostUsd: number;
   /** Enabled connections, and those of them whose last test failed. */
   connections: { enabled: number; failed: number };
+  /** Runs that finished (however they ended) on the local calendar day of `now`. */
+  doneToday: number;
 };
 
 /** Counts for the status bar. */
@@ -566,6 +626,9 @@ export function workspaceCounts(db: Db, now: Date = new Date()): WorkspaceCounts
       enabled: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1"),
       failed: count("SELECT COUNT(*) AS n FROM connections WHERE enabled = 1 AND status_state = 'failed'"),
     },
+    doneToday: (db
+      .prepare("SELECT COUNT(*) AS n FROM agent_runs WHERE finished_at >= ? AND finished_at < ?")
+      .get(dayStart.toISOString(), nextDay.toISOString()) as { n: number }).n,
   };
 }
 

@@ -261,4 +261,31 @@ describe("ChangesSideBar", () => {
     expect(await screen.findByText("notes.txt")).toBeTruthy();
     expect(dir).toHaveBeenCalledTimes(2);
   });
+  it("offers Accept these changes on a finished run to a maintainer, listing the files before accepting", async () => {
+    const onAcceptRun = vi.fn().mockResolvedValue(true);
+    setup({ me: { ...OWNER_ME, personId: "m", role: "maintainer" }, onAcceptRun });
+    fireEvent.click(screen.getByRole("button", { name: "Accept these changes" }));
+    const confirm = screen.getByRole("group", { name: "Accept these changes" });
+    expect(within(confirm).getByText("Merge 1 changed file into the project?")).toBeTruthy();
+    expect(within(confirm).getByText("notes.txt")).toBeTruthy();
+    fireEvent.click(within(confirm).getByRole("button", { name: "Accept" }));
+    expect(onAcceptRun).toHaveBeenCalledWith("run1");
+    expect(await screen.findByText("Accepted")).toBeTruthy();
+  });
+
+  it("shows no Accept to a reviewer", () => {
+    setup({ me: { ...OWNER_ME, personId: "r", role: "reviewer" } });
+    expect(screen.queryByRole("button", { name: "Accept these changes" })).toBeNull();
+  });
+
+  it("shows no Accept on a running run", () => {
+    setup({ changesRunId: "run2" });
+    expect(screen.queryByRole("button", { name: "Accept these changes" })).toBeNull();
+  });
+
+  it("says Accepted for a run already accepted", () => {
+    setup({ runs: [{ ...run1, acceptedCommit: "a".repeat(40) }, run2] });
+    expect(screen.getByText("Accepted")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Accept these changes" })).toBeNull();
+  });
 });

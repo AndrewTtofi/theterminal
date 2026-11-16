@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MAX_CHANGED_FILES, MAX_DIR_ENTRIES, plural, visibleControls } from "@theterminal/shared";
 import type { AgentRun, ChangeStatus, ChangedFile, DirEntry, DirListing } from "@theterminal/shared";
+import { AcceptChanges } from "../components/AcceptChanges";
 import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
 import { OverrideSection } from "../components/OverrideSection";
 import { clip } from "../components/text";
@@ -169,6 +170,11 @@ export function ChangesSideBar() {
           Learn more
         </button>
       </p>
+      {run && !live && (
+        <div className="changes-accept">
+          <AcceptChanges key={run.id} run={run} changes={c} />
+        </div>
+      )}
       {runId !== null && !atLeast(roleOf(model), "reviewer") && (
         <p className="note">Only reviewers and above can open file contents.</p>
       )}

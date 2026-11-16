@@ -42,6 +42,14 @@ import type {
   ShareSnapshot,
   ShareSnapshotRecord,
   Stage,
+  ApplyResult,
+  PublishResult,
+  GitHubRepoChoice,
+  HomeRuns,
+  ImportedProject,
+  ImportResult,
+  ProjectFiles,
+  WritebackPreview,
 } from "@theterminal/shared";
 import type { Invite, Me, Person, RemoteState, TlsMode } from "@theterminal/shared";
 import { CHANGES_REFUSED_PHRASES, ROLE_LABELS, requirementLabel, visibleControls, type PresenceEntry, type Role } from "@theterminal/shared";
@@ -74,6 +82,26 @@ export function setUnauthorizedHandler(fn: (() => void) | null): void {
   onUnauthorized = fn;
 }
 
+/** What the Add files dialog sends to open an upload. */
+export type UploadOpen = { files: number; bytes: number; includeSecrets: boolean };
+
+async function refusal(res: Response): Promise<ApiError> {
+  let code = "internal";
+  let detail: unknown;
+  try {
+    const body: unknown = await res.json();
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      const { error, ...rest } = body as Record<string, unknown>;
+      if (typeof error === "string") code = error;
+      if (Object.keys(rest).length > 0) detail = rest;
+    }
+  } catch {
+    // non-JSON error body: keep the default code
+  }
+  if (res.status === 401 && code === "unauthorized") onUnauthorized?.();
+  return new ApiError(res.status, code, detail);
+}
+
 async function request<T>(
   path: string,
   init?: { method: "POST" | "PATCH" | "PUT"; body: unknown } | { method: "POST" | "DELETE" },
@@ -86,22 +114,7 @@ async function request<T>(
       body: JSON.stringify(init.body),
     }),
   });
-  if (!res.ok) {
-    let code = "internal";
-    let detail: unknown;
-    try {
-      const body: unknown = await res.json();
-      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-        const { error, ...rest } = body as Record<string, unknown>;
-        if (typeof error === "string") code = error;
-        if (Object.keys(rest).length > 0) detail = rest;
-      }
-    } catch {
-      // non-JSON error body: keep the default code
-    }
-    if (res.status === 401 && code === "unauthorized") onUnauthorized?.();
-    throw new ApiError(res.status, code, detail);
-  }
+  if (!res.ok) throw await refusal(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -164,6 +177,8 @@ export type Status = {
   network: NetworkState;
   /** Share links being served right now. */
   shareLinks: number;
+  /** Runs that finished today (the server's local time). */
+  doneToday?: number;
   /** Remote access: on or off for everyone; `label` (`<domain or address>:<port>`) is the Owner's alone. */
   remote?: { enabled: boolean; listening: boolean; label?: string };
 };
@@ -239,6 +254,34 @@ const enc = encodeURIComponent;
 
 export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
+  getHome: (projectId: string | null) =>
+    request<HomeRuns>(projectId === null ? "/api/home" : `/api/home?projectId=${enc(projectId)}`),
+  projectFiles: (id: string) => request<ProjectFiles>(`/api/projects/${enc(id)}/files`),
+  githubRepos: () => request<{ repos: GitHubRepoChoice[] }>("/api/github/repos"),
+  createFromGitHub: (i: { repo: string; name?: string; includeSecrets?: boolean }) =>
+    request<ImportedProject>("/api/projects/from-github", { method: "POST", body: i }),
+  createFromFolder: (i: { path: string; name?: string; includeSecrets?: boolean }) =>
+    request<ImportedProject>("/api/projects/from-folder", { method: "POST", body: i }),
+  pickFolder: () => request<{ path: string | null }>("/api/host/pick-folder", { method: "POST", body: {} }),
+  openUpload: (id: string, i: UploadOpen) => request<{ uploadId: string }>(`/api/projects/${enc(id)}/uploads`, { method: "POST", body: i }),
+  /** One file of an upload, streamed as the raw request body (nothing holds the whole upload in memory). */
+  putUploadFile: async (uploadId: string, path: string, file: Blob): Promise<void> => {
+    const res = await fetch(`/api/uploads/${enc(uploadId)}/file?path=${enc(path)}`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "content-type": "application/octet-stream" },
+      body: file,
+    });
+    if (!res.ok) throw await refusal(res);
+  },
+  commitUpload: (uploadId: string) => request<ImportResult>(`/api/uploads/${enc(uploadId)}/commit`, { method: "POST", body: {} }),
+  cancelUpload: (uploadId: string) => request<void>(`/api/uploads/${enc(uploadId)}`, { method: "DELETE" }),
+  acceptRun: (id: string) => request<{ commit: string }>(`/api/runs/${enc(id)}/accept`, { method: "POST", body: {} }),
+  writebackPreview: (id: string) => request<WritebackPreview>(`/api/projects/${enc(id)}/writeback`),
+  applyToFolder: (id: string, head: string) =>
+    request<ApplyResult>(`/api/projects/${enc(id)}/apply`, { method: "POST", body: { head } }),
+  publishToGitHub: (id: string, head: string) =>
+    request<PublishResult>(`/api/projects/${enc(id)}/publish`, { method: "POST", body: { head } }),
   createProject: (i: { name: string; pitch?: string }) =>
     request<Project>("/api/projects", { method: "POST", body: i }),
   getBoard: (id: string) => request<Board>(`/api/projects/${encodeURIComponent(id)}/board`),
@@ -533,9 +576,21 @@ function remoteRefusal(e: ApiError): string {
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
  * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair" | "sources"): string {
   if (e instanceof ApiError) {
     if (e.code === "remote_refused") return remoteRefusal(e);
+    if (e.code === "limit_exceeded") {
+      return "That is more than The Terminal takes at once: up to 2,000 files, 200 MB in total and 50 MB per file.";
+    }
+    if (e.code === "possible_secrets") {
+      const names = Array.isArray((e.detail as { names?: unknown } | undefined)?.names)
+        ? ((e.detail as { names: unknown[] }).names.filter((n): n is string => typeof n === "string").slice(0, 20))
+        : [];
+      return `These files may contain secrets: ${names.join(", ")}. Tick “include files that may contain secrets” to add them anyway.`;
+    }
+    if (e.code === "merge_conflict") return "These changes clash with newer work. Ask an agent to redo them on top of the latest files.";
+    if (e.code === "folder_unavailable") return "The original folder can't be found.";
+    if (e.code === "local_only") return "This works only on the computer The Terminal runs on.";
     // The machine a run is on refused a decision or a stop (502): fixed words, nothing of its reply.
     if (e.code === "machine_refused") return "The linked machine refused the request. Nothing was changed.";
     if (context === "run" && e.code === "machine_unreachable") return "Could not reach that machine. Nothing was started.";
@@ -551,6 +606,9 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (people !== null) return people;
     if (e.status === 423) return "Workspace is read-only";
     // The share view's refusals, before the generic 400, 404 and 409 wordings below.
+    if (context === "sources" && e.code === "preview_stale") {
+      return "The files changed since you looked. Review the list again.";
+    }
     if (e.code === "preview_stale" || e.code === "preview_not_found") {
       return "The preview has changed or expired. Preview again before confirming.";
     }

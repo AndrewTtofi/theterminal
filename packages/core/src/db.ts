@@ -177,6 +177,14 @@ const MIGRATIONS = [
   CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, person_id TEXT NOT NULL, listener TEXT NOT NULL, method TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT);
   CREATE INDEX sessions_person ON sessions (person_id);
   CREATE TABLE credential_state (credential_id TEXT PRIMARY KEY, counter INTEGER NOT NULL);`,
+  // Home: a run's latest step report (JSON), its last message, and the commit it was accepted into.
+  `ALTER TABLE agent_runs ADD COLUMN progress TEXT;
+  ALTER TABLE agent_runs ADD COLUMN last_message TEXT;
+  ALTER TABLE agent_runs ADD COLUMN accepted_commit TEXT;`,
+  // Project sources: where a project's files came from (GitHub or a folder, whose path only the Owner sees) and the
+  // last commit written back to it; and how many files were added to each project.
+  `CREATE TABLE project_sources (project_id TEXT PRIMARY KEY, kind TEXT NOT NULL, repo TEXT, branch TEXT, remote_commit TEXT, path TEXT, synced_commit TEXT NOT NULL);
+  CREATE TABLE project_imports (project_id TEXT PRIMARY KEY, files INTEGER NOT NULL);`,
 ];
 
 export type Db = Database.Database;

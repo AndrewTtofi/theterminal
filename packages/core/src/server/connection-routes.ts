@@ -146,6 +146,8 @@ export function registerConnectionRoutes(app: FastifyInstance, deps: ConnectionR
     const shared = {
       runningAgents: counts.runningAgents,
       pendingDecisions: counts.pendingDecisions,
+      // Runs that finished today, however they ended (Home's "done today").
+      doneToday: counts.doneToday,
       todayCostUsd: counts.todayCostUsd,
       monthCostUsd: counts.monthCostUsd,
       connections: { enabled: counts.connections.enabled, failed: counts.connections.failed },

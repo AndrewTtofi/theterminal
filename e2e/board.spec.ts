@@ -1,11 +1,12 @@
 import { test, expect } from "@playwright/test";
-import { operatorLayout } from "./support.js";
+import { enableBoard, openBoard, operatorLayout } from "./support.js";
 
 test("full board + ledger flow served by core", async ({ page, browser }) => {
   const url = process.env.TT_E2E_URL!;
   const origin = new URL(url).origin;
 
   // 1. the token moves into a cookie and disappears from the URL
+  await enableBoard(page);
   await page.goto(url);
   await expect(page).toHaveURL(`${origin}/`);
 
@@ -14,6 +15,7 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "Local Model Hub" })).toHaveClass(/selected/);
   await operatorLayout(page);
+  await openBoard(page);
 
   // 3. add a card to Design and move it to Build (no gate stands between them; a move out of Plan needs a plan)
   await page.getByLabel("Add card to Design").fill("Detect GPU");

@@ -241,6 +241,25 @@ describe("displayEntry", () => {
 });
 
 describe("remoteDisplay", () => {
+  it("re-cleans a remote run's step texts and last message with this machine's redaction, at most 80 characters a step", () => {
+    accept(remote.line(remote.started()));
+    expect(accept(remote.line(remote.message(`done with ${SECRET}`))).ok).toBe(true);
+    const progress = remote.record("agent.progress", {
+      runId: remote.runId, steps: [`Use ${SECRET} \u202e ${"q".repeat(40)}`, "Fix"], done: [], current: 1,
+    });
+    expect(accept(remote.line(progress)).ok).toBe(true);
+    const run = getRun(db, remote.runId)!;
+    expect(run.progress!.steps[0]).toContain(SECRET); // the projection keeps what the worker sent
+    const shown = remoteDisplay(db).run(run);
+    expect(shown.lastMessage).toBe("done with [REDACTED]");
+    expect(shown.progress!.steps[0]).not.toContain("TESTKEY");
+    expect(shown.progress!.steps[0]).not.toContain("\u202e");
+    expect(shown.progress!.steps[0]!.length).toBeLessThanOrEqual(80);
+    expect(shown.progress).toMatchObject({ done: [], current: 1 });
+    expect(shown.progress!.steps[1]).toBe("Fix");
+    expect(remoteDisplay(db, (s) => s.replace("Fix", "cleaned")).run(run).progress!.steps[1]).toBe("cleaned");
+  });
+
   it("cleans a remote run's free text and its actions', and leaves this machine's runs and the worktree alone", async () => {
     accept(remote.line(remote.started()));
     accept(remote.line(remote.requested("act-1", `echo ${SECRET}`)));

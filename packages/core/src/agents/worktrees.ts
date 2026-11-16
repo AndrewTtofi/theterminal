@@ -1,8 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, closeSync, constants, copyFileSync, lstatSync, mkdirSync, mkdtempSync, openSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { checkImportPath, type PathRefusal } from "@theterminal/shared";
+import { PathRefusedError } from "../sources/staging.js";
 import { allowlistedEnv } from "./env-allowlist.js";
 
 const execFileAsync = promisify(execFile);
@@ -148,6 +152,20 @@ const REPO_CONFIG: [key: string, value: string][] = [
  * work here: git on Windows cannot open `\\.\nul` as a config file.
  */
 export const EMPTY_GITCONFIG = ".theterminal-empty-gitconfig";
+/** Scratch directories (an index, a pathspec file) for imports, materialising and run snapshots, inside dataDir. */
+const SCRATCH_PREFIX = ".theterminal-import-";
+const COMMIT_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** Adding or checking out up to 200 MiB of imported files takes longer than an ordinary call. */
+const IMPORT_GIT_TIMEOUT_MS = 5 * 60_000;
+const IMPORT_GIT_MAX_BUFFER = 32 * 1024 * 1024;
+/** Imported and written-back bytes stay exactly as they are: no end-of-line conversion on add or checkout. */
+const NO_EOL_CONVERSION = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"] as const;
+/** The repo's own identity for a commit The Terminal writes with `commit-tree`, whatever a worktree configures. */
+const COMMIT_IDENTITY = Object.fromEntries(
+  REPO_CONFIG.filter(([k]) => k.startsWith("user.")).flatMap(([k, v]) =>
+    k === "user.name" ? [["GIT_AUTHOR_NAME", v], ["GIT_COMMITTER_NAME", v]] : [["GIT_AUTHOR_EMAIL", v], ["GIT_COMMITTER_EMAIL", v]],
+  ),
+) as Partial<Record<GitEnvName, string>>;
 
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 
@@ -428,6 +446,17 @@ export class WorktreeManager {
       if (this.queues.get(projectId) === tail) this.queues.delete(projectId);
     });
     return next;
+  }
+
+  /**
+   * Runs `fn` in the project's queue, after all earlier work on the project's repository has settled and before any
+   * later work starts: for a caller that changes the project repo itself through runGit (a merge, say). `fn` must not
+   * call this manager's queued methods for the same project (ensureProjectRepo, commitFiles, materialise,
+   * snapshotRun, createRunWorktree), which would wait on `fn` forever.
+   */
+  withProjectLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+    assertId("projectId", projectId);
+    return this.serialize(projectId, fn);
   }
 
   /** The project's own repository: `<dataDir>/projects/<projectId>/repo`. */
@@ -778,6 +807,139 @@ export class WorktreeManager {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) throw new Error("the new worktree has no commit to fork from");
       const relPath = relative(this.dataDir, absPath).split(sep).join("/");
       return { absPath, relPath, base };
+    });
+  }
+
+  /**
+   * A scratch directory inside dataDir for one operation's index or pathspec file, removed after `fn` (never inside a
+   * repository or worktree, so nothing lands in a git directory an agent can see).
+   */
+  private async withScratch<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+    const dir = mkdtempSync(join(this.dataDir, SCRATCH_PREFIX));
+    try {
+      return await fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }
+
+  /**
+   * Commits staged import files into the project repo and returns HEAD. Each path must pass `checkImportPath`, its
+   * staged copy must be a regular file (never a symlink), and its target in the repo must be exactly where the path
+   * says, with no symlink on the way (`resolveInside`, compared with the plain join); any refusal throws
+   * PathRefusedError before anything is copied. The files are copied in, added with `--force` (an ignored name is
+   * still imported) from a NUL-separated pathspec file under `--literal-pathspecs`, and committed with
+   * `--no-verify` under the repo's own identity. With nothing changed, HEAD is returned without a commit.
+   */
+  async commitFiles(projectId: string, stagingDir: string, files: string[], message: string): Promise<string> {
+    assertId("projectId", projectId);
+    return this.serialize(projectId, async () => {
+      const scope = new GitScope();
+      const repo = await this.initRepo(projectId, scope);
+      const root = realpathSync.native(repo);
+      const copies: { from: string; to: string; path: string }[] = [];
+      for (const f of files) {
+        const checked = checkImportPath(f);
+        if (!checked.ok) throw new PathRefusedError(checked.reason);
+        const segments = checked.path.split("/");
+        const from = join(stagingDir, ...segments);
+        const st = lstatSync(from, { throwIfNoEntry: false });
+        if (st === undefined || !st.isFile()) throw new PathRefusedError("link");
+        const plain = join(root, ...segments);
+        const to = this.resolveInside(repo, checked.path);
+        if (to === null || fold(normalize(to)) !== fold(normalize(plain))) throw new PathRefusedError("link");
+        copies.push({ from, to: plain, path: checked.path });
+      }
+      if (copies.length === 0) return (await this.runGit(repo, ["rev-parse", "HEAD"], { scope })).trim();
+      for (const c of copies) {
+        mkdirSync(dirname(c.to), { recursive: true });
+        copyFileSync(c.from, c.to);
+      }
+      return this.withScratch(async (dir) => {
+        const spec = join(dir, "pathspec");
+        writeFileSync(spec, copies.map((c) => `${c.path}\0`).join(""));
+        await this.runGit(
+          repo,
+          [...NO_EOL_CONVERSION, "--literal-pathspecs", "add", "--force", `--pathspec-from-file=${spec}`, "--pathspec-file-nul"],
+          { scope, timeoutMs: IMPORT_GIT_TIMEOUT_MS },
+        );
+        const staged = await this.runGit(repo, ["diff", "--cached", "--name-only", "-z"], { scope, maxBuffer: IMPORT_GIT_MAX_BUFFER });
+        if (staged.length > 0) {
+          await this.runGit(repo, ["commit", "--no-verify", "-q", "-m", message], { scope, timeoutMs: IMPORT_GIT_TIMEOUT_MS });
+        }
+        return (await this.runGit(repo, ["rev-parse", "HEAD"], { scope })).trim();
+      });
+    });
+  }
+
+  /**
+   * Writes the files `paths` as they are at `commit` into `dir` (`checkout <commit> -- <paths>` with `--work-tree`
+   * set to `dir` and a scratch index), without touching the project repo's own working tree or index. The bytes are
+   * written exactly: no end-of-line conversion and no attributes from the tree (runGit's empty attribute source).
+   * A path `checkImportPath` refuses (one this computer cannot store, say) is never written: it is returned with the
+   * reason, and the rest are still written.
+   */
+  async materialise(projectId: string, commit: string, paths: string[], dir: string): Promise<{ path: string; reason: PathRefusal }[]> {
+    assertId("projectId", projectId);
+    if (!COMMIT_PATTERN.test(commit)) throw new Error("invalid commit");
+    const checked: string[] = [];
+    const refused: { path: string; reason: PathRefusal }[] = [];
+    for (const p of paths) {
+      const c = checkImportPath(p);
+      if (c.ok) checked.push(c.path);
+      else refused.push({ path: p, reason: c.reason });
+    }
+    return this.serialize(projectId, async () => {
+      if (checked.length === 0) return refused;
+      const repo = this.repoPath(projectId);
+      const scope = new GitScope();
+      await this.withScratch(async (scratch) => {
+        const spec = join(scratch, "pathspec");
+        writeFileSync(spec, checked.map((p) => `${p}\0`).join(""));
+        await this.runGit(
+          repo,
+          [...NO_EOL_CONVERSION, "--literal-pathspecs", "checkout", commit, `--pathspec-from-file=${spec}`, "--pathspec-file-nul"],
+          { scope, gitDir: join(repo, ".git"), workTree: dir, indexFile: join(scratch, "index"), timeoutMs: IMPORT_GIT_TIMEOUT_MS },
+        );
+      });
+      return refused;
+    });
+  }
+
+  /**
+   * The run's working copy as a commit `Run <id8>` whose parent is the worktree's HEAD, built through a scratch index
+   * (`read-tree HEAD`, `add -A`, `write-tree`, `commit-tree`): the tree the Changes view shows, untracked files
+   * included and ignored ones left out. Nothing of the run's own index, branch or files changes. The worktree must be
+   * the project repo's entry for the run (its common git directory is the repo's `.git`).
+   */
+  async snapshotRun(projectId: string, runId: string): Promise<string> {
+    assertId("projectId", projectId);
+    assertId("runId", runId);
+    return this.serialize(projectId, async () => {
+      const repo = this.repoPath(projectId);
+      const abs = join(this.dataDir, "projects", projectId, "worktrees", runId);
+      const gitDir = join(repo, ".git", "worktrees", runId);
+      const scope = new GitScope();
+      const opts = { scope, gitDir, workTree: abs };
+      const common = (await this.runGit(abs, ["rev-parse", "--git-common-dir"], opts)).trim();
+      if (fold(realpathSync.native(resolve(abs, common))) !== fold(realpathSync.native(join(repo, ".git")))) {
+        throw new Error("the run's worktree is not the project repository's");
+      }
+      return this.withScratch(async (scratch) => {
+        const indexFile = join(scratch, "index");
+        const scratchOpts = { ...opts, indexFile };
+        await this.runGit(abs, ["read-tree", "HEAD"], scratchOpts);
+        await this.runGit(abs, [...NO_EOL_CONVERSION, "add", "-A"], { ...scratchOpts, timeoutMs: IMPORT_GIT_TIMEOUT_MS });
+        const tree = (await this.runGit(abs, ["write-tree"], scratchOpts)).trim();
+        const commit = (
+          await this.runGit(abs, ["commit-tree", tree, "-p", "HEAD", "-m", `Run ${runId.slice(0, 8)}`], {
+            ...opts,
+            env: COMMIT_IDENTITY,
+          })
+        ).trim();
+        if (!COMMIT_PATTERN.test(commit)) throw new Error("the snapshot did not produce a commit");
+        return commit;
+      });
     });
   }
 

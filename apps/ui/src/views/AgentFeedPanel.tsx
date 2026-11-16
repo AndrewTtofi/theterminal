@@ -1,7 +1,8 @@
 import { useMemo, useRef } from "react";
-import { innerEntry, narrate, visibleControls } from "@theterminal/shared";
+import { innerEntry, jobTitle, narrate, progressPercent, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, Narration, NarrationContext } from "@theterminal/shared";
 import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
+import { ProgressBar, StepChecklist } from "../components/ProgressBar";
 import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
 import { clip, stripAnsiDeep } from "../components/text";
 import { namesRun, useShell } from "../shell/model";
@@ -82,6 +83,8 @@ export function AgentFeedPanel() {
   const shown = useMemo(() => all.slice(-FEED_LIMIT), [all]);
   const items = useNarrations(shown, narration);
   const follow = useFollowBottom<HTMLUListElement>(items.map(({ e }) => String(e.seq)));
+  const followed = feedRunId === null ? undefined : runs.find((r) => r.id === feedRunId);
+  const plan = followed?.progress && followed.progress.steps.length > 0 ? followed.progress : null;
   const working = runs.some((r) => r.status === "running" && (feedRunId === null || r.id === feedRunId));
 
   return (
@@ -90,6 +93,12 @@ export function AgentFeedPanel() {
         <FollowSelect />
         {all.length > FEED_LIMIT && <p className="note">Showing the latest {FEED_LIMIT}</p>}
       </div>
+      {followed && plan && (
+        <div className="feed-progress">
+          <ProgressBar percent={progressPercent(plan)} label={jobTitle(followed)} />
+          <StepChecklist progress={plan} />
+        </div>
+      )}
       {items.length === 0 ? (
         <p className="empty">Nothing to show yet. Start an agent in the Agents view or the Conversation tab.</p>
       ) : (

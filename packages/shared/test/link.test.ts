@@ -60,7 +60,7 @@ describe("link constants", () => {
 
   it("lists the mirrorable types", () => {
     expect([...MIRRORABLE_TYPES]).toEqual([
-      "agent.started", "agent.message", "agent.action.requested", "agent.action.decided", "agent.action.completed",
+      "agent.started", "agent.message", "agent.progress", "agent.action.requested", "agent.action.decided", "agent.action.completed",
       "agent.finished", "agent.rate_limited", "connection.used",
     ]);
   });
@@ -187,6 +187,12 @@ describe("mirroredOriginSchema", () => {
     expect(mirroredOriginSchema.safeParse(origin({
       type: "connection.used", projectId: null, payload: { connectionId: "c1", name: "n", runId: "r1", purpose: "local_model" },
     })).success).toBe(true);
+  });
+
+  it("accepts a valid agent.progress and refuses a bad one", () => {
+    const good = { runId: "r1", steps: ["a", "b"], done: [1], current: 2 };
+    expect(mirroredOriginSchema.safeParse(origin({ type: "agent.progress", payload: good })).success).toBe(true);
+    expect(mirroredOriginSchema.safeParse(origin({ type: "agent.progress", payload: { ...good, done: [3] } })).success).toBe(false);
   });
 
   it("refuses a type that is not mirrorable", () => {

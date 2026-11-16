@@ -25,6 +25,28 @@ export async function openView(page: Page, name: string) {
   await expect(button).toHaveAttribute("aria-pressed", "true");
 }
 
+/** Per-device workspace settings key (`apps/ui/src/shell/workspace-store.ts`). */
+const WORKSPACE_KEY = "tt.workspace.v1";
+
+/** Turns "Show the Board" on for every page this test opens, through an init script. Call it before `page.goto`. */
+export async function enableBoard(page: Page) {
+  await page.addInitScript((key) => {
+    try {
+      localStorage.setItem(key, JSON.stringify({ showBoard: true }));
+    } catch {
+      // storage unavailable: the Board stays hidden
+    }
+  }, WORKSPACE_KEY);
+}
+
+/** Opens (or brings back and focuses) the Board tab from its activity bar button. Needs `enableBoard` first. */
+export async function openBoard(page: Page) {
+  const button = page.getByRole("navigation", { name: "Views" }).getByRole("button", { name: "Board", exact: true });
+  await button.click();
+  // Clicking the active view's button hides the side bar; the tab is open either way.
+  await expect(page.getByRole("tab", { name: "Board" })).toBeVisible();
+}
+
 /** Shows every project's entries (connection entries belong to no project) in the Ledger panel. */
 export async function showAllProjects(page: Page) {
   await openView(page, "Ledger");
@@ -40,13 +62,15 @@ export async function operatorLayout(page: Page) {
   await expect(page.getByRole("tab", { name: "Ledger" })).toBeVisible();
 }
 
-/** Opens the agent server, creates (and selects) a project, and chooses the Operator layout. */
+/** Opens the agent server, creates (and selects) a project, chooses the Operator layout and opens the Board tab. */
 export async function openProject(page: Page, name: string) {
+  await enableBoard(page);
   await page.goto(process.env.TT_E2E_AGENT_URL!);
   await page.getByLabel("New project name").fill(name);
   await page.getByLabel("New project name").press("Enter");
   await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
   await operatorLayout(page);
+  await openBoard(page);
 }
 
 /** Opens a catalog entry's editor from the Connections view (a new connection, or the existing one). */
@@ -330,3 +354,34 @@ export async function invite(owner: Page, role: "Viewer" | "Reviewer" | "Maintai
   await expect(dialog).toHaveCount(0);
   return url;
 }
+
+/** What the Home server's fake agent writes to src/app.txt once its write is allowed (e2e/global-setup.ts). */
+export const HOME_APP_TEXT = "the app text, as the agent changed it\n";
+
+// Home (home.spec.ts, sources.spec.ts).
+export const views = (page: Page) => page.getByRole("navigation", { name: "Views" });
+export const homeView = (page: Page) => page.locator(".home-view");
+export const homeBlock = (page: Page, name: string) => homeView(page).getByRole("region", { name, exact: true });
+
+/** Creates and selects an empty project from the Projects list. */
+export async function newProject(page: Page, name: string) {
+  await page.getByLabel("New project name").fill(name);
+  await page.getByLabel("New project name").press("Enter");
+  await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+}
+
+/** Starts the fake agent from Home's ask box. */
+export async function askOnHome(page: Page, prompt: string) {
+  const ask = homeBlock(page, "Ask box");
+  await ask.getByLabel("Ask with").selectOption("fake");
+  await ask.getByLabel("Tell an agent what you want").fill(prompt);
+  await ask.getByRole("button", { name: "Go" }).click();
+}
+
+/** The approval row on Home whose sentence matches `sentence`. */
+export const approvalRow = (page: Page, sentence: RegExp) =>
+  homeBlock(page, "Needs your approval").getByRole("listitem").filter({ has: page.locator(".approval-sentence", { hasText: sentence }) });
+
+/** The Working now card of the run started with `prompt`, and its progress bar. */
+export const workingCard = (page: Page, prompt: string) => homeBlock(page, "Working now").getByRole("article", { name: prompt });
+

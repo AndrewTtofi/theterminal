@@ -638,6 +638,21 @@ export class ConnectionService {
   }
 
   /**
+   * The token of the first enabled GitHub connection that has one, whether or not it names a repository: for listing,
+   * importing from and publishing to the person's repositories.
+   */
+  githubToken(): { connectionId: string; token: string } | null {
+    const rows = this.db
+      .prepare("SELECT id FROM connections WHERE provider = 'github' AND enabled = 1 ORDER BY created_at, rowid")
+      .all() as { id: string }[];
+    for (const row of rows) {
+      const token = this.cache.get(row.id)?.token;
+      if (token) return { connectionId: row.id, token };
+    }
+    return null;
+  }
+
+  /**
    * Records a hardware detection in the This computer connection: added when absent, else updated with the new config
    * (every detection is recorded, as its time changes). Whether it is enabled stays the Owner's choice. Detections run
    * one at a time, so two at once never both add it.

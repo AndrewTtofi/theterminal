@@ -13,11 +13,11 @@ type Placed = { id: DockPanelId; where: "main" | "bottom" };
 
 const PRESETS: Record<PresetId, Placed[]> = {
   guided: [
-    { id: "board", where: "main" },
+    { id: "home", where: "main" },
     { id: "conversation", where: "main" },
   ],
   operator: [
-    { id: "board", where: "main" },
+    { id: "home", where: "main" },
     { id: "capacity", where: "main" },
     { id: "terminal", where: "bottom" },
     { id: "agent_feed", where: "bottom" },
@@ -26,6 +26,7 @@ const PRESETS: Record<PresetId, Placed[]> = {
 };
 /** Built-in panels focus() opens when absent. */
 const BUILT_IN: Placed[] = [
+  { id: "home", where: "main" },
   { id: "board", where: "main" },
   { id: "agent_feed", where: "bottom" },
   { id: "ledger", where: "bottom" },
@@ -38,6 +39,13 @@ const BUILT_IN: Placed[] = [
   { id: "share", where: "main" },
   { id: "digest", where: "main" },
   { id: "people", where: "main" },
+];
+
+/** Home and the Board beside the Conversation: the layout most shell tests start from, since they exercise the Board. */
+export const WITH_BOARD: Placed[] = [
+  { id: "home", where: "main" },
+  { id: "board", where: "main" },
+  { id: "conversation", where: "main" },
 ];
 
 /**

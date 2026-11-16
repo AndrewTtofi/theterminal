@@ -13,9 +13,9 @@ export { diffPanelId, filePanelId, parsePanelPath } from "./dock-layout";
 
 /** `diff:` and `file:` ids are `<runId>:<encodeURIComponent(path)>`. */
 export type DockPanelId =
-  | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | "conversation" | "needs_you" | "terminal" | "link_machine"
+  | "home" | "board" | "agent_feed" | "ledger" | "capacity" | "intake" | "conversation" | "needs_you" | "terminal" | "link_machine"
   | "share" | "digest" | "people"
-  | `connection:${string}` | `story:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
+  | `connection:${string}` | `story:${string}` | `timeline:${string}` | `diff:${string}:${string}` | `file:${string}:${string}`;
 export type DockApi = {
   open(id: DockPanelId, title: string, where: "main" | "bottom"): void;
   focus(id: DockPanelId): void;
@@ -42,6 +42,7 @@ export type DockApi = {
 const BOTTOM_IDS: DockPanelId[] = ["terminal", "agent_feed", "ledger"];
 /** Where focus() reopens a built-in panel the Owner closed. */
 const DEFAULTS: Partial<Record<DockPanelId, { title: string; where: "main" | "bottom" }>> = {
+  home: { title: "Home", where: "main" },
   board: { title: "Board", where: "main" },
   agent_feed: { title: "Agent feed", where: "bottom" },
   ledger: { title: "Ledger", where: "bottom" },
@@ -119,9 +120,9 @@ function makeDockApi(api: DockviewApi, layoutKey: string, components: readonly s
       });
       return;
     }
-    // Main area: beside the board, else in any group that is not the bottom panel.
+    // Main area: beside Home or the board, else in any group that is not the bottom panel.
     const bottomGroup = bottomPanel(api)?.group;
-    const main = api.getPanel("board")?.group ?? api.groups.find((g) => g !== bottomGroup);
+    const main = api.getPanel("home")?.group ?? api.getPanel("board")?.group ?? api.groups.find((g) => g !== bottomGroup);
     api.addPanel({
       id,
       component: componentOf(id),

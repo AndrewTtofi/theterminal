@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import type { HostMessage, ReadyMessage } from "@theterminal/core/dist/host.js";
+import type { HostMessage, PickFolderMessage, ReadyMessage } from "@theterminal/core/dist/host.js";
+import { isPickablePath } from "./folder-pick.js";
 
 const STDERR_TAIL = 4000;
 const TIMED_OUT = "timed out waiting for the server";
@@ -142,6 +143,14 @@ function isReadyMessage(m: unknown): m is ReadyMessage {
   return r?.type === "ready" && typeof r.url === "string" && Number.isInteger(r.port);
 }
 
+/** A pick id: 1–64 letters, digits, `-` or `_` (the server child uses a UUID). */
+const PICK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+function isPickFolderMessage(m: unknown): m is PickFolderMessage {
+  const r = m as Partial<PickFolderMessage> | null;
+  return typeof r === "object" && r !== null && r.type === "pick_folder" && typeof r.id === "string" && PICK_ID.test(r.id);
+}
+
 /**
  * Starts the server child (`<nodeFile> <cliFile> ...args`) with an IPC channel and exactly the given environment,
  * never through a shell. Its stdout and stderr go to `logFile`. `ready` settles once: with the first valid ready
@@ -149,6 +158,11 @@ function isReadyMessage(m: unknown): m is ReadyMessage {
  * child is then terminated). `stop()` asks for a shutdown over IPC and terminates the child after `stopTimeoutMs`.
  * Termination is SIGTERM, then after `killGraceMs` SIGKILL (POSIX); on win32 `taskkill /T /F` on the process tree, then
  * `kill()` after `killGraceMs` if that did not end the child.
+ *
+ * A valid `pick_folder` request from the child calls `onPickFolder` (the native folder dialog) and answers the child,
+ * and only the child, with `picked_folder` and the same id. One dialog runs at a time: a request while one is open is
+ * answered null at once. The path is null when there is no `onPickFolder`, it fails, or it gives anything but an
+ * absolute path of at most 4096 characters. Malformed requests are ignored.
  */
 export function startServer(o: {
   nodeFile: string;
@@ -159,6 +173,7 @@ export function startServer(o: {
   readyTimeoutMs?: number;
   stopTimeoutMs?: number;
   killGraceMs?: number;
+  onPickFolder?: () => Promise<string | null>;
 }): ServerHandle {
   const readyTimeoutMs = o.readyTimeoutMs ?? 60_000;
   const stopTimeoutMs = o.stopTimeoutMs ?? 10_000;
@@ -199,8 +214,34 @@ export function startServer(o: {
     void terminate();
   }, readyTimeoutMs);
 
+  const answerPick = (id: string, path: string | null) => {
+    if (!child.connected) return;
+    const answer: HostMessage = { type: "picked_folder", id, path };
+    try {
+      child.send(answer, () => {});
+    } catch {
+      // The channel is closing; the child's own pick times out.
+    }
+  };
+  let picking = false;
+  const pickFolder = (id: string) => {
+    if (picking || !o.onPickFolder) return answerPick(id, null);
+    picking = true;
+    void Promise.resolve()
+      .then(() => o.onPickFolder!())
+      .then(
+        (path) => (isPickablePath(path) ? path : null),
+        () => null,
+      )
+      .then((path) => {
+        picking = false;
+        answerPick(id, path);
+      });
+  };
+
   child.on("message", (message: unknown) => {
     if (isReadyMessage(message)) settle(() => resolveReady(message));
+    else if (isPickFolderMessage(message)) pickFolder(message.id);
   });
   let spawnError: Error | null = null;
   child.on("error", (err) => {

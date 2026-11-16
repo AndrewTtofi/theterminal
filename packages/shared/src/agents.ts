@@ -27,6 +27,10 @@ export type ActionKind = (typeof ACTION_KINDS)[number];
 export type ActionStatus = "pending" | "allowed" | "denied" | "completed" | "failed";
 export type RunStatus = "running" | "completed" | "failed" | "stopped";
 
+/** The plan an agent stated and how far it got; every number is 1-based. */
+export type RunProgress = { steps: string[]; done: number[]; current: number | null };
+export const PROGRESS_LIMITS = { maxSteps: 7, stepChars: 80 } as const;
+
 export type AgentRun = {
   id: string;
   projectId: string;
@@ -51,6 +55,12 @@ export type AgentRun = {
   finishedAt: string | null;
   /** The linked machine the run executes on; null when it runs on this computer. */
   machineId: string | null;
+  /** The latest `agent.progress` snapshot; null or absent when the agent stated no plan. */
+  progress?: RunProgress | null;
+  /** The agent's last message (cleaned); null or absent when it said nothing. */
+  lastMessage?: string | null;
+  /** The commit the run was accepted into; null or absent while it is not accepted. */
+  acceptedCommit?: string | null;
 };
 
 export type AgentAction = {
@@ -114,6 +124,23 @@ export const agentPayloadSchemas = {
     })
     .strict(),
   "agent.message": z.object({ runId: id, text: z.string().max(4000) }).strict(),
+  "agent.progress": z
+    .object({
+      runId: id,
+      steps: z.array(z.string().min(1).max(PROGRESS_LIMITS.stepChars)).min(1).max(PROGRESS_LIMITS.maxSteps),
+      done: z.array(z.number().int().min(1).max(PROGRESS_LIMITS.maxSteps)),
+      current: z.number().int().min(1).max(PROGRESS_LIMITS.maxSteps).nullable(),
+    })
+    .strict()
+    .superRefine((v, ctx) => {
+      const n = v.steps.length;
+      if (v.done.some((d, i) => d > n || (i > 0 && d <= v.done[i - 1]!))) {
+        ctx.addIssue({ code: "custom", path: ["done"], message: "must be unique, ascending and within the steps" });
+      }
+      if (v.current !== null && v.current > n) {
+        ctx.addIssue({ code: "custom", path: ["current"], message: "must be within the steps" });
+      }
+    }),
   "agent.action.requested": z
     .object({
       runId: id,

@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { ACTION_KINDS, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
+import { ACTION_KINDS, PROGRESS_LIMITS, visibleControls, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
 import { pairValueSecrets, type McpServerSpec } from "../connections/mcp.js";
 import { ConflictError, UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
@@ -15,6 +15,7 @@ import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./adapter.js";
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
+import { ProgressTracker, STEP_PLAN_INSTRUCTION } from "./progress.js";
 import { redact, truncate } from "./redact.js";
 import { ProviderSettings } from "./settings.js";
 import { pathScrubber, usernameScrubber, type Scrub } from "./scrub-paths.js";
@@ -191,6 +192,8 @@ type Session = {
   failure: string | null;
   /** This run's own secrets (minted cloud values, MCP env and header values), redacted with the global ones. */
   secrets: string[];
+  /** Reads the agent's step reports out of its own messages. */
+  progress: ProgressTracker;
 };
 type Payload = Record<string, unknown>;
 type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string; machine_id: string | null };
@@ -587,6 +590,8 @@ export class AgentRunner {
     const session: Session = {
       projectId: run.projectId, scrub, abort, done: Promise.resolve(), costUsd: null, inputTokens: null, outputTokens: null, failure: null,
       secrets,
+      // A step text is the agent's own words: cleaned like every recorded text, controls made visible, then clipped.
+      progress: new ProgressTracker((s) => truncate(visibleControls(this.clean(s, Infinity, scrub, secrets)), PROGRESS_LIMITS.stepChars)),
     };
     this.sessions.set(run.id, session);
     this.unsettled.add(run.id);
@@ -595,7 +600,8 @@ export class AgentRunner {
       let error: string | null = null;
       try {
         const r = await adapter.start({
-          cwd, projectId: run.projectId, prompt, authMode, signal: abort.signal,
+          // The step instruction goes to the agent only; agent.started recorded the person's prompt unchanged.
+          cwd, projectId: run.projectId, prompt: prompt + STEP_PLAN_INSTRUCTION, authMode, signal: abort.signal,
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
           recordDenied: async (a, reason) => this.recordDenied(run.id, session, a, reason),
@@ -741,11 +747,20 @@ export class AgentRunner {
     };
     try {
       if (e.type === "message") {
-        const text = this.clean(asText(e.text), MAX.text, s.scrub, s.secrets);
+        const raw = asText(e.text); // read once
+        const text = this.clean(raw, MAX.text, s.scrub, s.secrets);
         commitEvent(db, ledger, () => ({
           event: { projectId: s.projectId, actor: agent, type: "agent.message", payload: { runId, text } },
           result: () => undefined,
         }));
+        // Only the agent's own messages are read for step reports, never tool output.
+        const progress = s.progress.feed(raw);
+        if (progress) {
+          commitEvent(db, ledger, () => ({
+            event: { projectId: s.projectId, actor: agent, type: "agent.progress", payload: { runId, ...progress } },
+            result: () => undefined,
+          }));
+        }
       } else if (e.type === "action_result") {
         const output = this.clean(asText(e.output), MAX.output, s.scrub, s.secrets);
         const committed = commitEvent(db, ledger, () => {

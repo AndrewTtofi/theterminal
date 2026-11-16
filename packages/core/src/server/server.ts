@@ -49,6 +49,12 @@ import { buildSnapshot } from "../share/snapshot.js";
 import { ShareService } from "../share/service.js";
 import { ShareLinkManager, shareAddresses } from "../share/link-server.js";
 import { GitHubClient } from "../github/client.js";
+import { GitHubRepos } from "../github/repos.js";
+import { SourceService } from "../sources/service.js";
+import { WritebackService } from "../sources/writeback.js";
+import { registerSourcesRoutes } from "./sources-routes.js";
+import { registerHomeRoutes } from "./home-routes.js";
+import { installRequestDeadlines, type RequestDeadlines } from "./request-deadlines.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
 import { commitEvent } from "../events/commit.js";
@@ -115,13 +121,17 @@ const CLI_ACTOR: Actor = { kind: "system", id: "cli" };
 /**
  * Timeouts on the shared HTTP server, which the TLS listener's decrypted sockets go through too: the whole request
  * (headers and body) within a minute, the headers within half of it, and an idle keep-alive connection closed after
- * thirty seconds. Loopback requests never come near them; a slow or silent network client does.
+ * thirty seconds. One file of an upload (up to 50 MiB, perhaps over a slow link) is spared the whole-request minute
+ * and is cut off instead after a minute without a byte (installRequestDeadlines). Loopback requests never come near
+ * them; a slow or silent network client does.
  */
-const REQUEST_TIMEOUT_MS = 60_000;
+const REQUEST_DEADLINES: RequestDeadlines = { wholeMs: 60_000, idleMs: 60_000, checkMs: 1_000 };
 const HEADERS_TIMEOUT_MS = 30_000;
 const KEEP_ALIVE_TIMEOUT_MS = 30_000;
 
 const PORT_ATTEMPTS = 21; // the requested port plus 20 above it
+/** How often abandoned uploads and leftover staging folders are swept. */
+const UPLOAD_SWEEP_MS = 10 * 60_000;
 
 function loadToken(dataDir: string, given?: string): string {
   if (given) return given;
@@ -533,6 +543,8 @@ export async function createServer(opts: {
   discovery?: Discovery;
   /** Tests only: shorter reconnect waits (and stream idle timeout) for runs on linked machines. */
   remoteRuns?: { backoffMs?: number[]; streamIdleMs?: number };
+  /** Tests only: shorter whole-request and upload idle limits. Default: a minute each (REQUEST_DEADLINES). */
+  requestDeadlines?: RequestDeadlines;
   /** The first port a share link tries (it tries 20 above it too). Default 4400; tests pass 0 for any free port. */
   sharePort?: number;
   /**
@@ -546,6 +558,12 @@ export async function createServer(opts: {
    * `--allow-restricted-signin` or THETERMINAL_RESTRICTED_SIGNIN=1, read once at start.
    */
   restrictedSignIn?: boolean;
+  /**
+   * Shows the system folder picker through the host (the desktop app), resolving with an absolute path or null. Set
+   * by the CLI only when it runs under a host with an IPC channel; absent on a headless server, which then answers
+   * `folder_picker_unavailable`.
+   */
+  pickFolder?: () => Promise<string | null>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -716,6 +734,21 @@ export async function createServer(opts: {
     };
 
     const github = new GitHubClient({ fetch: fetchFn, source: () => connections.githubSource() });
+    // The person's repositories (listing, importing, publishing): the first enabled GitHub connection's token, whether
+    // or not it names a repository.
+    const repos = new GitHubRepos({ fetch: fetchFn, token: () => connections.githubToken() });
+    // Imported names are redacted of every secret the server knows, as everything else it shows.
+    const knownSecrets = (): string[] => [token, ...secretEnvValues(process.env), ...connections.secretValues(), ...runner.mintedSecrets()];
+    const sources = new SourceService({
+      db, ledger, worktrees, board, github: repos, dataDir: opts.dataDir, recorded, redact: (s: string) => redact(s, knownSecrets()),
+    });
+    const writeback = new WritebackService({
+      db, ledger, worktrees, github: repos, dataDir: opts.dataDir, settling: (id: string) => runner.settling(id),
+    });
+    // Uploads left by an earlier server, and abandoned ones (an hour old), are removed at start and every ten minutes.
+    sources.sweep(new Date());
+    const uploadSweep = setInterval(() => sources.sweep(new Date()), UPLOAD_SWEEP_MS);
+    uploadSweep.unref();
 
     // Share: the share page's cleaner and service.
     // The cleaner reads every secret the server knows on each call, minted cloud values included, like every cleaner here.
@@ -750,7 +783,10 @@ export async function createServer(opts: {
     });
     const shareLinks = (): number => links.activeCount();
 
-    const app = Fastify({ requestTimeout: REQUEST_TIMEOUT_MS, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
+    // Node's own whole-request timeout is off (0): it would cut off a large upload file, so installRequestDeadlines
+    // enforces it instead for every other request. The headers timeout stays Node's.
+    const app = Fastify({ requestTimeout: 0, keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS, http: { headersTimeout: HEADERS_TIMEOUT_MS } });
+    installRequestDeadlines(app.server, opts.requestDeadlines ?? REQUEST_DEADLINES);
     let boundPort = 0;
     let stopBootstrapWatch = (): void => undefined;
     // The network listener: off until the ledger or the command line says otherwise. Its decrypted sockets go to this
@@ -808,6 +844,10 @@ export async function createServer(opts: {
         secretStore: () => secretStoreKind,
       });
       registerGitHubRoutes(app, { github });
+      registerHomeRoutes(app, { db, clean: cleanMirrored });
+      registerSourcesRoutes(app, {
+        db, sources, writeback, github: repos, ...(opts.pickFolder !== undefined && { pickFolder: opts.pickFolder }),
+      });
       registerShareRoutes(app, { db, ledger, share });
       registerShareLinkRoutes(app, { links, addresses: () => shareAddresses() });
       localCapacity = registerCapacityRoutes(app, {
@@ -864,6 +904,7 @@ export async function createServer(opts: {
         });
       }
     } catch (err) {
+      clearInterval(uploadSweep);
       stopBootstrapWatch();
       await remoteListener.close().catch(() => undefined);
       await remote.shutdown();
@@ -898,6 +939,7 @@ export async function createServer(opts: {
       },
       async close() {
         try {
+          clearInterval(uploadSweep);
           stopBootstrapWatch();
           await remoteListener.close(); // the network listener goes first: nothing from outside reaches the rest of the shutdown
           await remote.shutdown(); // stops following runs on linked machines; they go on there and resume on restart

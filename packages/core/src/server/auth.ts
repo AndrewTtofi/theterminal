@@ -111,6 +111,7 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "GET /api/share/snapshots/:id/download": viewer,
   "GET /api/projects/:id/digests": viewer,
   "GET /api/share/links": viewer,
+  "GET /api/home": viewer,
   // reviewer: decisions, gate moves, and the contents of agent worktrees
   "POST /api/cards/:id/move": reviewer,
   "POST /api/actions/:id/decision": reviewer,
@@ -122,6 +123,9 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "GET /api/runs/:id/files": reviewer,
   "GET /api/runs/:id/file": reviewer,
   "GET /api/link/verify": reviewer,
+  // the project's top-level names come from its repo, as a run's file list does
+  "GET /api/projects/:id/files": reviewer,
+  "GET /api/projects/:id/source": reviewer,
   // maintainer: projects, cards, runs and intake
   "POST /api/projects": maintainer,
   "POST /api/projects/:id/cards": maintainer,
@@ -131,6 +135,13 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "POST /api/projects/:id/intake": maintainer,
   "POST /api/projects/:id/intake/answers": maintainer,
   "POST /api/projects/:id/intake/reopen": maintainer,
+  "GET /api/github/repos": owner,
+  "POST /api/projects/from-github": owner,
+  "POST /api/projects/:id/uploads": maintainer,
+  "PUT /api/uploads/:id/file": maintainer,
+  "POST /api/uploads/:id/commit": maintainer,
+  "DELETE /api/uploads/:id": maintainer,
+  "POST /api/runs/:id/accept": maintainer,
   // owner: credentials, machines, people, remote access, and what leaves this machine
   "POST /api/settings/provider-auth": owner,
   "POST /api/settings/claude-auth": owner,
@@ -170,6 +181,12 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "GET /api/share/addresses": owner,
   "POST /api/share/snapshots/:id/links": owner,
   "DELETE /api/share/links/:id": owner,
+  // a folder on this computer, and what goes back to the folder or to GitHub (the folder routes: local listener only)
+  "POST /api/projects/from-folder": owner,
+  "POST /api/host/pick-folder": owner,
+  "GET /api/projects/:id/writeback": owner,
+  "POST /api/projects/:id/apply": owner,
+  "POST /api/projects/:id/publish": owner,
 };
 
 /** `<METHOD> <route pattern>`; HEAD is keyed as its GET (Fastify adds a HEAD twin to every GET route). */

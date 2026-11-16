@@ -100,6 +100,34 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
     expect(live).toEqual([]);
   });
 
+  it("lists the Home, project source, accept and write-back routes with the contract's roles", () => {
+    const contract: Record<string, Role> = {
+      "GET /api/home": "viewer",
+      "GET /api/projects/:id/files": "reviewer",
+      "GET /api/projects/:id/source": "reviewer",
+      // The Owner's GitHub token: listing its repositories and importing one are the Owner's.
+      "GET /api/github/repos": "owner",
+      "POST /api/projects/from-github": "owner",
+      "POST /api/projects/from-folder": "owner",
+      "POST /api/host/pick-folder": "owner",
+      "POST /api/projects/:id/uploads": "maintainer",
+      "PUT /api/uploads/:id/file": "maintainer",
+      "POST /api/uploads/:id/commit": "maintainer",
+      "DELETE /api/uploads/:id": "maintainer",
+      "POST /api/runs/:id/accept": "maintainer",
+      "GET /api/projects/:id/writeback": "owner",
+      "POST /api/projects/:id/apply": "owner",
+      "POST /api/projects/:id/publish": "owner",
+    };
+    expect(Object.fromEntries(Object.keys(contract).map((k) => [k, ROUTE_ROLES[k]]))).toEqual(contract);
+  });
+
+  it("a server whose routes are all listed starts: assertRoutesHaveRoles finds nothing missing", async () => {
+    const { s, as } = await start();
+    // The server refuses to start otherwise (createServer runs the check); a listed route answers its own way.
+    expect((await send(s, "GET", "/api/home", as("viewer"))).status).toBe(200);
+  });
+
   it("an unlisted route inside an encapsulated plugin is reported, so the server refuses to start", async () => {
     const db = openDatabase(":memory:");
     const app = Fastify();
