@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { JoinPage } from "./pages/JoinPage";
 import { SignInPage } from "./pages/SignInPage";
+import { PreviewPage } from "./preview/PreviewPage";
 import { routeOf } from "./route";
 import { applyTheme } from "./theme/apply";
 import { currentTheme } from "./theme/theme-store";
@@ -15,6 +16,14 @@ applyTheme(currentTheme());
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {route.page === "join" ? <JoinPage code={route.code} /> : route.page === "sign-in" ? <SignInPage /> : <App />}
+    {route.page === "join" ? (
+      <JoinPage code={route.code} />
+    ) : route.page === "sign-in" ? (
+      <SignInPage />
+    ) : route.page === "preview" ? (
+      <PreviewPage id={route.id} />
+    ) : (
+      <App />
+    )}
   </StrictMode>,
 );

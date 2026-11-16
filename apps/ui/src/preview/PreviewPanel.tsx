@@ -1,0 +1,336 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { DEVICES, DEVICE_IDS, PREVIEW_LIMITS, adapterLabel, failureSentence, jobTitle } from "@theterminal/shared";
+import type { DeviceId, PreviewPlan, PreviewView } from "@theterminal/shared";
+import { ApiError, api, errorMessage } from "../api";
+import { ProgressBar, StepChecklist } from "../components/ProgressBar";
+import { useShell } from "../shell/model";
+import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
+import { DeviceStage } from "./DeviceStage";
+import { isDesktop, useLiveViews } from "./live-views";
+import { loadPreviewPrefs, rotateAll, savePreviewPrefs, toggleDevice } from "./preview-store";
+import type { PreviewPrefs } from "./preview-store";
+import "./preview.css";
+
+/** The tab tells the server it is still watched this often; 30 minutes without it stops the preview. */
+const SEEN_MS = 60_000;
+/** While a preview is starting, its view is read again this often, besides on its ledger entries. */
+const POLL_MS = 2_000;
+
+const isLive = (v: PreviewView | null): v is PreviewView => v !== null && (v.state === "requested" || v.state === "starting" || v.state === "ready");
+
+/** The rest of the dialog's state: the plan shown, and why it is shown again. */
+type Confirm = { plan: PreviewPlan; notice: string | null };
+
+/** True while the element is on screen (dockview hides the tabs behind the active one). */
+function useOnScreen(el: HTMLElement | null): boolean {
+  const [on, setOn] = useState(true);
+  useEffect(() => {
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((entries) => setOn(entries.some((e) => e.isIntersecting)));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [el]);
+  return on;
+}
+
+/** The Preview tab (`preview:<runId>`): a run's website on phone, tablet and laptop sizes. */
+export function PreviewPanel({ id }: { id: string }) {
+  const { model } = useShell();
+  const runId = id.slice("preview:".length);
+  const run = model.runs.find((r) => r.id === runId) ?? null;
+  const homeRun = [...(model.home.data?.working ?? []), ...(model.home.data?.finishedToday ?? [])].find((h) => h.run.id === runId) ?? null;
+  const title = run ? jobTitle(run) : homeRun ? homeRun.title : "job";
+  const agent = adapterLabel((run ?? homeRun?.run)?.adapter);
+
+  const [prefs, setPrefs] = useState<PreviewPrefs>(loadPreviewPrefs);
+  const [view, setView] = useState<PreviewView | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  /** Desktop app with a host for device views: null until the server answered. */
+  const [liveHost, setLiveHost] = useState<boolean | null>(() => (isDesktop() ? null : false));
+  const [frames, setFrames] = useState<Map<DeviceId, HTMLElement>>(() => new Map());
+  const [root, setRoot] = useState<HTMLElement | null>(null);
+  const visible = useOnScreen(root);
+
+  const previewId = view?.id ?? null;
+  const ready = view?.state === "ready" ? view : null;
+
+  const changePrefs = (next: PreviewPrefs) => {
+    setPrefs(next);
+    savePreviewPrefs(next);
+  };
+
+  useEffect(() => {
+    if (liveHost !== null) return;
+    let on = true;
+    api.hostCapabilities().then(
+      (c) => on && setLiveHost(c.previewViews),
+      () => on && setLiveHost(false),
+    );
+    return () => {
+      on = false;
+    };
+  }, [liveHost]);
+
+  // A preview of this run already live (started earlier, or in another tab): follow it.
+  const livePreviewId = homeRun?.livePreviewId ?? null;
+  useEffect(() => {
+    if (livePreviewId === null || (view !== null && isLive(view))) return;
+    let on = true;
+    api.getPreview(livePreviewId).then(
+      (v) => on && setView(v),
+      () => {},
+    );
+    return () => {
+      on = false;
+    };
+  }, [livePreviewId]);
+
+  const refresh = useCallback((pid: string) => {
+    api.getPreview(pid).then(
+      (v) => setView((cur) => (cur?.id === v.id ? v : cur)),
+      () => {},
+    );
+  }, []);
+
+  // Its ledger entries (started, progress, ready, failed, stopped) bring the view up to date.
+  useEffect(() => {
+    if (previewId === null) return;
+    return model.subscribeEntries((e) => {
+      if (!e.type.startsWith("preview.")) return;
+      const p = e.payload as { previewId?: unknown } | null;
+      if (p?.previewId === previewId) refresh(previewId);
+    });
+  }, [previewId, model.subscribeEntries, refresh]);
+
+  // While it starts, read it again now and then: build counts are kept in memory only, not in the ledger.
+  const starting = view !== null && (view.state === "requested" || view.state === "starting");
+  useEffect(() => {
+    if (!starting || previewId === null) return;
+    const t = setInterval(() => refresh(previewId), POLL_MS);
+    return () => clearInterval(t);
+  }, [starting, previewId, refresh]);
+
+  // Tell the server the tab still shows it, so it is not stopped as idle.
+  const live = isLive(view);
+  useEffect(() => {
+    if (!live || previewId === null) return;
+    const t = setInterval(() => {
+      api.previewSeen(previewId).catch(() => {});
+    }, SEEN_MS);
+    return () => clearInterval(t);
+  }, [live, previewId]);
+
+  // Closing the tab stops the preview. The stop waits a tick, so a remount of the same tab (React's development
+  // double mount) keeps it.
+  const liveIdRef = useRef<string | null>(null);
+  liveIdRef.current = live ? previewId : null;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      const pid = liveIdRef.current;
+      if (pid === null) return;
+      setTimeout(() => {
+        if (!mounted.current) api.stopPreview(pid, "tab_closed").catch(() => {});
+      }, 0);
+    };
+  }, []);
+
+  useLiveViews({ previewId: ready && liveHost === true ? ready.id : null, frames, rotated: prefs.rotated, visible });
+
+  const start = async (plan: PreviewPlan) => {
+    setBusy(true);
+    try {
+      const v = await api.startPreview(runId, { kind: "web", key: plan.key });
+      setConfirm(null);
+      setReload(0);
+      setView(v);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "preview_changed") {
+        // The agent changed the command or package.json: show what will run now, and ask again.
+        const notice = errorMessage(e);
+        try {
+          setConfirm({ plan: await api.previewPlan(runId, "web"), notice });
+        } catch (again) {
+          setConfirm(null);
+          setError(errorMessage(again));
+        }
+      } else {
+        setConfirm(null);
+        setError(errorMessage(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const begin = async () => {
+    setError(null);
+    setStatus(null);
+    setBusy(true);
+    let plan: PreviewPlan;
+    try {
+      plan = await api.previewPlan(runId, "web");
+    } catch (e) {
+      setError(errorMessage(e));
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    if (plan.confirmedEarlier) await start(plan);
+    else setConfirm({ plan, notice: null });
+  };
+
+  const stop = async () => {
+    if (previewId === null) return;
+    setError(null);
+    try {
+      await api.stopPreview(previewId, "person");
+      setView((v) => (v && v.id === previewId ? { ...v, state: "stopped" } : v));
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  const doReload = () => {
+    if (ready && liveHost) api.previewViews({ previewId: ready.id, action: "reload", devices: [] }).catch(() => {});
+    else setReload((k) => k + 1);
+  };
+
+  const screenshotAll = async () => {
+    if (!ready) return;
+    setError(null);
+    setStatus(null);
+    try {
+      const { screenshots } = await api.takeScreenshots(ready.id);
+      setStatus(screenshots.length === 1 ? "Saved 1 screenshot on the job." : `Saved ${screenshots.length} screenshots on the job.`);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  const origin = ready?.origin ?? null;
+  const count = prefs.devices.length;
+
+  return (
+    <section className="preview-panel" ref={setRoot} aria-label="Preview">
+      <header className="preview-top">
+        <span className="preview-word">
+          PREVIEW · <b>{title}</b>
+        </span>
+        {origin && (
+          <a className="preview-open" href={origin} target="_blank" rel="noreferrer noopener">
+            Open in my browser ↗
+          </a>
+        )}
+      </header>
+
+      {ready && (
+        <div className="preview-bar">
+          <div className="preview-devices" role="group" aria-label="Devices">
+            {DEVICE_IDS.map((d) => {
+              const on = prefs.devices.includes(d);
+              const full = !on && count >= PREVIEW_LIMITS.maxDevices;
+              const last = on && count === 1;
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  aria-pressed={on}
+                  disabled={full || last}
+                  title={full ? "Up to 4 devices" : last ? "Keep at least one device" : undefined}
+                  onClick={() => changePrefs(toggleDevice(prefs, d))}
+                >
+                  {DEVICES[d].label}
+                </button>
+              );
+            })}
+          </div>
+          <span className="preview-origin">
+            <span className="preview-live">● live</span> · from “{title}” ({agent})
+          </span>
+          <button type="button" className="quiet" onClick={doReload}>
+            ⟳ Reload
+          </button>
+          <button type="button" className="quiet" onClick={() => changePrefs(rotateAll(prefs))}>
+            ⤾ Rotate
+          </button>
+          {liveHost ? (
+            <button type="button" onClick={() => void screenshotAll()}>
+              Screenshot all
+            </button>
+          ) : (
+            <span className="preview-note">Screenshots need the desktop app</span>
+          )}
+          <button type="button" className="quiet" onClick={() => void stop()}>
+            Stop
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <p className="preview-error" role="alert">
+          {error}
+        </p>
+      )}
+      {status && (
+        <p className="preview-note" role="status">
+          {status}
+        </p>
+      )}
+      {ready?.exposed && <p className="preview-warning">This site may be reachable from other devices on your network</p>}
+
+      <div className="preview-body">
+        {view === null || view.state === "stopped" ? (
+          <div className="preview-empty">
+            <p className="preview-note">
+              {view?.state === "stopped" ? "The preview stopped." : "See this job's website on phone, tablet and laptop sizes."}
+            </p>
+            <button type="button" onClick={() => void begin()} disabled={busy}>
+              Preview
+            </button>
+          </div>
+        ) : view.state === "failed" ? (
+          <div className="preview-failed">
+            <p className="preview-error-line">{failureSentence(view.error ?? "start_failed", view.kind)}</p>
+            {view.tail.length > 0 && <pre className="preview-tail">{view.tail.join("\n")}</pre>}
+            <button type="button" onClick={() => void begin()} disabled={busy}>
+              Try again
+            </button>
+          </div>
+        ) : view.state !== "ready" ? (
+          <div className="preview-starting">
+            <ProgressBar percent={view.percent} label="Getting the site running" />
+            <StepChecklist progress={view.progress} />
+            <button type="button" className="quiet" onClick={() => void stop()}>
+              Stop
+            </button>
+          </div>
+        ) : liveHost === null ? null : liveHost ? (
+          <DeviceStage devices={prefs.devices} rotated={prefs.rotated} onFrames={setFrames} />
+        ) : (
+          <iframe
+            className="preview-host"
+            title="Device previews"
+            src={`/preview/${encodeURIComponent(view.id)}?d=${prefs.devices.join(",")}&r=${prefs.rotated.join(",")}&k=${reload}`}
+          />
+        )}
+      </div>
+
+      {confirm && (
+        <ConfirmPreviewDialog
+          plan={confirm.plan}
+          notice={confirm.notice}
+          busy={busy}
+          onStart={() => void start(confirm.plan)}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+    </section>
+  );
+}

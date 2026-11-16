@@ -22,6 +22,7 @@ import { DigestPanel } from "../views/DigestPanel";
 import { SharePanel } from "../views/SharePanel";
 import { PeoplePanel } from "../views/PeoplePanel";
 import { RunTimelinePanel } from "../home/RunTimelinePanel";
+import { PreviewPanel } from "../preview/PreviewPanel";
 import { ActivityBar } from "./ActivityBar";
 import { diffPanelId, filePanelId, runsOfPanels, staleConnectionPanels, staleRunPanels } from "./dock-layout";
 import { Dock } from "./Dock";
@@ -41,6 +42,7 @@ const PANELS = {
   conversation: ConversationPanel, needs_you: NeedsYouPanel, terminal: TerminalPanel, diff: DiffPanel, file: FilePanel,
   link_machine: LinkMachinePanel,
   share: SharePanel, digest: DigestPanel, people: PeoplePanel,
+  preview: PreviewPanel,
 };
 
 type Props = { model: AppModel };
