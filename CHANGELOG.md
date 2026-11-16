@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ## Unreleased
 
 ### Added
+- Home is the new first screen: approvals first, a progress bar and percentage for each running job (from the steps the agent reports, never estimated), what finished today, and the project's files. Edit Home lets each person hide and reorder blocks; approvals always stay visible. The Board is now optional (Settings → Workspace).
+- New projects can start from added files, one of your GitHub repositories, or a folder on this computer, as well as empty. Accept a run's changes to bring them into the project, then Apply them to your folder or Publish them to GitHub as a pull request.
 - Brand: the `>_` mark, wordmark, app icons for macOS and Windows, a favicon and a brand guide (`docs/brand.md`).
 - Ice is the new default look. Settings → Appearance (the gear at the bottom of the activity bar) has six built-in themes (Ice, Phosphor, Amber, Classic, Light, High contrast), and lets you duplicate, edit, import and export your own. Approval, danger and override colours always stay readable.
 - VS Code-style workbench: activity bar, side bar, tabbed main area with the board as home, bottom panel, saved layout and a live status bar (running agents, today's cost, pending decisions, connections).
