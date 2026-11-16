@@ -336,6 +336,25 @@ describe("webPlan, installCommand, contentKey and resolveWebArgv", () => {
     expect(contentKey(dir, "web", [["npm", "run", "start"]], plan.files)).not.toBe(contentKey(dir, "web", plan.commands, plan.files));
   });
 
+  it("never lets npx download a package: --no in the argv and in what the person confirms", () => {
+    pkg({});
+    mkdirSync(join(dir, "node_modules"));
+    const plan = webPlan(dir, "npx vite --open");
+    expect(plan.commands).toEqual([["npx", "vite", "--open"]]);
+    expect(plan.display).toEqual(["npx --no vite --open --port <port> --host 127.0.0.1"]);
+    const npx = "/opt/node/lib/node_modules/npm/bin/npx-cli.js";
+    const r = resolveWebArgv(plan.commands[0]!, 4000, {
+      env: {},
+      execPath: "/opt/node/bin/node",
+      platform: "darwin",
+      which: () => null,
+      realpath: same,
+      isFile: only(npx),
+      scriptText: plan.script,
+    });
+    expect(r.args.slice(0, 3)).toEqual([npx, "--no", "vite"]);
+  });
+
   it("hashes a missing file as null", () => {
     const missing = contentKey(dir, "web", [["npm", "run", "dev"]], ["package.json"]);
     writeFileSync(join(dir, "package.json"), "");
@@ -362,7 +381,7 @@ describe("webPlan, installCommand, contentKey and resolveWebArgv", () => {
     const npx = "/opt/node/lib/node_modules/npm/bin/npx-cli.js";
     expect(resolveWebArgv(["npx", "vite", "--open"], 5173, { ...base, isFile: only(npx), scriptText: null })).toEqual({
       file: "/opt/node/bin/node",
-      args: [npx, "vite", "--open", "--port", "5173", "--host", "127.0.0.1"],
+      args: [npx, "--no", "vite", "--open", "--port", "5173", "--host", "127.0.0.1"],
     });
 
     const pnpm = "/usr/local/lib/node_modules/pnpm/bin/pnpm.cjs";

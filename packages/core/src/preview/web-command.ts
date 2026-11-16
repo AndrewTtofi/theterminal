@@ -265,6 +265,9 @@ function readScripts(worktree: string): Record<string, unknown> {
   return typeof scripts === "object" && scripts !== null && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
 }
 
+/** npx never downloads a package: only one already installed runs. */
+const NPX_NO_INSTALL = "--no";
+
 const INSTALL_SHAPES: readonly string[] = [
   "npm ci",
   "pnpm install --frozen-lockfile",
@@ -276,7 +279,8 @@ const INSTALL_SHAPES: readonly string[] = [
 
 /**
  * The full logical argument array as it runs: for `npm run`, `--` goes straight after the script, so no argument
- * is ever read by npm itself as its own configuration (`--script-shell=…`); the framework flags come last.
+ * is ever read by npm itself as its own configuration (`--script-shell=…`); npx always gets `--no`, so it never
+ * downloads a package; the framework flags come last.
  * PreviewRefusedError("program") for anything outside the grammar or the install commands.
  */
 function logicalArgv(cmd: readonly string[], scriptText: string | null, port: string): string[] {
@@ -288,7 +292,9 @@ function logicalArgv(cmd: readonly string[], scriptText: string | null, port: st
     port,
   );
   const tail = [...parsed.args, ...flags];
-  if (parsed.runner === "npx") return ["npx", parsed.name, ...tail];
+  // `--no` (npm 7+): npx refuses to download a package that is not installed; it comes before the tool, where
+  // npx reads its own options.
+  if (parsed.runner === "npx") return ["npx", NPX_NO_INSTALL, parsed.name, ...tail];
   if (parsed.manager === "npm" && tail.length > 0) return ["npm", "run", parsed.name, "--", ...tail];
   return [parsed.manager, "run", parsed.name, ...tail];
 }
