@@ -1,7 +1,7 @@
 import { open } from "node:fs/promises";
 import { chmodSync, lstatSync, renameSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
 import { FolderRefusedError, FolderUnavailableError, listFolder, sameIdentity, stageFolder } from "../../src/sources/folder.js";
@@ -103,7 +103,8 @@ describe("listFolder", () => {
   });
 
   it("refuses a relative path", async () => {
-    await expect(listFolder(wt, dataDir, relative(process.cwd(), folder))).rejects.toBeInstanceOf(FolderRefusedError);
+    // Built by hand: on Windows, relative() across drives returns an absolute path.
+    await expect(listFolder(wt, dataDir, join("some", "folder"))).rejects.toBeInstanceOf(FolderRefusedError);
     await expect(listFolder(wt, dataDir, "mine")).rejects.toBeInstanceOf(FolderRefusedError);
   });
 

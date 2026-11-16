@@ -268,7 +268,7 @@ test("window: opens the workspace on theterminal.localhost with the session cook
     const viewButtons = page.getByRole("navigation", { name: "Views" }).getByRole("button");
     await expect(viewButtons).toHaveCount(12);
     expect(await viewButtons.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")))).toEqual([
-      "Board", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "People", "Share", "Learn",
+      "Home", "Agents", "Changes", "Needs you", "Ledger", "Connections", "GitHub", "Capacity", "Machines", "People", "Share", "Learn",
     ]);
 
     // Only the cookie's attributes are compared, never its value.
