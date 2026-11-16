@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { BUILTIN_THEMES, THEME_KEYS } from "@theterminal/shared";
 import { describe, expect, it } from "vitest";
+import { applyTheme } from "../src/theme/apply";
 
 const css = readFileSync(join(__dirname, "..", "src", "styles.css"), "utf8");
 const rootMatch = /:root\s*\{([^}]*)\}/.exec(css);
@@ -72,14 +74,133 @@ describe("styles.css tokens", () => {
     expect(/\.cursor\s*\{[^}]*animation:[^;}]*1\.1s steps\(1\)/.test(css)).toBe(true);
     expect(/@media \(prefers-reduced-motion: reduce\)\s*\{[^{}]*\.cursor\s*\{[^}]*animation:\s*none/.test(css)).toBe(true);
   });
-  it("glows live things and sets output in mono", () => {
+  it("does not glow live things, and sets output in mono", () => {
     for (const sel of [".activity-bar button.active", ".dot.active", ".runs button.selected"]) {
-      const re = new RegExp(`${sel.replace(/[.[\]]/g, "\\$&")}[^{]*\\{[^}]*box-shadow: 0 0 6px var\\(--glow\\)`);
-      expect(re.test(css), sel).toBe(true);
+      const re = new RegExp(`${sel.replace(/[.[\]]/g, "\\$&")}[^{]*\\{[^}]*box-shadow:[^;}]*var\\(--glow\\)`);
+      expect(re.test(css), sel).toBe(false);
     }
     for (const sel of [".status-bar", ".start-run textarea", ".conversation blockquote", ".conversation .agent-says"]) {
       const re = new RegExp(`${sel.replace(/[.[\]]/g, "\\$&")}[^{]*\\{[^}]*var\\(--font-mono\\)`);
       expect(re.test(css), sel).toBe(true);
     }
+  });
+});
+
+const decls = (text: string, prop: string): string[] =>
+  [...text.matchAll(new RegExp(`(?<![-\\w])${prop}\\s*:\\s*([^;}]+)`, "g"))].map((m) => `${prop}:${m[1]!.trim()}`);
+const valueOf = (d: string): string => d.slice(d.indexOf(":") + 1);
+
+/** `border-radius` declarations holding a px number (only var(--radius-…), 0 and 50% pass). */
+export function checkRadii(text: string): string[] {
+  return decls(text, "border-radius").filter((d) => /\d+(\.\d+)?px/.test(valueOf(d)));
+}
+/** Spacing declarations with a px number that is not a multiple of 4. */
+export function checkGrid(text: string): string[] {
+  return ["padding", "margin", "gap", "row-gap", "column-gap"].flatMap((p) => decls(text, p)).filter((d) =>
+    [...valueOf(d).matchAll(/(-?\d+(?:\.\d+)?)px/g)].some((m) => Number(m[1]) % 4 !== 0));
+}
+/** `font-size` that is not var(--text-…), inherit or an em value, outside the selectors in `allow`. */
+export function checkFontSizes(text: string, allow: string[]): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const sels = m[1]!.split(",").map((x) => x.trim());
+    if (sels.some((x) => allow.includes(x))) continue;
+    for (const d of decls(m[2]!, "font-size")) {
+      const v = valueOf(d).trim();
+      if (!(/^var\(--text-/.test(v) || v === "inherit" || /^[\d.]+em$/.test(v))) out.push(d);
+    }
+  }
+  return out;
+}
+/** `box-shadow` other than none or `0 0 0 1px var(--…)`. */
+export function checkShadows(text: string): string[] {
+  return decls(text, "box-shadow").filter((d) => !/^(none|0 0 0 1px var\(--[\w-]+\))$/.test(valueOf(d)));
+}
+/** `transition` or `animation` durations that are not var(--motion-…), except .cursor's blink. */
+export function checkTransitions(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (m[1]!.split(",").some((x) => x.trim() === ".cursor")) continue;
+    for (const p of ["transition", "animation"]) {
+      for (const d of decls(m[2]!, p)) {
+        const v = valueOf(d);
+        if (/\b\d*\.?\d+m?s\b/.test(v)) out.push(d);
+      }
+    }
+  }
+  return out;
+}
+
+describe("shape checkers", () => {
+  it("flags a px radius only", () => {
+    expect(checkRadii(".a{border-radius:2px}")).toEqual(["border-radius:2px"]);
+    expect(checkRadii(".a{border-radius:var(--radius-m)}")).toEqual([]);
+    expect(checkRadii(".a{border-radius:0}.b{border-radius:50%}")).toEqual([]);
+  });
+  it("flags spacing off the 4px grid", () => {
+    expect(checkGrid(".a{padding:6px 8px}")).toEqual(["padding:6px 8px"]);
+    expect(checkGrid(".a{margin:0 4px 8px}")).toEqual([]);
+  });
+  it("flags font sizes outside the tokens", () => {
+    expect(checkFontSizes(".a{font-size:14px}", ["h1"])).toEqual(["font-size:14px"]);
+    expect(checkFontSizes("h1{font-size:18px}", ["h1"])).toEqual([]);
+    expect(checkFontSizes(".a{font-size:var(--text-m)}.b{font-size:inherit}.c{font-size:1.2em}", [])).toEqual([]);
+  });
+  it("flags shadows other than a 1px ring", () => {
+    expect(checkShadows(".a{box-shadow:0 0 6px var(--glow)}")).toEqual(["box-shadow:0 0 6px var(--glow)"]);
+    expect(checkShadows(".a{box-shadow:0 0 0 1px var(--accent)}.b{box-shadow:none}")).toEqual([]);
+  });
+  it("flags transitions outside the motion tokens", () => {
+    expect(checkTransitions(".a{transition:width 200ms linear}")).toEqual(["transition:width 200ms linear"]);
+    expect(checkTransitions(".a{transition:width var(--motion-progress) linear}")).toEqual([]);
+    expect(checkTransitions(".cursor{animation:cursor-blink 1.1s steps(1) infinite}")).toEqual([]);
+  });
+});
+
+describe("shape tokens", () => {
+  const blocks = [...css.matchAll(/:root\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+  const shape = blocks.find((b) => /--radius-m:/.test(b)) ?? "";
+  const tok = (k: string, from = shape) => new RegExp(`--${k}:\\s*([^;]+);`).exec(from)?.[1]?.trim();
+  it("keeps the colours in the first :root block and the shape in a block of its own", () => {
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    expect(rootBlock).not.toMatch(/--radius-/);
+    expect(shape).not.toMatch(/--bg:/);
+  });
+  it("defines exactly the ruled values", () => {
+    const want: Record<string, string> = {
+      "radius-s": "4px", "radius-m": "8px", "radius-l": "10px", "radius-pill": "999px",
+      "space-1": "4px", "space-2": "8px", "space-3": "12px", "space-4": "16px", "space-5": "24px", "space-6": "32px",
+      "text-s": "11px", "text-m": "12px", "text-l": "13px", "motion-fast": "80ms", "motion-progress": "200ms",
+    };
+    for (const [k, v] of Object.entries(want)) expect(tok(k), `--${k}`).toBe(v);
+  });
+  it("zeroes the motion tokens under reduced motion", () => {
+    const m = /@media \(prefers-reduced-motion: reduce\)\s*\{\s*:root\s*\{([^}]*)\}/.exec(css);
+    expect(m?.[1]).toBeDefined();
+    expect(tok("motion-fast", m![1]!)).toBe("0ms");
+    expect(tok("motion-progress", m![1]!)).toBe("0ms");
+  });
+  it("uses them in the base rules", () => {
+    const rule = (sel: string) => new RegExp(`(?:^|\\n)${sel.replace(/[.[\]"():]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+    expect(rule("input, select, textarea")).toMatch(/border-radius: var\(--radius-m\)/);
+    expect(rule("button")).toMatch(/border-radius: var\(--radius-pill\)/);
+    expect(rule("button")).toMatch(/font-size: var\(--text-m\)/);
+    expect(rule("fieldset")).toMatch(/border-radius: var\(--radius-m\)/);
+    expect(rule(":focus-visible")).toMatch(/outline: 2px solid var\(--focus\)/);
+    expect(rule(".num")).toMatch(/font-family: var\(--font-mono\)/);
+    expect(rule(".num")).toMatch(/font-variant-numeric: tabular-nums/);
+  });
+  it("is never set by a theme", () => {
+    for (const k of THEME_KEYS) expect(k).not.toMatch(/^(radius|space|text|motion)/);
+    const root = document.documentElement;
+    root.removeAttribute("style");
+    for (const t of BUILTIN_THEMES) {
+      applyTheme(t);
+      for (const p of ["radius-m", "space-2", "text-m", "motion-fast"]) expect(root.style.getPropertyValue(`--${p}`), `${t.id} ${p}`).toBe("");
+    }
+  });
+  it("has no px radius and no glow or heavy shadow in styles.css", () => {
+    expect(checkRadii(css)).toEqual([]);
+    expect(checkShadows(css)).toEqual([]);
   });
 });
