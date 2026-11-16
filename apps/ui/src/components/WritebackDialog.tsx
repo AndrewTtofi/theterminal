@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import { visibleControls } from "@theterminal/shared";
-import type { ApplyResult, WritebackPreview } from "@theterminal/shared";
+import type { ApplyResult, PublishResult, WritebackPreview } from "@theterminal/shared";
 import { ApiError, api } from "../api";
 import { sourcesMessage } from "../upload";
 import { Modal } from "./Modal";
@@ -17,7 +17,30 @@ function question(kind: Kind, n: number): string {
   return kind === "folder" ? `Write ${these} to your folder?` : `Open a pull request with ${these}?`;
 }
 
-type Done = { kind: "folder"; result: ApplyResult } | { kind: "github"; branch: string; pullUrl: string };
+type Done = { kind: "folder"; result: ApplyResult } | ({ kind: "github" } & PublishResult);
+
+/**
+ * Files Apply left out for one reason, said plainly: write-back moves on past them, so they are never offered again
+ * and the person copies them by hand if they want them.
+ */
+function SkippedGroup({ paths, why, label }: { paths: string[]; why: (one: boolean) => string; label: string }) {
+  if (paths.length === 0) return null;
+  const one = paths.length === 1;
+  const these = one ? "This 1 file" : `These ${paths.length} files`;
+  const them = one ? "it" : "them";
+  return (
+    <div className="writeback-skipped">
+      <p>{`${these} ${why(one)}; ${one ? "it" : "they"} won't be offered again — copy ${them} by hand if you want ${them}.`}</p>
+      <ul className="writeback-files" aria-label={label}>
+        {paths.map((p) => (
+          <li key={p}>
+            <span className="wb-path">{clip(visibleControls(p), 200)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * Sends accepted work back where the project came from, after showing every file it will touch. Confirm sends the
@@ -76,11 +99,16 @@ export function WritebackDialog({ projectId, kind, onClose }: { projectId: strin
                 <span className="import-tick" aria-hidden="true">✓</span>
                 {`Wrote ${done.result.written} ${done.result.written === 1 ? "file" : "files"} to your folder${done.result.deleted > 0 ? ` and removed ${done.result.deleted}` : ""}.`}
               </p>
-              {done.result.skipped.length > 0 && (
-                <p className="writeback-skipped">
-                  {`Skipped because they changed in your folder: ${done.result.skipped.map((s) => clip(visibleControls(s.path), 160)).join(", ")}`}
-                </p>
-              )}
+              <SkippedGroup
+                paths={done.result.skipped.filter((s) => s.reason === "changed").map((s) => s.path)}
+                label="Skipped files"
+                why={(one) => (one ? "was skipped because it changed in your folder" : "were skipped because they changed in your folder")}
+              />
+              <SkippedGroup
+                paths={done.result.skipped.filter((s) => s.reason !== "changed").map((s) => s.path)}
+                label="Files not written"
+                why={() => "could not be written safely to your folder (a link, or a name this computer cannot store)"}
+              />
             </div>
           ) : (
             <div role="status" className="writeback-done">
@@ -88,6 +116,11 @@ export function WritebackDialog({ projectId, kind, onClose }: { projectId: strin
                 <span className="import-tick" aria-hidden="true">✓</span>
                 The pull request is open on GitHub, on the branch <code>{visibleControls(done.branch)}</code>.
               </p>
+              {done.skipped.length > 0 && (
+                <p className="writeback-skipped">
+                  {`${done.skipped.length === 1 ? "This 1 file was" : `These ${done.skipped.length} files were`} left out because this computer cannot store ${done.skipped.length === 1 ? "its name" : "their names"}: ${done.skipped.map((s) => clip(visibleControls(s.path), 160)).join(", ")}`}
+                </p>
+              )}
               <p>
                 <a href={done.pullUrl} target="_blank" rel="noreferrer noopener">
                   Open the pull request
@@ -119,7 +152,7 @@ export function WritebackDialog({ projectId, kind, onClose }: { projectId: strin
               <p className="writeback-question">{question(kind, files.length)}</p>
               <p className="modal-note">
                 {kind === "folder"
-                  ? "Only these files are written. A file you changed in your folder since it was copied in is left alone."
+                  ? "Only these files are written. A file you changed in your folder since it was copied in is left alone and won't be offered again."
                   : "One commit with these changes goes on a new branch, and a pull request asks to merge it. Nothing is merged for you."}
               </p>
               <ul className="writeback-files" aria-label="Files to write">

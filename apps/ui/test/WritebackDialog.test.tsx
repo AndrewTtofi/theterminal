@@ -35,7 +35,53 @@ describe("WritebackDialog", () => {
     expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["changedsrc/app.txt", "addednotes.md", "deletedold.txt"]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Apply to my folder" }));
     expect(apply).toHaveBeenCalledWith("p1", H1);
-    expect(await within(dialog).findByText("Skipped because they changed in your folder: old.txt")).toBeTruthy();
+    expect(
+      await within(dialog).findByText(
+        "This 1 file was skipped because it changed in your folder; it won't be offered again — copy it by hand if you want it.",
+      ),
+    ).toBeTruthy();
+    expect(within(within(dialog).getByRole("list", { name: "Skipped files" })).getByText("old.txt")).toBeTruthy();
+  });
+
+  it("says plainly which files were skipped, why, and that they won't be offered again", async () => {
+    vi.spyOn(api, "writebackPreview").mockResolvedValue(preview("folder"));
+    vi.spyOn(api, "applyToFolder").mockResolvedValue({
+      written: 0,
+      deleted: 0,
+      skipped: [
+        { path: "src/app.txt", reason: "changed" },
+        { path: "old.txt", reason: "changed" },
+        { path: "aux.c", reason: "unstorable" },
+      ],
+    });
+    const { dialog } = setup("folder");
+    await within(dialog).findByText("Write these 3 files to your folder?");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply to my folder" }));
+    expect(
+      await within(dialog).findByText(
+        "These 2 files were skipped because they changed in your folder; they won't be offered again — copy them by hand if you want them.",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "This 1 file could not be written safely to your folder (a link, or a name this computer cannot store); it won't be offered again — copy it by hand if you want it.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says which files a pull request left out", async () => {
+    vi.spyOn(api, "writebackPreview").mockResolvedValue(preview("github"));
+    vi.spyOn(api, "publishToGitHub").mockResolvedValue({
+      branch: "the-terminal/0a1b2c3d",
+      pullUrl: "https://github.com/you/site/pull/7",
+      skipped: [{ path: "aux.c", reason: "unstorable" }],
+    });
+    const { dialog } = setup("github");
+    await within(dialog).findByText("Open a pull request with these 3 files?");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Publish to GitHub" }));
+    expect(
+      await within(dialog).findByText("This 1 file was left out because this computer cannot store its name: aux.c"),
+    ).toBeTruthy();
   });
 
   it("on preview_stale says so and loads the list again", async () => {

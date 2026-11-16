@@ -139,6 +139,7 @@ All three sources produce the same thing: the project's own git repository (`<da
 - **Apply to my folder:** for a local-folder project, after you approve a run's changes, the owner can choose **Apply to my folder**.
   - **Confirming:** it shows the list of files that will be added, changed or deleted, and asks once more.
   - **Writing:** it writes only those files. If a file in the original has changed since it was copied in, that file is skipped and the skip is reported. It never deletes anything outside the list.
+  - **Skipped files are not offered again:** after Apply, the project counts as in step with the folder, skipped files included. The result says so plainly: "These N files were skipped because they changed in your folder; they won't be offered again — copy them by hand if you want them." A file that could not be written safely (a link, or a name the computer cannot store) is reported the same way.
   - **Record:** it is a ledger event.
 - **Publish to GitHub:** for a GitHub project, the owner can publish accepted work as a pull request.
   - **How:** the server creates a new branch `the-terminal/<short id>` through the GitHub API, adds the commits with the API's git data endpoints, and opens a pull request against the default branch. It never pushes to the default branch.
