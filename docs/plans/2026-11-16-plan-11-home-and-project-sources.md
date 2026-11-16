@@ -502,7 +502,7 @@ Runs after Task 1 (both edit `narration.ts` and `index.ts`).
   - `createFromGitHub(actor, i: { repo: string; name?: string; includeSecrets?: boolean }): Promise<ImportedProject>`. It runs `head`, then `tarball`, then `readTarGz` into staging (links skipped as `link`). Only after `finish()` does it run `createProject` (the default name is the repository name), `commitFiles` with `Imported from GitHub: owner/repo`, and `commitEvents` of `project.source_set` and `project.files_imported`.
   - `createFromFolder(actor, i: { path: string; name?: string; includeSecrets?: boolean }): Promise<ImportedProject>`: the same, through `listFolder` and `stageFolder`. The default name is the folder's base name, made fit by `RecordedText`.
   - Uploads:
-    - `openUpload(actor, projectId, i: { files: number; bytes: number; includeSecrets: boolean }): { uploadId: string }`. The declared totals are checked against `IMPORT_LIMITS` first. More than 4 open uploads gives `UploadBusyError`.
+    - `openUpload(actor, projectId, i: { files: number; bytes: number; includeSecrets: boolean }): { uploadId: string }`. The declared totals are checked against `IMPORT_LIMITS` first. More than 4 open uploads for one person, or 16 on the server, gives `UploadBusyError`.
     - `putUploadFile(actor, uploadId, path, body: Readable): Promise<void>`. Another person's upload, or an unknown one, gives `UploadNotFoundError`. A refused path gives `PathRefusedError`, and the body is not read.
     - `commitUpload(actor, uploadId): Promise<ImportResult>`: `Added N files`, then `project.files_imported` with `from: "files"`.
     - `cancelUpload(actor, uploadId): void` and `sweep(now): void`, which removes uploads older than 1 hour.
