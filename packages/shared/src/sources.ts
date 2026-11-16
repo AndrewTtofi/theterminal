@@ -1,7 +1,9 @@
 import { z } from "zod";
 import type { AgentRun } from "./agents.js";
 import type { DirEntry } from "./changes.js";
+import type { CardMoveRequest } from "./agent-board.js";
 import type { Project } from "./domain.js";
+import type { PreviewKind, Screenshot } from "./preview.js";
 
 /** Limits for every import and every write-back. MB means MiB. */
 export const IMPORT_LIMITS = { files: 2000, bytes: 209_715_200, fileBytes: 52_428_800 } as const;
@@ -69,8 +71,11 @@ export type HomeRun = {
   summary: string | null;
   waiting: boolean;
   reason: string | null;
+  offers?: PreviewKind[];
+  screenshots?: Screenshot[];
+  livePreviewId?: string | null;
 };
-export type HomeRuns = { working: HomeRun[]; finishedToday: HomeRun[] };
+export type HomeRuns = { working: HomeRun[]; finishedToday: HomeRun[]; moveRequests?: CardMoveRequest[] };
 export type ProjectFiles = { source: ProjectSourceView; added: boolean; head: string; entries: DirEntry[]; truncated: boolean };
 export type GitHubRepoChoice = { fullName: string; defaultBranch: string; private: boolean };
 export type ImportResult = {

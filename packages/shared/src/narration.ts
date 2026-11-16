@@ -19,11 +19,12 @@ import { GATES, requirementLabel, type GateId, type GateRequirement } from "./ga
 import { INTAKE_DECISIONS, INTAKE_QUESTIONS, renderAnswer, type IntakeAnswer } from "./intake.js";
 import { CHANGES_REFUSED_PHRASES, MIRRORABLE_TYPES } from "./link.js";
 import { OWNER_ID, ROLE_LABELS, type Role } from "./people.js";
+import { DEVICES, failureSentence, type PreviewFailure } from "./preview.js";
 import { formatUsd, lowerFirst, plural, visibleControls } from "./text.js";
 
 export type NarrationTopic =
   | "board" | "agent" | "decision" | "gate" | "intake" | "connection" | "settings" | "override" | "machine" | "share" | "people"
-  | "remote" | "other";
+  | "preview" | "remote" | "other";
 export type NarrationRefs = {
   cardId?: string;
   runId?: string;
@@ -202,6 +203,11 @@ const firstLine = (s: string): string => s.split(/\r?\n/)[0] ?? "";
 
 const gateTitle = (id: unknown): string => GATES.find((g) => g.id === id)?.title ?? show(id, 30);
 
+const FAILURE_KNOWN: Record<PreviewFailure, true> = {
+  timed_out: true, exited: true, install_failed: true, build_failed: true,
+  boot_failed: true, install_app_failed: true, launch_failed: true, start_failed: true,
+};
+
 function topicOf(type: string): NarrationTopic {
   if (type === "agent.action.decided") return "decision";
   const prefix = type.split(".")[0];
@@ -212,6 +218,8 @@ function topicOf(type: string): NarrationTopic {
     case "agent":
     case "run":
       return "agent";
+    case "preview":
+      return "preview";
     case "gate":
       return "gate";
     case "intake":
@@ -386,6 +394,35 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `${claude(runId)} wants to move ${board(cardId)} to ${stage(p.to)}` };
     case "card.move_declined":
       return { headline: `${who} said not yet to moving ${board(cardId)} to ${stage(p.to)}` };
+
+    case "preview.offered": {
+      const what = p.kind === "ios" ? "an iPhone app" : p.kind === "android" ? "an Android app" : "a website";
+      return { headline: `${claude(runId)} offered ${what} preview` };
+    }
+    case "preview.requested": {
+      const first = Array.isArray(p.commands) && Array.isArray(p.commands[0]) ? p.commands[0].map((x) => str(x)).join(" ") : "";
+      const what = p.kind === "ios" ? "iPhone app" : p.kind === "android" ? "Android app" : "website";
+      return { headline: `${who} confirmed starting the ${what} preview: ${show(first, 80)}` };
+    }
+    case "preview.started":
+      return { headline: "Started the website preview" };
+    case "preview.progress": {
+      const steps = Array.isArray(p.steps) ? p.steps.length : 0;
+      const done = Array.isArray(p.done) ? p.done.length : 0;
+      return { headline: `Website preview: step ${done} of ${steps} done` };
+    }
+    case "preview.ready":
+      return { headline: "The website preview is ready" };
+    case "preview.failed":
+      return { headline: own(FAILURE_KNOWN, p.reason) ? failureSentence(p.reason as PreviewFailure, "web") : "The website preview failed", attention: true };
+    case "preview.stopped": {
+      const note = p.reason === "idle" ? " (idle for 30 minutes)" : p.reason === "restarted" ? " (The Terminal restarted)" : "";
+      return { headline: `The website preview stopped${note}` };
+    }
+    case "preview.screenshot": {
+      const dev = own(DEVICES as Record<string, { label: string }>, str(p.device));
+      return { headline: `${who} took a screenshot on ${dev ? dev.label : show(p.device, 40)}` };
+    }
 
     case "agent.started": {
       const adapter = adapterLabel(p.adapter);
