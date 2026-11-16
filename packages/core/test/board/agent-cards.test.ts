@@ -67,7 +67,7 @@ describe("AgentCards.onCard", () => {
 
   it("the title never carries a secret or a hidden control", () => {
     start("r1");
-    cards.onCard("r1", `Fix ${SECRET}‮`);
+    cards.onCard("r1", `Fix ${SECRET}\u202e`);
     const title = requireCard(w.db, cardOf("r1")).title;
     expect(title).not.toContain("TESTKEY");
     expect(title).toContain("\\u202e");
@@ -180,7 +180,7 @@ describe("AgentCards.addComment", () => {
   it("clips the text to 2,000 characters and escapes hidden controls", () => {
     const long = cards.addComment(human, ANA, c, "a".repeat(2500));
     expect(long.text).toHaveLength(2000);
-    const bidi = cards.addComment(human, ANA, c, "look ‮ here");
+    const bidi = cards.addComment(human, ANA, c, "look \u202e here");
     expect(bidi.text).toBe("look \\u202e here");
     expect(bidi).toMatchObject({ cardId: c, authorName: "Ana", role: "maintainer", state: "waiting", runId: null, adapter: null });
     const entry = since(0).filter((e) => e.type === "card.comment").at(-1)!;

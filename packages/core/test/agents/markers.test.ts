@@ -41,11 +41,11 @@ describe("parseMarkerLine", () => {
 
   it("cleans a card title: trimmed, controls escaped, secrets redacted, at most 200 characters", () => {
     expect(parseMarkerLine("[[card:   ]]")).toBeNull();
-    const m = parseMarkerLine(`[[card: Fix ‮ ${FAKE_KEY} ${"y".repeat(300)} ]]`);
+    const m = parseMarkerLine(`[[card: Fix \u202e ${FAKE_KEY} ${"y".repeat(300)} ]]`);
     expect(m?.kind).toBe("card");
     const title = (m as { title: string }).title;
-    expect(title).not.toContain("‮");
-    expect(title).toContain(visibleControls("‮"));
+    expect(title).not.toContain("\u202e");
+    expect(title).toContain(visibleControls("\u202e"));
     expect(title).not.toContain("TESTKEY");
     expect(title.length).toBeLessThanOrEqual(200);
     expect(title.startsWith("Fix ")).toBe(true);
