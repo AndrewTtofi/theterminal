@@ -145,7 +145,7 @@ All three sources produce the same thing: the project's own git repository (`<da
   - **How:** the server creates a new branch `the-terminal/<short id>` through the GitHub API, adds the commits with the API's git data endpoints, and opens a pull request against the default branch. It never pushes to the default branch.
   - **Confirming:** it shows the file list, asks once more, and records a ledger event with the pull request's address.
 - **Start empty:** stays available, as today.
-- **Collaborators:** maintainers and above can add files and create projects from GitHub. Only the owner can use a local folder or Apply to my folder.
+- **Collaborators:** maintainers and above can add files. Only the owner can create projects from GitHub (the repository list and the download use the owner's GitHub token, so a collaborator would otherwise act with it), use a local folder, or Apply to my folder. Others don't see the From GitHub choice, with a short note saying why.
 
 ## The Board
 

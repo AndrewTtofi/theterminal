@@ -63,9 +63,9 @@ export function registerSourcesRoutes(app: FastifyInstance, deps: SourcesRouteDe
     return { source: owner && s.path !== null ? { kind: "folder", path: s.path } : { kind: "folder" } };
   });
 
-  app.get("/api/github/repos", needs("maintainer"), async () => ({ repos: await github.listRepos() }));
+  app.get("/api/github/repos", needs("owner"), async () => ({ repos: await github.listRepos() }));
 
-  app.post("/api/projects/from-github", needs("maintainer"), async (req, reply) => {
+  app.post("/api/projects/from-github", needs("owner"), async (req, reply) => {
     const body = githubBody.parse(req.body);
     const imported = await sources.createFromGitHub(actorOf(req), {
       repo: body.repo, ...(body.name !== undefined && { name: body.name }), ...(body.includeSecrets !== undefined && { includeSecrets: body.includeSecrets }),

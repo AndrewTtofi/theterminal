@@ -373,12 +373,18 @@ describe("uploads", () => {
 });
 
 describe("GitHub", () => {
-  it("lists the person's repositories and creates a project from one", async () => {
+  it("uses the Owner's token, so only the Owner lists repositories or imports one", async () => {
     await build();
-    const repos = await inject("GET", "/api/github/repos", MAINTAINER);
+    expect((await inject("GET", "/api/github/repos", MAINTAINER)).statusCode).toBe(403);
+    expect((await inject("POST", "/api/projects/from-github", MAINTAINER, { repo: "octo/site" })).statusCode).toBe(403);
+  });
+
+  it("lists the Owner's repositories and creates a project from one", async () => {
+    await build();
+    const repos = await inject("GET", "/api/github/repos", OWNER);
     expect(repos.statusCode).toBe(200);
     expect(repos.json()).toEqual({ repos: [{ fullName: "octo/site", defaultBranch: "main", private: true }] });
-    const res = await inject("POST", "/api/projects/from-github", MAINTAINER, { repo: "octo/site" });
+    const res = await inject("POST", "/api/projects/from-github", OWNER, { repo: "octo/site" });
     expect(res.statusCode).toBe(201);
     const { project, result } = res.json() as ImportedProject;
     expect(project.name).toBe("site");

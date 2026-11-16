@@ -39,7 +39,7 @@ describe("NewProjectDialog", () => {
       ],
     });
     const create = vi.spyOn(api, "createFromGitHub").mockResolvedValue({ project: project("taxes"), result: result({ skippedCount: 1, skipped: [{ path: "CON.txt", reason: "unstorable" }] }) });
-    const { dialog, onCreated } = setup("maintainer");
+    const { dialog, onCreated } = setup();
     await userEvent.click(within(dialog).getByRole("radio", { name: /From GitHub/ }));
     const repo = (await within(dialog).findByRole("combobox", { name: "Repository" })) as HTMLSelectElement;
     expect(within(repo).getAllByRole("option").map((o) => o.textContent)).toEqual(["you/website", "you/taxes · private"]);
@@ -53,7 +53,7 @@ describe("NewProjectDialog", () => {
 
   it("asks to connect GitHub when there is no connection", async () => {
     vi.spyOn(api, "githubRepos").mockRejectedValue(new ApiError(400, "github_not_connected"));
-    const { dialog } = setup("maintainer");
+    const { dialog } = setup();
     await userEvent.click(within(dialog).getByRole("radio", { name: /From GitHub/ }));
     expect(await within(dialog).findByText("Connect GitHub in Connections first.")).toBeTruthy();
   });
@@ -61,6 +61,15 @@ describe("NewProjectDialog", () => {
   it("shows no folder choice to anyone but the Owner", () => {
     const { dialog } = setup("maintainer");
     expect(within(dialog).queryByRole("radio", { name: /folder on this computer/ })).toBeNull();
+  });
+
+  it("shows no GitHub choice to anyone but the Owner, and says why", () => {
+    const repos = vi.spyOn(api, "githubRepos");
+    const { dialog } = setup("maintainer");
+    expect(within(dialog).queryByRole("radio", { name: /From GitHub/ })).toBeNull();
+    expect(within(dialog).getAllByRole("radio").map((r) => r.getAttribute("value"))).toEqual(["files", "empty"]);
+    expect(within(dialog).getByText("Only the Owner can start a project from GitHub, because it uses the Owner's GitHub connection.")).toBeTruthy();
+    expect(repos).not.toHaveBeenCalled();
   });
 
   it("uses the folder picker, and on folder_picker_unavailable offers a typed path", async () => {
@@ -91,7 +100,7 @@ describe("NewProjectDialog", () => {
       .spyOn(api, "createFromGitHub")
       .mockRejectedValueOnce(new ApiError(409, "possible_secrets", { names: [".env", "deploy.pem"] }))
       .mockResolvedValueOnce({ project: project("website"), result: result() });
-    const { dialog } = setup("maintainer");
+    const { dialog } = setup();
     await userEvent.click(within(dialog).getByRole("radio", { name: /From GitHub/ }));
     await within(dialog).findByRole("combobox", { name: "Repository" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Create project" }));

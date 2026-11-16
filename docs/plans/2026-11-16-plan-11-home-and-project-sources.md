@@ -34,8 +34,8 @@
 |---|---|---|---|
 | `GET /api/home` | viewer | `?projectId=` (absent: every project) | `HomeRuns` |
 | `GET /api/projects/:id/files` | reviewer | | `ProjectFiles` |
-| `GET /api/github/repos` | maintainer | | `{ repos: GitHubRepoChoice[] }` |
-| `POST /api/projects/from-github` | maintainer | `{ repo, name?, includeSecrets? }` | 201 `ImportedProject` |
+| `GET /api/github/repos` | owner | | `{ repos: GitHubRepoChoice[] }` |
+| `POST /api/projects/from-github` | owner | `{ repo, name?, includeSecrets? }` | 201 `ImportedProject` |
 | `POST /api/projects/from-folder` | owner, local | `{ path, name?, includeSecrets? }` | 201 `ImportedProject` |
 | `POST /api/host/pick-folder` | owner, local | `{}` | `{ path: string \| null }`, or 404 `folder_picker_unavailable` |
 | `POST /api/projects/:id/uploads` | maintainer | `{ files, bytes, includeSecrets }` | 201 `{ uploadId }` |

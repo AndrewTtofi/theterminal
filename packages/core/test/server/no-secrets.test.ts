@@ -279,8 +279,8 @@ describe("the GitHub token never leaves the Authorization header", () => {
         return res;
       };
       expect((await call("POST", "/api/connections", owner, { kind: "github", provider: "github", name: "GitHub", config: {}, secrets: { token: GH_TOKEN } })).status).toBe(201);
-      expect((await call("GET", "/api/github/repos", maintainer)).status).toBe(200);
-      const imported = await call("POST", "/api/projects/from-github", maintainer, { repo: "octo/site" });
+      expect((await call("GET", "/api/github/repos", owner)).status).toBe(200);
+      const imported = await call("POST", "/api/projects/from-github", owner, { repo: "octo/site" });
       expect(imported.status).toBe(201);
       const { project } = (await imported.json()) as { project: { id: string } };
       const { uploadId } = (await (await call("POST", `/api/projects/${project.id}/uploads`, maintainer, { files: 1, bytes: 4, includeSecrets: false })).json()) as { uploadId: string };

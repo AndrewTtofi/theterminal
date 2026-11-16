@@ -21,8 +21,8 @@ type Repos = { state: "idle" | "loading" | "ready" } | { state: "error"; message
 type Done = { project: Project; result: ImportResult | null; note: string | null };
 
 /**
- * "New project": a name and where its first files come from: files you add, one of your GitHub repositories, a folder
- * on this computer (the Owner, on this computer only), or nothing. A project made from a source is selected at once
+ * "New project": a name and where its first files come from: files you add, one of the Owner's GitHub repositories
+ * (the Owner only), a folder on this computer (the Owner, on this computer only), or nothing. A project made from a source is selected at once
  * (`onCreated`); the dialog then shows what was copied in and what was left out.
  */
 export function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (p: Project) => void }) {
@@ -143,7 +143,9 @@ export function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; 
   const titleId = `${ids}-title`;
   const working = busy && choice !== "empty";
   const imports = choice !== "empty";
-  const shown = CHOICES.filter((c) => c.id !== "folder" || folderAllowed);
+  // From GitHub uses the Owner's GitHub connection, so it is the Owner's alone, like a folder on this computer.
+  const githubAllowed = role === "owner";
+  const shown = CHOICES.filter((c) => (c.id !== "folder" || folderAllowed) && (c.id !== "github" || githubAllowed));
 
   if (done !== null) {
     return (
@@ -208,6 +210,9 @@ export function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; 
             <span className="np-title">Start empty</span>
             <span className="np-text">and let an agent build from scratch.</span>
           </label>
+          {!githubAllowed && (
+            <p className="np-hint">Only the Owner can start a project from GitHub, because it uses the Owner's GitHub connection.</p>
+          )}
         </fieldset>
 
         <div className="np-detail">

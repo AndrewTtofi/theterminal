@@ -105,8 +105,9 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
       "GET /api/home": "viewer",
       "GET /api/projects/:id/files": "reviewer",
       "GET /api/projects/:id/source": "reviewer",
-      "GET /api/github/repos": "maintainer",
-      "POST /api/projects/from-github": "maintainer",
+      // The Owner's GitHub token: listing its repositories and importing one are the Owner's.
+      "GET /api/github/repos": "owner",
+      "POST /api/projects/from-github": "owner",
       "POST /api/projects/from-folder": "owner",
       "POST /api/host/pick-folder": "owner",
       "POST /api/projects/:id/uploads": "maintainer",
