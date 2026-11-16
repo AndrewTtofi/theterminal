@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { pushOverlay } from "../shell/overlay-store";
 import "./sources.css";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -24,6 +25,9 @@ export function Modal({ labelledBy, onClose, locked = false, className, children
   close.current = onClose;
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
+
+  // An open dialog counts as an overlay, so device views drawn over the page hide meanwhile.
+  useEffect(() => pushOverlay(), []);
 
   useEffect(() => {
     const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;

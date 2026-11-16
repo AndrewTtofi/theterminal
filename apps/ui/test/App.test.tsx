@@ -75,6 +75,7 @@ vi.mock("../src/api", () => ({
     getHome: vi.fn(),
     projectFiles: vi.fn(),
     acceptRun: vi.fn(),
+    cardInfos: vi.fn(),
   },
   setUnauthorizedHandler: (fn: (() => void) | null) => {
     h.unauthorized = fn;
@@ -167,6 +168,7 @@ beforeEach(() => {
   m.listInvites.mockResolvedValue([]);
   m.getRemote.mockResolvedValue({ enabled: false, listening: false });
   m.getHome.mockResolvedValue({ working: [], finishedToday: [] });
+  m.cardInfos.mockResolvedValue({ cards: [] });
   m.projectFiles.mockResolvedValue({ source: null, added: false, head: "h", entries: [], truncated: false });
 });
 
@@ -1406,5 +1408,48 @@ describe("App Home data", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     await waitFor(() => expect(m.getHome).toHaveBeenLastCalledWith("A"));
     await waitFor(() => expect(m.projectFiles).toHaveBeenLastCalledWith("A"));
+  });
+});
+
+describe("App card infos and Home on card and preview entries", () => {
+  const entry = (type: string, projectId = "A"): LedgerEntry => ({
+    seq: 60, id: "60", ts: "2026-11-17T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type: type as LedgerEntry["type"], payload: {}, prevHash: "", hash: "",
+  });
+
+  it("reads the card infos once, debounced, after a card.comment entry", async () => {
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await waitFor(() => expect(m.cardInfos).toHaveBeenCalledWith("A"));
+    vi.useFakeTimers();
+    try {
+      const before = m.cardInfos.mock.calls.length;
+      await act(async () => {
+        h.onEntry!(entry("card.comment"));
+        h.onEntry!(entry("card.comment"));
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(m.cardInfos.mock.calls.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reloads Home after a card.* and a preview.* entry", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      for (const type of ["card.move_requested", "preview.offered"]) {
+        const before = m.getHome.mock.calls.length;
+        await act(async () => {
+          h.onEntry!(entry(type));
+          await vi.advanceTimersByTimeAsync(600);
+        });
+        expect(m.getHome.mock.calls.length).toBe(before + 1);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

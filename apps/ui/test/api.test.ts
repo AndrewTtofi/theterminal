@@ -750,3 +750,82 @@ describe("project sources", () => {
     expect(JSON.parse(call(f, 1)[1].body as string)).toEqual({ head: "abc" });
   });
 });
+
+describe("preview and card note calls", () => {
+  it("posts a note's text to its card", async () => {
+    const f = respond(201, { id: "n1" });
+    await api.addCardComment("c1", "hi");
+    const [url, init] = call(f, 0);
+    expect(url).toBe("/api/cards/c1/comments");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ text: "hi" });
+  });
+
+  it("reads card infos, comments, plans and screenshots from the contract's routes", async () => {
+    const f = respond(200, { cards: [], comments: [], screenshots: [] });
+    await api.cardInfos("p1");
+    await api.cardComments("c1");
+    await api.previewPlan("r1", "web");
+    await api.previewPlan("r1", "ios", "App Scheme");
+    await api.runScreenshots("r1");
+    expect(f.mock.calls.map((c) => c[0])).toEqual([
+      "/api/projects/p1/cards/info",
+      "/api/cards/c1/comments",
+      "/api/runs/r1/preview/plan?kind=web",
+      "/api/runs/r1/preview/plan?kind=ios&target=App%20Scheme",
+      "/api/runs/r1/screenshots",
+    ]);
+  });
+
+  it("starts, stops and marks previews, and declines a move", async () => {
+    const f = respond(204);
+    await api.startPreview("r1", { kind: "web", key: "k" });
+    await api.stopPreview("v1", "tab_closed");
+    await api.previewSeen("v1");
+    await api.takeScreenshots("v1");
+    await api.declineMove("c1");
+    await api.previewViews({ previewId: "v1", action: "hide", devices: [] });
+    const seen = (f.mock.calls as [string, RequestInit][]).map(([u, i]) => [u, i.method, i.body ?? null]);
+    expect(seen).toEqual([
+      ["/api/runs/r1/preview", "POST", JSON.stringify({ kind: "web", key: "k" })],
+      ["/api/previews/v1/stop", "POST", JSON.stringify({ reason: "tab_closed" })],
+      ["/api/previews/v1/seen", "POST", "{}"],
+      ["/api/previews/v1/screenshots", "POST", "{}"],
+      ["/api/cards/c1/move-request/decline", "POST", "{}"],
+      ["/api/host/preview-views", "POST", JSON.stringify({ previewId: "v1", action: "hide", devices: [] })],
+    ]);
+  });
+
+  it("reads the host's capabilities, native tools and one preview", async () => {
+    const f = respond(200, {});
+    await api.hostCapabilities();
+    await api.nativeTools();
+    await api.getPreview("v1");
+    expect(f.mock.calls.map((c) => c[0])).toEqual(["/api/host/capabilities", "/api/host/native-tools", "/api/previews/v1"]);
+  });
+
+  it("sends autoCard with a run start", async () => {
+    const f = respond(201, { id: "r1" });
+    await api.startRun("p1", { adapter: "claude", prompt: "go", autoCard: true });
+    expect(JSON.parse(call(f, 0)[1].body as string)).toMatchObject({ autoCard: true });
+  });
+
+  it("builds a screenshot's address", () => {
+    expect(api.screenshotUrl({ sha256: "ab12", runId: "r1" } as never)).toBe("/api/screenshots/ab12?runId=r1");
+  });
+
+  it("words the preview refusals", () => {
+    expect(errorMessage(new ApiError(409, "package_manager_not_found", { manager: "pnpm" }))).toBe("pnpm isn't installed on this computer.");
+    expect(errorMessage(new ApiError(409, "preview_changed"))).toBe("The agent changed what will run. Look at the commands again before you start it.");
+    expect(errorMessage(new ApiError(403, "preview_not_allowed"))).toBe("Only the Owner, or the person who started this job, can start its preview.");
+    expect(errorMessage(new ApiError(400, "preview_refused", { reason: "program" }))).toBe(
+      "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.",
+    );
+    expect(errorMessage(new ApiError(409, "platform_unsupported", { kind: "ios" }))).toBe("iPhone apps need a Mac.");
+    expect(errorMessage(new ApiError(409, "platform_unsupported", { kind: "android" }))).toBe("Android apps can't be built on Windows in this version.");
+    expect(errorMessage(new ApiError(409, "native_tools_missing", { missing: ["xcode"] }))).toBe(
+      "Some tools are missing on this computer. See What you need on this computer.",
+    );
+    expect(errorMessage(new ApiError(409, "screenshots_unavailable"))).toBe("Screenshots of websites need the desktop app.");
+  });
+});

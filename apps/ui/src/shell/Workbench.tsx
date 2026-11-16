@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LEARN_TOPICS } from "@theterminal/shared";
+import { LEARN_TOPICS, jobTitle } from "@theterminal/shared";
 import { DecisionCard } from "../components/DecisionCard";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
@@ -214,6 +214,11 @@ export function Workbench({ model }: Props) {
     ...model,
     onOpenDiff: (runId, path) => dockRef.current?.open(diffPanelId(runId, path), basename(path), "main"),
     onOpenFile: (runId, path) => dockRef.current?.open(filePanelId(runId, path), basename(path), "main"),
+    openPreview: (runId) => {
+      const run = model.runs.find((r) => r.id === runId);
+      // The `preview:` panel id joins DockPanelId with the Preview tab (Plan 12, Task 16).
+      dockRef.current?.open(`preview:${runId}` as DockPanelId, `Preview · ${run ? jobTitle(run) : "job"}`, "main");
+    },
   };
   const ctx: ShellContextValue = {
     model: shellModel,
