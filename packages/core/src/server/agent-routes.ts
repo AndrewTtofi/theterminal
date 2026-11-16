@@ -49,6 +49,8 @@ const startBody = z.object({
   connectionIds: z.array(z.string().min(1).max(200)).max(10).optional(),
   /** A paired machine to run on (its connections are the ones given); absent runs here. */
   machineId: z.string().regex(MACHINE_ID).optional(),
+  /** A run started from Home: without a card, it gets one titled from the prompt (ignored on a linked machine). */
+  autoCard: z.boolean().optional(),
 });
 const decisionBody = z.object({ decision: z.enum(["allow", "deny"]), reason: z.string().optional() });
 const authBody = z.object({ mode: z.enum(["api_key", "subscription"]), acknowledgement: z.string().optional() });
@@ -122,6 +124,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRouteDeps):
       prompt: body.prompt,
       ...(body.cardId !== undefined && { cardId: body.cardId }),
       ...(body.connectionIds !== undefined && { connectionIds: body.connectionIds }),
+      ...(body.autoCard !== undefined && { autoCard: body.autoCard }),
       forceApiKey,
     });
     return reply.code(201).send(run);

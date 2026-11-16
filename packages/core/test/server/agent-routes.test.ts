@@ -376,6 +376,21 @@ describe("agent API", { timeout: GIT_TEST_TIMEOUT_MS }, () => {
     expect(await res.json()).toMatchObject({ cardId: card.id });
   });
 
+  it("autoCard: true makes the run's card from the prompt's first line; a non-boolean autoCard is 400", async () => {
+    const { s, projectId } = await start([]);
+    const before = await json<unknown[]>(get(s, "/api/ledger"));
+    const bad = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "go", autoCard: "yes" });
+    expect(bad.status).toBe(400);
+    expect(await json<unknown[]>(get(s, "/api/ledger"))).toHaveLength(before.length);
+    const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "Fix the login\nmore", autoCard: true });
+    expect(res.status).toBe(201);
+    const run = (await res.json()) as AgentRun;
+    expect(run.cardId).not.toBeNull();
+    const board = await json<{ columns: Record<string, { id: string; title: string }[]> }>(get(s, `/api/projects/${projectId}/board`));
+    expect(board.columns.plan).toEqual([expect.objectContaining({ id: run.cardId, title: "Fix the login" })]);
+    await untilFinished(s, run.id);
+  });
+
   it("starts, lists, inspects and approves a scripted run end to end", async () => {
     const { s, projectId } = await start(script);
     const res = await post(s, `/api/projects/${projectId}/runs`, { adapter: "fake", prompt: "do it" });

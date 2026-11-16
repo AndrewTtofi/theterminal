@@ -3,23 +3,36 @@ import { mkdirSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { ACTION_KINDS, PROGRESS_LIMITS, visibleControls, type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type Provider } from "@theterminal/shared";
+import {
+  ACTION_KINDS, PROGRESS_LIMITS, jobTitle, visibleControls,
+  type Actor, type AdapterId, type AgentAction, type AgentRun, type AuthMode, type NewLedgerEntry, type PreviewKind, type Provider,
+} from "@theterminal/shared";
 import { CloudCredentialError, type CloudGrant } from "../connections/cloud/grant.js";
 import { pairValueSecrets, type McpServerSpec } from "../connections/mcp.js";
 import { ConflictError, UnsupportedConnectionError, type CloudSource, type Credentials, type RunSelection } from "../connections/service.js";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
-import { commitEvent } from "../events/commit.js";
+import type { AgentCards } from "../board/agent-cards.js";
+import { commitEvent, commitEvents } from "../events/commit.js";
 import { getRun, listActions, listRuns } from "../events/projections.js";
 import { LedgerReadOnlyError, type Ledger } from "../ledger/ledger.js";
 import type { AdapterEvent, AgentAdapter, GateResult, ProposedAction, RunCredentials } from "./adapter.js";
 import { AlreadyDecidedError, type ApprovalBroker } from "./approvals.js";
 import { classify } from "./policy.js";
+import { LineReader, parseMarkerLine, type Marker } from "./markers.js";
 import { ProgressTracker, STEP_PLAN_INSTRUCTION } from "./progress.js";
 import { redact, truncate } from "./redact.js";
 import { ProviderSettings } from "./settings.js";
 import { pathScrubber, usernameScrubber, type Scrub } from "./scrub-paths.js";
 import type { WorktreeManager } from "./worktrees.js";
+
+/** What the runner asks of the Board for a run's card markers and its card's notes (see AgentCards). */
+export type CardMarkers = Pick<AgentCards, "onCard" | "onStage" | "onDone" | "onNoted" | "notesFor">;
+
+/** Put in front of the prompt, above the card's waiting notes (Ruling 6). */
+export const NOTES_HEADER = "Notes about this card from people on the project:";
+/** Put after the card's waiting notes, before the person's prompt. */
+export const NOTES_FOOTER = "When you have read these notes, write [[noted]] on a line of its own.";
 
 export class AdapterUnavailableError extends Error {
   constructor(adapter: string) {
@@ -153,6 +166,8 @@ export type AgentRunnerDeps = {
   mintCloud?: (source: CloudSource, signal: AbortSignal) => Promise<CloudGrant>;
   /** One deadline for minting all of a run's cloud grants. Default DEFAULT_GRANT_TIMEOUT_MS. */
   grantTimeoutMs?: number;
+  /** The Board, for card markers and notes. Absent: card markers are ignored and no notes are given. */
+  cards?: CardMarkers;
 };
 
 function defaultSelect(ids: string[]): RunSelection {
@@ -194,6 +209,12 @@ type Session = {
   secrets: string[];
   /** Reads the agent's step reports out of its own messages. */
   progress: ProgressTracker;
+  /** Splits the agent's own messages into whole lines, each parsed once as a marker. */
+  lines: LineReader;
+  /** Which markers count: a run for a linked machine's card (`foreignCard`) reads only plan and step. */
+  markers: "all" | "progress";
+  /** The run's latest recorded offer of each kind, so an unchanged offer is not recorded again (Ruling 8). */
+  offers: Partial<Record<PreviewKind, string>>;
 };
 type Payload = Record<string, unknown>;
 type ActionRow = { run_id: string; project_id: string; status: AgentAction["status"]; reason: string; machine_id: string | null };
@@ -202,7 +223,11 @@ type GateOutcome = GateResult & { actionId: string };
 const POLICY: Actor = { kind: "system", id: "policy" };
 const RUNNER: Actor = { kind: "system", id: "runner" };
 // Bounds from the agent payload schemas in @theterminal/shared; input has no schema bound, so we cap it.
-const MAX = { tool: 200, summary: 200, reason: 500, text: 4000, output: 4000, prompt: 20000, error: 1000, input: 20000, preview: 4000 };
+const MAX = {
+  tool: 200, summary: 200, reason: 500, text: 4000, output: 4000, prompt: 20000, error: 1000, input: 20000, preview: 4000,
+  // From markers: a card title (Ruling 1), a website command and an app target (the `preview.offered` schema).
+  cardTitle: 200, command: 500, target: 200,
+};
 const promptSchema = z.string().min(1).max(MAX.prompt);
 const INTERNAL_ERROR = "internal error";
 const NOT_ALLOWED_RESULT = "adapter reported a result for an action that was not allowed";
@@ -318,7 +343,7 @@ export class AgentRunner {
     actor: Actor,
     input: {
       projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; runId?: string;
-      foreignCard?: boolean; forceApiKey?: boolean;
+      foreignCard?: boolean; forceApiKey?: boolean; autoCard?: boolean;
     },
   ): Promise<AgentRun> {
     if (input.runId === undefined) return this.startRun(actor, input, this.newId());
@@ -338,7 +363,7 @@ export class AgentRunner {
     actor: Actor,
     input: {
       projectId: string; adapter: AdapterId; prompt: string; cardId?: string | null; connectionIds?: string[]; foreignCard?: boolean;
-      forceApiKey?: boolean;
+      forceApiKey?: boolean; autoCard?: boolean;
     },
     runId: string,
   ): Promise<AgentRun> {
@@ -397,18 +422,39 @@ export class AgentRunner {
     const wt = await worktrees.createRunWorktree(input.projectId, runId);
     if (this.closing) throw new ShuttingDownError(); // shutdown began while the worktree was created
     const scrub = this.runScrubber(wt.absPath);
-    const run = commitEvent(db, ledger, () => ({
-      event: {
+    const foreign = input.foreignCard === true;
+    const recordedPrompt = this.clean(prompt, MAX.prompt, scrub, runSecrets);
+    // A run started from Home without a card gets one at its start, titled from the person's prompt (Ruling 2).
+    const autoTitle = input.autoCard === true && cardId === null && !foreign ? visibleControls(jobTitle({ prompt: recordedPrompt, progress: null })) : "";
+    const newCardId = autoTitle !== "" ? this.newId() : null;
+    // The card's waiting notes, read in the same transaction that records them given, so two starts never share one.
+    let notes: { ids: string[]; lines: string[] } | null = null;
+    const run = commitEvents(db, ledger, () => {
+      const agent: Actor = { kind: "agent", id: runId };
+      const events: NewLedgerEntry[] = [];
+      if (newCardId !== null) {
+        events.push({ projectId: input.projectId, actor: agent, type: "card.created", payload: { cardId: newCardId, title: autoTitle, stage: "plan" } });
+      }
+      events.push({
         projectId: input.projectId,
         actor,
         type: "agent.started",
         payload: {
-          runId, adapter: input.adapter, authMode, prompt: this.clean(prompt, MAX.prompt, scrub, runSecrets),
-          cardId, worktree: wt.relPath, base: wt.base,
+          runId, adapter: input.adapter, authMode, prompt: recordedPrompt, cardId: newCardId ?? cardId, worktree: wt.relPath, base: wt.base,
         },
-      },
-      result: () => getRun(db, runId)!,
-    }));
+      });
+      // Only a run on this computer, on a card of this computer, is given notes; a linked machine's run leaves them waiting.
+      notes = cardId !== null && !foreign ? (this.deps.cards?.notesFor(cardId) ?? null) : null;
+      if (notes !== null) {
+        events.push({
+          projectId: input.projectId, actor: RUNNER, type: "card.comments_given", payload: { cardId, runId, commentIds: notes.ids },
+        });
+      }
+      return { events, result: () => getRun(db, runId)! };
+    });
+    const given = notes as { ids: string[]; lines: string[] } | null;
+    // The notes go to the agent only, in front of the prompt; agent.started recorded the person's prompt unchanged.
+    const agentPrompt = given === null ? prompt : `${NOTES_HEADER}\n${given.lines.join("\n")}\n${NOTES_FOOTER}\n\n${prompt}`;
     // What the run was given: which connection, for what, which kind of credential and when it expires; never a value.
     const uses: Payload[] = [];
     if (creds && purpose) uses.push({ connectionId: creds.connectionId, name: creds.name, runId, purpose });
@@ -430,7 +476,7 @@ export class AgentRunner {
       throw e;
     }
     if (credentials.configHome !== undefined) mkdirSync(credentials.configHome, { recursive: true });
-    this.launch(run, adapter, wt.absPath, scrub, prompt, authMode, credentials, runSecrets);
+    this.launch(run, adapter, wt.absPath, scrub, agentPrompt, authMode, credentials, runSecrets, foreign ? "progress" : "all");
     return run;
   }
 
@@ -584,7 +630,7 @@ export class AgentRunner {
 
   private launch(
     run: AgentRun, adapter: AgentAdapter, cwd: string, scrub: Scrub, prompt: string, authMode: AuthMode, credentials: RunCredentials,
-    secrets: string[],
+    secrets: string[], markers: Session["markers"],
   ): void {
     const abort = new AbortController();
     const session: Session = {
@@ -592,6 +638,9 @@ export class AgentRunner {
       secrets,
       // A step text is the agent's own words: cleaned like every recorded text, controls made visible, then clipped.
       progress: new ProgressTracker((s) => truncate(visibleControls(this.clean(s, Infinity, scrub, secrets)), PROGRESS_LIMITS.stepChars)),
+      lines: new LineReader(),
+      markers,
+      offers: {},
     };
     this.sessions.set(run.id, session);
     this.unsettled.add(run.id);
@@ -600,7 +649,7 @@ export class AgentRunner {
       let error: string | null = null;
       try {
         const r = await adapter.start({
-          // The step instruction goes to the agent only; agent.started recorded the person's prompt unchanged.
+          // The step instruction (and any notes) go to the agent only; agent.started recorded the person's prompt unchanged.
           cwd, projectId: run.projectId, prompt: prompt + STEP_PLAN_INSTRUCTION, authMode, signal: abort.signal,
           gate: (a) => this.gate(run.id, session, cwd, a),
           emit: (e) => this.onEmit(run.id, session, e),
@@ -753,14 +802,8 @@ export class AgentRunner {
           event: { projectId: s.projectId, actor: agent, type: "agent.message", payload: { runId, text } },
           result: () => undefined,
         }));
-        // Only the agent's own messages are read for step reports, never tool output.
-        const progress = s.progress.feed(raw);
-        if (progress) {
-          commitEvent(db, ledger, () => ({
-            event: { projectId: s.projectId, actor: agent, type: "agent.progress", payload: { runId, ...progress } },
-            result: () => undefined,
-          }));
-        }
+        // Only the agent's own messages are read for markers, never tool output; each whole line is parsed once.
+        for (const line of s.lines.feed(raw)) this.onMarkerLine(runId, s, line);
       } else if (e.type === "action_result") {
         const output = this.clean(asText(e.output), MAX.output, s.scrub, s.secrets);
         const committed = commitEvent(db, ledger, () => {
@@ -791,6 +834,77 @@ export class AgentRunner {
     } catch {
       fail(INTERNAL_ERROR);
     }
+  }
+
+  /**
+   * Acts on one whole line of the agent's own message. `plan` and `step` become `agent.progress`. With every marker
+   * read (a run on this computer's own card or none), card markers go to the Board, and `preview`/`app` become
+   * `preview.offered`. Every text a marker carries gets the run's full cleaning (redaction with the run's secrets,
+   * path scrub), its hidden controls made visible and its clip, before anything sees it. A commit that throws fails
+   * the run (the caller's catch); a marker the Board ignores is not a failure.
+   */
+  private onMarkerLine(runId: string, s: Session, line: string): void {
+    const { db, ledger } = this.deps;
+    const agent: Actor = { kind: "agent", id: runId };
+    const first = parseMarkerLine(line);
+    if (first === null) return;
+    if (first.kind === "plan" || first.kind === "step") {
+      const progress = s.progress.apply(first);
+      if (progress) {
+        commitEvent(db, ledger, () => ({
+          event: { projectId: s.projectId, actor: agent, type: "agent.progress", payload: { runId, ...progress } },
+          result: () => undefined,
+        }));
+      }
+      return;
+    }
+    if (s.markers !== "all") return;
+    // The texts are read from the line cleaned whole, so no secret is cut in half by a clip before it is redacted.
+    const m: Marker | null = first.kind === "card" || first.kind === "preview" || first.kind === "app"
+      ? parseMarkerLine(this.clean(line, Infinity, s.scrub, s.secrets))
+      : first;
+    if (m === null) return;
+    const text = (t: string, max: number) => truncate(visibleControls(this.clean(t, Infinity, s.scrub, s.secrets)), max).trim();
+    const cards = this.deps.cards;
+    switch (m.kind) {
+      case "card": {
+        const title = text(m.title, MAX.cardTitle);
+        if (title !== "") cards?.onCard(runId, title);
+        return;
+      }
+      case "card-stage":
+        cards?.onStage(runId, m.stage);
+        return;
+      case "card-done":
+        cards?.onDone(runId);
+        return;
+      case "noted":
+        cards?.onNoted(runId);
+        return;
+      case "preview": {
+        const command = text(m.command, MAX.command);
+        if (command !== "") this.offer(runId, s, { runId, kind: "web", command, port: m.port });
+        return;
+      }
+      case "app": {
+        const target = text(m.target, MAX.target);
+        if (target !== "") this.offer(runId, s, { runId, kind: m.platform, target });
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /** `preview.offered` as the agent, only when it differs from the run's latest offer of that kind (Ruling 8). */
+  private offer(runId: string, s: Session, payload: { runId: string; kind: PreviewKind; command?: string; port?: number; target?: string }): void {
+    const key = JSON.stringify(payload);
+    if (s.offers[payload.kind] === key) return;
+    commitEvent(this.deps.db, this.deps.ledger, () => ({
+      event: { projectId: s.projectId, actor: { kind: "agent", id: runId }, type: "preview.offered", payload },
+      result: () => undefined,
+    }));
+    s.offers[payload.kind] = key;
   }
 
   /** Aborts the run, denies its pending actions, then commits agent.finished once (guarded by run status). */
