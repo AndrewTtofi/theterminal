@@ -160,11 +160,18 @@ describe("acquireDataDirLock", () => {
   });
 });
 
-describe("createServer and the data folder lock", () => {
+/**
+ * Each test here starts and closes whole servers (up to three), which take tens of milliseconds on a quiet machine but
+ * seconds each on a loaded Windows runner, where even the sync lock tests above take most of a second.
+ */
+const WIN32 = process.platform === "win32";
+const SERVER_TEST_TIMEOUT_MS = WIN32 ? 40_000 : 15_000;
+
+describe("createServer and the data folder lock", { timeout: SERVER_TEST_TIMEOUT_MS }, () => {
   const running: RunningServer[] = [];
   afterEach(async () => {
     while (running.length) await running.pop()!.close().catch(() => undefined);
-  });
+  }, SERVER_TEST_TIMEOUT_MS);
   const opts = (dataDir: string, port: number) => ({ dataDir, port, which: () => null, secrets: new MemorySecretStore(), discovery: fakeDiscovery() });
 
   it("a second server on the same data folder is refused while the first runs", async () => {
