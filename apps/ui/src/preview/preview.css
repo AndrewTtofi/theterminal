@@ -51,3 +51,44 @@
 
 .preview-page { height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); }
 .preview-page > .preview-note { padding: var(--space-4); }
+
+/* Website, iOS or Android: a pill switch like the device toggles. */
+.preview-kinds { display: flex; flex: none; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); overflow: hidden; }
+.preview-kinds button { background: none; color: var(--muted); border-radius: 0; border-right: 1px solid var(--line); padding: 4px var(--space-3); font-size: var(--text-m); transition: background var(--motion-fast) linear, color var(--motion-fast) linear; }
+.preview-kinds button:last-child { border-right: 0; }
+.preview-kinds button:hover { background: var(--hover); color: var(--fg); }
+.preview-kinds button[aria-pressed="true"] { background: var(--selected); color: var(--fg-strong); }
+.preview-web { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.preview-web[hidden], .preview-app[hidden] { display: none; }
+.preview-app { flex: 1; min-height: 0; overflow: auto; }
+
+/* A phone app: the stages beside what this computer needs and the latest screenshots (the approved sketch). */
+.app-preview { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+@container (max-width: 640px) { .app-preview { grid-template-columns: minmax(0, 1fr); } }
+.preview-panel { container-type: inline-size; }
+.app-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-m); min-width: 0; }
+.app-card h3 { margin: 0; font-size: var(--text-s); font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.app-card .progress { align-self: stretch; }
+.app-stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-m); }
+.app-stages li { display: flex; justify-content: space-between; gap: var(--space-2); min-height: 20px; align-items: center; }
+.app-stage-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-stages li.todo .app-stage-name { color: var(--muted); }
+.app-stage-mark { flex: none; white-space: nowrap; }
+.app-stage-mark.ok { color: var(--ok); }
+.app-stage-mark.now { color: var(--accent); }
+.app-stage-mark.todo { color: var(--muted); }
+.app-stage-mark.failed { color: var(--danger); }
+.app-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-1); }
+.preview-failed-inline { display: flex; flex-direction: column; gap: var(--space-2); }
+
+/* What you need on this computer. */
+.tools-box { display: flex; flex-direction: column; gap: var(--space-2); }
+.tool-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-m); }
+.tool-line { display: flex; align-items: center; gap: var(--space-2); min-height: 24px; }
+.tool-name { flex: 1; min-width: 0; }
+.tool-mark { flex: none; width: 16px; text-align: center; font-weight: 600; }
+.tool-ok { color: var(--ok); }
+.tool-missing { color: var(--attention); }
+.tool-help { margin: var(--space-1) 0 var(--space-2) var(--space-6); font-size: var(--text-m); color: var(--fg); }
+.tool-help ol { margin: 0 0 var(--space-1); padding-left: var(--space-4); }
+.tool-help a { color: var(--accent); }

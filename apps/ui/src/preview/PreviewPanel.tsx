@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DEVICES, DEVICE_IDS, PREVIEW_LIMITS, adapterLabel, failureSentence, jobTitle } from "@theterminal/shared";
-import type { DeviceId, PreviewPlan, PreviewView } from "@theterminal/shared";
+import type { DeviceId, NativeTools, PreviewKind, PreviewPlan, PreviewView } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
 import { ProgressBar, StepChecklist } from "../components/ProgressBar";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
+import { AppPreview } from "./AppPreview";
 import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
 import { DeviceStage } from "./DeviceStage";
 import { isDesktop, useLiveViews } from "./live-views";
@@ -17,6 +18,18 @@ const SEEN_MS = 60_000;
 const POLL_MS = 2_000;
 
 const isLive = (v: PreviewView | null): v is PreviewView => v !== null && (v.state === "requested" || v.state === "starting" || v.state === "ready");
+
+const KIND_LABELS: Record<PreviewKind, string> = { web: "Website", ios: "iOS", android: "Android" };
+
+/**
+ * What the switch offers: the website when the run offered one, and both phone platforms when it offered an app
+ * (The Terminal detects the project when the marker named the other one).
+ */
+export function previewChoices(offers: readonly PreviewKind[]): PreviewKind[] {
+  const app = offers.includes("ios") || offers.includes("android");
+  if (!app) return ["web"];
+  return [...(offers.includes("web") ? (["web"] as const) : []), "ios", "android"];
+}
 
 /** The rest of the dialog's state: the plan shown, and why it is shown again. */
 type Confirm = { plan: PreviewPlan; notice: string | null };
@@ -53,7 +66,45 @@ export function PreviewPanel({ id }: { id: string }) {
   const [liveHost, setLiveHost] = useState<boolean | null>(() => (isDesktop() ? null : false));
   const [frames, setFrames] = useState<Map<DeviceId, HTMLElement>>(() => new Map());
   const [root, setRoot] = useState<HTMLElement | null>(null);
-  const visible = useOnScreen(root);
+  const onScreen = useOnScreen(root);
+
+  // Website, iOS or Android. The choices only grow, so an app being built is never unmounted by a Home reload.
+  const offers = homeRun?.offers ?? [];
+  const offered = previewChoices(offers);
+  const [choices, setChoices] = useState<PreviewKind[]>(offered);
+  const offeredKey = offered.join(",");
+  useEffect(() => {
+    setChoices((c) => {
+      if (offered.every((k) => c.includes(k))) return c;
+      // The website shown only because nothing was offered yet gives way, unless it is already in use.
+      const keep = c.length === 1 && c[0] === "web" && view === null ? [] : c;
+      return previewChoices([...new Set([...keep, ...offered])]);
+    });
+  }, [offeredKey]);
+  const [picked, setPicked] = useState<PreviewKind | null>(null);
+  // Until the person picks, the first thing the run offered.
+  const active: PreviewKind = picked !== null && choices.includes(picked) ? picked : (choices.find((k) => offers.includes(k)) ?? choices[0]!);
+  const visible = onScreen && active === "web";
+  const appKinds = choices.filter((k): k is "ios" | "android" => k !== "web");
+  /** A live app of this run found when the tab opened. */
+  const [followed, setFollowed] = useState<PreviewView | null>(null);
+
+  // The Owner's tool detection, read once when the tab shows an app.
+  const owner = roleOf(model) === "owner";
+  const [tools, setTools] = useState<NativeTools | null>(null);
+  const [toolsError, setToolsError] = useState<string | null>(null);
+  const wantTools = owner && appKinds.length > 0;
+  useEffect(() => {
+    if (!wantTools) return;
+    let on = true;
+    api.nativeTools().then(
+      (t) => on && setTools(t),
+      (e) => on && setToolsError(errorMessage(e)),
+    );
+    return () => {
+      on = false;
+    };
+  }, [wantTools]);
 
   const previewId = view?.id ?? null;
   const ready = view?.state === "ready" ? view : null;
@@ -81,7 +132,16 @@ export function PreviewPanel({ id }: { id: string }) {
     if (livePreviewId === null || (view !== null && isLive(view))) return;
     let on = true;
     api.getPreview(livePreviewId).then(
-      (v) => on && setView(v),
+      (v) => {
+        if (!on) return;
+        if (v.kind === "web") {
+          setView(v);
+          return;
+        }
+        setFollowed(v);
+        setChoices((c) => (c.includes(v.kind) ? c : previewChoices([...c, v.kind])));
+        setPicked(v.kind);
+      },
       () => {},
     );
     return () => {
@@ -222,105 +282,127 @@ export function PreviewPanel({ id }: { id: string }) {
       <header className="preview-top">
         <span className="preview-word">
           PREVIEW · <b>{title}</b>
+          {active !== "web" && " · Phone app"}
         </span>
-        {origin && (
+        {choices.length > 1 && (
+          <div className="preview-kinds" role="group" aria-label="What to preview">
+            {choices.map((k) => (
+              <button key={k} type="button" aria-pressed={active === k} onClick={() => setPicked(k)}>
+                {KIND_LABELS[k]}
+              </button>
+            ))}
+          </div>
+        )}
+        {origin && active === "web" && (
           <a className="preview-open" href={origin} target="_blank" rel="noreferrer noopener">
             Open in my browser ↗
           </a>
         )}
       </header>
 
-      {ready && (
-        <div className="preview-bar">
-          <div className="preview-devices" role="group" aria-label="Devices">
-            {DEVICE_IDS.map((d) => {
-              const on = prefs.devices.includes(d);
-              const full = !on && count >= PREVIEW_LIMITS.maxDevices;
-              const last = on && count === 1;
-              return (
-                <button
-                  key={d}
-                  type="button"
-                  aria-pressed={on}
-                  disabled={full || last}
-                  title={full ? "Up to 4 devices" : last ? "Keep at least one device" : undefined}
-                  onClick={() => changePrefs(toggleDevice(prefs, d))}
-                >
-                  {DEVICES[d].label}
-                </button>
-              );
-            })}
-          </div>
-          <span className="preview-origin">
-            <span className="preview-live">● live</span> · from “{title}” ({agent})
-          </span>
-          <button type="button" className="quiet" onClick={doReload}>
-            ⟳ Reload
-          </button>
-          <button type="button" className="quiet" onClick={() => changePrefs(rotateAll(prefs))}>
-            ⤾ Rotate
-          </button>
-          {liveHost ? (
-            <button type="button" onClick={() => void screenshotAll()}>
-              Screenshot all
+      <div className="preview-web" hidden={active !== "web"}>
+        {ready && (
+          <div className="preview-bar">
+            <div className="preview-devices" role="group" aria-label="Devices">
+              {DEVICE_IDS.map((d) => {
+                const on = prefs.devices.includes(d);
+                const full = !on && count >= PREVIEW_LIMITS.maxDevices;
+                const last = on && count === 1;
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    aria-pressed={on}
+                    disabled={full || last}
+                    title={full ? "Up to 4 devices" : last ? "Keep at least one device" : undefined}
+                    onClick={() => changePrefs(toggleDevice(prefs, d))}
+                  >
+                    {DEVICES[d].label}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="preview-origin">
+              <span className="preview-live">● live</span> · from “{title}” ({agent})
+            </span>
+            <button type="button" className="quiet" onClick={doReload}>
+              ⟳ Reload
             </button>
-          ) : (
-            <span className="preview-note">Screenshots need the desktop app</span>
-          )}
-          <button type="button" className="quiet" onClick={() => void stop()}>
-            Stop
-          </button>
-        </div>
-      )}
-
-      {error && (
-        <p className="preview-error" role="alert">
-          {error}
-        </p>
-      )}
-      {status && (
-        <p className="preview-note" role="status">
-          {status}
-        </p>
-      )}
-      {ready?.exposed && <p className="preview-warning">This site may be reachable from other devices on your network</p>}
-
-      <div className="preview-body">
-        {view === null || view.state === "stopped" ? (
-          <div className="preview-empty">
-            <p className="preview-note">
-              {view?.state === "stopped" ? "The preview stopped." : "See this job's website on phone, tablet and laptop sizes."}
-            </p>
-            <button type="button" onClick={() => void begin()} disabled={busy}>
-              Preview
+            <button type="button" className="quiet" onClick={() => changePrefs(rotateAll(prefs))}>
+              ⤾ Rotate
             </button>
-          </div>
-        ) : view.state === "failed" ? (
-          <div className="preview-failed">
-            <p className="preview-error-line">{failureSentence(view.error ?? "start_failed", view.kind)}</p>
-            {view.tail.length > 0 && <pre className="preview-tail">{view.tail.join("\n")}</pre>}
-            <button type="button" onClick={() => void begin()} disabled={busy}>
-              Try again
-            </button>
-          </div>
-        ) : view.state !== "ready" ? (
-          <div className="preview-starting">
-            <ProgressBar percent={view.percent} label="Getting the site running" />
-            <StepChecklist progress={view.progress} />
+            {liveHost ? (
+              <button type="button" onClick={() => void screenshotAll()}>
+                Screenshot all
+              </button>
+            ) : (
+              <span className="preview-note">Screenshots need the desktop app</span>
+            )}
             <button type="button" className="quiet" onClick={() => void stop()}>
               Stop
             </button>
           </div>
-        ) : liveHost === null ? null : liveHost ? (
-          <DeviceStage devices={prefs.devices} rotated={prefs.rotated} onFrames={setFrames} />
-        ) : (
-          <iframe
-            className="preview-host"
-            title="Device previews"
-            src={`/preview/${encodeURIComponent(view.id)}?d=${prefs.devices.join(",")}&r=${prefs.rotated.join(",")}&k=${reload}`}
-          />
         )}
+
+        {error && (
+          <p className="preview-error" role="alert">
+            {error}
+          </p>
+        )}
+        {status && (
+          <p className="preview-note" role="status">
+            {status}
+          </p>
+        )}
+        {ready?.exposed && <p className="preview-warning">This site may be reachable from other devices on your network</p>}
+
+        <div className="preview-body">
+          {view === null || view.state === "stopped" ? (
+            <div className="preview-empty">
+              <p className="preview-note">
+                {view?.state === "stopped" ? "The preview stopped." : "See this job's website on phone, tablet and laptop sizes."}
+              </p>
+              <button type="button" onClick={() => void begin()} disabled={busy}>
+                Preview
+              </button>
+            </div>
+          ) : view.state === "failed" ? (
+            <div className="preview-failed">
+              <p className="preview-error-line">{failureSentence(view.error ?? "start_failed", view.kind)}</p>
+              {view.tail.length > 0 && <pre className="preview-tail">{view.tail.join("\n")}</pre>}
+              <button type="button" onClick={() => void begin()} disabled={busy}>
+                Try again
+              </button>
+            </div>
+          ) : view.state !== "ready" ? (
+            <div className="preview-starting">
+              <ProgressBar
+                percent={view.percent}
+                label="Getting the site running"
+                caption={`stage ${view.progress.current ?? view.progress.done.length} of ${view.progress.steps.length}`}
+              />
+              <StepChecklist progress={view.progress} />
+              <button type="button" className="quiet" onClick={() => void stop()}>
+                Stop
+              </button>
+            </div>
+          ) : liveHost === null ? null : liveHost ? (
+            <DeviceStage devices={prefs.devices} rotated={prefs.rotated} onFrames={setFrames} />
+          ) : (
+            <iframe
+              className="preview-host"
+              title="Device previews"
+              src={`/preview/${encodeURIComponent(view.id)}?d=${prefs.devices.join(",")}&r=${prefs.rotated.join(",")}&k=${reload}`}
+            />
+          )}
+        </div>
       </div>
+
+      {appKinds.map((k) => (
+        <div key={k} className="preview-app" hidden={active !== k}>
+          <AppPreview runId={runId} kind={k} tools={tools} toolsError={toolsError} follow={followed} />
+        </div>
+      ))}
 
       {confirm && (
         <ConfirmPreviewDialog

@@ -12,13 +12,19 @@ type Props = {
   onCancel: () => void;
 };
 
+const HEADINGS: Record<PreviewPlan["kind"], string> = {
+  web: "Start the website preview",
+  ios: "Run the app in the iPhone simulator",
+  android: "Run the app in the Android emulator",
+};
+
 /** The person's own confirmation: the exact commands that will run, before anything runs. */
 export function ConfirmPreviewDialog({ plan, notice, busy, onStart, onCancel }: Props) {
   const titleId = useId();
   return (
     <Modal labelledBy={titleId} onClose={onCancel} locked={busy} className="preview-confirm">
       <header className="modal-head">
-        <h2 id={titleId}>Start the website preview</h2>
+        <h2 id={titleId}>{HEADINGS[plan.kind]}</h2>
       </header>
       <div className="modal-body">
         {notice && (

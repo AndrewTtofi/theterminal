@@ -1,7 +1,7 @@
 /** Where the Home layout lives in localStorage. Bump the version when saved layouts stop being compatible. */
 export const HOME_KEY = "tt.home.v1";
 
-export const HOME_BLOCKS = ["ask", "approvals", "working", "overall", "finished", "files"] as const;
+export const HOME_BLOCKS = ["ask", "approvals", "working", "overall", "finished", "previews", "files"] as const;
 export type HomeBlockId = (typeof HOME_BLOCKS)[number];
 
 export const HOME_BLOCK_LABELS: Record<HomeBlockId, string> = {
@@ -10,6 +10,7 @@ export const HOME_BLOCK_LABELS: Record<HomeBlockId, string> = {
   working: "Working now",
   overall: "Overall progress",
   finished: "Finished today",
+  previews: "Previews",
   files: "Project files",
 };
 

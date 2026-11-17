@@ -2,6 +2,8 @@ import { useId } from "react";
 import { visibleControls } from "@theterminal/shared";
 import type { HomeRun, RunStatus } from "@theterminal/shared";
 import { AcceptChanges } from "../components/AcceptChanges";
+import { Screenshots } from "../components/Screenshots";
+import { PreviewButton } from "./WorkingBlock";
 
 const OUTCOME: Record<Exclude<RunStatus, "running">, string> = { completed: "done", failed: "failed", stopped: "stopped" };
 
@@ -26,6 +28,8 @@ export function FinishedBlock({ runs, allProjects }: { runs: HomeRun[]; allProje
                 <span className="finished-line">
                   {`${visibleControls(h.title)}${h.summary !== null ? ` — ${visibleControls(h.summary)}` : ""} — ${outcome}`}
                 </span>
+                <Screenshots shots={h.screenshots ?? []} max={3} />
+                <PreviewButton h={h} />
                 <span className="finished-accept">
                   <AcceptChanges run={h.run} />
                 </span>

@@ -5,9 +5,20 @@ import "./progress.css";
 /**
  * A run's progress as the agent reports it. A number draws a progressbar; `null` (no plan) shows "Working…" with no
  * number and no progressbar value, because a made-up percentage would be fake progress. `compact` draws the bar alone
- * (a Board card shows its own percent), and nothing at all without a number.
+ * (a Board card shows its own percent), and nothing at all without a number. `caption` replaces "as the agent reports it"
+ * for a plan that is not the agent's (a preview's fixed stages).
  */
-export function ProgressBar({ percent, label, compact = false }: { percent: number | null; label: string; compact?: boolean }) {
+export function ProgressBar({
+  percent,
+  label,
+  compact = false,
+  caption = "as the agent reports it",
+}: {
+  percent: number | null;
+  label: string;
+  compact?: boolean;
+  caption?: string;
+}) {
   if (compact) {
     if (percent === null) return null;
     return (
@@ -31,7 +42,7 @@ export function ProgressBar({ percent, label, compact = false }: { percent: numb
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
       <span className="progress-text">{percent}%</span>
-      <span className="progress-caption">as the agent reports it</span>
+      <span className="progress-caption">{caption}</span>
     </div>
   );
 }

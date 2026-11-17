@@ -31,15 +31,23 @@ describe("home layout store", () => {
     const l = normalizeHome({ version: 1, order: ["files", "x", "files"], hidden: ["approvals", "files"], workingColumns: 3 });
     expect(l.order[0]).toBe("files");
     expect([...l.order].sort()).toEqual([...HOME_BLOCKS].sort());
-    expect(l.order).toHaveLength(6);
+    expect(l.order).toHaveLength(7);
     expect(l.hidden).toEqual(["files"]);
     expect(l.workingColumns).toBe(2);
   });
 
   test("missing ids go back at their default position", () => {
     const l = normalizeHome({ version: 1, order: ["files", "ask"], hidden: [], workingColumns: 1 });
-    expect(l.order).toEqual(["files", "ask", "approvals", "working", "overall", "finished"]);
+    expect(l.order).toEqual(["files", "ask", "approvals", "working", "overall", "finished", "previews"]);
     expect(l.workingColumns).toBe(1);
+  });
+
+  test("Previews comes right after Finished today, also in a layout saved before it existed", () => {
+    expect(HOME_BLOCKS.indexOf("previews")).toBe(HOME_BLOCKS.indexOf("finished") + 1);
+    expect(HOME_BLOCK_LABELS.previews).toBe("Previews");
+    const l = normalizeHome({ version: 1, order: ["finished", "files", "ask", "approvals", "working", "overall"], hidden: ["files"], workingColumns: 1 });
+    expect(l.order).toEqual(["finished", "previews", "files", "ask", "approvals", "working", "overall"]);
+    expect(l.hidden).toEqual(["files"]);
   });
 
   test("approvals cannot be hidden, and the first block cannot move up", () => {

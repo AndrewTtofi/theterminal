@@ -20,6 +20,12 @@ describe("ProgressBar", () => {
     rerender(<ProgressBar percent={null} label="Fix login" compact />);
     expect(container.innerHTML).toBe("");
   });
+  it("takes another caption for a fixed plan that is not the agent's", () => {
+    render(<ProgressBar percent={40} label="Getting it running" caption="stage 3 of 5" />);
+    expect(screen.getByText("40%")).toBeTruthy();
+    expect(screen.getByText("stage 3 of 5")).toBeTruthy();
+    expect(screen.queryByText("as the agent reports it")).toBeNull();
+  });
   it("shows Working… and no number without a plan", () => {
     const { container } = render(<ProgressBar percent={null} label="Fix login" />);
     expect(screen.getByText("Working…")).toBeTruthy();

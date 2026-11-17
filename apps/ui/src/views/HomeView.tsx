@@ -8,6 +8,7 @@ import { HomeEditor } from "../home/HomeEditor";
 import { loadHome, resetHome, saveHome } from "../home/home-store";
 import type { HomeBlockId, HomeLayout } from "../home/home-store";
 import { OverallBlock } from "../home/OverallBlock";
+import { PreviewsBlock } from "../home/PreviewsBlock";
 import { TotalsStrip } from "../home/TotalsStrip";
 import type { HomeFilter } from "../home/TotalsStrip";
 import { WorkingBlock } from "../home/WorkingBlock";
@@ -52,6 +53,8 @@ export function HomeView(_props: { id?: string }) {
         return <OverallBlock runs={working} />;
       case "finished":
         return <FinishedBlock runs={finished} allProjects={filter !== null} />;
+      case "previews":
+        return <PreviewsBlock />;
       case "files":
         return <FilesBlock />;
     }

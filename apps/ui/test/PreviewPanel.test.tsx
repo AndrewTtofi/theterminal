@@ -237,4 +237,53 @@ describe("PreviewPanel", () => {
     });
     expect(api.stopPreview).toHaveBeenCalledWith("pv1", "tab_closed");
   });
+
+  it("names a website's fixed stages, not the agent's report", async () => {
+    vi.spyOn(api, "previewPlan").mockResolvedValue(plan({ confirmedEarlier: true }));
+    vi.spyOn(api, "startPreview").mockResolvedValue(view());
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("stage 2 of 4")).toBeTruthy();
+    expect(screen.queryByText("as the agent reports it")).toBeNull();
+  });
+
+  it("has no switch when the run offered no app", () => {
+    const home: HomeRuns = {
+      working: [{ run, projectName: "Website", title: "Fix the contact form", percent: null, now: null, summary: null, waiting: false, reason: null, offers: ["web"] }],
+      finishedToday: [],
+    };
+    setup(home);
+    expect(screen.queryByRole("group", { name: "What to preview" })).toBeNull();
+  });
+
+  it("switches between the website, iOS and Android when the run offered an app", async () => {
+    vi.spyOn(api, "runScreenshots").mockResolvedValue({ screenshots: [] });
+    const home: HomeRuns = {
+      working: [{ run, projectName: "Website", title: "Fix the contact form", percent: null, now: null, summary: null, waiting: false, reason: null, offers: ["web", "ios"] }],
+      finishedToday: [],
+    };
+    setup(home);
+    const group = screen.getByRole("group", { name: "What to preview" });
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual(["Website", "iOS", "Android"]);
+    expect(within(group).getByRole("button", { name: "Website" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Preview" })).toBeTruthy();
+    fireEvent.click(within(group).getByRole("button", { name: "iOS" }));
+    expect(within(group).getByRole("button", { name: "iOS" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Run the app" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+    expect(screen.getByText(/PREVIEW ·/).textContent).toContain("Phone app");
+  });
+
+  it("opens on the app when the run offered only an app", () => {
+    vi.spyOn(api, "runScreenshots").mockResolvedValue({ screenshots: [] });
+    const home: HomeRuns = {
+      working: [{ run, projectName: "Website", title: "Fix the contact form", percent: null, now: null, summary: null, waiting: false, reason: null, offers: ["android"] }],
+      finishedToday: [],
+    };
+    setup(home);
+    const group = screen.getByRole("group", { name: "What to preview" });
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual(["iOS", "Android"]);
+    expect(within(group).getByRole("button", { name: "Android" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Run the app" })).toBeTruthy();
+  });
 });

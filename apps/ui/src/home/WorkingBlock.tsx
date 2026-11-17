@@ -1,9 +1,10 @@
 import { useId } from "react";
 import type { CSSProperties } from "react";
-import { adapterLabel, formatUsd, visibleControls } from "@theterminal/shared";
+import { adapterLabel, atLeast, formatUsd, visibleControls } from "@theterminal/shared";
 import type { HomeRun } from "@theterminal/shared";
 import { ProgressBar, StepChecklist } from "../components/ProgressBar";
-import { useShell } from "../shell/model";
+import { Screenshots } from "../components/Screenshots";
+import { roleOf, useShell } from "../shell/model";
 import { decisionSentence } from "./ApprovalsBlock";
 
 /** Whole minutes since `startedAt`, never negative. */
@@ -16,6 +17,17 @@ export function elapsedMinutes(startedAt: string, now = Date.now()): number {
 export function useOpenTimeline() {
   const { dock } = useShell();
   return (h: HomeRun) => dock()?.open(`timeline:${h.run.id}`, visibleControls(h.title), "main");
+}
+
+/** Preview, on a run that offered a website or an app: opens its Preview tab (reviewers and above see previews). */
+export function PreviewButton({ h }: { h: HomeRun }) {
+  const { model } = useShell();
+  if ((h.offers ?? []).length === 0 || !atLeast(roleOf(model), "reviewer")) return null;
+  return (
+    <button type="button" className="quiet card-preview" onClick={() => model.openPreview(h.run.id)}>
+      Preview
+    </button>
+  );
 }
 
 function RunCard({ h, showProject }: { h: HomeRun; showProject: boolean }) {
@@ -33,7 +45,7 @@ function RunCard({ h, showProject }: { h: HomeRun; showProject: boolean }) {
       aria-labelledby={titleId}
       // The whole card opens the timeline for a pointer; the title is the keyboard's button.
       onClick={(e) => {
-        if (!(e.target instanceof HTMLElement) || !e.target.closest("button")) open(h);
+        if (!(e.target instanceof HTMLElement) || !e.target.closest("button, a")) open(h);
       }}
     >
       {showProject && <span className="card-project">{visibleControls(h.projectName)}</span>}
@@ -53,9 +65,13 @@ function RunCard({ h, showProject }: { h: HomeRun; showProject: boolean }) {
           </p>
         )
       )}
-      <p className="card-meta">
-        {adapterLabel(h.run.adapter)} · {elapsedMinutes(h.run.startedAt)} min · {cost}
-      </p>
+      <Screenshots shots={h.screenshots ?? []} max={3} />
+      <div className="card-foot">
+        <p className="card-meta">
+          {adapterLabel(h.run.adapter)} · {elapsedMinutes(h.run.startedAt)} min · {cost}
+        </p>
+        <PreviewButton h={h} />
+      </div>
     </article>
   );
 }

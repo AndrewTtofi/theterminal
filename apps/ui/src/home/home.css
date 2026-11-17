@@ -122,3 +122,14 @@
 @media (prefers-reduced-motion: reduce) {
   .ask-box, .home-card { transition: none; }
 }
+
+/* Screenshots and Preview on jobs, and the Previews block. Tokens only. */
+.home-card .card-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.home-card .card-foot .card-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-view button.card-preview { flex: none; border-radius: var(--radius-pill); padding: 2px var(--space-3); font-size: var(--text-m); }
+.home-finished-list .shots { flex: none; }
+.home-previews { display: flex; flex-direction: column; gap: var(--space-2); }
+.home-preview-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.home-preview { display: flex; align-items: center; gap: var(--space-3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-m); padding: var(--space-2) var(--space-3); font-size: var(--text-m); }
+.home-preview-title { flex: 1; min-width: 0; color: var(--fg-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-preview-state { flex: none; color: var(--muted); }
