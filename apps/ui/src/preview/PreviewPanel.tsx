@@ -102,7 +102,7 @@ export function PreviewPanel({ id }: { id: string }) {
     let on = true;
     api.nativeTools().then(
       (t) => on && setTools(t),
-      (e) => on && setToolsError(errorMessage(e)),
+      (e) => on && setToolsError(errorMessage(e, "preview")),
     );
     return () => {
       on = false;
@@ -216,16 +216,16 @@ export function PreviewPanel({ id }: { id: string }) {
     } catch (e) {
       if (e instanceof ApiError && e.code === "preview_changed") {
         // The agent changed the command or package.json: show what will run now, and ask again.
-        const notice = errorMessage(e);
+        const notice = errorMessage(e, "preview");
         try {
           setConfirm({ plan: await api.previewPlan(runId, "web"), notice });
         } catch (again) {
           setConfirm(null);
-          setError(errorMessage(again));
+          setError(errorMessage(again, "preview"));
         }
       } else {
         setConfirm(null);
-        setError(errorMessage(e));
+        setError(errorMessage(e, "preview"));
       }
     } finally {
       setBusy(false);
@@ -240,7 +240,7 @@ export function PreviewPanel({ id }: { id: string }) {
     try {
       plan = await api.previewPlan(runId, "web");
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
       setBusy(false);
       return;
     }
@@ -256,7 +256,7 @@ export function PreviewPanel({ id }: { id: string }) {
       await api.stopPreview(previewId, "person");
       setView((v) => (v && v.id === previewId ? { ...v, state: "stopped" } : v));
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
     }
   };
 
@@ -273,7 +273,7 @@ export function PreviewPanel({ id }: { id: string }) {
       const { screenshots } = await api.takeScreenshots(ready.id);
       setStatus(screenshots.length === 1 ? "Saved 1 screenshot on the job." : `Saved ${screenshots.length} screenshots on the job.`);
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
     }
   };
 

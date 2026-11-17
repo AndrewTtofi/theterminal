@@ -612,9 +612,10 @@ function remoteRefusal(e: ApiError): string {
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
- * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed.
+ * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed, `"preview"` a run on another
+ * computer as the reason it cannot be previewed.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair" | "sources"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair" | "sources" | "preview"): string {
   if (e instanceof ApiError) {
     if (e.code === "remote_refused") return remoteRefusal(e);
     if (e.code === "limit_exceeded") {
@@ -632,8 +633,14 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (e.code === "preview_changed") return "The agent changed what will run. Look at the commands again before you start it.";
     if (e.code === "preview_not_allowed") return "Only the Owner or the person who started this job can run its preview.";
     if (e.code === "preview_refused") {
+      const reason = detailString(e, "reason");
+      if (reason === "script_missing") return "The project has no such script in package.json.";
+      if (reason === "no_package_json") return "The project has no package.json.";
       return "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.";
     }
+    if (e.code === "no_preview_offer") return "This job didn't offer a preview of that kind.";
+    if (e.code === "preview_busy") return "Another preview is already running. Stop it first, then try again.";
+    if (context === "preview" && e.code === "remote_run") return "This job ran on another computer, so it can't be previewed here.";
     if (e.code === "package_manager_not_found") {
       const manager = detailString(e, "manager");
       return `${manager === "npm" || manager === "pnpm" || manager === "yarn" ? manager : "The package manager"} isn't installed on this computer.`;

@@ -170,16 +170,16 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
       show(v);
     } catch (e) {
       if (e instanceof ApiError && e.code === "preview_changed") {
-        const notice = errorMessage(e);
+        const notice = errorMessage(e, "preview");
         try {
           setConfirm({ plan: await api.previewPlan(runId, kind), notice });
         } catch (again) {
           setConfirm(null);
-          setError(errorMessage(again));
+          setError(errorMessage(again, "preview"));
         }
       } else {
         setConfirm(null);
-        setError(errorMessage(e));
+        setError(errorMessage(e, "preview"));
       }
     } finally {
       setBusy(false);
@@ -194,7 +194,7 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
     try {
       plan = await api.previewPlan(runId, kind);
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
       setBusy(false);
       return;
     }
@@ -210,7 +210,7 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
       await api.stopPreview(previewId, "person");
       setView((v) => (v && v.id === previewId ? { ...v, state: "stopped" } : v));
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
     }
   };
 
@@ -223,7 +223,7 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
       setStatus(screenshots.length === 1 ? "Saved 1 screenshot on the job." : `Saved ${screenshots.length} screenshots on the job.`);
       loadShots();
     } catch (e) {
-      setError(errorMessage(e));
+      setError(errorMessage(e, "preview"));
     }
   };
 

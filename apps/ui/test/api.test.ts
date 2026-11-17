@@ -826,6 +826,15 @@ describe("preview and card note calls", () => {
     expect(errorMessage(new ApiError(409, "native_tools_missing", { missing: ["xcode"] }))).toBe(
       "Some tools are missing on this computer. See What you need on this computer.",
     );
-    expect(errorMessage(new ApiError(409, "screenshots_unavailable"))).toBe("Screenshots of websites need the desktop app.");
+    expect(errorMessage(new ApiError(409, "screenshots_unavailable"))).toBe("Screenshots of websites need the desktop app.");    expect(errorMessage(new ApiError(404, "no_preview_offer"))).toBe("This job didn't offer a preview of that kind.");
+    expect(errorMessage(new ApiError(409, "preview_busy"))).toBe("Another preview is already running. Stop it first, then try again.");
+    expect(errorMessage(new ApiError(409, "remote_run"), "preview")).toBe("This job ran on another computer, so it can't be previewed here.");
+    expect(errorMessage(new ApiError(400, "preview_refused", { reason: "script_missing" }))).toBe("The project has no such script in package.json.");
+    expect(errorMessage(new ApiError(400, "preview_refused", { reason: "no_package_json" }))).toBe("The project has no package.json.");
+    for (const reason of ["redacted", "truncated", "controls", "program", "made-up"]) {
+      expect(errorMessage(new ApiError(400, "preview_refused", { reason })), reason).toBe(
+        "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.",
+      );
+    }
   });
 });
