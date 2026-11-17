@@ -8,7 +8,8 @@ export { spendLine };
 
 /**
  * The main area's home tab: the selected project's board, run by agents, with what they have cost in the header.
- * Clicking a card opens its panel beside the columns; Escape closes it and puts focus back on the card.
+ * Clicking a card opens its panel beside the columns; Escape closes it and puts focus back on the card (but not while
+ * a note is being written, so the draft is never lost).
  */
 export function BoardView() {
   const { model } = useShell();
@@ -48,6 +49,9 @@ export function BoardView() {
       className="board-view agent-board-view"
       onKeyDown={(e) => {
         if (e.key === "Escape" && open !== null) {
+          // Escape while a note is being written keeps the panel and the draft; it closes once the box is empty.
+          const target = e.target;
+          if (target instanceof HTMLTextAreaElement && target.value !== "") return;
           e.stopPropagation();
           close();
         }

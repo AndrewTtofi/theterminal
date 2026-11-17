@@ -9,6 +9,7 @@ vi.mock("../src/api", async (importOriginal) => {
 });
 
 import { ShellContext } from "../src/shell/model";
+import { OWNER_ME } from "./as-owner";
 import type { WorkbenchModel } from "../src/shell/model";
 import { BoardView, spendLine } from "../src/views/BoardView";
 import { fakeDock, shellNav } from "./connections-harness";
@@ -32,11 +33,12 @@ const info: CardInfo = {
   comments: 0, commentsWaiting: 0, screenshots: 0, moveRequest: null,
 };
 
-function renderBoard(runs: AgentRun[], b: Board = board) {
+function renderBoard(runs: AgentRun[], b: Board = board, owner = false) {
   const model = {
     selectedId: "p1", board: b, runs, onAddCard: vi.fn(), onMoveCard: vi.fn(),
     cardInfos: { data: { c1: info }, refresh: vi.fn() }, subscribeEntries: vi.fn(() => () => {}),
     home: { data: null, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
+    ...(owner && { me: OWNER_ME }),
   } as unknown as WorkbenchModel;
   render(
     <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...shellNav() }}>
@@ -63,6 +65,19 @@ describe("BoardView", () => {
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
     expect(document.activeElement).toBe(button);
+  });
+
+  it("Escape while writing a note keeps the panel and the draft; in an empty note box it closes as usual", async () => {
+    renderBoard([], withCard, true);
+    await userEvent.click(screen.getByRole("button", { name: "Open Fix the contact form" }));
+    const box = within(screen.getByRole("complementary", { name: "Card" })).getByRole("textbox");
+    await userEvent.type(box, "Make the error message red");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("complementary", { name: "Card" })).toBeTruthy();
+    expect((box as HTMLTextAreaElement).value).toBe("Make the error message red");
+    await userEvent.clear(box);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
   });
 
   it("closes the panel from its close button", async () => {
