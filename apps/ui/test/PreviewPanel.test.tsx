@@ -81,6 +81,21 @@ describe("PreviewPanel, who may run it", () => {
     expect(screen.getByText(sentence)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
   });
+  it.each([
+    ["ready", () => ready(), async () => screen.findByTitle("Device previews")],
+    ["failed", () => view({ state: "failed", error: "exited", percent: 25 }), async () => screen.findByText("The site stopped by itself.")],
+    ["starting", () => view(), async () => screen.findByRole("progressbar")],
+  ] as const)("a reviewer on a %s website preview sees the sentence where the buttons would be", async (_state, make, shown) => {
+    vi.spyOn(api, "getPreview").mockResolvedValue(make());
+    const home: HomeRuns = {
+      working: [{ run, projectName: "Site", title: "Fix the contact form", percent: null, now: null, summary: null, waiting: false, reason: null, livePreviewId: "pv1" }],
+      finishedToday: [],
+    };
+    setup(home, "reviewer");
+    await shown();
+    expect(screen.getByText(sentence)).toBeTruthy();
+    for (const name of ["Preview", "Try again", "Stop", "Screenshot all"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  });
   it.each(["owner", "maintainer"] as const)("a %s sees Preview", (role) => {
     setup(null, role);
     expect(screen.getByRole("button", { name: "Preview" })).toBeTruthy();

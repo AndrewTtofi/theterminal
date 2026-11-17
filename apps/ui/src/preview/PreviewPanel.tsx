@@ -342,10 +342,12 @@ export function PreviewPanel({ id }: { id: string }) {
               ) : (
                 <span className="preview-note">Screenshots need the desktop app</span>
               ))}
-            {canRun && (
+            {canRun ? (
               <button type="button" className="quiet" onClick={() => void stop()}>
                 Stop
               </button>
+            ) : (
+              <span className="preview-note">{CANNOT_RUN}</span>
             )}
           </div>
         )}
@@ -380,10 +382,12 @@ export function PreviewPanel({ id }: { id: string }) {
             <div className="preview-failed">
               <p className="preview-error-line">{failureSentence(view.error ?? "start_failed", view.kind)}</p>
               {view.tail.length > 0 && <pre className="preview-tail">{view.tail.join("\n")}</pre>}
-              {canRun && (
+              {canRun ? (
                 <button type="button" onClick={() => void begin()} disabled={busy}>
                   Try again
                 </button>
+              ) : (
+                <p className="preview-note">{CANNOT_RUN}</p>
               )}
             </div>
           ) : view.state !== "ready" ? (
@@ -395,10 +399,12 @@ export function PreviewPanel({ id }: { id: string }) {
                 caption={`stage ${view.progress.current ?? view.progress.done.length} of ${view.progress.steps.length}`}
               />
               <StepChecklist progress={view.progress} />
-              {canRun && (
+              {canRun ? (
                 <button type="button" className="quiet" onClick={() => void stop()}>
                   Stop
                 </button>
+              ) : (
+                <p className="preview-note">{CANNOT_RUN}</p>
               )}
             </div>
           ) : liveHost === null ? null : liveHost ? (
