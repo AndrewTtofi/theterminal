@@ -35,9 +35,19 @@ export function nowLine(a: ActionLike | null): string | null {
   return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
-/** The agent's last message (at most 200 characters), else the headline. */
+/** A whole line that is one of the agent's markers (`[[noted]]`, `[[step 1/2 done]]`, …): protocol, not prose. */
+const MARKER_LINE = /^\[\[[^\]]*\]\]$/;
+
+/**
+ * The agent's last message without its marker lines (at most 200 characters), else the headline. A marker inside a
+ * sentence stays: only whole lines are protocol.
+ */
 export function finalSummary(lastMessage: string | null | undefined, finishedHeadline: string): string {
-  const text = lastMessage?.trim();
+  const text = (lastMessage ?? "")
+    .split(/\r?\n/)
+    .filter((l) => !MARKER_LINE.test(l.trim()))
+    .join("\n")
+    .trim();
   return text ? clip(text, 200) : finishedHeadline;
 }
 

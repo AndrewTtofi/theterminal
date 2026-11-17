@@ -358,10 +358,12 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     return title ? `\u201c${show(title, 80)}\u201d` : "a card";
   };
   /** The agent that did it, by adapter name when the context knows the run. */
-  const claude = (id: string | undefined) => {
+  /** The run's agent by adapter name, or undefined when the context does not know the run. */
+  const knownAgent = (id: string | undefined): string | undefined => {
     const name = lookup(ctx.adapterName, id);
-    return name ? (own(ADAPTER_LABELS, name) ?? show(name, 20)) : "The agent";
+    return name ? (own(ADAPTER_LABELS, name) ?? show(name, 20)) : undefined;
   };
+  const claude = (id: string | undefined) => knownAgent(id) ?? "The agent";
   /** The first eight characters of a run id, as 5B wrote them. */
   const run8 = () => `Agent ${show(str(p.runId).slice(0, 8), 16)}`;
 
@@ -382,8 +384,7 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     case "card.comments_given": {
       const count = Array.isArray(p.commentIds) ? p.commentIds.length : 0;
       // The run's own agent, as the other board lines say it; "the agent" when the run is not known.
-      const named = claude(runId);
-      const to = named === "The agent" ? "the agent" : named;
+      const to = knownAgent(runId) ?? "the agent";
       return {
         headline:
           count === 1

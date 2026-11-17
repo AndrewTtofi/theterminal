@@ -59,6 +59,14 @@ describe("text helpers", () => {
     expect(finalSummary(null, "Claude finished")).toBe("Claude finished");
     expect(finalSummary("y".repeat(250), "h")).toHaveLength(200);
   });
+  it("leaves the agent's marker lines out of the summary", () => {
+    expect(finalSummary("I added the form.\n[[noted]]", "h")).toBe("I added the form.");
+    expect(finalSummary("[[step 1/2 done]]\n  [[card-stage: design]]  \r\n[[noted]]", "Fake finished")).toBe("Fake finished");
+    expect(finalSummary("[[noted]]", "Fake finished")).toBe("Fake finished");
+    expect(finalSummary("Ran [[noted]] as asked", "h")).toBe("Ran [[noted]] as asked");
+    expect(finalSummary("[[plan: A | B]]\nFirst line\n[[preview: npm run dev | port 5173]]\nSecond line", "h")).toBe("First line\nSecond line");
+    expect(finalSummary(`${"y".repeat(250)}\n[[card-done]]`, "h")).toHaveLength(200);
+  });
   it("phrases the current action", () => {
     expect(nowLine(null)).toBeNull();
     expect(nowLine({ kind: "other", tool: "t", summary: "check the build", input: {} })).toBe("Check the build");
