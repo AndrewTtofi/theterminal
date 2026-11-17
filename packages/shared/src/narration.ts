@@ -357,7 +357,6 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
     const title = lookup(ctx.cardTitle, id);
     return title ? `\u201c${show(title, 80)}\u201d` : "a card";
   };
-  /** The agent that did it, by adapter name when the context knows the run. */
   /** The run's agent by adapter name, or undefined when the context does not know the run. */
   const knownAgent = (id: string | undefined): string | undefined => {
     const name = lookup(ctx.adapterName, id);
@@ -408,20 +407,21 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       const what = p.kind === "ios" ? "iPhone app" : p.kind === "android" ? "Android app" : "website";
       return { headline: `${who} confirmed starting the ${what} preview: ${show(first, 80)}` };
     }
+    // A preview's later entries do not say its kind, so these lines fit a website and a phone app alike.
     case "preview.started":
-      return { headline: "Started the website preview" };
+      return { headline: "Started the preview" };
     case "preview.progress": {
       const steps = Array.isArray(p.steps) ? p.steps.length : 0;
       const done = Array.isArray(p.done) ? p.done.length : 0;
-      return { headline: `Website preview: step ${done} of ${steps} done` };
+      return { headline: `Preview: step ${done} of ${steps} done` };
     }
     case "preview.ready":
-      return { headline: "The website preview is ready" };
+      return { headline: "The preview is ready" };
     case "preview.failed":
-      return { headline: own(FAILURE_KNOWN, p.reason) ? failureSentence(p.reason as PreviewFailure, "web") : "The website preview failed", attention: true };
+      return { headline: own(FAILURE_KNOWN, p.reason) ? failureSentence(p.reason as PreviewFailure, null) : "The preview failed", attention: true };
     case "preview.stopped": {
       const note = p.reason === "idle" ? " (idle for 30 minutes)" : p.reason === "restarted" ? " (The Terminal restarted)" : "";
-      return { headline: `The website preview stopped${note}` };
+      return { headline: `The preview stopped${note}` };
     }
     case "preview.screenshot": {
       const dev = own(DEVICES as Record<string, { label: string }>, str(p.device));

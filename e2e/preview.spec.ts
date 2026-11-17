@@ -73,8 +73,8 @@ test("a run's website: confirmed once, started with real stage progress, shown o
   await expect(panel.getByRole("button", { name: "Screenshot all" })).toHaveCount(0);
 
   await expect(lineMatching(ledger, ".* confirmed starting the website preview: npm run dev")).toHaveCount(1);
-  await expect(line(ledger, "Website preview: step 3 of 3 done")).toHaveCount(1);
-  await expect(line(ledger, "The website preview is ready")).toHaveCount(1);
+  await expect(line(ledger, "Preview: step 3 of 3 done")).toHaveCount(1);
+  await expect(line(ledger, "The preview is ready")).toHaveCount(1);
 
   // Reload loads every device again, and the site still answers.
   await panel.getByRole("button", { name: "⟳ Reload" }).click();
@@ -84,7 +84,7 @@ test("a run's website: confirmed once, started with real stage progress, shown o
   // Closing the tab stops the preview.
   await tab.locator(".dv-default-tab-action").click();
   await expect(tab).toHaveCount(0);
-  await expect(line(ledger, "The website preview stopped")).toHaveCount(1);
+  await expect(line(ledger, "The preview stopped")).toHaveCount(1);
   await expect.poll(async () => await previewView(page, runId)).toBeNull();
 
   // Opened again, Preview starts at once: the same commands and files were confirmed earlier. The start is still
@@ -95,11 +95,11 @@ test("a run's website: confirmed once, started with real stage progress, shown o
   await expectSiteInEveryDevice(page);
   await expect(page.getByRole("dialog", { name: "Start the website preview" })).toHaveCount(0);
   await expect(lineMatching(ledger, ".* confirmed starting the website preview: npm run dev")).toHaveCount(2);
-  await expect(line(ledger, "The website preview is ready")).toHaveCount(2);
+  await expect(line(ledger, "The preview is ready")).toHaveCount(2);
   await expect(panel.getByText("Screenshots need the desktop app")).toBeVisible();
 
   // Stop ends it before the spec does.
   await panel.getByRole("button", { name: "Stop", exact: true }).click();
-  await expect(line(ledger, "The website preview stopped")).toHaveCount(2);
+  await expect(line(ledger, "The preview stopped")).toHaveCount(2);
   await expect(panel.getByText("The preview stopped.")).toBeVisible();
 });

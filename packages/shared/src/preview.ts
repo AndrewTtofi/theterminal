@@ -192,20 +192,25 @@ export type NativeTools = {
   android: { supported: boolean; sdk: boolean; avds: string[]; missing: ToolId[] };
 };
 
-const FAILURES: Record<PreviewFailure, { web: string; native: string }> = {
-  timed_out: { web: "The site did not answer within 3 minutes.", native: "The app did not start within 3 minutes." },
-  exited: { web: "The site stopped by itself.", native: "The app stopped by itself." },
-  install_failed: { web: "Installing the packages failed.", native: "Installing the packages failed." },
-  build_failed: { web: "The build failed.", native: "The build failed." },
-  boot_failed: { web: "The device did not start.", native: "The device did not start." },
-  install_app_failed: { web: "The app could not be installed.", native: "The app could not be installed." },
-  launch_failed: { web: "The app could not be opened.", native: "The app could not be opened." },
-  start_failed: { web: "The site could not be started.", native: "The app could not be started." },
+const FAILURES: Record<PreviewFailure, { web: string; native: string; any: string }> = {
+  timed_out: {
+    web: "The site did not answer within 3 minutes.", native: "The app did not start within 3 minutes.",
+    any: "The preview did not start within 3 minutes.",
+  },
+  exited: { web: "The site stopped by itself.", native: "The app stopped by itself.", any: "The preview stopped by itself." },
+  install_failed: { web: "Installing the packages failed.", native: "Installing the packages failed.", any: "Installing the packages failed." },
+  build_failed: { web: "The build failed.", native: "The build failed.", any: "The build failed." },
+  boot_failed: { web: "The device did not start.", native: "The device did not start.", any: "The device did not start." },
+  install_app_failed: {
+    web: "The app could not be installed.", native: "The app could not be installed.", any: "The app could not be installed.",
+  },
+  launch_failed: { web: "The app could not be opened.", native: "The app could not be opened.", any: "The app could not be opened." },
+  start_failed: { web: "The site could not be started.", native: "The app could not be started.", any: "The preview could not be started." },
 };
 
-/** One plain sentence for why a preview failed. */
-export function failureSentence(f: PreviewFailure, kind: PreviewKind): string {
-  return FAILURES[f][kind === "web" ? "web" : "native"];
+/** One plain sentence for why a preview failed; `kind` null when it is not known (a sentence that fits any preview). */
+export function failureSentence(f: PreviewFailure, kind: PreviewKind | null): string {
+  return FAILURES[f][kind === null ? "any" : kind === "web" ? "web" : "native"];
 }
 
 const id = z.string().min(1).max(200);

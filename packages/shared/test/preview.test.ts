@@ -74,6 +74,13 @@ describe("failureSentence", () => {
   it("says what happened", () => {
     expect(failureSentence("timed_out", "web")).toBe("The site did not answer within 3 minutes.");
   });
+
+  it("has a sentence that fits any kind of preview, when the kind is not known", () => {
+    expect(failureSentence("timed_out", null)).toBe("The preview did not start within 3 minutes.");
+    expect(failureSentence("exited", null)).toBe("The preview stopped by itself.");
+    expect(failureSentence("start_failed", null)).toBe("The preview could not be started.");
+    expect(failureSentence("build_failed", null)).toBe("The build failed.");
+  });
 });
 
 describe("narration of preview events", () => {
@@ -88,14 +95,16 @@ describe("narration of preview events", () => {
     const req = say("preview.requested", { previewId: "x", runId: "r1", kind: "web", commands: [["npm", "ci"], ["npm", "run", "dev"]], key: sha, install: true, target: "s" });
     expect(req.headline).toBe("Owner confirmed starting the website preview: npm ci");
     expect(req.topic).toBe("preview");
-    expect(say("preview.ready", { previewId: "x" }).headline).toBe("The website preview is ready");
-    expect(say("preview.failed", { previewId: "x", reason: "timed_out", tail: [] }).headline).toBe("The site did not answer within 3 minutes.");
-    expect(say("preview.stopped", { previewId: "x", reason: "person" }).headline).toBe("The website preview stopped");
+    expect(say("preview.ready", { previewId: "x" }).headline).toBe("The preview is ready");
+    expect(say("preview.failed", { previewId: "x", reason: "timed_out", tail: [] }).headline).toBe("The preview did not start within 3 minutes.");
+    expect(say("preview.failed", { previewId: "x", reason: "launch_failed", tail: [] }).headline).toBe("The app could not be opened.");
+    expect(say("preview.failed", { previewId: "x", reason: "odd", tail: [] }).headline).toBe("The preview failed");
+    expect(say("preview.stopped", { previewId: "x", reason: "person" }).headline).toBe("The preview stopped");
     expect(say("preview.stopped", { previewId: "x", reason: "idle" }).headline).toMatch(/\(idle for 30 minutes\)$/);
     expect(say("preview.stopped", { previewId: "x", reason: "restarted" }).headline).toMatch(/\(The Terminal restarted\)$/);
     expect(say("preview.screenshot", { previewId: "x", runId: "r1", device: "iphone16", sha256: sha, bytes: 1, width: 1, height: 1 }).headline).toBe("Owner took a screenshot on iPhone 16");
-    expect(say("preview.started", { previewId: "x" }).headline).toBe("Started the website preview");
-    expect(say("preview.progress", { previewId: "x", steps: ["a", "b", "c"], done: [1, 2], current: 3 }).headline).toBe("Website preview: step 2 of 3 done");
+    expect(say("preview.started", { previewId: "x" }).headline).toBe("Started the preview");
+    expect(say("preview.progress", { previewId: "x", steps: ["a", "b", "c"], done: [1, 2], current: 3 }).headline).toBe("Preview: step 2 of 3 done");
   });
 });
 
