@@ -128,7 +128,7 @@ describe("HomeView", () => {
     const box = screen.getByPlaceholderText("Tell an agent what you want…");
     await userEvent.type(box, "Fix the form");
     await userEvent.click(screen.getByRole("button", { name: "Go" }));
-    expect(onStartRun).toHaveBeenCalledWith("claude", "Fix the form", [], null);
+    expect(onStartRun).toHaveBeenCalledWith("claude", "Fix the form", [], null, undefined, { autoCard: true });
     expect((box as HTMLTextAreaElement).value).toBe("Fix the form");
   });
 
@@ -256,5 +256,44 @@ describe("Home sources", () => {
     await userEvent.click(within(block).getByRole("button", { name: "Accept" }));
     expect(onAcceptRun).toHaveBeenCalledWith("r2");
     await waitFor(() => expect(within(block).getAllByText("Accepted")).toHaveLength(2));
+  });
+});
+
+describe("Home previews and screenshots", () => {
+  const shots = (runId: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      sha256: String(i).repeat(64), runId, previewId: "pv1", device: "iphone16", width: 393, height: 852, bytes: 10, at: `2026-11-16T0${i}:00:00.000Z`,
+    }));
+
+  it("a Working now card of a run that offered a site has Preview, which opens its tab, and up to 3 thumbnails", async () => {
+    const openPreview = vi.fn();
+    const r = homeRun("r1", {}, { offers: ["web"], screenshots: shots("r1", 5) });
+    renderInShell(<HomeView />, homeModel({ openPreview }, { working: [r], finishedToday: [] }));
+    const card = screen.getByRole("article", { name: "Fix the contact form" });
+    expect(within(card).getAllByRole("img")).toHaveLength(3);
+    await userEvent.click(within(card).getByRole("button", { name: "Preview" }));
+    expect(openPreview).toHaveBeenCalledWith("r1", "Fix the contact form");
+  });
+
+  it("a run that offered nothing has no Preview", () => {
+    renderInShell(<HomeView />, homeModel({}, { working: [homeRun("r1", {}, { offers: [] })], finishedToday: [] }));
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+  });
+
+  it("a Finished today line shows at most 3 thumbnails from 5", () => {
+    const done = homeRun("r2", { status: "completed", finishedAt: new Date().toISOString() }, { title: "Write the notes", screenshots: shots("r2", 5), offers: ["ios"] });
+    renderInShell(<HomeView />, homeModel({ openPreview: vi.fn() }, { working: [], finishedToday: [done] }));
+    const block = screen.getByRole("region", { name: "Finished today" });
+    const imgs = within(block).getAllByRole("img");
+    expect(imgs).toHaveLength(3);
+    expect(imgs[0]!.getAttribute("alt")).toBe("Screenshot on iPhone 16");
+    expect(within(block).getByRole("button", { name: "Preview" })).toBeTruthy();
+  });
+
+  it("shows the Previews block after Finished today", () => {
+    renderInShell(<HomeView />, homeModel());
+    const order = [...document.querySelectorAll("[data-block]")].map((e) => e.getAttribute("data-block"));
+    expect(order.indexOf("previews")).toBe(order.indexOf("finished") + 1);
+    expect(screen.getByRole("region", { name: "Previews" })).toBeTruthy();
   });
 });

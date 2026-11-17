@@ -156,7 +156,7 @@ export function SignInPanel({ provider, onClose, pollMs = 1000 }: { provider: Pr
       )}
       {waiting && (
         <p role="status" aria-label="Waiting for you to sign in" className="signin-waiting">
-          <span className="spinner" aria-hidden="true" /> Waiting for you to sign in…
+          <span className="cursor spinner" aria-hidden="true" /> Waiting for you to sign in…
         </p>
       )}
       <p className={`signin-result${signedIn ? " ok" : phase === "failed" ? " failed" : ""}`} aria-live="polite">

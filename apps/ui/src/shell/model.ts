@@ -6,6 +6,8 @@ import type {
   AuthMode,
   Board,
   CapacityReport,
+  CardInfo,
+  CardMoveRequest,
   CardStory,
   DailyDigest,
   DecisionId,
@@ -61,7 +63,8 @@ export type GatePrompt = {
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
 export const LEDGER_TOPICS: NarrationTopic[] = [
-  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
+  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "preview", "remote",
+  "other",
 ];
 
 /**
@@ -115,6 +118,12 @@ export type WorkbenchModel = {
    */
   onResolveGate: (decisions: GateDecisionInput[]) => Promise<boolean>;
   onCancelGate: () => void;
+  /** The selected project's cards with their run, progress and note counts; reloaded 500 ms after a card.*, agent.* or preview.screenshot entry. */
+  cardInfos: { data: Record<string, CardInfo>; refresh(): void };
+  /** Selects the request's project, then asks for its move through `onMoveCard`, so the gate card and its sign-off do it. */
+  onReviewMove: (r: CardMoveRequest) => Promise<void>;
+  /** Records that the person declined an agent's move request; true when the server did it. */
+  onDeclineMove: (cardId: string) => Promise<boolean>;
   /** A card's story, read from the server each time. */
   story: (cardId: string) => Promise<CardStory>;
   /** Calls `onEntry` for every new ledger entry of any project until the returned function is called. */
@@ -128,7 +137,15 @@ export type WorkbenchModel = {
    * Resolves false when starting failed, so the prompt is kept. `cardId` ties the run to a card; `machineId` sends the
    * run to that linked machine.
    */
-  onStartRun: (adapter: AdapterId, prompt: string, connectionIds: string[], cardId?: string | null, machineId?: string) => Promise<boolean>;
+  onStartRun: (
+    adapter: AdapterId,
+    prompt: string,
+    connectionIds: string[],
+    cardId?: string | null,
+    machineId?: string,
+    /** `autoCard` has the server make the job's card at its start (a job started from Home). */
+    opts?: { autoCard?: boolean },
+  ) => Promise<boolean>;
   onSelectRun: (runId: string | null) => void;
   onStopRun: (runId: string) => void;
 
@@ -280,6 +297,8 @@ export type WorkbenchModel = {
   onOpenDiff: (runId: string, path: string) => void;
   /** Opens (or shows) the read-only tab of one file of a run. */
   onOpenFile: (runId: string, path: string) => void;
+  /** Opens (or shows) the Preview tab `preview:<runId>` in the main group, named after `title` (the job) when given. */
+  openPreview: (runId: string, title?: string) => void;
 
   /**
    * Who is signed in; absent or null (not known) counts as a viewer. The UI disables what the role cannot do; the
@@ -346,7 +365,7 @@ export function useViewerRole(): Role {
 }
 
 /** What App provides: the shell adds the actions that open tabs, since it owns the dock. */
-export type AppModel = Omit<WorkbenchModel, "onOpenDiff" | "onOpenFile">;
+export type AppModel = Omit<WorkbenchModel, "onOpenDiff" | "onOpenFile" | "openPreview">;
 
 export type ShellContextValue = {
   model: WorkbenchModel;

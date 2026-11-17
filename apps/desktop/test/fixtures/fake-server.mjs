@@ -75,6 +75,44 @@ if (mode === "fail") {
     process.send({ type: "pick_folder", id: "p1" });
     process.send({ type: "pick_folder", id: "p2" });
   }
+} else if (mode === "preview") {
+  // Asks the host for preview views and captures, then reports the answers it got in the ready URL.
+  exitOnShutdown();
+  const view = (device) => ({
+    device,
+    x: 0,
+    y: 0,
+    width: 393,
+    height: 852,
+    viewport: { width: 393, height: 852 },
+    scale: 3,
+    mobile: true,
+    userAgent: null,
+  });
+  const views = (over) => ({
+    type: "preview_views",
+    id: "v1",
+    previewId: "p1",
+    origin: "http://127.0.0.1:5173",
+    action: "show",
+    views: [view("iphone16")],
+    ...over,
+  });
+  const got = [];
+  process.on("message", (m) => {
+    if (m?.type !== "preview_views_done" && m?.type !== "preview_captured") return;
+    got.push(m);
+    if (got.length === 2) {
+      process.send({ ...ready, url: `http://127.0.0.1:4321/?answers=${encodeURIComponent(JSON.stringify(got))}` });
+    }
+  });
+  // Malformed requests are ignored and never answered.
+  process.send(views({ id: "bad1", origin: "http://example.com" }));
+  process.send(views({ id: "bad2", views: ["a", "b", "c", "d", "e"].map(view) }));
+  process.send(views({ id: "../bad3" }));
+  process.send({ type: "preview_capture", id: "bad4", previewId: "p/1" });
+  process.send(views());
+  process.send({ type: "preview_capture", id: "c1", previewId: "p1" });
 } else {
   process.stderr.write(`unknown mode ${mode}\n`);
   process.exit(2);

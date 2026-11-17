@@ -1,8 +1,15 @@
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import type { HostMessage, PickFolderMessage, ReadyMessage } from "@theterminal/core/dist/host.js";
+import type {
+  HostMessage,
+  PickFolderMessage,
+  PreviewCaptureMessage,
+  PreviewViewsMessage,
+  ReadyMessage,
+} from "@theterminal/core/dist/host.js";
 import { isPickablePath } from "./folder-pick.js";
+import { parsePreviewMessage } from "./preview-policy.js";
 
 const STDERR_TAIL = 4000;
 const TIMED_OUT = "timed out waiting for the server";
@@ -151,6 +158,31 @@ function isPickFolderMessage(m: unknown): m is PickFolderMessage {
   return typeof r === "object" && r !== null && r.type === "pick_folder" && typeof r.id === "string" && PICK_ID.test(r.id);
 }
 
+/** A preview request from the server child, already checked by `parsePreviewMessage`. */
+export type PreviewRequest = PreviewViewsMessage | PreviewCaptureMessage;
+
+const MAX_SHOTS = 4;
+/** The base64 length of the largest screenshot file (16 MiB), as the server child accepts. */
+const MAX_PNG_BASE64 = Math.ceil(16_777_216 / 3) * 4;
+const SHOT_DEVICE = /^[A-Za-z0-9_-]{1,100}$/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/** The well-formed shots of a capture answer, at most 4; anything else is dropped. */
+function cleanShots(shots: unknown): { device: string; png: string }[] {
+  if (!Array.isArray(shots)) return [];
+  const out: { device: string; png: string }[] = [];
+  for (const s of shots) {
+    if (out.length === MAX_SHOTS) break;
+    const r = s as { device?: unknown; png?: unknown } | null;
+    if (typeof r !== "object" || r === null) continue;
+    if (typeof r.device !== "string" || !SHOT_DEVICE.test(r.device)) continue;
+    const png = r.png;
+    if (typeof png !== "string" || png.length === 0 || png.length > MAX_PNG_BASE64 || !BASE64.test(png)) continue;
+    out.push({ device: r.device, png });
+  }
+  return out;
+}
+
 /**
  * Starts the server child (`<nodeFile> <cliFile> ...args`) with an IPC channel and exactly the given environment,
  * never through a shell. Its stdout and stderr go to `logFile`. `ready` settles once: with the first valid ready
@@ -163,6 +195,11 @@ function isPickFolderMessage(m: unknown): m is PickFolderMessage {
  * and only the child, with `picked_folder` and the same id. One dialog runs at a time: a request while one is open is
  * answered null at once. The path is null when there is no `onPickFolder`, it fails, or it gives anything but an
  * absolute path of at most 4096 characters. Malformed requests are ignored.
+ *
+ * A `preview_views` or `preview_capture` request that `parsePreviewMessage` accepts calls `onPreview` with its clean
+ * copy and answers the child with `preview_views_done` (ok only when `onPreview` gives exactly true) or
+ * `preview_captured` (its well-formed shots, at most 4) and the same id. Without `onPreview`, or when it fails, the
+ * answer is a refusal (false, or no shots). Anything else is ignored.
  */
 export function startServer(o: {
   nodeFile: string;
@@ -174,6 +211,7 @@ export function startServer(o: {
   stopTimeoutMs?: number;
   killGraceMs?: number;
   onPickFolder?: () => Promise<string | null>;
+  onPreview?: (m: PreviewRequest) => Promise<unknown>;
 }): ServerHandle {
   const readyTimeoutMs = o.readyTimeoutMs ?? 60_000;
   const stopTimeoutMs = o.stopTimeoutMs ?? 10_000;
@@ -239,9 +277,34 @@ export function startServer(o: {
       });
   };
 
+  const answer = (m: HostMessage) => {
+    if (!child.connected) return;
+    try {
+      child.send(m, () => {});
+    } catch {
+      // The channel is closing; the child's own request times out.
+    }
+  };
+  const preview = (m: PreviewRequest) => {
+    void Promise.resolve()
+      .then(() => (o.onPreview ? o.onPreview(m) : null))
+      .catch(() => null)
+      .then((result) =>
+        answer(
+          m.type === "preview_views"
+            ? { type: "preview_views_done", id: m.id, ok: result === true }
+            : { type: "preview_captured", id: m.id, shots: cleanShots(result) },
+        ),
+      );
+  };
+
   child.on("message", (message: unknown) => {
     if (isReadyMessage(message)) settle(() => resolveReady(message));
     else if (isPickFolderMessage(message)) pickFolder(message.id);
+    else {
+      const request = parsePreviewMessage(message);
+      if (request !== null) preview(request);
+    }
   });
   let spawnError: Error | null = null;
   child.on("error", (err) => {

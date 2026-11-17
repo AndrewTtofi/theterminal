@@ -4,12 +4,13 @@ import {
   addCard,
   allow,
   anonymousUrl,
+  boardCard,
   decisionCard,
-  gateCard,
+  gatesOf,
   ledgerItems,
   line,
   lineMatching,
-  moveButton,
+  moveCardViaApi,
   openEditor,
   openProject,
   openView,
@@ -19,7 +20,7 @@ import {
   RUN_FINISHED,
   saveWithSecret,
   startRun,
-  waive,
+  waivers,
 } from "./support.js";
 
 // The fake agent's shell step prints this key, bare (see global-setup.ts). Stored as a connection's secret, it is
@@ -36,11 +37,12 @@ test("a card's story tells what happened in plain language, its decisions and wh
   await saveWithSecret(claude, "API key");
 
   await openView(page, "Board");
-  await addCard(page, "Build", "Login");
-  await page.getByLabel("Move Login to").selectOption("ship");
-  await waive(gateCard(page, "Ready to ship"), "We are only testing this");
-  await moveButton(page, "Login", "Ship").click();
-  await expect(page.getByRole("region", { name: "Ship" }).getByText("Login")).toBeVisible();
+  // The Board no longer moves cards: the move and its waiver go through the route it used to call.
+  const card = await addCard(page, "Build", "Login");
+  const blocked = await moveCardViaApi(page, card, "ship");
+  expect(blocked.status).toBe(409);
+  expect((await moveCardViaApi(page, card, "ship", waivers(gatesOf(blocked.body), "We are only testing this"))).status).toBe(200);
+  await expect(boardCard(page, "Login", "Ship")).toBeVisible();
 
   // During the run, the decision card says what the step means.
   await prepareRun(page, "fake", "Check the login page");
@@ -52,9 +54,10 @@ test("a card's story tells what happened in plain language, its decisions and wh
   await allow(page, "Run: nvidia-smi");
   await expect(lineMatching(ledgerItems(page), RUN_FINISHED("Fake"))).toHaveCount(1);
 
-  // A card's title opens its story.
+  // A card opens its panel, and the panel opens its story.
   await openView(page, "Board");
-  await page.getByRole("button", { name: "Open the story of Login" }).click();
+  await boardCard(page, "Login").click();
+  await page.getByRole("complementary", { name: "Card" }).getByRole("button", { name: "Open the full story" }).click();
   const story = page.getByRole("region", { name: "Story: Login" });
   await expect(story).toBeVisible();
   const happened = story.getByRole("list", { name: "What happened" }).getByRole("listitem");

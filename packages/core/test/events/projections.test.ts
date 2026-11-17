@@ -14,7 +14,8 @@ import {
   countActiveShareLinks, countPendingActions, countRunningRuns, getIntake, getLinkRun, getMachine, getRun, getSetting,
   getShareSnapshot, listActions, listAllPendingActions, listGateDecisions, listLinkRuns, listMachines, listOpenIntakes,
   listPendingActions, listProjectGateDecisions, listRuns, listShareLinks, listShareSnapshots, mirroredIds, projectSpendUsd,
-  rebuildAllProjections, workspaceCounts, getProjectSource, getPerson, listPeople, getRemoteState, getGateRequirement, getInviteByHash, listInvites,
+  rebuildAllProjections, workspaceCounts, getProjectSource, listCardComments, listMoveRequests, cardInfos, getPreview, livePreviews,
+  listScreenshots, runStarter, latestOffer, countCardScreenshots, getPerson, listPeople, getRemoteState, getGateRequirement, getInviteByHash, listInvites,
 } from "../../src/events/projections.js";
 import { canonicalJson } from "../../src/ledger/canonical.js";
 import { MirroredEntryRefusedError } from "../../src/events/projections.js";
@@ -208,8 +209,8 @@ describe("agent projections", () => {
     expect(columns).toEqual(expect.arrayContaining(["progress", "last_message", "accepted_commit"]));
   });
 
-  it("migrates to user_version 13 with project_sources and project_imports", () => {
-    expect(db.pragma("user_version", { simple: true })).toBe(13);
+  it("migrates past user_version 13 with project_sources and project_imports", () => {
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(13);
     const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
     expect(columns("project_sources")).toEqual(["project_id", "kind", "repo", "branch", "remote_commit", "path", "synced_commit"]);
     expect(columns("project_imports")).toEqual(["project_id", "files"]);
@@ -1029,5 +1030,199 @@ describe("people, invites, remote access and gate requirements", () => {
     rebuildAllProjections(db, ledger);
     expect(db.prepare("SELECT COUNT(*) AS n FROM credential_state").get()).toEqual({ n: 1 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 1 });
+  });
+});
+
+describe("agent board projections", () => {
+  const card = (cardId: string, stage = "plan", projectId = "p1") => emit("card.created", { cardId, title: `Card ${cardId}`, stage }, agent, projectId);
+  const comment = (commentId: string, cardId = "c1", text = "Mind the footer") =>
+    emit("card.comment", { commentId, cardId, text, authorName: "Ana", role: "maintainer" }, { kind: "human", id: "ana" });
+  const start = (runId: string, cardId: string | null = null, adapter = "claude") =>
+    emit("agent.started", { runId, adapter, authMode: "none", prompt: "p", cardId, worktree: `wt/${runId}` });
+  const states = (cardId = "c1") => listCardComments(db, cardId).map((c) => [c.id, c.state, c.runId, c.adapter]);
+
+  beforeEach(() => {
+    emit("project.created", { projectId: "p1", name: "Book Club", pitch: "" }, human);
+  });
+
+  it("migrates past user_version 14 with card_comments and card_move_requests", () => {
+    expect(db.pragma("user_version", { simple: true })).toBeGreaterThanOrEqual(14);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("card_comments")).toEqual(["id", "card_id", "project_id", "author_name", "role", "text", "at", "state", "run_id"]);
+    expect(columns("card_move_requests")).toEqual(["card_id", "project_id", "run_id", "from_stage", "to_stage", "at"]);
+  });
+
+  it("card.run_linked sets the run's card", () => {
+    card("c1");
+    start("r1");
+    emit("card.run_linked", { cardId: "c1", runId: "r1" });
+    expect(getRun(db, "r1")!.cardId).toBe("c1");
+  });
+
+  it("notes go from waiting to given to read, only for the run they were given to", () => {
+    card("c1");
+    start("r1", "c1");
+    start("r2", "c1", "codex");
+    comment("n1");
+    comment("n2");
+    comment("n3");
+    expect(listCardComments(db, "c1")[0]).toEqual({
+      id: "n1", cardId: "c1", authorName: "Ana", role: "maintainer", text: "Mind the footer", at: expect.any(String),
+      state: "waiting", runId: null, adapter: null,
+    });
+    emit("card.comments_given", { cardId: "c1", runId: "r1", commentIds: ["n1"] });
+    emit("card.comments_given", { cardId: "c1", runId: "r2", commentIds: ["n2"] });
+    emit("card.comments_read", { cardId: "c1", runId: "r1", commentIds: ["n1", "n2"] });
+    expect(states()).toEqual([["n1", "read", "r1", "claude"], ["n2", "given", "r2", "codex"], ["n3", "waiting", null, null]]);
+  });
+
+  it("keeps one move request per card, replaced by a newer one, cleared by card.moved or card.move_declined", () => {
+    card("c1");
+    card("c2", "build");
+    start("r1", "c1");
+    start("r2", "c2");
+    emit("card.move_requested", { cardId: "c1", runId: "r1", from: "plan", to: "design" });
+    emit("card.move_requested", { cardId: "c1", runId: "r1", from: "plan", to: "build" });
+    emit("card.move_requested", { cardId: "c2", runId: "r2", from: "build", to: "ship" });
+    expect(listMoveRequests(db)).toEqual([
+      { cardId: "c1", projectId: "p1", projectName: "Book Club", title: "Card c1", runId: "r1", adapter: "claude", from: "plan", to: "build", at: expect.any(String) },
+      { cardId: "c2", projectId: "p1", projectName: "Book Club", title: "Card c2", runId: "r2", adapter: "claude", from: "build", to: "ship", at: expect.any(String) },
+    ]);
+    expect(listMoveRequests(db, "p2")).toEqual([]);
+    emit("card.moved", { cardId: "c1", from: "plan", to: "design" }, human);
+    emit("card.move_declined", { cardId: "c2", to: "ship" }, human);
+    expect(listMoveRequests(db, "p1")).toEqual([]);
+  });
+
+  it("a decline for another stage leaves the newer request", () => {
+    card("c1");
+    start("r1", "c1");
+    emit("card.move_requested", { cardId: "c1", runId: "r1", from: "plan", to: "build" });
+    emit("card.move_declined", { cardId: "c1", to: "design" }, human);
+    expect(listMoveRequests(db).map((r) => r.to)).toEqual(["build"]);
+  });
+
+  it("cardInfos: the latest run's progress, now line and waiting; note counts; the move request; rebuilds the same", () => {
+    card("c1", "build");
+    card("c2");
+    start("r0", "c1");
+    emit("agent.finished", { runId: "r0", status: "completed", costUsd: 0, error: null });
+    start("r1", "c1");
+    emit("agent.progress", { runId: "r1", steps: ["Read", "Write", "Test"], done: [1], current: 2 });
+    emit("agent.action.requested", { runId: "r1", actionId: "a1", kind: "shell", tool: "Bash", summary: "npm test", input: { command: "npm test" } });
+    comment("n1");
+    comment("n2");
+    emit("card.comments_given", { cardId: "c1", runId: "r1", commentIds: ["n1"] });
+    emit("card.move_requested", { cardId: "c1", runId: "r1", from: "build", to: "ship" });
+    const infos = cardInfos(db, "p1");
+    expect(infos).toEqual([
+      {
+        cardId: "c1", runId: "r1", adapter: "claude", runStatus: "running",
+        progress: { steps: ["Read", "Write", "Test"], done: [1], current: 2 }, percent: 33, now: expect.any(String),
+        waiting: true, comments: 2, commentsWaiting: 1, screenshots: 0, moveRequest: { to: "ship" },
+      },
+      {
+        cardId: "c2", runId: null, adapter: null, runStatus: null, progress: null, percent: null, now: null,
+        waiting: false, comments: 0, commentsWaiting: 0, screenshots: 0, moveRequest: null,
+      },
+    ]);
+    expect(infos[0]!.now).toMatch(/^[A-Z]/);
+    const dump = () => ["card_comments", "card_move_requests", "agent_runs"].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+    const before = dump();
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(before);
+    expect(cardInfos(db, "p1")).toEqual(infos);
+  });
+});
+
+describe("previews", () => {
+  const SHA_A = "a".repeat(64);
+  const SHA_B = "b".repeat(64);
+  const KEY = "c".repeat(64);
+  const person = { kind: "human", id: "maint-1" } as const;
+  const system = { kind: "system", id: "preview" } as const;
+
+  it("migrates to user_version 15 with preview_offers, previews and preview_screenshots", () => {
+    expect(db.pragma("user_version", { simple: true })).toBe(15);
+    const columns = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns("preview_offers")).toEqual(["run_id", "kind", "command", "port", "target"]);
+    expect(columns("previews")).toEqual([
+      "id", "run_id", "project_id", "kind", "key", "state", "progress", "origin", "frameable", "exposed", "reason", "tail",
+      "started_by", "started_at", "ended_at",
+    ]);
+    expect(columns("preview_screenshots")).toEqual(["sha256", "run_id", "project_id", "preview_id", "device", "width", "height", "bytes", "at"]);
+  });
+
+  it("knows who started a run, only for a person", () => {
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r1" }, person);
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "p", cardId: null, worktree: "wt/r2" }, system);
+    expect(runStarter(db, "r1")).toBe("maint-1");
+    expect(runStarter(db, "r2")).toBeNull();
+    expect(runStarter(db, "nope")).toBeNull();
+  });
+
+  it("keeps the latest offer of each kind", () => {
+    expect(latestOffer(db, "r1", "web")).toBeNull();
+    emit("preview.offered", { runId: "r1", kind: "web", command: "npm run dev", port: 5173 });
+    emit("preview.offered", { runId: "r1", kind: "ios", target: "Trips.xcodeproj" });
+    emit("preview.offered", { runId: "r1", kind: "web", command: "npm run start", port: 3000 });
+    expect(latestOffer(db, "r1", "web")).toEqual({ command: "npm run start", port: 3000, target: null });
+    expect(latestOffer(db, "r1", "ios")).toEqual({ command: null, port: null, target: "Trips.xcodeproj" });
+    expect(latestOffer(db, "r1", "android")).toBeNull();
+  });
+
+  it("projects a preview through its stages, its screenshots, and rebuilds the same rows", () => {
+    emit("agent.started", { runId: "r1", adapter: "fake", authMode: "none", prompt: "p", cardId: "c1", worktree: "wt/r1" }, person);
+    emit("agent.started", { runId: "r2", adapter: "fake", authMode: "none", prompt: "p", cardId: "c2", worktree: "wt/r2" }, person);
+    emit("preview.offered", { runId: "r1", kind: "web", command: "npm run dev", port: 5173 });
+    emit("preview.requested", { previewId: "pv1", runId: "r1", kind: "web", commands: [["npm", "run", "dev"]], key: KEY, install: false, target: "npm run dev" }, person);
+    let v = getPreview(db, "pv1")!;
+    expect(v).toMatchObject({
+      id: "pv1", runId: "r1", projectId: "p1", kind: "web", state: "requested", percent: 0, origin: null, frameable: null, exposed: false,
+      error: null, tail: [], liveCount: null, progress: { steps: ["Starting the site", "Waiting for the port", "Loading the first page"], done: [], current: 1 },
+    });
+    emit("preview.started", { previewId: "pv1", port: 40001 }, person);
+    expect(getPreview(db, "pv1")!.state).toBe("starting");
+    emit("preview.progress", { previewId: "pv1", steps: ["Starting the site", "Waiting for the port", "Loading the first page"], done: [1], current: 2 }, person);
+    expect(getPreview(db, "pv1")!.percent).toBe(33);
+    emit("preview.ready", { previewId: "pv1", origin: "http://127.0.0.1:40001", frameable: false, exposed: true }, person);
+    v = getPreview(db, "pv1")!;
+    expect(v).toMatchObject({ state: "ready", origin: "http://127.0.0.1:40001", frameable: false, exposed: true });
+    expect(livePreviews(db).map((p) => p.id)).toEqual(["pv1"]);
+    expect(livePreviews(db, "p1").map((p) => p.id)).toEqual(["pv1"]);
+    expect(livePreviews(db, "p2")).toEqual([]);
+
+    emit("preview.requested", { previewId: "pv2", runId: "r2", kind: "ios", commands: [["xcodebuild", "build"]], key: KEY, install: false, target: "Trips.xcodeproj" }, person);
+    emit("preview.failed", { previewId: "pv2", reason: "build_failed", tail: ["error: one", "error: two"] }, person);
+    expect(getPreview(db, "pv2")).toMatchObject({ state: "failed", error: "build_failed", tail: ["error: one", "error: two"], kind: "ios" });
+    expect(getPreview(db, "pv2")!.progress.steps).toHaveLength(5);
+    emit("preview.stopped", { previewId: "pv2", reason: "person" }, person); // an ended preview stays as it ended
+    expect(getPreview(db, "pv2")!.state).toBe("failed");
+
+    emit("preview.screenshot", { previewId: "pv1", runId: "r1", device: "iPhone 16", sha256: SHA_A, bytes: 10, width: 393, height: 852 }, person);
+    emit("preview.screenshot", { previewId: "pv1", runId: "r1", device: "Pixel 9", sha256: SHA_B, bytes: 12, width: 412, height: 915 }, person);
+    emit("preview.screenshot", { previewId: "pv1", runId: "r1", device: "iPhone 16", sha256: SHA_A, bytes: 10, width: 393, height: 852 }, person);
+    expect(listScreenshots(db, "r1").map((s) => s.sha256).sort()).toEqual([SHA_A, SHA_B]);
+    expect(listScreenshots(db, "r1", 1)).toHaveLength(1);
+    expect(listScreenshots(db, "r1")[0]).toMatchObject({ runId: "r1", previewId: "pv1", bytes: expect.any(Number), at: expect.any(String) });
+    expect(countCardScreenshots(db, "c1")).toBe(2);
+    expect(countCardScreenshots(db, "c2")).toBe(0);
+
+    emit("preview.stopped", { previewId: "pv1", reason: "idle" }, system);
+    expect(getPreview(db, "pv1")!.state).toBe("stopped");
+    expect(livePreviews(db)).toEqual([]);
+
+    const dump = () => ["preview_offers", "previews", "preview_screenshots"].map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY 1, 2`).all());
+    const live = dump();
+    const views = [getPreview(db, "pv1"), getPreview(db, "pv2"), listScreenshots(db, "r1"), latestOffer(db, "r1", "web")];
+    rebuildAllProjections(db, ledger);
+    expect(dump()).toEqual(live);
+    expect([getPreview(db, "pv1"), getPreview(db, "pv2"), listScreenshots(db, "r1"), latestOffer(db, "r1", "web")]).toEqual(views);
+  });
+
+  it("gives the install step first when the install is included", () => {
+    emit("preview.requested", { previewId: "pv1", runId: "r1", kind: "web", commands: [["npm", "ci"], ["npm", "run", "dev"]], key: KEY, install: true, target: "npm run dev" }, person);
+    expect(getPreview(db, "pv1")!.progress.steps).toEqual(["Installing packages", "Starting the site", "Waiting for the port", "Loading the first page"]);
+    expect(getPreview(db, "nope")).toBeNull();
   });
 });

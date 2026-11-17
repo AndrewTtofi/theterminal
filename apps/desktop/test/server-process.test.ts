@@ -20,6 +20,7 @@ type StartOpts = {
   nodeFile?: string;
   extraArgs?: string[];
   onPickFolder?: () => Promise<string | null>;
+  onPreview?: Parameters<typeof startServer>[0]["onPreview"];
 };
 
 function start(mode: string, o: StartOpts = {}) {
@@ -230,6 +231,85 @@ describe("startServer", () => {
     expect(answers(m)).toEqual([
       { type: "picked_folder", id: "p2", path: null },
       { type: "picked_folder", id: "p1", path: chosen },
+    ]);
+  });
+});
+
+describe("startServer preview requests", () => {
+  const answers = (m: { url: string }) => JSON.parse(new URL(m.url).searchParams.get("answers") ?? "null") as unknown;
+  const PNG = "iVBORw0KGgo=";
+
+  it("passes valid preview_views and preview_capture to onPreview once each and answers with the same ids", async () => {
+    const calls: unknown[] = [];
+    const h = start("preview", {
+      onPreview: async (m) => {
+        calls.push(m);
+        return m.type === "preview_views" ? true : [{ device: "iphone16", png: PNG }];
+      },
+    });
+    const m = await h.ready;
+    expect(calls).toEqual([
+      {
+        type: "preview_views",
+        id: "v1",
+        previewId: "p1",
+        origin: "http://127.0.0.1:5173",
+        action: "show",
+        views: [
+          {
+            device: "iphone16",
+            x: 0,
+            y: 0,
+            width: 393,
+            height: 852,
+            viewport: { width: 393, height: 852 },
+            scale: 3,
+            mobile: true,
+            userAgent: null,
+          },
+        ],
+      },
+      { type: "preview_capture", id: "c1", previewId: "p1" },
+    ]);
+    expect(answers(m)).toEqual([
+      { type: "preview_views_done", id: "v1", ok: true },
+      { type: "preview_captured", id: "c1", shots: [{ device: "iphone16", png: PNG }] },
+    ]);
+  });
+
+  it("answers a refusal when there is no onPreview, or it fails", async () => {
+    const refusal = [
+      { type: "preview_views_done", id: "v1", ok: false },
+      { type: "preview_captured", id: "c1", shots: [] },
+    ];
+    expect(answers(await start("preview").ready)).toEqual(refusal);
+    expect(answers(await start("preview", { onPreview: () => Promise.reject(new Error("no window")) }).ready)).toEqual(refusal);
+  });
+
+  it("sends back only well-formed shots, at most 4", async () => {
+    const shots = [
+      { device: "a", png: PNG },
+      { device: "b c", png: PNG },
+      { device: "d", png: "not base64!" },
+      { device: "e", png: 42 },
+      { device: "f", png: PNG },
+      { device: "g", png: PNG },
+      { device: "h", png: PNG },
+      { device: "i", png: PNG },
+    ];
+    const h = start("preview", { onPreview: async (m) => (m.type === "preview_views" ? "yes" : shots) });
+    expect(answers(await h.ready)).toEqual([
+      { type: "preview_views_done", id: "v1", ok: false },
+      {
+        type: "preview_captured",
+        id: "c1",
+        shots: [
+          { device: "a", png: PNG },
+          { device: "f", png: PNG },
+          { device: "g", png: PNG },
+          { device: "h", png: PNG },
+        ],
+      },
     ]);
   });
 });

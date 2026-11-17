@@ -1,16 +1,53 @@
+import { useRef } from "react";
 import { progressPercent } from "@theterminal/shared";
 import type { RunProgress } from "@theterminal/shared";
 import "./progress.css";
 
 /**
  * A run's progress as the agent reports it. A number draws a progressbar; `null` (no plan) shows "Working…" with no
- * number and no progressbar value, because a made-up percentage would be fake progress.
+ * number and no progressbar value, because a made-up percentage would be fake progress. `compact` draws the bar alone
+ * (a Board card shows its own percent), and nothing at all without a number. `caption` replaces "as the agent reports it"
+ * for a plan that is not the agent's (a preview's fixed stages).
+ *
+ * The bar never moves back: it keeps the highest percent it has shown, so a stale response cannot undo progress. A
+ * caller keys it with progressKey (the run or preview, and its plan's length): another run, or a plan restated with
+ * more steps, starts it again, so the number shown is always true.
  */
-export function ProgressBar({ percent, label }: { percent: number | null; label: string }) {
+/** A ProgressBar's `key`: its subject (a run, a preview, a set of runs) and how many steps its plan has. */
+export function progressKey(subject: string, steps: number): string {
+  return `${subject}:${steps}`;
+}
+
+export function ProgressBar({
+  percent,
+  label,
+  compact = false,
+  caption = "as the agent reports it",
+}: {
+  percent: number | null;
+  label: string;
+  compact?: boolean;
+  caption?: string;
+}) {
+  const highest = useRef<number | null>(null);
+  if (percent !== null) highest.current = Math.max(percent, highest.current ?? percent);
+  percent = percent === null ? null : highest.current;
+  if (compact) {
+    if (percent === null) return null;
+    return (
+      <div className="progress progress-compact">
+        <div className="progress-track" role="progressbar" aria-label={label} aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+          <div className="progress-fill" style={{ width: `${percent}%` }} />
+        </div>
+      </div>
+    );
+  }
   if (percent === null) {
     return (
       <div className="progress progress-indeterminate">
-        <span className="progress-text" role="status">Working…</span>
+        <span className="progress-text" role="status">
+          Working…<span className="cursor" aria-hidden="true" />
+        </span>
       </div>
     );
   }
@@ -19,8 +56,8 @@ export function ProgressBar({ percent, label }: { percent: number | null; label:
       <div className="progress-track" role="progressbar" aria-label={label} aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
-      <span className="progress-text">{percent}%</span>
-      <span className="progress-caption">as the agent reports it</span>
+      <span className="progress-text num">{percent}%</span>
+      <span className="progress-caption">{caption}</span>
     </div>
   );
 }

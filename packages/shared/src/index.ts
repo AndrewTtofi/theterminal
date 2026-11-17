@@ -18,3 +18,5 @@ export * from "./people.js";
 export * from "./theme.js";
 export * from "./home.js";
 export * from "./sources.js";
+export * from "./agent-board.js";
+export * from "./preview.js";

@@ -5,6 +5,8 @@ import type {
   AuthMode,
   Board,
   Card,
+  CardComment,
+  CardInfo,
   CardStory,
   CatalogEntry,
   CapacityReport,
@@ -50,10 +52,23 @@ import type {
   ImportResult,
   ProjectFiles,
   WritebackPreview,
+  DeviceId,
+  NativeTools,
+  PreviewKind,
+  PreviewPlan,
+  PreviewView,
+  Screenshot,
 } from "@theterminal/shared";
 import type { Invite, Me, Person, RemoteState, TlsMode } from "@theterminal/shared";
 import { CHANGES_REFUSED_PHRASES, ROLE_LABELS, requirementLabel, visibleControls, type PresenceEntry, type Role } from "@theterminal/shared";
 import { clip } from "./components/text";
+
+/** Where the Preview tab's frames are, in CSS pixels of the window; the server fills in the rest from the devices. */
+export type PreviewViewsBody = {
+  previewId: string;
+  action: "show" | "hide" | "reload" | "close";
+  devices: { device: DeviceId; rotated: boolean; x: number; y: number; width: number; height: number }[];
+};
 
 export type Health = {
   ok: true;
@@ -256,6 +271,29 @@ export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
   getHome: (projectId: string | null) =>
     request<HomeRuns>(projectId === null ? "/api/home" : `/api/home?projectId=${enc(projectId)}`),
+  // --- card notes, previews and screenshots ---
+  cardInfos: (projectId: string) => request<{ cards: CardInfo[] }>(`/api/projects/${enc(projectId)}/cards/info`),
+  cardComments: (cardId: string) => request<{ comments: CardComment[] }>(`/api/cards/${enc(cardId)}/comments`),
+  addCardComment: (cardId: string, text: string) =>
+    request<CardComment>(`/api/cards/${enc(cardId)}/comments`, { method: "POST", body: { text } }),
+  declineMove: (cardId: string) => request<void>(`/api/cards/${enc(cardId)}/move-request/decline`, { method: "POST", body: {} }),
+  previewPlan: (runId: string, kind: PreviewKind, target?: string) =>
+    request<PreviewPlan>(`/api/runs/${enc(runId)}/preview/plan?kind=${kind}${target === undefined ? "" : `&target=${enc(target)}`}`),
+  /** 201 for a new preview, 200 when the same one is already live. */
+  startPreview: (runId: string, i: { kind: PreviewKind; key: string; target?: string }) =>
+    request<PreviewView>(`/api/runs/${enc(runId)}/preview`, { method: "POST", body: i }),
+  getPreview: (id: string) => request<PreviewView>(`/api/previews/${enc(id)}`),
+  stopPreview: (id: string, reason: "person" | "tab_closed") =>
+    request<void>(`/api/previews/${enc(id)}/stop`, { method: "POST", body: { reason } }),
+  previewSeen: (id: string) => request<void>(`/api/previews/${enc(id)}/seen`, { method: "POST", body: {} }),
+  takeScreenshots: (id: string) =>
+    request<{ screenshots: Screenshot[] }>(`/api/previews/${enc(id)}/screenshots`, { method: "POST", body: {} }),
+  runScreenshots: (runId: string) => request<{ screenshots: Screenshot[] }>(`/api/runs/${enc(runId)}/screenshots`),
+  screenshotUrl: (s: Pick<Screenshot, "sha256" | "runId">) => `/api/screenshots/${enc(s.sha256)}?runId=${enc(s.runId)}`,
+  hostCapabilities: () => request<{ previewViews: boolean }>("/api/host/capabilities"),
+  /** Asks the desktop app to lay (or move, or hide) the device views of a ready website preview. */
+  previewViews: (body: PreviewViewsBody) => request<void>("/api/host/preview-views", { method: "POST", body }),
+  nativeTools: () => request<NativeTools>("/api/host/native-tools"),
   projectFiles: (id: string) => request<ProjectFiles>(`/api/projects/${enc(id)}/files`),
   githubRepos: () => request<{ repos: GitHubRepoChoice[] }>("/api/github/repos"),
   createFromGitHub: (i: { repo: string; name?: string; includeSecrets?: boolean }) =>
@@ -303,7 +341,7 @@ export const api = {
   setProviderAuth: (i: { provider: Provider; mode: AuthMode; acknowledgement?: string }) =>
     request<{ provider: Provider; mode: AuthMode }>("/api/settings/provider-auth", { method: "POST", body: i }),
   /** With `machineId`, the run goes to that linked machine (its connections are the ones given). */
-  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[]; machineId?: string }) =>
+  startRun: (projectId: string, i: { adapter: AdapterId; prompt: string; cardId?: string; connectionIds?: string[]; machineId?: string; autoCard?: boolean }) =>
     request<AgentRun>(`/api/projects/${enc(projectId)}/runs`, { method: "POST", body: i }),
   listRuns: (projectId: string) => request<AgentRun[]>(`/api/projects/${enc(projectId)}/runs`),
   getRun: (runId: string) => request<{ run: AgentRun; actions: AgentAction[] }>(`/api/runs/${enc(runId)}`),
@@ -574,9 +612,10 @@ function remoteRefusal(e: ApiError): string {
  * The message for a failed request. `context: "run"` words the connection refusals for starting a run;
  * `"intake"` words a conflict as the project already having an intake and a missing project as gone, `"reopen"` a
  * conflict as the plan being open already, `"changes"` a live run as the reason a run's changes, files or diffs
- * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed.
+ * cannot be read yet, `"pair"` an unreachable machine as the address the Owner typed, `"preview"` a run on another
+ * computer as the reason it cannot be previewed.
  */
-export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair" | "sources"): string {
+export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" | "changes" | "pair" | "sources" | "preview"): string {
   if (e instanceof ApiError) {
     if (e.code === "remote_refused") return remoteRefusal(e);
     if (e.code === "limit_exceeded") {
@@ -590,6 +629,27 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     }
     if (e.code === "merge_conflict") return "These changes clash with newer work. Ask an agent to redo them on top of the latest files.";
     if (e.code === "folder_unavailable") return "The original folder can't be found.";
+    // Previews: fixed sentences, nothing from the request.
+    if (e.code === "preview_changed") return "The agent changed what will run. Look at the commands again before you start it.";
+    if (e.code === "preview_not_allowed") return "Only the Owner or the person who started this job can run its preview.";
+    if (e.code === "preview_refused") {
+      const reason = detailString(e, "reason");
+      if (reason === "script_missing") return "The project has no such script in package.json.";
+      if (reason === "no_package_json") return "The project has no package.json.";
+      return "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.";
+    }
+    if (e.code === "no_preview_offer") return "This job didn't offer a preview of that kind.";
+    if (e.code === "preview_busy") return "Another preview is already running. Stop it first, then try again.";
+    if (context === "preview" && e.code === "remote_run") return "This job ran on another computer, so it can't be previewed here.";
+    if (e.code === "package_manager_not_found") {
+      const manager = detailString(e, "manager");
+      return `${manager === "npm" || manager === "pnpm" || manager === "yarn" ? manager : "The package manager"} isn't installed on this computer.`;
+    }
+    if (e.code === "platform_unsupported") {
+      return detailString(e, "kind") === "ios" ? "iPhone apps need a Mac." : "Android apps can't be built on Windows in this version.";
+    }
+    if (e.code === "native_tools_missing") return "Some tools are missing on this computer. See What you need on this computer.";
+    if (e.code === "screenshots_unavailable") return "Screenshots of websites need the desktop app.";
     if (e.code === "local_only") return "This works only on the computer The Terminal runs on.";
     // The machine a run is on refused a decision or a stop (502): fixed words, nothing of its reply.
     if (e.code === "machine_refused") return "The linked machine refused the request. Nothing was changed.";

@@ -75,6 +75,8 @@ vi.mock("../src/api", () => ({
     getHome: vi.fn(),
     projectFiles: vi.fn(),
     acceptRun: vi.fn(),
+    cardInfos: vi.fn(),
+    cardComments: vi.fn(),
   },
   setUnauthorizedHandler: (fn: (() => void) | null) => {
     h.unauthorized = fn;
@@ -167,6 +169,8 @@ beforeEach(() => {
   m.listInvites.mockResolvedValue([]);
   m.getRemote.mockResolvedValue({ enabled: false, listening: false });
   m.getHome.mockResolvedValue({ working: [], finishedToday: [] });
+  m.cardInfos.mockResolvedValue({ cards: [] });
+  m.cardComments.mockResolvedValue({ comments: [] });
   m.projectFiles.mockResolvedValue({ source: null, added: false, head: "h", entries: [], truncated: false });
 });
 
@@ -211,7 +215,8 @@ describe("App board refresh", () => {
     await screen.findByRole("heading", { name: "Project A" });
 
     m.getBoard.mockImplementationOnce(() => new Promise<Board>((r) => (resolveStale = r)));
-    await userEvent.type(screen.getByLabelText("Add card to Plan"), "x{Enter}");
+    // The Board has no add box: the model's add (what the intake and the API use) refreshes the board.
+    act(() => testDock.shell!.model.onAddCard("plan", "x"));
     await waitFor(() => expect(m.getBoard).toHaveBeenCalledTimes(2));
 
     await userEvent.click(screen.getByRole("button", { name: "Project B" }));
@@ -821,14 +826,16 @@ describe("App readiness gates", () => {
     m.getBoard.mockResolvedValue(withLogin());
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
-    await screen.findByRole("button", { name: "Open the story of Login" });
+    await screen.findByRole("button", { name: "Open Login" });
   };
+  // People no longer move cards on the Board: a move comes through the model, as Home's Review of an agent's request does.
+  const askMove = () => act(async () => void testDock.shell!.model.onMoveCard("c1", "ship"));
 
   it("moves at once when every gate passes", async () => {
     m.getCardGates.mockResolvedValue([planPassed()]);
     m.moveCard.mockResolvedValue({ ...login, stage: "ship" });
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     await waitFor(() => expect(m.moveCard).toHaveBeenCalledWith("c1", "ship"));
     expect(m.getCardGates).toHaveBeenCalledWith("c1", "ship");
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
@@ -840,7 +847,7 @@ describe("App readiness gates", () => {
     await openA();
     await userEvent.click(within(views()).getByRole("button", { name: "Connections" }));
     await userEvent.keyboard("{Control>}j{/Control}");
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     const card = within(strip).getByRole("article", { name: "Gate: Ready to ship" });
     expect(m.moveCard).not.toHaveBeenCalled();
@@ -867,7 +874,7 @@ describe("App readiness gates", () => {
     let resolve!: (v: unknown) => void;
     m.moveCard.mockReturnValue(new Promise((r) => (resolve = r)) as never);
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     await screen.findByRole("article", { name: "Gate: Ready to ship" });
     const { onResolveGate } = testDock.shell!.model;
     const decisions = [{ gateId: "ready_to_ship" as const, decision: "sign_off" as const, acknowledgement: "x" }];
@@ -887,7 +894,7 @@ describe("App readiness gates", () => {
     m.getCardGates.mockResolvedValueOnce([shipMet()]).mockResolvedValue([shipBlocked()]);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_not_met", { gateId: "ready_to_ship", unmet: ["The plan has been approved"] }));
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     const card = within(strip).getByRole("article", { name: "Gate: Ready to ship" });
     await userEvent.click(within(card).getByRole("checkbox"));
@@ -903,7 +910,7 @@ describe("App readiness gates", () => {
     m.getCardGates.mockResolvedValue([shipMet()]);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_blocked", { gates: [shipBlocked()] }));
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     const card = within(strip).getByRole("article", { name: "Gate: Ready to ship" });
     await userEvent.click(within(card).getByRole("checkbox"));
@@ -917,7 +924,7 @@ describe("App readiness gates", () => {
     m.getCardGates.mockResolvedValue([]);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_blocked", { gates: [shipBlocked()] }));
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     expect(within(strip).getByRole("article", { name: "Gate: Ready to ship" })).toBeTruthy();
   });
@@ -925,20 +932,21 @@ describe("App readiness gates", () => {
   it("cancels the gate", async () => {
     m.getCardGates.mockResolvedValue([shipMet()]);
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     await userEvent.click(within(strip).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
     expect(m.moveCard).not.toHaveBeenCalled();
   });
 
-  it("opens the story tab from a card title and loads its story", async () => {
+  it("opens the story tab from a card's panel and loads its story", async () => {
     m.getCardStory.mockResolvedValue({
       card: login, runs: [], actions: [], gateDecisions: [], costUsd: null, integrity: { ok: true }, unreadable: [],
       entries: [{ ...gateEntry(1, "card.created"), payload: { cardId: "c1", title: "Login", stage: "build" } }],
     });
     await openA();
-    await userEvent.click(screen.getByRole("button", { name: "Open the story of Login" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Login" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open the full story" }));
     const story = await screen.findByRole("region", { name: "Story: Login" });
     expect(m.getCardStory).toHaveBeenCalledWith("c1");
     expect(story.textContent).toContain("Nothing has happened on this card yet.");
@@ -962,7 +970,7 @@ describe("App readiness gates", () => {
     m.getCardGates.mockResolvedValue([shipMet()]);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_blocked", { gates: "x" }));
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     await userEvent.click(within(strip).getByRole("checkbox"));
     await userEvent.click(within(strip).getByRole("button", { name: "Sign off" }));
@@ -978,7 +986,7 @@ describe("App readiness gates", () => {
       .mockImplementationOnce(() => new Promise((r) => { resolveRefresh = r; }) as never);
     m.moveCard.mockRejectedValue(new ApiError(409, "gate_not_met", { gateId: "ready_to_ship", unmet: [] }));
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     const strip = await screen.findByRole("region", { name: "Needs you" });
     await userEvent.click(within(strip).getByRole("checkbox"));
     await userEvent.click(within(strip).getByRole("button", { name: "Sign off" }));
@@ -994,7 +1002,7 @@ describe("App readiness gates", () => {
   it("clears an open gate when another project is selected", async () => {
     m.getCardGates.mockResolvedValue([shipMet()]);
     await openA();
-    await userEvent.selectOptions(screen.getByLabelText("Move Login to"), "Ship");
+    await askMove();
     await screen.findByRole("region", { name: "Needs you" });
     m.getBoard.mockResolvedValue(mk("B"));
     await userEvent.click(screen.getByRole("button", { name: "Project B" }));
@@ -1406,5 +1414,48 @@ describe("App Home data", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
     await waitFor(() => expect(m.getHome).toHaveBeenLastCalledWith("A"));
     await waitFor(() => expect(m.projectFiles).toHaveBeenLastCalledWith("A"));
+  });
+});
+
+describe("App card infos and Home on card and preview entries", () => {
+  const entry = (type: string, projectId = "A"): LedgerEntry => ({
+    seq: 60, id: "60", ts: "2026-11-17T00:00:00Z", projectId, actor: { kind: "human", id: "owner" },
+    type: type as LedgerEntry["type"], payload: {}, prevHash: "", hash: "",
+  });
+
+  it("reads the card infos once, debounced, after a card.comment entry", async () => {
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Project A" }));
+    await waitFor(() => expect(m.cardInfos).toHaveBeenCalledWith("A"));
+    vi.useFakeTimers();
+    try {
+      const before = m.cardInfos.mock.calls.length;
+      await act(async () => {
+        h.onEntry!(entry("card.comment"));
+        h.onEntry!(entry("card.comment"));
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(m.cardInfos.mock.calls.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reloads Home after a card.* and a preview.* entry", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      for (const type of ["card.move_requested", "preview.offered"]) {
+        const before = m.getHome.mock.calls.length;
+        await act(async () => {
+          h.onEntry!(entry(type));
+          await vi.advanceTimersByTimeAsync(600);
+        });
+        expect(m.getHome.mock.calls.length).toBe(before + 1);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

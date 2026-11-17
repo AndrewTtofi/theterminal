@@ -3,12 +3,13 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { AddressInfo } from "node:net";
-import { arch, cpus, release, totalmem } from "node:os";
+import { arch, cpus, homedir, release, totalmem } from "node:os";
 import { promisify } from "node:util";
 import Fastify from "fastify";
 import { openDatabase, type Db } from "../db.js";
 import { Ledger, type VerifyResult } from "../ledger/ledger.js";
 import { BoardService } from "../board/board-service.js";
+import { AgentCards } from "../board/agent-cards.js";
 import { registerRoutes } from "./routes.js";
 import { registerAuth, assertRoutesHaveRoles, APP_HOST } from "./auth.js";
 import { AUTH_THROTTLE, Throttle } from "./throttle.js";
@@ -54,6 +55,10 @@ import { SourceService } from "../sources/service.js";
 import { WritebackService } from "../sources/writeback.js";
 import { registerSourcesRoutes } from "./sources-routes.js";
 import { registerHomeRoutes } from "./home-routes.js";
+import { registerCardRoutes } from "./card-routes.js";
+import { registerPreviewRoutes } from "./preview-routes.js";
+import { PreviewService } from "../preview/service.js";
+import { detectTools, realTools } from "../preview/native.js";
 import { installRequestDeadlines, type RequestDeadlines } from "./request-deadlines.js";
 import { ConnectionService } from "../connections/service.js";
 import { SignInManager, fakeLoginEnv } from "../connections/signin.js";
@@ -67,14 +72,16 @@ import { KeychainSecretStore } from "../secrets/keychain-store.js";
 import { MemorySecretStore } from "../secrets/memory-store.js";
 import { FileSecretStore, assertKeyOutsideDataDir, type SecretStoreKind } from "../secrets/file-store.js";
 import {
-  ADAPTERS, PROVIDERS, RESTRICTED_SIGNIN_ENV, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type Provider, type TlsMode,
+  ADAPTERS, PROVIDERS, RESTRICTED_SIGNIN_ENV, type Actor, type AdapterId, type CapacityReport, type HardwareInfo, type LocalEngine, type NativeTools,
+  type Provider, type TlsMode,
 } from "@theterminal/shared";
 import { detectHardware, fakeHardware, type ExecFile } from "../capacity/hardware.js";
 import { LLAMACPP_URL, OLLAMA_URL, detectLocalEngines, isLoopbackUrl } from "../capacity/local-models.js";
 import type { AgentAdapter } from "../agents/adapter.js";
+import type { PreviewHost } from "./preview-host.js";
 import { ApprovalBroker } from "../agents/approvals.js";
 import { ClaudeAdapter } from "../agents/claude-adapter.js";
-import { fakeAgentEnv } from "../agents/child-env.js";
+import { baseChildEnv, fakeAgentEnv } from "../agents/child-env.js";
 import { CodexAdapter } from "../agents/codex/adapter.js";
 import { FakeAdapter, type FakeStep } from "../agents/fake-adapter.js";
 import { GeminiAdapter } from "../agents/gemini/adapter.js";
@@ -564,6 +571,13 @@ export async function createServer(opts: {
    * `folder_picker_unavailable`.
    */
   pickFolder?: () => Promise<string | null>;
+  /**
+   * Shows and captures a website preview's device views through the host (the desktop app). Set by the CLI only when
+   * it runs under a host with an IPC channel; absent on a headless server.
+   */
+  previewHost?: PreviewHost;
+  /** Tests only: what the native tools route reports. Default: detection with the real programs (detectTools). */
+  nativeTools?: () => Promise<NativeTools>;
 }): Promise<RunningServer> {
   const which: Which = opts.which ?? whichOnPath;
   // Located once, at startup: every listing and run start reuses the result.
@@ -684,6 +698,10 @@ export async function createServer(opts: {
         })),
     });
 
+    // The gates before the runner: the agents' card markers (AgentCards) move cards only through them.
+    const gates = new GateService({ db, ledger, recorded });
+    const cards = new AgentCards({ db, ledger, gates, board, recorded });
+
     const worktrees = new WorktreeManager(opts.dataDir);
     const runner = new AgentRunner({
       db,
@@ -699,6 +717,7 @@ export async function createServer(opts: {
       mintCloud: (source, signal) => mintCloudGrant(source, { sts, fetch: fetchFn, signal }),
       dataDir: opts.dataDir,
       restrictedSignIn,
+      cards,
       ...(opts.shutdownTimeoutMs !== undefined && { shutdownTimeoutMs: opts.shutdownTimeoutMs }),
     });
 
@@ -710,6 +729,17 @@ export async function createServer(opts: {
       return redact(recorded.scrub(redact(s, secrets)), secrets);
     };
     const overrides = new OverrideService({ db, ledger, dataDir: opts.dataDir, worktrees, recorded, clean, which, settling: (id) => runner.settling(id) });
+    // Previews the person confirms: each stage cleaned like the run's own output; a website's screenshots come from
+    // the desktop app's device views, when there is a desktop app.
+    const previewHost = opts.previewHost;
+    const previews = new PreviewService({
+      db, ledger, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id),
+      ownPorts: () => [boundPort, remoteListener.state().port].filter((p) => p > 0),
+      ...(previewHost !== undefined && { capture: (id: string) => previewHost.capture(id) }),
+    });
+    const nativeTools =
+      opts.nativeTools ??
+      (() => detectTools(realTools(process.platform), { platform: process.platform, env: baseChildEnv(opts.dataDir), homedir: homedir() }));
     // Runs this computer asks a linked machine to do: followed through its signed entries, decided and stopped there.
     const remote = new RemoteRunService({
       db, ledger, link: linkService, worktrees, dataDir: opts.dataDir, clean: cleanMirrored,
@@ -718,7 +748,6 @@ export async function createServer(opts: {
     });
 
     const intake = new IntakeService({ db, ledger, recorded });
-    const gates = new GateService({ db, ledger, recorded });
 
     // People: one session store, one challenge store, one lockout store, one service and one auth throttle for the
     // whole server. The auth hook reads sessions and people here; the sign-in routes, the remote listener and the
@@ -802,6 +831,7 @@ export async function createServer(opts: {
       if (!ledger.readOnly) runner.recoverOnStartup(); // nothing survived the restart: deny and fail
       if (!ledger.readOnly) overrides.recoverOnStartup(); // an override's process never survives a restart
       if (!ledger.readOnly) links.recoverOnStartup(); // no link's listener survives a restart
+      if (!ledger.readOnly) previews.recoverOnStartup(); // no preview's process survives a restart
       registerAuth(app, {
         token,
         port: () => boundPort,
@@ -845,6 +875,12 @@ export async function createServer(opts: {
       });
       registerGitHubRoutes(app, { github });
       registerHomeRoutes(app, { db, clean: cleanMirrored });
+      registerCardRoutes(app, { db, cards, clean: cleanMirrored });
+      registerPreviewRoutes(app, {
+        db, dataDir: opts.dataDir, previews, nativeTools,
+        ...(previewHost !== undefined && { previewHost }), ...(opts.uiDir !== undefined && { uiDir: opts.uiDir }),
+        uiDeny: opts.secretKeyFile === undefined ? [] : [opts.secretKeyFile],
+      });
       registerSourcesRoutes(app, {
         db, sources, writeback, github: repos, ...(opts.pickFolder !== undefined && { pickFolder: opts.pickFolder }),
       });
@@ -911,6 +947,7 @@ export async function createServer(opts: {
       await linkService.shutdown();
       await links.shutdown();
       await overrides.shutdown();
+      await previews.shutdown();
       await signin.shutdown();
       await app.close().catch(() => undefined);
       throw err;
@@ -947,6 +984,7 @@ export async function createServer(opts: {
           await links.shutdown(); // closes every share link's listener and records it, while the db is open
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+          await previews.shutdown(); // kills every preview's process tree and records it, while the db is open
           await signin.shutdown(); // kills every login and status check before the db closes
           for (const client of app.websocketServer.clients) client.terminate();
           await app.close();

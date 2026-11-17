@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import type { AgentRun, Board } from "@theterminal/shared";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { AgentRun, Board, CardInfo } from "@theterminal/shared";
+
+vi.mock("../src/api", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/api")>();
+  return { ...real, api: { cardComments: vi.fn().mockResolvedValue({ comments: [] }), addCardComment: vi.fn() } };
+});
+
 import { ShellContext } from "../src/shell/model";
+import { OWNER_ME } from "./as-owner";
 import type { WorkbenchModel } from "../src/shell/model";
 import { BoardView, spendLine } from "../src/views/BoardView";
 import { fakeDock, shellNav } from "./connections-harness";
@@ -12,14 +20,73 @@ const board: Board = {
   columns: { plan: [], design: [], build: [], ship: [], operate: [] },
 };
 
-function renderBoard(runs: AgentRun[]) {
-  const model = { selectedId: "p1", board, runs, onAddCard: vi.fn(), onMoveCard: vi.fn() } as unknown as WorkbenchModel;
+const withCard: Board = {
+  ...board,
+  columns: {
+    ...board.columns,
+    build: [{ id: "c1", projectId: "p1", title: "Fix the contact form", stage: "build", status: "active", createdAt: "", updatedAt: "" }],
+  },
+};
+const info: CardInfo = {
+  cardId: "c1", runId: "r1", adapter: "claude", runStatus: "running", percent: 50, now: "Checking it works", waiting: false,
+  progress: { steps: ["Found the problem", "Wrote the fix", "Checking it works", "Ready for your review"], done: [1, 2], current: 3 },
+  comments: 0, commentsWaiting: 0, screenshots: 0, moveRequest: null,
+};
+
+function renderBoard(runs: AgentRun[], b: Board = board, owner = false) {
+  const model = {
+    selectedId: "p1", board: b, runs, onAddCard: vi.fn(), onMoveCard: vi.fn(),
+    cardInfos: { data: { c1: info }, refresh: vi.fn() }, subscribeEntries: vi.fn(() => () => {}),
+    home: { data: null, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
+    ...(owner && { me: OWNER_ME }),
+  } as unknown as WorkbenchModel;
   render(
     <ShellContext.Provider value={{ model, dock: () => fakeDock(), ...shellNav() }}>
       <BoardView />
     </ShellContext.Provider>,
   );
 }
+
+describe("BoardView", () => {
+  it("says who manages the cards", () => {
+    renderBoard([]);
+    expect(screen.getByText("Cards are managed by agents · click a card to leave a note")).toBeTruthy();
+  });
+
+  it("opens a card's panel beside the columns; Escape closes it and focuses the card", async () => {
+    renderBoard([], withCard);
+    expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
+    const button = screen.getByRole("button", { name: "Open Fix the contact form" });
+    await userEvent.click(button);
+    const panel = screen.getByRole("complementary", { name: "Card" });
+    const current = within(panel).getAllByRole("listitem").find((li) => li.getAttribute("aria-current") === "step");
+    expect(current?.textContent).toContain("Checking it works");
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("Escape while writing a note keeps the panel and the draft; in an empty note box it closes as usual", async () => {
+    renderBoard([], withCard, true);
+    await userEvent.click(screen.getByRole("button", { name: "Open Fix the contact form" }));
+    const box = within(screen.getByRole("complementary", { name: "Card" })).getByRole("textbox");
+    await userEvent.type(box, "Make the error message red");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("complementary", { name: "Card" })).toBeTruthy();
+    expect((box as HTMLTextAreaElement).value).toBe("Make the error message red");
+    await userEvent.clear(box);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
+  });
+
+  it("closes the panel from its close button", async () => {
+    renderBoard([], withCard);
+    await userEvent.click(screen.getByRole("button", { name: "Open Fix the contact form" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close the card" }));
+    expect(screen.queryByRole("complementary", { name: "Card" })).toBeNull();
+  });
+});
 
 describe("BoardView spend line", () => {
   it("sums the project's run costs as an estimate in the header", () => {

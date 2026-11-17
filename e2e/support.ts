@@ -1,3 +1,6 @@
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { expect, type Locator, type Page } from "@playwright/test";
 
 // Helpers shared by the 5B specs (cloud, github, mcp, capacity). Every spec creates the connections it needs and
@@ -311,11 +314,86 @@ export async function waive(gate: Locator, reason: string) {
 export const moveButton = (page: Page, card: string, stage: string) =>
   page.getByRole("region", { name: "Needs you" }).getByRole("button", { name: `Move "${card}" to ${stage}` });
 
-/** Adds a card to a column of the Board and waits until it shows there. */
-export async function addCard(page: Page, stage: string, title: string) {
-  await page.getByLabel(`Add card to ${stage}`).fill(title);
-  await page.getByLabel(`Add card to ${stage}`).press("Enter");
-  await expect(page.getByRole("region", { name: stage }).getByRole("button", { name: `Open the story of ${title}` })).toBeVisible();
+/** A card on the Board (the button that opens its panel), in the column of `stage` ("Build") when given. */
+export const boardCard = (page: Page, title: string, stage?: string) =>
+  (stage === undefined ? page.locator(".agent-board") : page.getByRole("region", { name: stage })).getByRole("button", {
+    name: `Open ${title}`,
+    exact: true,
+  });
+
+/**
+ * Adds a card to the selected project through the API, as the intake and the agents do (the Board has no add box),
+ * waits until it shows in its column of the Board, and returns its id.
+ */
+export async function addCard(page: Page, stage: string, title: string): Promise<string> {
+  const name = (await page.getByRole("navigation", { name: "Projects" }).locator("button.selected").innerText()).trim();
+  const id = await projectId(page, name);
+  const res = await page.evaluate(
+    async ({ pid, title, stage }) => {
+      const r = await fetch(`/api/projects/${encodeURIComponent(pid)}/cards`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, stage }),
+      });
+      return { status: r.status, body: (await r.json()) as { id?: string } };
+    },
+    { pid: id, title, stage: stage.toLowerCase() },
+  );
+  expect(res.status, `add card ${title}`).toBe(201);
+  await expect(boardCard(page, title, stage)).toBeVisible();
+  return res.body.id!;
+}
+
+/** A gate decision as the move route takes it. */
+export type GateDecisionBody = { gateId: string; decision: "sign_off" | "waive"; reason?: string; acknowledgement: string };
+
+/**
+ * Moves a card through `POST /api/cards/:id/move`, read in the page (it carries the cookie): people no longer move
+ * cards on the Board, and a move a gate stops answers 409 `gate_blocked` with the gates' evaluations.
+ */
+export function moveCardViaApi(
+  request: Page,
+  cardId: string,
+  to: string,
+  gates?: GateDecisionBody[],
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  return request.evaluate(
+    async ({ cardId, to, gates }) => {
+      const r = await fetch(`/api/cards/${encodeURIComponent(cardId)}/move`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(gates ? { to, gates } : { to }),
+      });
+      return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+    },
+    { cardId, to, gates },
+  );
+}
+
+type GateView = { id: string; acknowledgement: string; outcome: string; conditions: { label: string; met: boolean }[] };
+
+/** The gates of a move's 409 answer, or of `GET /api/cards/:id/gates`. */
+export const gatesOf = (body: unknown): GateView[] => (Array.isArray(body) ? body : ((body as { gates?: GateView[] }).gates ?? [])) as GateView[];
+
+/** Whether the condition labelled `label` of the gate `gateId` holds. */
+export function conditionMet(gates: GateView[], gateId: string, label: string): boolean | undefined {
+  return gates.find((g) => g.id === gateId)?.conditions.find((c) => c.label === label)?.met;
+}
+
+/** Waivers, with `reason`, for every gate of `gates` that did not pass. */
+export const waivers = (gates: GateView[], reason: string): GateDecisionBody[] =>
+  gates.filter((g) => g.outcome !== "pass").map((g) => ({ gateId: g.id, decision: "waive", reason, acknowledgement: g.acknowledgement }));
+
+/** `GET /api/cards/:id/gates?to=`, read in the page. */
+export function cardGates(page: Page, cardId: string, to: string): Promise<GateView[]> {
+  return page.evaluate(
+    async ({ cardId, to }) => {
+      const r = await fetch(`/api/cards/${encodeURIComponent(cardId)}/gates?to=${encodeURIComponent(to)}`);
+      if (!r.ok) throw new Error(`GET gates: ${r.status}`);
+      return (await r.json()) as GateView[];
+    },
+    { cardId, to },
+  );
 }
 
 /** The People panel in the dock (the dock group holding it carries the same name, so it is found by its class). */
@@ -385,3 +463,54 @@ export const approvalRow = (page: Page, sentence: RegExp) =>
 /** The Working now card of the run started with `prompt`, and its progress bar. */
 export const workingCard = (page: Page, prompt: string) => homeBlock(page, "Working now").getByRole("article", { name: prompt });
 
+
+// The website preview and the agents' Board (preview.spec.ts, agent-board.spec.ts).
+
+/** The website fixture: one page served by `node server.mjs` on PORT and HOST, with `node_modules` already there. */
+export const SITE_FIXTURE = join(import.meta.dirname, "fixtures", "site");
+
+/**
+ * Copies the website fixture to a temporary folder and creates a project from it on the site server (headless, so the
+ * folder is typed), then selects it. Returns the temporary folder, for the caller to remove.
+ */
+export async function importSite(page: Page, name: string): Promise<string> {
+  const folder = join(mkdtempSync(join(tmpdir(), "tt-e2e-site-")), "site");
+  cpSync(SITE_FIXTURE, folder, { recursive: true });
+  await page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "New project…" }).click();
+  const dialog = page.getByRole("dialog", { name: "New project" });
+  await dialog.getByLabel("Name").fill(name);
+  await dialog.getByText("A folder on this computer", { exact: true }).click();
+  await dialog.getByRole("button", { name: "Choose folder…" }).click();
+  await dialog.getByLabel("Folder path").fill(folder);
+  await dialog.getByRole("button", { name: "Create project" }).click();
+  await expect(dialog.getByText(`${name} is ready.`)).toBeVisible();
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+  return folder;
+}
+
+/** Removes a folder made by `importSite` (file handles can linger briefly on Windows). */
+export function removeSite(folder: string): void {
+  rmSync(dirname(folder), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+/** The Preview tab's panel. */
+export const previewPanel = (page: Page) => page.getByRole("region", { name: "Preview", exact: true });
+
+/**
+ * Clicks Preview on the Home entry of the job titled `jobTitle` (Working now or Finished today) and waits for its
+ * Preview tab, titled "Preview · <job title>". Returns the tab.
+ */
+export async function openPreview(page: Page, jobTitle: string): Promise<Locator> {
+  const working = homeBlock(page, "Working now").getByRole("article", { name: jobTitle });
+  const finished = homeBlock(page, "Finished today")
+    .getByRole("listitem")
+    .filter({ has: page.locator(".finished-line", { hasText: new RegExp(`^${escape(jobTitle)} — `) }) });
+  const entry = working.or(finished);
+  await expect(entry).toHaveCount(1);
+  await entry.getByRole("button", { name: "Preview", exact: true }).click();
+  const tab = page.getByRole("tab", { name: `Preview · ${jobTitle}` });
+  await expect(tab).toBeVisible();
+  await expect(previewPanel(page)).toBeVisible();
+  return tab;
+}

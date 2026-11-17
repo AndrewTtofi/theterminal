@@ -34,7 +34,7 @@ async function decide(panel: Locator, q: string, option: string) {
 }
 
 const column = (page: Page, stage: string) => page.getByRole("region", { name: stage });
-const cardsIn = (page: Page, stage: string) => column(page, stage).locator(".card");
+const cardsIn = (page: Page, stage: string) => column(page, stage).locator(".agent-card");
 
 test("guided intake: describe, answer, decide, approve; then reopen, take payments and approve again", async ({ page }) => {
   const name = "Book Club";

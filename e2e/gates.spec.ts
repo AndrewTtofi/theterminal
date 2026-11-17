@@ -1,16 +1,17 @@
 import { test, expect } from "@playwright/test";
 import {
   SECRET_LIKE,
-  SECRET_REFUSED,
   addCard,
   allow,
   anonymousUrl,
-  checklistLine,
-  gateCard,
+  boardCard,
+  cardGates,
+  conditionMet,
+  gatesOf,
   ledgerItems,
   line,
   lineMatching,
-  moveButton,
+  moveCardViaApi,
   openProject,
   openView,
   prepareRun,
@@ -18,29 +19,36 @@ import {
   projectId,
   RUN_FINISHED,
   startRun,
-  waive,
+  statusBar,
+  waivers,
 } from "./support.js";
 
 const STAGE_GATED = "Add the card to an earlier stage, then move it, so its readiness checks run.";
+const PLAN = "The plan has been approved";
+const NOBODY_WAITING = "No agent is waiting for a decision in this project";
+
+// The Board no longer moves cards (agents do, and a move a gate holds becomes a request on Home), so these specs move
+// cards through the same route the Board used to call.
 
 test("a card cannot be created in Ship or Operate: it is added earlier and moved, so its gates run", async ({ page }) => {
   const name = "Gate Shortcut";
   await openProject(page, name);
-  await page.getByLabel("Add card to Ship").fill("Skip the checks");
-  await page.getByLabel("Add card to Ship").press("Enter");
-  await expect(page.getByText(STAGE_GATED)).toBeVisible();
-  await expect(page.getByRole("region", { name: "Ship" }).getByText("Skip the checks")).toHaveCount(0);
-
   const id = await projectId(page, name);
-  const res = await page.evaluate(async (pid) => {
-    const r = await fetch(`/api/projects/${encodeURIComponent(pid)}/cards`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: "Skip the checks", stage: "operate" }),
-    });
-    return { status: r.status, body: (await r.json()) as unknown };
-  }, id);
-  expect(res).toEqual({ status: 409, body: { error: "stage_gated", message: STAGE_GATED } });
+  for (const stage of ["ship", "operate"]) {
+    const res = await page.evaluate(
+      async ({ pid, stage }) => {
+        const r = await fetch(`/api/projects/${encodeURIComponent(pid)}/cards`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "Skip the checks", stage }),
+        });
+        return { status: r.status, body: (await r.json()) as unknown };
+      },
+      { pid: id, stage },
+    );
+    expect(res, stage).toEqual({ status: 409, body: { error: "stage_gated", message: STAGE_GATED } });
+  }
+  await expect(boardCard(page, "Skip the checks")).toHaveCount(0);
   expect((await projectEntries(page, name)).map((e) => e.type)).toEqual(["project.created"]);
 });
 
@@ -48,44 +56,26 @@ test("moves stop at readiness gates: a waiver with a reason, and a checklist tha
   const name = "Gate Checks";
   await openProject(page, name);
   const ledger = ledgerItems(page);
-  await addCard(page, "Build", "Login");
+  const card = await addCard(page, "Build", "Login");
 
-  // With the bottom panel closed and Connections selected, the gate card still renders in the strip.
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  await page.keyboard.press("Control+j");
-  await expect(page.getByRole("tab", { name: "Ledger" })).not.toBeInViewport();
-  await openView(page, "Connections");
-  await page.getByLabel("Move Login to").selectOption("ship");
-  const ship = gateCard(page, "Ready to ship");
-  await expect(ship).toBeVisible();
-  await expect(checklistLine(ship, "The plan has been approved")).toContainText("✗ The plan has been approved");
-  await expect(checklistLine(ship, "No agent is waiting for a decision in this project")).toContainText("✓");
-  await expect(ship.getByRole("button", { name: "Sign off" })).toHaveCount(0);
-  await page.keyboard.press("Control+j");
-  await expect(page.getByRole("tab", { name: "Ledger" })).toBeInViewport();
-  await openView(page, "Board");
+  // A move to Ship stops at its gate and moves nothing.
+  const blocked = await moveCardViaApi(page, card, "ship");
+  expect(blocked.status).toBe(409);
+  expect(blocked.body.error).toBe("gate_blocked");
+  const ship = gatesOf(blocked.body);
+  expect(conditionMet(ship, "ready_to_ship", PLAN)).toBe(false);
+  expect(conditionMet(ship, "ready_to_ship", NOBODY_WAITING)).toBe(true);
 
-  // Waive stays disabled until the acknowledgement is ticked and a reason of at least 10 characters is typed.
-  const waiveButton = ship.getByRole("button", { name: "Waive" });
-  await expect(waiveButton).toBeDisabled();
-  await ship.getByRole("checkbox").check();
-  await expect(waiveButton).toBeDisabled();
-  await ship.getByLabel("Why are you proceeding anyway?").fill("too short");
-  await expect(waiveButton).toBeDisabled();
-  await expect(moveButton(page, "Login", "Ship")).toBeDisabled();
-
-  // A reason that looks like a secret is refused and never recorded.
-  await ship.getByLabel("Why are you proceeding anyway?").fill(`only testing ${SECRET_LIKE}`);
-  await waiveButton.click();
-  await moveButton(page, "Login", "Ship").click();
-  await expect(page.getByText(SECRET_REFUSED)).toBeVisible();
-  await expect(page.getByRole("region", { name: "Build" }).getByText("Login")).toBeVisible();
+  // A waiver needs a reason of at least 10 characters; one that looks like a secret is refused and never recorded.
+  expect((await moveCardViaApi(page, card, "ship", waivers(ship, "too short"))).status).toBe(400);
+  const secret = await moveCardViaApi(page, card, "ship", waivers(ship, `only testing ${SECRET_LIKE}`));
+  expect(secret.status).toBe(400);
+  expect(secret.body.error).toBe("secret_in_text");
+  await expect(boardCard(page, "Login", "Build")).toBeVisible();
   expect(JSON.stringify(await projectEntries(page, name))).not.toContain("TESTKEY");
 
-  await waive(ship, "We are only testing this");
-  await moveButton(page, "Login", "Ship").click();
-  await expect(ship).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Ship" }).getByText("Login")).toBeVisible();
+  expect((await moveCardViaApi(page, card, "ship", waivers(ship, "We are only testing this"))).status).toBe(200);
+  await expect(boardCard(page, "Login", "Ship")).toBeVisible();
   await expect(line(ledger, 'Owner waived "Ready to ship" for "Login": We are only testing this')).toHaveCount(1);
   await expect(line(ledger, 'Owner moved "Login" from Build to Ship')).toHaveCount(1);
 
@@ -95,38 +85,31 @@ test("moves stop at readiness gates: a waiver with a reason, and a checklist tha
   await startRun(page);
   const decision = page.getByRole("article", { name: "Decision: Run: nvidia-smi" });
   await expect(decision).toBeVisible();
-  await openView(page, "Board");
-  await page.getByLabel("Move Login to").selectOption("operate");
-  const live = gateCard(page, "Going live");
-  await expect(live).toBeVisible();
-  await expect(checklistLine(live, "The plan has been approved")).toContainText("✗ The plan has been approved");
-  await expect(checklistLine(live, "No agent is waiting for a decision in this project")).toContainText(
-    "✗ No agent is waiting for a decision in this project",
-  );
+  const held = await moveCardViaApi(page, card, "operate");
+  expect(held.status).toBe(409);
+  expect(conditionMet(gatesOf(held.body), "go_live", PLAN)).toBe(false);
+  expect(conditionMet(gatesOf(held.body), "go_live", NOBODY_WAITING)).toBe(false);
 
-  // Once the step is allowed and the run has finished, the checklist refreshes: only the plan is still missing.
+  // Once the step is allowed and the run has finished, the checklist reads differently: only the plan is still missing.
   await allow(page, "Run: nvidia-smi");
   await expect(lineMatching(ledger, RUN_FINISHED("Fake"))).toHaveCount(1);
-  await expect(checklistLine(live, "No agent is waiting for a decision in this project")).toContainText(
-    "✓ No agent is waiting for a decision in this project",
-  );
-  await expect(checklistLine(live, "No agent is still working on this card")).toContainText("✓ No agent is still working on this card");
-  await expect(checklistLine(live, "The plan has been approved")).toContainText("✗ The plan has been approved");
-  await expect(live.getByRole("button", { name: "Sign off" })).toHaveCount(0);
+  const live = await cardGates(page, card, "operate");
+  expect(conditionMet(live, "go_live", NOBODY_WAITING)).toBe(true);
+  expect(conditionMet(live, "go_live", "No agent is still working on this card")).toBe(true);
+  expect(conditionMet(live, "go_live", PLAN)).toBe(false);
 
-  await waive(live, "Still only a test of the gates");
-  await moveButton(page, "Login", "Operate").click();
-  await expect(live).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Operate" }).getByText("Login")).toBeVisible();
+  expect((await moveCardViaApi(page, card, "operate", waivers(live, "Still only a test of the gates"))).status).toBe(200);
+  await openView(page, "Board");
+  await expect(boardCard(page, "Login", "Operate")).toBeVisible();
   await expect(line(ledger, 'Owner waived "Going live" for "Login": Still only a test of the gates')).toHaveCount(1);
 
-  const waivers = (await projectEntries(page, name)).filter((e) => e.type === "gate.waived");
-  expect(waivers.map((e) => [e.payload.gateId, e.payload.to, e.payload.unmet])).toEqual([
+  const recorded = (await projectEntries(page, name)).filter((e) => e.type === "gate.waived");
+  expect(recorded.map((e) => [e.payload.gateId, e.payload.to, e.payload.unmet])).toEqual([
     ["ready_to_ship", "ship", ["intake_completed"]],
     ["go_live", "operate", ["intake_completed"]],
   ]);
   // Nothing is left waiting on the Owner for the specs that follow on this server.
-  await expect(page.getByRole("contentinfo", { name: "Status bar" }).getByRole("button", { name: "Needs you: 0" })).toBeVisible();
+  await expect(statusBar(page).getByRole("button", { name: "Needs you: 0" })).toBeVisible();
 });
 
 test("GET /api/cards/:id/gates without the session cookie is rejected", async ({ browser }) => {

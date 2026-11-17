@@ -1,7 +1,7 @@
 import { useId } from "react";
 import { overallProgress } from "@theterminal/shared";
 import type { HomeRun } from "@theterminal/shared";
-import { ProgressBar } from "../components/ProgressBar";
+import { ProgressBar, progressKey } from "../components/ProgressBar";
 
 /**
  * Overall progress: done steps over all steps of the running runs that stated a plan. Runs without a plan add nothing
@@ -17,7 +17,13 @@ export function OverallBlock({ runs }: { runs: HomeRun[] }) {
         <p className="home-empty">Nothing is running.</p>
       ) : (
         <>
-          {o.withPlan > 0 && <ProgressBar percent={o.percent} label="Overall progress" />}
+          {o.withPlan > 0 && (
+            <ProgressBar
+              key={progressKey(runs.map((h) => h.run.id).join(" "), runs.reduce((n, h) => n + (h.run.progress?.steps.length ?? 0), 0))}
+              percent={o.percent}
+              label="Overall progress"
+            />
+          )}
           {o.withoutPlan > 0 && <p className="home-note">{o.withoutPlan} working without a plan</p>}
         </>
       )}

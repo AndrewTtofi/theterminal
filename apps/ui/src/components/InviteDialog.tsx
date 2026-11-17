@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ROLE_DESCRIPTIONS, ROLE_LABELS } from "@theterminal/shared";
 import type { Role } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
+import { pushOverlay } from "../shell/overlay-store";
 import type { NewInvite } from "../api";
 
 type Props = {
@@ -31,6 +32,8 @@ export function InviteDialog({ remoteOn, onClose, onCreated }: Props) {
   const root = useRef<HTMLDialogElement>(null);
   const linkRef = useRef<HTMLInputElement>(null);
 
+  // An open dialog counts as an overlay, so device views drawn over the page hide meanwhile (as for Modal).
+  useEffect(() => pushOverlay(), []);
   useEffect(() => {
     root.current?.querySelector<HTMLElement>("input")?.focus();
     const onKey = (e: KeyboardEvent) => {

@@ -79,6 +79,62 @@ describe("homeRuns", () => {
   });
 });
 
+describe("homeRuns: move requests, offers, screenshots and live previews", () => {
+  let db: Db;
+  let ledger: Ledger;
+  let board: BoardService;
+
+  beforeEach(() => {
+    db = openDatabase(":memory:");
+    ledger = new Ledger(db);
+    board = new BoardService(db, ledger);
+  });
+  afterEach(() => db.close());
+
+  const record = (projectId: string, type: string, payload: unknown, actor: { kind: "human" | "agent"; id: string } = owner) =>
+    commitEvent(db, ledger, () => ({ event: { projectId, actor, type, payload } as never, result: () => undefined }));
+  const start = (projectId: string, runId: string, cardId: string | null = null) =>
+    record(projectId, "agent.started", { runId, adapter: "fake", authMode: "none", prompt: "go", cardId, worktree: `w/${runId}` });
+
+  it("lists every project's move requests with the project's name, even when Home shows one project", () => {
+    const a = board.createProject(owner, { name: "Alpha" });
+    const b = board.createProject(owner, { name: "Beta" });
+    const card = board.addCard(owner, b.id, { title: "Fix the form", stage: "plan" });
+    start(b.id, "run-b", card.id);
+    record(b.id, "card.move_requested", { cardId: card.id, runId: "run-b", from: "plan", to: "design" }, { kind: "agent", id: "run-b" });
+    const home = homeRuns(db, { projectId: a.id, clean: same });
+    expect(home.moveRequests).toEqual([
+      expect.objectContaining({ cardId: card.id, projectId: b.id, projectName: "Beta", title: "Fix the form", runId: "run-b", from: "plan", to: "design" }),
+    ]);
+  });
+
+  it("gives each run its offers, its latest 3 screenshots (newest first) and its live preview", () => {
+    const p = board.createProject(owner, { name: "Club" });
+    start(p.id, "run-1");
+    start(p.id, "run-2");
+    record(p.id, "preview.offered", { runId: "run-1", kind: "web", command: "npm run dev", port: 5173 }, { kind: "agent", id: "run-1" });
+    record(p.id, "preview.offered", { runId: "run-1", kind: "ios", target: "Trips.xcodeproj" }, { kind: "agent", id: "run-1" });
+    record(p.id, "preview.requested", {
+      previewId: "pv1", runId: "run-1", kind: "web", commands: [["npm", "run", "dev"]], key: "a".repeat(64), install: false, target: "npm run dev",
+    });
+    record(p.id, "preview.started", { previewId: "pv1", port: 5999 });
+    for (let i = 0; i < 4; i++) {
+      record(p.id, "preview.screenshot", {
+        previewId: "pv1", runId: "run-1", device: `d${i}`, sha256: String(i).repeat(64), bytes: 10, width: 1, height: 1,
+      });
+    }
+    const home = homeRuns(db, { projectId: p.id, clean: same });
+    const one = home.working.find((h) => h.run.id === "run-1")!;
+    const two = home.working.find((h) => h.run.id === "run-2")!;
+    expect(one.offers).toEqual(["web", "ios"]);
+    expect(one.screenshots!.map((s) => s.device)).toEqual(["d3", "d2", "d1"]);
+    expect(one.livePreviewId).toBe("pv1");
+    expect(two).toMatchObject({ offers: [], screenshots: [], livePreviewId: null });
+    record(p.id, "preview.stopped", { previewId: "pv1", reason: "person" });
+    expect(homeRuns(db, { projectId: p.id, clean: same }).working.find((h) => h.run.id === "run-1")!.livePreviewId).toBeNull();
+  });
+});
+
 describe("GET /api/home and /api/status", () => {
   const KEYS = ["THETERMINAL_FAKE_AGENT", "THETERMINAL_FAKE_SCRIPT"] as const;
   const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));

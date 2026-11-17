@@ -10,4 +10,13 @@ describe("routeOf", () => {
     expect(routeOf("/join/")).toEqual({ page: "app" });
     expect(routeOf("/join/%3Cscript%3E")).toEqual({ page: "app" });
   });
+
+  it("sends /preview/<id> to the preview page, and nothing that is not a plain id", () => {
+    expect(routeOf("/preview/p1")).toEqual({ page: "preview", id: "p1" });
+    expect(routeOf("/preview/AbC_-9")).toEqual({ page: "preview", id: "AbC_-9" });
+    expect(routeOf("/preview/../x")).toEqual({ page: "app" });
+    expect(routeOf("/preview/")).toEqual({ page: "app" });
+    expect(routeOf("/preview/a/b")).toEqual({ page: "app" });
+    expect(routeOf("/preview/%2E%2E")).toEqual({ page: "app" });
+  });
 });

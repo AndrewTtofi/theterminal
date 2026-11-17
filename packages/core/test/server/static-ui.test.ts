@@ -1,10 +1,10 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerStaticUi } from "../../src/server/static-ui.js";
+import { UI_CSP, previewCsp, registerStaticUi, serveIndex } from "../../src/server/static-ui.js";
 
 const dirs: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -110,5 +110,56 @@ describe("registerStaticUi: the favicon", () => {
     expect(res.body).toMatch(/^<svg /);
     // The page links it from this origin, which img-src 'self' allows.
     expect(String(res.headers["content-security-policy"])).toContain("img-src 'self'");
+  });
+});
+
+describe("the preview page's policy (Ruling 23)", () => {
+  it("is UI_CSP with frame-ancestors 'self' and frame-src for exactly the preview's origin", () => {
+    const csp = previewCsp("http://127.0.0.1:5173");
+    expect(csp).toBe(UI_CSP.replace("frame-ancestors 'none'", "frame-src http://127.0.0.1:5173; frame-ancestors 'self'"));
+    expect(previewCsp("http://[::1]:3000")).toContain("frame-src http://[::1]:3000;");
+  });
+
+  it("refuses anything but a loopback http origin with a port", () => {
+    for (const bad of ["https://127.0.0.1:5173", "http://example.com:80", "http://127.0.0.1", "http://127.0.0.1:5173; script-src *", "*", "http://127.0.0.1:70000"]) {
+      expect(() => previewCsp(bad), bad).toThrow();
+    }
+  });
+
+  it("serveIndex serves index.html under the given policy", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tt-static-ui-"));
+    dirs.push(root);
+    writeFileSync(join(root, "index.html"), "<html>ui</html>");
+    const app = Fastify();
+    apps.push(app);
+    app.get("/p", (_req, reply) => serveIndex(reply, previewCsp("http://127.0.0.1:5173"), root));
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: "/p" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("<html>ui</html>");
+    expect(res.headers["content-security-policy"]).toBe(previewCsp("http://127.0.0.1:5173"));
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+});
+
+describe("the page routes keep the file checks", () => {
+  // A link needs extra rights on Windows; the checks are the same code there.
+  it.skipIf(process.platform === "win32")("never serve index.html when it leads to a denied file: the key file, a dotfile or a token", async () => {
+    for (const target of ["key.bin", ".env", "token"]) {
+      const root = mkdtempSync(join(tmpdir(), "tt-static-ui-"));
+      dirs.push(root);
+      writeFileSync(join(root, target), "zq-TESTKEY-static-0001");
+      symlinkSync(join(root, target), join(root, "index.html"));
+      const app = Fastify();
+      apps.push(app);
+      registerStaticUi(app, root, { deny: [join(root, "key.bin")] });
+      app.get("/p", (_req, reply) => serveIndex(reply, previewCsp("http://127.0.0.1:5173"), root, [join(root, "key.bin")]));
+      await app.ready();
+      for (const url of ["/", "/sign-in", "/join/abc", "/p"]) {
+        const res = await app.inject({ method: "GET", url });
+        expect(res.statusCode, `${target} ${url}`).toBe(404);
+        expect(res.body, `${target} ${url}`).not.toContain("TESTKEY");
+      }
+    }
   });
 });

@@ -2,14 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { NarrationTopic } from "@theterminal/shared";
-import { ShellContext } from "../src/shell/model";
+import { LEDGER_TOPICS, ShellContext } from "../src/shell/model";
 import type { LedgerScope, WorkbenchModel } from "../src/shell/model";
 import { LedgerSideBar } from "../src/views/LedgerSideBar";
 import { fakeDock, shellNav } from "./connections-harness";
 import { OWNER_ME } from "./as-owner";
 
 const ALL: NarrationTopic[] = [
-  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
+  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "preview", "remote",
+  "other",
 ];
 
 function renderSideBar(
@@ -35,12 +36,17 @@ function renderSideBar(
 }
 
 describe("LedgerSideBar", () => {
-  it("offers thirteen topic checkboxes under Show, Share after Overrides, Machines after Settings, then People and Remote access, all ticked by default", () => {
+  it("shows every topic by default, previews among them", () => {
+    expect([...LEDGER_TOPICS].sort()).toEqual([...ALL].sort());
+  });
+
+  it("offers fourteen topic checkboxes under Show, Share after Overrides, Machines after Settings, then People, Previews and Remote access, all ticked by default", () => {
     renderSideBar();
     const show = screen.getByRole("group", { name: "Show" });
     const boxes = within(show).getAllByRole("checkbox") as HTMLInputElement[];
     expect(boxes.map((b) => b.labels?.[0]?.textContent)).toEqual([
-      "Board", "Agents", "Decisions", "Gates", "Overrides", "Share", "Intake", "Connections", "Settings", "Machines", "People", "Remote access", "Other",
+      "Board", "Agents", "Decisions", "Gates", "Overrides", "Share", "Intake", "Connections", "Settings", "Machines", "People", "Previews", "Remote access",
+      "Other",
     ]);
     expect(boxes.every((b) => b.checked)).toBe(true);
   });

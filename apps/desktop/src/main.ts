@@ -15,12 +15,14 @@ import { execFile } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, Menu, session, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, session, shell, WebContentsView, type Session } from "electron";
 import type { ReadyMessage } from "@theterminal/core/dist/host.js";
 import { DesktopArgsError, parseDesktopArgs, type DesktopArgs } from "./args.js";
 import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignInRequested, serverArgs, serverLogFile, type Layout } from "./layout.js";
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
 import { pickedPath } from "./folder-pick.js";
+import { hardenPreviewContents, hardenPreviewSession, policyFor } from "./preview-policy.js";
+import { closeViewsOnExit, closeViewsOnPageChange, createPreviewViews } from "./preview-views.js";
 import { createColorRecorder, loadWindowColor, saveWindowColor } from "./window-color.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
@@ -30,6 +32,10 @@ import { ServerStartError, startServer, type ServerHandle } from "./server-proce
 
 const TITLE = "The Terminal";
 const START_FAILED = "The Terminal could not start";
+/** Added to the app window's user agent, so the UI knows it can ask for live preview views. */
+const DESKTOP_UA_MARK = " TheTerminalDesktop";
+/** The longest link shown in the "open in your browser" confirmation. */
+const CONFIRM_URL_MAX = 2000;
 
 type HostModule = typeof import("@theterminal/core/dist/host.js");
 
@@ -76,6 +82,38 @@ function run(args: DesktopArgs, dataDir: string): void {
   let stopping = false;
   let restartOffered = false;
 
+  const openExternal = (url: string) => void shell.openExternal(url);
+  /** Asks the person before a preview sends them to a link in their own browser. */
+  const confirmOpen = async (url: string): Promise<boolean> => {
+    const options = {
+      type: "question" as const,
+      title: TITLE,
+      message: "Open this link in your browser?",
+      detail: url.length > CONFIRM_URL_MAX ? `${url.slice(0, CONFIRM_URL_MAX)}…` : url,
+      buttons: ["Open in my browser", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    const { response } = win && !win.isDestroyed() ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+    return response === 0;
+  };
+  // The sessions of preview partitions, each with the origin its views show. Every other session is the app's.
+  const previewOrigins = new WeakMap<Session, string>();
+  const previewViews = createPreviewViews<Session>({
+    window: () => win,
+    makeView: (partition) =>
+      // No preload; the session is already marked, so web-contents-created gives these contents the preview policy.
+      new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, partition } }),
+    fromPartition: (p) => session.fromPartition(p),
+    markPreviewSession: (s, origin) => {
+      if (!previewOrigins.has(s)) hardenPreviewSession(s);
+      previewOrigins.set(s, origin);
+    },
+    confirmOpen,
+    openExternal,
+  });
+
   app.on("second-instance", () => {
     if (!win) return;
     if (win.isMinimized()) win.restore();
@@ -94,6 +132,7 @@ function run(args: DesktopArgs, dataDir: string): void {
 
   app.on("before-quit", (event) => {
     quitting = true;
+    previewViews.closeAll();
     if (stopping) {
       event.preventDefault();
       return;
@@ -116,9 +155,15 @@ function run(args: DesktopArgs, dataDir: string): void {
   void app.whenReady().then(async () => {
     // Before any web contents exists, so none is ever unguarded.
     hardenSession(session.defaultSession);
-    app.on("web-contents-created", (_event, contents) =>
-      hardenContents(contents, { appPort: () => ready?.port, openExternal: (url) => void shell.openExternal(url) }),
-    );
+    // A preview partition's contents get the preview policy; every other contents the app's, as before.
+    app.on("web-contents-created", (_event, contents) => {
+      const origin = previewOrigins.get(contents.session);
+      if (policyFor(origin !== undefined) === "preview" && origin !== undefined) {
+        hardenPreviewContents(contents, { origin, confirmOpen, openExternal });
+      } else {
+        hardenContents(contents, { appPort: () => ready?.port, openExternal });
+      }
+    });
     try {
       const env = await buildServerEnv(layout);
       if (quitting) return;
@@ -136,6 +181,9 @@ function run(args: DesktopArgs, dataDir: string): void {
           if (!win || win.isDestroyed()) return Promise.resolve(null);
           return dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] }).then(pickedPath);
         },
+        // Device views of website previews, laid over the Preview tab, and their screenshots. Asked for by the server
+        // child over IPC and checked by startServer; the window still has no preload and no renderer IPC.
+        onPreview: async (m) => (m.type === "preview_views" ? previewViews.apply(m) : previewViews.capture(m.previewId)),
       });
       ready = await server.ready;
     } catch (err) {
@@ -143,6 +191,7 @@ function run(args: DesktopArgs, dataDir: string): void {
       return;
     }
     if (quitting) return;
+    closeViewsOnExit(server.exited, () => previewViews.closeAll());
     void server.exited
       .then(() => offerRestart("The Terminal's server stopped unexpectedly."))
       .catch((err: unknown) => process.stderr.write(`${(err as Error).message}\n`));
@@ -212,10 +261,14 @@ function run(args: DesktopArgs, dataDir: string): void {
     });
     // Navigation, new windows and webviews are locked down by hardenContents (web-contents-created).
     forgetBootstrapUrl(w.webContents, r.port);
+    // The UI uses live preview views only in the desktop app (and when the server says it can show them).
+    w.webContents.setUserAgent(`${w.webContents.getUserAgent()}${DESKTOP_UA_MARK}`);
     w.webContents.on("did-fail-load", (_event, errorCode, _description, _url, isMainFrame) => {
       if (isFatalLoadFailure(errorCode, isMainFrame)) void offerRestart("The Terminal's window could not load.");
     });
     w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
+    // The device views go with the page they were laid over: on a reload, another page or a crash of the window.
+    closeViewsOnPageChange(w.webContents, () => previewViews.closeAll());
     w.once("ready-to-show", () => w.show());
     // Remember the theme's background so the next window opens in it. The main process reads it itself (no preload
     // or IPC). On close the renderer is usually gone too soon, so it is also saved on blur and every 30 s.
@@ -226,6 +279,7 @@ function run(args: DesktopArgs, dataDir: string): void {
     w.on("close", () => void recorder.record());
     w.on("closed", () => {
       clearInterval(timer);
+      previewViews.closeAll();
       if (win === w) win = null;
     });
     void w.loadURL(r.url);

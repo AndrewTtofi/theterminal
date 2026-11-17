@@ -17,6 +17,7 @@ import type { ConnectionsModel } from "../src/use-connections";
 import { digestsModel, preview, shareModel } from "./share-fixtures";
 import { OWNER_ME } from "./as-owner";
 import { saveWorkspace } from "../src/shell/workspace-store";
+import { homeRun } from "./home-fixtures";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
   return {
@@ -68,6 +69,9 @@ function model(over: Partial<AppModel> = {}): AppModel {
     onProjectCreated: vi.fn(),
     home: { data: null, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
     projectFiles: { data: null, error: null, refresh: vi.fn() },
+    cardInfos: { data: {}, refresh: vi.fn() },
+    onReviewMove: vi.fn(async () => undefined),
+    onDeclineMove: vi.fn(async () => true),
     onAcceptRun: vi.fn().mockResolvedValue(true),
     board,
     onAddCard: vi.fn(),
@@ -151,6 +155,16 @@ beforeEach(() => {
 });
 
 describe("Workbench", () => {
+  it("names a Preview tab after its job even when the job is from another project (Home's all-projects scope)", async () => {
+    const other = homeRun("r9", { projectId: "p2" }, { title: "Fix the contact form", offers: ["web"] });
+    render(<Workbench model={model({ runs: [], home: { data: { working: [other], finishedToday: [] }, error: null, scope: "all", setScope: vi.fn(), refresh: vi.fn() } })} />);
+    const open = vi.spyOn(testDock.api!, "open");
+    // The totals strip's "working" shows every project's running jobs.
+    await userEvent.click(screen.getByRole("button", { name: /working$/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(open).toHaveBeenCalledWith("preview:r9", "Preview · Fix the contact form", "main");
+  });
+
   it("lays out the activity bar, side bar, dock and status bar, with the Home view first", () => {
     render(<Workbench model={model()} />);
     expect(view("Home").getAttribute("aria-pressed")).toBe("true");
@@ -466,11 +480,12 @@ describe("Workbench", () => {
     expect(m.onCancelGate).toHaveBeenCalled();
   });
 
-  it("opens a card's story tab from its title on the board", async () => {
+  it("opens a card's story tab from its panel on the board", async () => {
     const login = { id: "c1", projectId: "p1", title: "Login", stage: "build", status: "todo", createdAt: "", updatedAt: "" } as const;
     const m = model({ board: { ...board, columns: { ...board.columns, build: [login] } } });
     const { container } = render(<Workbench model={m} />);
-    await userEvent.click(screen.getByRole("button", { name: "Open the story of Login" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Login" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open the full story" }));
     expect(container.querySelector('[data-panel="story:c1"]')?.getAttribute("data-active")).toBe("true");
     expect(m.story).toHaveBeenCalledWith("c1");
   });
@@ -786,8 +801,9 @@ describe("Workbench", () => {
       const name = screen.getByLabelText("New project name") as HTMLInputElement;
       expect(name.disabled).toBe(true);
       expect(name.title).toBe("Your role (Viewer) cannot do this.");
+      // The Board belongs to the agents: nobody adds or moves a card there.
       const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
-      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      expect(panel.querySelector("input, select")).toBeNull();
       // The decision card stays in the strip, without Allow or Deny.
       const strip = screen.getByRole("region", { name: "Needs you" });
       expect(within(strip).getByText(/nvidia-smi/)).toBeTruthy();
@@ -808,12 +824,13 @@ describe("Workbench", () => {
       expect(within(side).queryByRole("heading", { name: "Files" })).toBeNull();
     });
 
-    it("lets a reviewer decide and move cards, but not add cards or start agents", async () => {
+    it("lets a reviewer decide, but not add cards or start agents", async () => {
       render(<Workbench model={model({ ...as("reviewer"), pending: [pendingAction] })} />);
       const strip = screen.getByRole("region", { name: "Needs you" });
       expect(within(strip).getByRole("button", { name: "Allow" })).toBeTruthy();
+      // The Board belongs to the agents: nobody adds or moves a card there.
       const panel = document.querySelector<HTMLElement>('[data-panel="board"]')!;
-      expect((within(panel).getByLabelText("Add card to Plan") as HTMLInputElement).disabled).toBe(true);
+      expect(panel.querySelector("input, select")).toBeNull();
       expect((screen.getByLabelText("New project name") as HTMLInputElement).disabled).toBe(true);
     });
 

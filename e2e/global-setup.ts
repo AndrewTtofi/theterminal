@@ -81,6 +81,19 @@ const HOME_SCRIPT = JSON.stringify([
   { message: "I changed src/app.txt." },
 ]);
 
+// The site server's fake agent (preview.spec.ts, agent-board.spec.ts), for projects imported from e2e/fixtures/site/:
+// messages only. A plan of two steps, a card for the job, a website it offers to preview, a move of its card to Design
+// (held by the "Plan approved" gate while the intake is not complete), step 1 done, then "[[noted]]": the first run on
+// a card has no notes, so it changes nothing; a later run on the card reads the notes it was given.
+const SITE_SCRIPT = JSON.stringify([
+  { message: "[[plan: Build | Check]]" },
+  { message: "[[card: Contact form]]" },
+  { message: "[[preview: npm run dev | port 5173]]" },
+  { message: "[[card-stage: design]]" },
+  { message: "[[step 1/2 done]]" },
+  { message: "[[noted]]" },
+]);
+
 // Read once, when the agent server is created: the fake adapter and the provider CLI overrides.
 const AT_CREATE = {
   THETERMINAL_FAKE_AGENT: "1",
@@ -135,20 +148,21 @@ const offlineFetch: typeof fetch = async (input) => {
   return json(404, {});
 };
 
-// Starts six core servers (serving the built UI) for the whole run and exposes their urls to the tests:
+// Starts seven core servers (serving the built UI) for the whole run and exposes their urls to the tests:
 // TT_E2E_URL for the board flow, TT_E2E_AGENT_URL for the agent flow (its own data, with the fake agent enabled),
 // TT_E2E_PEER_URL for a second agent computer with no internet, which link.spec.ts pairs with the agent server and
 // offline.spec.ts uses offline, and two collaboration servers with the fake agent: TT_E2E_PEOPLE_URL (remote access
 // off, people.spec.ts) and TT_E2E_REMOTE_OWNER_URL (remote.spec.ts), whose remote TLS listener is on from the start at
 // TT_E2E_REMOTE_URL with the self-signed certificate TT_E2E_FINGERPRINT, and TT_E2E_HOME_URL, the fake agent with
-// step reports (home.spec.ts, sources.spec.ts), whose Home counts no other spec's runs or decisions. Each spec gets a
-// workspace of its own, so the people it invites, removes and re-roles, and remote access going off, touch no other
-// spec.
+// step reports (home.spec.ts, sources.spec.ts), whose Home counts no other spec's runs or decisions, and
+// TT_E2E_SITE_URL, the fake agent of SITE_SCRIPT for the website fixture (preview.spec.ts, agent-board.spec.ts). Each
+// spec gets a workspace of its own, so the people it invites, removes and re-roles, and remote access going off, touch
+// no other spec.
 type Server = Awaited<ReturnType<typeof createServer>>;
 
 export default async function globalSetup() {
   const uiDir = join(import.meta.dirname, "..", "apps", "ui", "dist");
-  const dirs = ["tt-e2e-", "tt-e2e-agent-", "tt-e2e-peer-", "tt-e2e-people-", "tt-e2e-remote-", "tt-e2e-home-"].map((p) => mkdtempSync(join(tmpdir(), p)));
+  const dirs = ["tt-e2e-", "tt-e2e-agent-", "tt-e2e-peer-", "tt-e2e-people-", "tt-e2e-remote-", "tt-e2e-home-", "tt-e2e-site-"].map((p) => mkdtempSync(join(tmpdir(), p)));
   const servers: Server[] = [];
   let restoreRunEnv = () => {};
   const teardown = async () => {
@@ -210,6 +224,15 @@ export default async function globalSetup() {
         process.env.TT_E2E_HOME_URL = home.url;
       } finally {
         restoreHomeEnv();
+      }
+
+      const restoreSiteEnv = setEnv({ THETERMINAL_FAKE_SCRIPT: SITE_SCRIPT });
+      try {
+        const site = await createServer({ dataDir: dirs[6]!, port: 0, uiDir, ...linkOpts() });
+        servers.push(site);
+        process.env.TT_E2E_SITE_URL = site.url;
+      } finally {
+        restoreSiteEnv();
       }
     } finally {
       restoreCreateEnv();

@@ -112,6 +112,11 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "GET /api/projects/:id/digests": viewer,
   "GET /api/share/links": viewer,
   "GET /api/home": viewer,
+  // the agents' Board: what each card's run is doing, the notes on it, and the screenshots of a run's previews
+  "GET /api/projects/:id/cards/info": viewer,
+  "GET /api/cards/:id/comments": viewer,
+  "GET /api/runs/:id/screenshots": viewer,
+  "GET /api/screenshots/:sha": viewer,
   // reviewer: decisions, gate moves, and the contents of agent worktrees
   "POST /api/cards/:id/move": reviewer,
   "POST /api/actions/:id/decision": reviewer,
@@ -126,6 +131,13 @@ export const ROUTE_ROLES: Record<string, Role> = {
   // the project's top-level names come from its repo, as a run's file list does
   "GET /api/projects/:id/files": reviewer,
   "GET /api/projects/:id/source": reviewer,
+  // a pending move goes through the gate card, so "Not yet" is a reviewer's too; seeing a live preview (local only)
+  "POST /api/cards/:id/move-request/decline": reviewer,
+  "GET /api/previews/:id": reviewer,
+  "POST /api/previews/:id/seen": reviewer,
+  "GET /api/host/capabilities": reviewer,
+  "POST /api/host/preview-views": reviewer,
+  "GET /preview/:id": reviewer,
   // maintainer: projects, cards, runs and intake
   "POST /api/projects": maintainer,
   "POST /api/projects/:id/cards": maintainer,
@@ -142,6 +154,12 @@ export const ROUTE_ROLES: Record<string, Role> = {
   "POST /api/uploads/:id/commit": maintainer,
   "DELETE /api/uploads/:id": maintainer,
   "POST /api/runs/:id/accept": maintainer,
+  // notes become the agent's input; previews run the project's code (local only, and the Owner or the run's starter)
+  "POST /api/cards/:id/comments": maintainer,
+  "GET /api/runs/:id/preview/plan": maintainer,
+  "POST /api/runs/:id/preview": maintainer,
+  "POST /api/previews/:id/stop": maintainer,
+  "POST /api/previews/:id/screenshots": maintainer,
   // owner: credentials, machines, people, remote access, and what leaves this machine
   "POST /api/settings/provider-auth": owner,
   "POST /api/settings/claude-auth": owner,
@@ -184,6 +202,7 @@ export const ROUTE_ROLES: Record<string, Role> = {
   // a folder on this computer, and what goes back to the folder or to GitHub (the folder routes: local listener only)
   "POST /api/projects/from-folder": owner,
   "POST /api/host/pick-folder": owner,
+  "GET /api/host/native-tools": owner,
   "GET /api/projects/:id/writeback": owner,
   "POST /api/projects/:id/apply": owner,
   "POST /api/projects/:id/publish": owner,

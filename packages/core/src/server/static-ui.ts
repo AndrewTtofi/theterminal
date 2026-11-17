@@ -47,11 +47,53 @@ function forms(p: string): string[] {
 export const UI_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-function secure(reply: FastifyReply): FastifyReply {
+/** A preview's recorded origin: plain http on a loopback address with a port (the `preview.ready` schema's shape). */
+const PREVIEW_ORIGIN = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})$/;
+
+/**
+ * The `/preview/:id` page's policy (plan 12 Ruling 23): UI_CSP changed in exactly two places, framed by the app's own
+ * pages (`frame-ancestors 'self'`) and framing exactly the preview's origin (`frame-src <origin>`). Anything but a
+ * loopback http origin with a port is refused (TypeError), so nothing else can be written into the policy.
+ */
+export function previewCsp(origin: string): string {
+  const m = PREVIEW_ORIGIN.exec(origin);
+  if (m === null || Number(m[1]) > 65_535) throw new TypeError("not a preview origin");
+  return UI_CSP.replace("frame-ancestors 'none'", `frame-src ${origin}; frame-ancestors 'self'`);
+}
+
+function secure(reply: FastifyReply, csp: string = UI_CSP): FastifyReply {
   return reply
-    .header("content-security-policy", UI_CSP)
+    .header("content-security-policy", csp)
     .header("x-content-type-options", "nosniff")
     .header("referrer-policy", "no-referrer");
+}
+
+/**
+ * Sends the UI's `index.html` from `uiDir` under the policy `csp`, with the page's other headers; 404 when it cannot be
+ * read as a regular file, or when it leads to a file never served (isDenied, or one of `deny`: the same checks as every
+ * other file). The page routes use UI_CSP; the preview page its own (previewCsp).
+ */
+export function serveIndex(reply: FastifyReply, csp: string, uiDir: string, deny: Iterable<string> = []): FastifyReply {
+  secure(reply, csp);
+  let file: string;
+  let fd: number;
+  try {
+    const root = realpathSync(resolve(uiDir));
+    file = realpathSync(resolve(root, "index.html"));
+    if (!file.startsWith(root + sep)) throw new Error("outside");
+    const denied = new Set([...deny].flatMap(forms));
+    if (denied.has(file) || isDenied(file.slice(root.length + 1))) throw new Error("denied");
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    return reply.code(404).send({ error: "not_found" });
+  }
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("not a file");
+  } catch {
+    closeSync(fd);
+    return reply.code(404).send({ error: "not_found" });
+  }
+  return reply.type(TYPES[".html"]!).send(createReadStream(file, { fd }));
 }
 
 /** An invite code as the join page's path carries it: one plain segment, nothing a file path could use. */
@@ -66,7 +108,8 @@ const JOIN_CODE = /^[A-Za-z0-9_-]{1,200}$/;
 export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { deny?: string[] } = {}): void {
   const root = realpathSync(resolve(uiDir));
   // Files that must never be served whatever their name: the secret store's key file, wherever the CLI put it.
-  const deniedFiles = new Set((opts.deny ?? []).flatMap(forms));
+  const deny = opts.deny ?? [];
+  const deniedFiles = new Set(deny.flatMap(forms));
 
   const serve = (rel: string, reply: FastifyReply) => {
     secure(reply);
@@ -94,11 +137,11 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
     return reply.type(TYPES[extname(file).toLowerCase()] ?? "application/octet-stream").send(createReadStream(file, { fd }));
   };
 
-  app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
-  app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serve("index.html", reply));
+  app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root, deny));
+  app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root, deny));
   app.get("/join/*", { config: PUBLIC_ROUTE }, (req, reply) => {
     const code = (req.params as { "*": string })["*"];
-    return JOIN_CODE.test(code) ? serve("index.html", reply) : secure(reply).code(404).send({ error: "not_found" });
+    return JOIN_CODE.test(code) ? serveIndex(reply, UI_CSP, root, deny) : secure(reply).code(404).send({ error: "not_found" });
   });
   app.get("/*", { config: PUBLIC_ROUTE }, (req, reply) => serve((req.params as { "*": string })["*"], reply));
 }

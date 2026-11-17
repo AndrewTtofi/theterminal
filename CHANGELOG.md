@@ -45,6 +45,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Sign-in lockouts (5 failures, 15 minutes), rate limits, and presence (in memory only).
 - Self-hosting with Docker: a server image with remote access on, an encrypted file store for secrets with its key on a separate volume, a bootstrap link for the first Owner (valid one hour), and a health check. See `docs/self-hosting.md`.
 - Documentation: `docs/collaboration.md`, `docs/self-hosting.md`, and new sections in `docs/connections-and-credentials.md`.
+- Preview a job's website on iPhone, Pixel, iPad and laptop sizes side by side, after you confirm the exact commands it will run. Each stage shows real progress, and the preview stops when you close the tab or leave it for 30 minutes. In the desktop app the site runs in locked-down views with screenshots; in a browser it runs in a sandboxed frame. Phone apps run in Apple's or Google's simulator, never on a connected phone, with a checklist of the tools this computer needs. Home has a new Previews block, and finished jobs show their screenshots.
+- The Board now belongs to the agents: they create cards and move them, and moves the readiness gates hold wait for you on Home. People watch and leave notes on cards. Each note shows whether it is waiting, was given to the agent, or was read.
+- One crisp, rounded look across the whole app: floating panels, 8px cards, pill buttons, steady layouts that don't jump as numbers update, and progress bars that never move backwards within a job.
+- Known limit of previews: if The Terminal crashes while a preview is running, the preview's site may keep running until the computer restarts or you stop it yourself.
 
 ### Changed
 - Signing in with your own Claude plan and Gemini CLI's Google sign-in are turned off, because those providers do not allow other apps to use them. API keys are the recommended way; Codex's Sign in with ChatGPT is unchanged. A server started with `THETERMINAL_RESTRICTED_SIGNIN=1` (or `--allow-restricted-signin`) turns them back on. While off, a mode chosen earlier is not used and runs use the API key.

@@ -970,6 +970,7 @@ describe("narration.ts purity", () => {
         "./learn.js",
         "./link.js",
         "./share.js",
+        "./preview.js",
       ]).toContain(spec);
     }
     expect(source).not.toMatch(/\bimport\s*\(/);

@@ -185,6 +185,17 @@ const MIGRATIONS = [
   // last commit written back to it; and how many files were added to each project.
   `CREATE TABLE project_sources (project_id TEXT PRIMARY KEY, kind TEXT NOT NULL, repo TEXT, branch TEXT, remote_commit TEXT, path TEXT, synced_commit TEXT NOT NULL);
   CREATE TABLE project_imports (project_id TEXT PRIMARY KEY, files INTEGER NOT NULL);`,
+  // The Board run by agents: notes people leave on cards for the next run (waiting, given to a run, read by it), and
+  // the one pending move per card that a gate held.
+  `CREATE TABLE card_comments (id TEXT PRIMARY KEY, card_id TEXT NOT NULL, project_id TEXT NOT NULL, author_name TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL, run_id TEXT);
+  CREATE INDEX card_comments_card ON card_comments (card_id);
+  CREATE TABLE card_move_requests (card_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, run_id TEXT NOT NULL, from_stage TEXT NOT NULL, to_stage TEXT NOT NULL, at TEXT NOT NULL);`,
+  // Previews: the agent's latest offer of each kind per run, every preview a person confirmed with its stage
+  // progress, and the screenshots taken of it (the PNG files live under <data>/projects/<id>/artifacts/).
+  `CREATE TABLE preview_offers (run_id TEXT NOT NULL, kind TEXT NOT NULL, command TEXT, port INTEGER, target TEXT, PRIMARY KEY (run_id, kind));
+  CREATE TABLE previews (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, project_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, state TEXT NOT NULL, progress TEXT NOT NULL, origin TEXT, frameable INTEGER, exposed INTEGER NOT NULL DEFAULT 0, reason TEXT, tail TEXT, started_by TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT);
+  CREATE INDEX previews_run ON previews (run_id);
+  CREATE TABLE preview_screenshots (sha256 TEXT NOT NULL, run_id TEXT NOT NULL, project_id TEXT NOT NULL, preview_id TEXT NOT NULL, device TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, bytes INTEGER NOT NULL, at TEXT NOT NULL, PRIMARY KEY (sha256, run_id));`,
 ];
 
 export type Db = Database.Database;

@@ -1,0 +1,91 @@
+/* The Board run by agents (the approved "agent-board-soft" sketch): columns without dividers, 8px cards, 4px bars,
+   a rounded side panel, thin lines, no glows, instant hover. Shape comes from the tokens only. */
+
+.agent-board-view { display: flex; flex-direction: column; gap: var(--space-2); height: 100%; min-height: 0; }
+.agent-board-view .board-note { flex-basis: 100%; margin: 0; color: var(--muted); font-size: var(--text-m); }
+.agent-board-body { display: flex; gap: var(--space-2); flex: 1; min-height: 0; }
+
+.agent-board { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); align-items: start; overflow: auto; }
+.agent-col { display: flex; flex-direction: column; min-width: 0; }
+.agent-col-head {
+  display: flex; align-items: center; justify-content: space-between; height: 32px; margin: 0; padding: 0 var(--space-3);
+  font-size: var(--text-s); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted);
+}
+.agent-col-head .num { font-weight: 400; }
+.agent-col-cards { display: flex; flex-direction: column; gap: var(--space-2); padding: 0 var(--space-2) var(--space-2); }
+
+button.agent-card {
+  display: grid; gap: var(--space-1); width: 100%; min-width: 0; padding: var(--space-2) var(--space-3);
+  text-align: left; font: inherit; font-size: var(--text-m); line-height: 16px; color: var(--fg);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-m); cursor: pointer;
+  transition: background-color var(--motion-fast) linear, border-color var(--motion-fast) linear;
+}
+button.agent-card:hover:not(:disabled) { background: var(--hover); border-color: var(--line-strong); }
+button.agent-card.selected, button.agent-card.selected:hover:not(:disabled) {
+  background: var(--selected); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
+}
+.agent-card-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+.agent-card-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--fg-strong); font-weight: 500; }
+.agent-card-pct { font-size: var(--text-s); color: var(--accent); }
+.agent-card.waiting .agent-card-pct { color: var(--attention); }
+.agent-card.done .agent-card-pct { color: var(--ok); }
+.agent-card-now { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-s); color: var(--muted); }
+.agent-card-now.attention { color: var(--attention); }
+.agent-card-meta { display: flex; justify-content: space-between; gap: var(--space-2); font-size: var(--text-s); color: var(--muted); min-width: 0; }
+.agent-card-counts { display: flex; gap: var(--space-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-card-tag {
+  padding: 0 var(--space-2); border: 1px solid color-mix(in srgb, var(--attention) 45%, transparent);
+  border-radius: var(--radius-pill); color: var(--attention);
+}
+
+.agent-card .dot { display: inline-block; width: 6px; height: 6px; margin-right: var(--space-1); vertical-align: 1px; border-radius: 50%; background: var(--idle); }
+.agent-card .dot.live { background: var(--accent); }
+.agent-card .dot.waiting { background: var(--attention); }
+.agent-card .dot.done { background: var(--ok); }
+
+/* 4px bars with rounded ends that move forward with a short linear ease. */
+.progress-compact { display: block; }
+.progress-compact .progress-track { height: 4px; min-width: 0; border: 0; border-radius: var(--radius-s); background: var(--line-strong); }
+.progress-compact .progress-fill { border-radius: var(--radius-s); background: var(--accent); transition: width var(--motion-progress) linear; }
+.agent-card.waiting .progress-fill { background: var(--attention); }
+.agent-card.done .progress-fill { background: var(--ok); }
+
+/* The card's panel floats beside the columns. */
+.card-panel {
+  display: flex; flex-direction: column; flex: none; width: 280px; min-height: 0; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-l);
+}
+.card-panel:focus:not(:focus-visible) { outline: none; }
+.card-panel-head {
+  display: flex; align-items: center; justify-content: space-between; flex: none; height: 36px; padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line); font-size: var(--text-s); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted);
+}
+button.card-panel-close { padding: 0 var(--space-2); background: none; color: var(--muted); font-size: var(--text-l); border-radius: var(--radius-pill); }
+button.card-panel-close:hover:not(:disabled) { background: var(--hover); color: var(--fg-strong); }
+.card-panel-sec { display: grid; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--line); }
+.card-panel-sec:last-child { border-bottom: 0; }
+.card-panel-title { margin: 0; color: var(--fg-strong); font-size: var(--text-l); font-weight: 600; overflow-wrap: anywhere; }
+.card-panel h4 { margin: 0; font-size: var(--text-s); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.card-panel .step-checklist { margin: 0; font-size: var(--text-m); line-height: 20px; }
+.card-panel-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+button.card-panel-link { padding: 0; background: none; color: var(--accent); border-radius: 0; }
+button.card-panel-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.card-panel button.ghost { padding: var(--space-1) var(--space-3); background: transparent; color: var(--fg); border: 1px solid var(--line-strong); }
+.card-panel button.ghost:hover:not(:disabled) { background: var(--hover); }
+.card-panel-notes ul { list-style: none; margin: 0; padding: 0; }
+.card-panel-notes li { padding: var(--space-2) 0; border-top: 1px solid var(--line); font-size: var(--text-m); }
+.card-panel-notes li:first-child { padding-top: 0; border-top: 0; }
+.card-panel-notes li p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+.card-panel-notes small { display: block; font-size: var(--text-s); color: var(--muted); }
+.card-panel-notes .ok { color: var(--ok); }
+.card-panel-notes .attention { color: var(--attention); }
+.card-panel-hint { margin: 0; color: var(--muted); font-size: var(--text-m); }
+.card-panel-compose { display: grid; gap: var(--space-2); }
+.card-panel-compose textarea { width: 100%; min-height: 64px; resize: vertical; box-sizing: border-box; font-size: var(--text-m); }
+.card-panel-send { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.card-panel-send .num { font-size: var(--text-s); color: var(--muted); }
+.card-panel-error { margin: 0; color: var(--danger); font-size: var(--text-m); }
+
+@media (prefers-reduced-motion: reduce) {
+  button.agent-card, .progress-compact .progress-fill { transition: none; }
+}

@@ -7,7 +7,7 @@ import type {
   ShareSnapshotRecord, Stage,
 } from "@theterminal/shared";
 import { innerEntry } from "@theterminal/shared";
-import type { HomeRuns, ProjectFiles } from "@theterminal/shared";
+import type { CardInfo, HomeRuns, ProjectFiles } from "@theterminal/shared";
 import { ADAPTER_NAMES } from "./components/AgentPanel";
 import {
   ApiError, LIVE_RUN_CHANGES, api, blockedGates, errorMessage, refusedChangesNote, remoteChangesNote, setUnauthorizedHandler, subscribeLedger,
@@ -648,7 +648,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
   }, []);
 
   // Home: the selected project's runs (every project's in the "all" scope), read again 500 ms after the last
-  // agent.*, run.* or link.mirrored entry.
+  // agent.*, run.*, card.*, preview.* or link.mirrored entry.
   const [homeScope, setHomeScope] = useState<"project" | "all">("project");
   const [homeData, setHomeData] = useState<HomeRuns | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
@@ -676,7 +676,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
     void load();
     const off = subscribeEntries((e) => {
       const type = innerEntry(e).type;
-      if (!(type.startsWith("agent.") || type.startsWith("run.") || e.type === "link.mirrored")) return;
+      if (!(type.startsWith("agent.") || type.startsWith("run.") || type.startsWith("card.") || type.startsWith("preview.") || e.type === "link.mirrored")) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
@@ -690,6 +690,49 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
       refreshHomeRef.current = () => {};
     };
   }, [selectedId, homeScope, subscribeEntries]);
+
+  // The selected project's cards with their run, progress and note counts, read again 500 ms after the last
+  // card.*, agent.* or preview.screenshot entry of it.
+  const [cardInfoData, setCardInfoData] = useState<Record<string, CardInfo>>({});
+  const refreshCardInfosRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    setCardInfoData({});
+    if (!selectedId) {
+      refreshCardInfosRef.current = () => {};
+      return;
+    }
+    let cancelled = false;
+    let gen = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      const mine = ++gen;
+      try {
+        const { cards } = await api.cardInfos(selectedId);
+        if (cancelled || mine !== gen) return;
+        setCardInfoData(Object.fromEntries(cards.map((c) => [c.cardId, c])));
+      } catch {
+        // The Board shows plain cards without them; the next entry tries again.
+      }
+    };
+    refreshCardInfosRef.current = () => void load();
+    void load();
+    const off = subscribeEntries((e) => {
+      if (e.projectId !== selectedId) return;
+      const type = innerEntry(e).type;
+      if (!(type.startsWith("card.") || type.startsWith("agent.") || type === "preview.screenshot")) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        void load();
+      }, 500);
+    });
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      off();
+      refreshCardInfosRef.current = () => {};
+    };
+  }, [selectedId, subscribeEntries]);
 
   // The selected project's top-level files, read again on any project.* entry of it and on run.accepted.
   const [filesData, setFilesData] = useState<ProjectFiles | null>(null);
@@ -829,6 +872,30 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
   const updateGate = (cardId: string, to: Stage, change: (prev: GatePrompt) => Partial<GatePrompt>) =>
     setGate((prev) => (prev && prev.cardId === cardId && prev.to === to ? { ...prev, ...change(prev) } : prev));
 
+  const moveCardIn = async (projectId: string | null, cardId: string, to: Stage, cardTitle: string): Promise<void> => {
+    if (!projectId) return;
+    const open = (evaluations: GateEvaluation[]) =>
+      setGate({
+        projectId, cardId, cardTitle, to, evaluations, note: null, revision: 0, refreshing: false,
+      });
+    try {
+      setError(null);
+      const evaluations = await api.getCardGates(cardId, to);
+      if (!evaluations.every((g) => g.outcome === "pass")) return open(evaluations);
+      try {
+        await api.moveCard(cardId, to);
+      } catch (e) {
+        // Something changed between the check and the move: the server sends the gates back.
+        const gates = blockedGates(e);
+        if (gates === null) throw e;
+        return open(gates);
+      }
+      refreshRef.current();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
   const model: AppModel = {
     projects,
     selectedId,
@@ -845,6 +912,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
     },
     home: { data: homeData, error: homeError, scope: homeScope, setScope: setHomeScope, refresh: () => refreshHomeRef.current() },
     projectFiles: { data: filesData, error: filesError, refresh: () => refreshFilesRef.current() },
+    cardInfos: { data: cardInfoData, refresh: () => refreshCardInfosRef.current() },
     onAcceptRun: async (runId) => {
       try {
         setError(null);
@@ -864,30 +932,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
         await api.addCard(selectedId, { title, stage });
         refreshRef.current();
       }),
-    onMoveCard: async (cardId, to) => {
-      const projectId = selectedId;
-      if (!projectId) return;
-      const open = (evaluations: GateEvaluation[]) =>
-        setGate({
-          projectId, cardId, cardTitle: titles.get(cardId) ?? "this card", to, evaluations, note: null, revision: 0, refreshing: false,
-        });
-      try {
-        setError(null);
-        const evaluations = await api.getCardGates(cardId, to);
-        if (!evaluations.every((g) => g.outcome === "pass")) return open(evaluations);
-        try {
-          await api.moveCard(cardId, to);
-        } catch (e) {
-          // Something changed between the check and the move: the server sends the gates back.
-          const gates = blockedGates(e);
-          if (gates === null) throw e;
-          return open(gates);
-        }
-        refreshRef.current();
-      } catch (e) {
-        setError(errorMessage(e));
-      }
-    },
+    onMoveCard: (cardId, to) => moveCardIn(selectedId, cardId, to, titles.get(cardId) ?? "this card"),
     gate: gatePrompt,
     onResolveGate: async (decisions) => {
       const g = gateRef.current;
@@ -922,13 +967,28 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
       }
     },
     onCancelGate: () => setGate(null),
+    onReviewMove: async (r) => {
+      setSelectedId(r.projectId);
+      await moveCardIn(r.projectId, r.cardId, r.to, r.title);
+    },
+    onDeclineMove: async (cardId) => {
+      try {
+        setError(null);
+        await api.declineMove(cardId);
+        refreshHomeRef.current();
+        return true;
+      } catch (e) {
+        setError(errorMessage(e));
+        return false;
+      }
+    },
     story: (cardId) => api.getCardStory(cardId),
     subscribeEntries,
     agentsInfo,
     runs,
     selectedRunId,
     runActions,
-    onStartRun: async (adapter, prompt, connectionIds, cardId, machineId) => {
+    onStartRun: async (adapter, prompt, connectionIds, cardId, machineId, opts) => {
       if (!selectedId) return false;
       try {
         setError(null);
@@ -938,6 +998,7 @@ export function App({ navigate = (url: string) => location.assign(url) }: Props 
           ...(cardId && { cardId }),
           ...(connectionIds.length > 0 && { connectionIds }),
           ...(machineId && { machineId }),
+          ...(opts?.autoCard && { autoCard: true }),
         });
         setSelectedRunId(started.id);
         setFeedRunId(started.id);

@@ -51,6 +51,12 @@ import {
   AlreadyAcceptedError, MergeConflictError, NoSourceError, NotAcceptableError, NothingToWriteError, WritebackStaleError,
 } from "../sources/writeback.js";
 import { PickerBusyError } from "./folder-picker.js";
+import {
+  NativeToolsMissingError, NoPreviewOfferError, PlatformUnsupportedError, PreviewBusyError, PreviewChangedError, PreviewNotAllowedError,
+  ScreenshotsUnavailableError,
+} from "../preview/service.js";
+import { PackageManagerNotFoundError, PreviewRefusedError, type PreviewRefusal } from "../preview/web-command.js";
+import { PreviewHostUnavailableError } from "./preview-routes.js";
 
 export type RouteDeps = {
   board: BoardService;
@@ -161,11 +167,46 @@ function sendSourcesError(err: unknown, reply: FastifyReply): FastifyReply | nul
   return null;
 }
 
+/** The refusal reasons a preview command may be answered with: fixed words of our own, never the command. */
+const PREVIEW_REFUSALS: ReadonlySet<PreviewRefusal> = new Set(["redacted", "truncated", "controls", "program", "script_missing", "no_package_json"]);
+const MANAGERS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn"]);
+const PREVIEW_KINDS: ReadonlySet<string> = new Set(["web", "ios", "android"]);
+const TOOL_IDS: ReadonlySet<string> = new Set(["xcode", "xcode_cli", "simulator", "android_sdk", "adb", "emulator", "avd", "gradle_wrapper"]);
+
+/**
+ * The errors of previews and screenshots (plan 12's contract): fixed codes, and only a fixed reason, a package
+ * manager's name, a preview kind or tool ids, each checked against its own list. Never the command, a path or the
+ * output of a program. Null for any other error.
+ */
+function sendPreviewError(err: unknown, reply: FastifyReply): FastifyReply | null {
+  if (err instanceof PreviewChangedError) return reply.code(409).send({ error: "preview_changed" });
+  if (err instanceof PreviewNotAllowedError) return reply.code(403).send({ error: "preview_not_allowed" });
+  if (err instanceof PreviewRefusedError) {
+    return reply.code(400).send({ error: "preview_refused", reason: PREVIEW_REFUSALS.has(err.reason) ? err.reason : "program" });
+  }
+  if (err instanceof PackageManagerNotFoundError) {
+    return reply.code(409).send({ error: "package_manager_not_found", manager: MANAGERS.has(err.manager) ? err.manager : "npm" });
+  }
+  if (err instanceof NoPreviewOfferError) return reply.code(404).send({ error: "no_preview_offer" });
+  if (err instanceof PreviewBusyError) return reply.code(409).send({ error: "preview_busy" });
+  if (err instanceof PlatformUnsupportedError) {
+    return reply.code(409).send({ error: "platform_unsupported", ...(PREVIEW_KINDS.has(err.kind) && { kind: err.kind }) });
+  }
+  if (err instanceof NativeToolsMissingError) {
+    return reply.code(409).send({ error: "native_tools_missing", missing: err.missing.filter((t) => TOOL_IDS.has(t)) });
+  }
+  if (err instanceof PreviewHostUnavailableError) return reply.code(404).send({ error: "preview_host_unavailable" });
+  if (err instanceof ScreenshotsUnavailableError) return reply.code(409).send({ error: "screenshots_unavailable" });
+  return null;
+}
+
 export function sendError(err: unknown, reply: FastifyReply, log: FastifyBaseLogger): FastifyReply {
   const gate = sendGateError(err, reply);
   if (gate !== null) return gate;
   const sources = sendSourcesError(err, reply);
   if (sources !== null) return sources;
+  const preview = sendPreviewError(err, reply);
+  if (preview !== null) return preview;
   if (err instanceof ZodError) {
     return reply.code(400).send({ error: "invalid_input", issues: err.issues.map(publicIssue) });
   }

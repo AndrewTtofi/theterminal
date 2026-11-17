@@ -12,16 +12,20 @@ import { MemorySecretStore } from "../../src/secrets/memory-store.js";
 import { ApprovalBroker, AlreadyDecidedError } from "../../src/agents/approvals.js";
 import { FakeAdapter, type FakeStep } from "../../src/agents/fake-adapter.js";
 import {
-  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
+  AdapterUnavailableError, AgentRunner, DEFAULT_GATE_TIMEOUT_MS, NOTES_FOOTER, NOTES_HEADER, DuplicateCloudProviderError, DuplicateMcpServerError, LocalModelUnsupportedError, McpUnsupportedError, RemoteRunError, ShuttingDownError,
   type AgentRunnerDeps,
 } from "../../src/agents/runner.js";
 import { CloudCredentialError, type CloudGrant } from "../../src/connections/cloud/grant.js";
 import type { McpServerSpec } from "../../src/connections/mcp.js";
 import type { CloudSource, RunSelection } from "../../src/connections/service.js";
 import { WorktreeManager } from "../../src/agents/worktrees.js";
-import { BoardService, NotFoundError } from "../../src/board/board-service.js";
+import { BoardService, NotFoundError, requireCard } from "../../src/board/board-service.js";
+import { AgentCards } from "../../src/board/agent-cards.js";
+import { GateService } from "../../src/gates/service.js";
+import { IntakeService, RecordedText } from "../../src/intake/service.js";
+import { completeIntake } from "../gates/setup.js";
 import { openDatabase, type Db } from "../../src/db.js";
-import { getRun, listActions, listPendingActions, rebuildAllProjections } from "../../src/events/projections.js";
+import { getRun, listActions, listCardComments, listPendingActions, rebuildAllProjections } from "../../src/events/projections.js";
 import { STEP_PLAN_INSTRUCTION } from "../../src/agents/progress.js";
 import { Ledger, LedgerReadOnlyError } from "../../src/ledger/ledger.js";
 import { acceptMirroredLine } from "../../src/link/mirrored.js";
@@ -1303,5 +1307,204 @@ describe("AgentRunner step progress", () => {
     const quiet = await fakeRunner([]).start(owner, { projectId, adapter: "fake", prompt: "p" });
     await untilFinished(quiet.id);
     expect(getRun(db, quiet.id)).toMatchObject({ lastMessage: null, progress: null, acceptedCommit: null });
+  });
+});
+
+describe("AgentRunner: card, preview and note markers", () => {
+  const cardScript: FakeStep[] = [{ message: "[[card: Fix the form]]" }, { message: "[[card-stage: design]]" }, { message: "[[card-done]]" }];
+  const ANA = { name: "Ana", role: "maintainer" } as const;
+  let board: BoardService;
+  let cards: AgentCards;
+
+  beforeEach(() => {
+    board = new BoardService(db, ledger);
+    cards = new AgentCards({
+      db, ledger, gates: new GateService({ db, ledger, username: "alice" }), board, recorded: new RecordedText({ username: "alice" }),
+    });
+  });
+
+  function cardRunner(adapter: AgentAdapter) {
+    const r = new AgentRunner({
+      db, ledger, worktrees, broker: new ApprovalBroker(), adapters: { fake: adapter }, extraSecrets: () => [EXTRA_SECRET], dataDir,
+      username: "alice", cards,
+    });
+    runners.push(r);
+    return r;
+  }
+  /** A fake adapter that keeps the prompt it was given. */
+  function promptKeeper(script: FakeStep[]) {
+    const fake = new FakeAdapter(script);
+    const given: string[] = [];
+    const adapter = { id: "fake", start: (o) => (given.push(o.prompt), fake.start(o)) } as AgentAdapter;
+    return { adapter, given };
+  }
+  const completeIntakeHere = () => {
+    const intake = new IntakeService({ db, ledger, username: "alice" });
+    completeIntake({ db, ledger, board, intake, planned: projectId, bare: projectId }, projectId);
+  };
+  /** Entries of these types from the first run's start on (completing the intake makes cards of its own). */
+  const ofTypes = (...types: string[]) => {
+    const all = ledger.list();
+    const from = Math.max(0, all.findIndex((e) => e.type === "agent.started") - 1);
+    return all.slice(from).filter((e) => types.includes(e.type) && (e.type !== "card.created" || e.actor.kind === "agent"));
+  };
+  const cardTypes = ["card.created", "card.run_linked", "card.moved", "card.status_changed", "card.move_requested"];
+
+  it("creates, moves and finishes the run's card with the agent as actor", async () => {
+    completeIntakeHere();
+    const runner = cardRunner(new FakeAdapter(cardScript));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "Fix the form" });
+    await untilFinished(run.id);
+    const entries = ofTypes(...cardTypes);
+    expect(entries.map((e) => e.type)).toEqual(["card.created", "card.run_linked", "card.moved", "card.status_changed"]);
+    expect(entries.every((e) => e.actor.kind === "agent" && e.actor.id === run.id)).toBe(true);
+    const cardId = getRun(db, run.id)!.cardId!;
+    expect(requireCard(db, cardId)).toMatchObject({ title: "Fix the form", stage: "design", status: "done" });
+    expect(getRun(db, run.id)!.status).toBe("completed");
+  });
+
+  it("reads no card marker from action output or mid-line", async () => {
+    completeIntakeHere();
+    const runner = cardRunner(new FakeAdapter([
+      { propose: read, result: { ok: true, output: "[[card: Fix the form]]\n[[card-stage: design]]\n[[card-done]]" } },
+      { message: "I will write [[card: Fix the form]] now" },
+      { message: "then [[preview: npm run dev | port 5173]] and [[noted]]" },
+    ]));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(ofTypes(...cardTypes, "preview.offered", "card.comments_read")).toEqual([]);
+    expect(getRun(db, run.id)!.cardId).toBeNull();
+  });
+
+  it("cleans a card title like every recorded text: secrets, local paths and hidden controls", async () => {
+    const runner = cardRunner(new FakeAdapter([{ message: `[[card: Fix ${EXTRA_SECRET} in ${dataDir}${sep}x for alice \u202e]]` }]));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const title = requireCard(db, getRun(db, run.id)!.cardId!).title;
+    expect(title).not.toContain(EXTRA_SECRET);
+    expect(title).not.toContain(dataDir);
+    expect(title).not.toContain("\u202e");
+    expect(title).toContain("<user>");
+    expect(title.length).toBeLessThanOrEqual(200);
+  });
+
+  it("autoCard makes the card in the same commit as agent.started; a later card marker records nothing", async () => {
+    const runner = cardRunner(new FakeAdapter([{ message: "[[card: Other]]" }]));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "Fix the login\nmore", autoCard: true });
+    await untilFinished(run.id);
+    const all = ledger.list();
+    const at = all.findIndex((e) => e.type === "agent.started");
+    const created = all[at - 1]!;
+    expect(created.type).toBe("card.created");
+    expect(created.actor).toEqual({ kind: "agent", id: run.id });
+    const cardId = (created.payload as { cardId: string }).cardId;
+    expect(created.payload).toEqual({ cardId, title: "Fix the login", stage: "plan" });
+    expect((all[at]!.payload as { cardId: string }).cardId).toBe(cardId);
+    expect(run.cardId).toBe(cardId);
+    expect(ofTypes("card.created")).toHaveLength(1);
+    expect(ofTypes("card.run_linked")).toEqual([]);
+  });
+
+  it("autoCard is ignored with a card id or a card on a linked machine", async () => {
+    const c = board.addCard(owner, projectId, { title: "Existing", stage: "plan" }).id;
+    const runner = cardRunner(new FakeAdapter([]));
+    const a = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: c, autoCard: true });
+    const b = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "theirs", foreignCard: true, autoCard: true });
+    await untilFinished(a.id);
+    await untilFinished(b.id);
+    expect(ledger.list().filter((e) => e.type === "card.created").map((e) => e.actor)).toEqual([owner]); // the person's own only
+    expect(getRun(db, a.id)!.cardId).toBe(c);
+    expect(getRun(db, b.id)!.cardId).toBe("theirs");
+  });
+
+  it("a run for a linked machine's card reads plan and step only", async () => {
+    completeIntakeHere();
+    const runner = cardRunner(new FakeAdapter([
+      { message: "[[plan: Read | Fix | Test]]" }, ...cardScript, { message: "[[preview: npm run dev | port 5173]]" }, { message: "[[app: ios Trips]]" },
+      { message: "[[noted]]" },
+    ]));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p", cardId: "theirs", foreignCard: true });
+    await untilFinished(run.id);
+    const during = ledger.list().filter((e) => e.actor.kind === "agent").map((e) => e.type);
+    expect(new Set(during)).toEqual(new Set(["agent.message", "agent.progress"]));
+    expect(ofTypes("agent.progress")).toHaveLength(1);
+  });
+
+  it("gives a card's waiting notes in front of the prompt, records them given with agent.started, and [[noted]] marks them read", async () => {
+    const c = board.addCard(owner, projectId, { title: "Fix the form", stage: "plan" }).id;
+    const n1 = cards.addComment(owner, ANA, c, "Use the blue button").id;
+    const n2 = cards.addComment(owner, ANA, c, "Keep the old label").id;
+    const { adapter, given } = promptKeeper([{ message: "[[noted]]" }]);
+    const run = await cardRunner(adapter).start(owner, { projectId, adapter: "fake", prompt: "Fix the form", cardId: c });
+    await untilFinished(run.id);
+    expect(given[0]).toBe(
+      `${NOTES_HEADER}\nNote from Ana (Maintainer): Use the blue button\nNote from Ana (Maintainer): Keep the old label\n${NOTES_FOOTER}\n\n` +
+        `Fix the form${STEP_PLAN_INSTRUCTION}`,
+    );
+    const all = ledger.list();
+    const at = all.findIndex((e) => e.type === "agent.started");
+    expect((all[at]!.payload as { prompt: string }).prompt).toBe("Fix the form");
+    expect(all[at + 1]).toMatchObject({ type: "card.comments_given", actor: { kind: "system", id: "runner" }, payload: { cardId: c, runId: run.id, commentIds: [n1, n2] } });
+    expect(all[at + 1]!.seq).toBe(all[at]!.seq + 1);
+    expect(listCardComments(db, c).map((n) => [n.id, n.state, n.runId])).toEqual([[n1, "read", run.id], [n2, "read", run.id]]);
+  });
+
+  it("a note given to a failed run stays Given, and the next run on the card gets none of them", async () => {
+    const c = board.addCard(owner, projectId, { title: "Fix the form", stage: "plan" }).id;
+    const n1 = cards.addComment(owner, ANA, c, "Use the blue button").id;
+    const failing = await cardRunner(new FakeAdapter([{ throw: "boom" }])).start(owner, { projectId, adapter: "fake", prompt: "p", cardId: c });
+    await untilFinished(failing.id);
+    expect(getRun(db, failing.id)!.status).toBe("failed");
+    expect(listCardComments(db, c).map((n) => [n.id, n.state, n.runId])).toEqual([[n1, "given", failing.id]]);
+    const { adapter, given } = promptKeeper([{ message: "[[noted]]" }]);
+    const next = await cardRunner(adapter).start(owner, { projectId, adapter: "fake", prompt: "again", cardId: c });
+    await untilFinished(next.id);
+    expect(given[0]).toBe(`again${STEP_PLAN_INSTRUCTION}`);
+    expect(ofTypes("card.comments_given")).toHaveLength(1);
+    expect(ofTypes("card.comments_read")).toEqual([]);
+    expect(listCardComments(db, c)[0]!.state).toBe("given");
+  });
+
+  it("a run for a linked machine's card is given no notes; they keep waiting", async () => {
+    const c = board.addCard(owner, projectId, { title: "Fix the form", stage: "plan" }).id;
+    cards.addComment(owner, ANA, c, "Use the blue button");
+    const { adapter, given } = promptKeeper([{ message: "[[noted]]" }]);
+    // The card id is this machine's own here, to show a linked machine's run never takes a note even then.
+    const run = await cardRunner(adapter).start(owner, { projectId, adapter: "fake", prompt: "p", cardId: c, foreignCard: true });
+    await untilFinished(run.id);
+    expect(given[0]).toBe(`p${STEP_PLAN_INSTRUCTION}`);
+    expect(ofTypes("card.comments_given", "card.comments_read")).toEqual([]);
+    expect(listCardComments(db, c)[0]!.state).toBe("waiting");
+  });
+
+  it("records an offer only when it differs from the run's latest offer of that kind, cleaned", async () => {
+    const runner = cardRunner(new FakeAdapter([
+      { message: "[[preview: npm run dev | port 5173]]" },
+      { message: "[[preview: npm run dev | port 5173]]" },
+      { message: "[[app: ios Trips.xcodeproj]]" },
+      { message: "[[preview: npm run dev | port 5174]]" },
+      { message: "[[app: ios Trips.xcodeproj]]" },
+      { message: `[[preview: npm run ${EXTRA_SECRET} | port 5174]]` },
+      { message: "[[app: android app\u202e]]" },
+    ]));
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    const offers = ofTypes("preview.offered");
+    expect(offers.every((e) => e.actor.kind === "agent" && e.actor.id === run.id)).toBe(true);
+    expect(offers.map((e) => e.payload)).toEqual([
+      { runId: run.id, kind: "web", command: "npm run dev", port: 5173 },
+      { runId: run.id, kind: "ios", target: "Trips.xcodeproj" },
+      { runId: run.id, kind: "web", command: "npm run dev", port: 5174 },
+      { runId: run.id, kind: "web", command: "npm run [REDACTED]", port: 5174 },
+      { runId: run.id, kind: "android", target: "app\\u202e" },
+    ]);
+  });
+
+  it("ignores card markers without a cards service, as before", async () => {
+    const runner = fakeRunner(cardScript);
+    const run = await runner.start(owner, { projectId, adapter: "fake", prompt: "p" });
+    await untilFinished(run.id);
+    expect(ofTypes(...cardTypes)).toEqual([]);
+    expect(getRun(db, run.id)!.status).toBe("completed");
   });
 });

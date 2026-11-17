@@ -1,4 +1,5 @@
 import { PROGRESS_LIMITS, type RunProgress } from "@theterminal/shared";
+import { LineReader, parseProgressLine, type ProgressLine } from "./markers.js";
 
 /**
  * Step reports: the one fixed instruction the runner appends to every prompt it gives an adapter, and the reader that
@@ -15,37 +16,18 @@ export const STEP_PLAN_INSTRUCTION = [
   "[[plan: step one | step two | step three]]",
   "Then, on lines of their own, write [[step n/m started]] when you start step n of m and [[step n/m done]] when it is finished.",
   "Keep each step under 80 characters, in plain words, and never put secrets, keys or passwords in them.",
+  "You may also write these lines, each on a line of its own:",
+  "[[card: short title]] to put this work on the project's board (only if this run has no card yet; it may already have one).",
+  "[[card-stage: plan]] to move the card to a stage: plan, design, build, ship or operate.",
+  "[[card-done]] when the card's work is finished.",
+  "[[preview: npm run dev | port 5173]] to say how to start the website and its port (npm run, pnpm run, yarn run or npx only).",
+  "[[app: ios <scheme or path>]] or [[app: android <module>]] to say which phone app to build.",
+  "[[noted]] after you read notes from people about the card.",
+  "Never put secrets, keys or passwords in any of these lines.",
 ].join("\n");
 
-export type ProgressLine =
-  | { kind: "plan"; steps: string[] }
-  | { kind: "step"; n: number; of: number; state: "started" | "done" };
-
-const PLAN = /^\[\[plan: (.+)\]\]$/;
-const STEP = /^\[\[step ([1-9]\d?)\/([1-9]\d?) (started|done)\]\]$/;
-
-/** Reads one line as a plan or a step marker; anything else, a marker mid-line included, is null. */
-export function parseProgressLine(line: string): ProgressLine | null {
-  const t = line.trim();
-  const plan = PLAN.exec(t);
-  if (plan) {
-    const steps = plan[1]!.split("|").map((s) => s.trim());
-    return steps.some((s) => s === "") ? null : { kind: "plan", steps };
-  }
-  const step = STEP.exec(t);
-  if (step) return { kind: "step", n: Number(step[1]), of: Number(step[2]), state: step[3] as "started" | "done" };
-  return null;
-}
-
-/** The longest unfinished line kept between chunks, to join a marker a streaming adapter split. */
-const MAX_CARRY = 400;
-const MARKER_STARTS = ["[[plan: ", "[[step "];
-
-/** Whether an unfinished line could still become a marker: a prefix of a marker's start, or a line that starts like one. */
-function couldBeMarker(partial: string): boolean {
-  const t = partial.trimStart();
-  return t !== "" && MARKER_STARTS.some((m) => m.startsWith(t) || t.startsWith(m));
-}
+export type { ProgressLine };
+export { parseProgressLine };
 
 /**
  * Follows one run's step reports. The first plan wins and keeps its first `PROGRESS_LIMITS.maxSteps` steps, each passed
@@ -53,33 +35,33 @@ function couldBeMarker(partial: string): boolean {
  * is within the kept steps. `started` sets the current step; `done` adds the step to the done set (and clears it as
  * the current one). `feed` returns a new snapshot only when something changed.
  *
- * Lines are read whole. A message's last line without a newline is read at once when it is a marker on its own (an
- * adapter that sends whole messages); otherwise it is kept, at most 400 characters and only while it could still be a
- * marker, and joined to the start of the next chunk (an adapter that streams a message in pieces).
+ * `feed` reads whole lines through its own `LineReader` (see `markers.ts`); `apply` takes one line the caller already
+ * parsed, for a runner that reads every marker once.
  */
 export class ProgressTracker {
   private steps: string[] | null = null;
   private stated = 0;
   private done: number[] = [];
   private current: number | null = null;
-  private carry = "";
+  private readonly lines = new LineReader();
 
   constructor(private readonly cleanStep: (s: string) => string) {}
 
   feed(text: string): RunProgress | null {
-    const lines = (this.carry + text).split("\n");
-    const last = lines.pop()!;
-    this.carry = "";
     let changed = false;
-    for (const line of lines) changed = this.apply(line) || changed;
-    if (parseProgressLine(last)) changed = this.apply(last) || changed;
-    else if (last.length <= MAX_CARRY && couldBeMarker(last)) this.carry = last;
+    for (const line of this.lines.feed(text)) {
+      const m = parseProgressLine(line);
+      if (m) changed = this.change(m) || changed;
+    }
     return changed ? this.snapshot() : null;
   }
 
-  private apply(line: string): boolean {
-    const m = parseProgressLine(line);
-    if (!m) return false;
+  /** Applies one plan or step line; a new snapshot when it changed something, else null. */
+  apply(m: ProgressLine): RunProgress | null {
+    return this.change(m) ? this.snapshot() : null;
+  }
+
+  private change(m: ProgressLine): boolean {
     if (m.kind === "plan") {
       if (this.steps !== null) return false;
       const steps = m.steps.slice(0, PROGRESS_LIMITS.maxSteps).map((s) => this.cleanStep(s));

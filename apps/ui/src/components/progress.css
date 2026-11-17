@@ -1,13 +1,11 @@
-.progress { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.progress-track { flex: 1; min-width: 60px; height: 6px; background: var(--input); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
-.progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
-.progress-text { color: var(--fg-strong); font-variant-numeric: tabular-nums; }
-.progress-indeterminate .progress-text::after { content: ""; display: inline-block; width: 6px; height: 12px; margin-left: 4px; background: var(--accent); vertical-align: text-bottom; animation: progress-pulse 1.1s steps(1) infinite; }
-@keyframes progress-pulse { 50% { opacity: 0; } }
-.step-checklist { list-style: none; margin: 4px 0; padding: 0; font-size: 12px; color: var(--muted); }
+/* Progress: 4px bars with rounded ends that move forward with a short linear ease; the percent is mono and keeps its width. */
+.progress { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-m); color: var(--muted); }
+.progress-track { flex: 1; min-width: 60px; height: 4px; background: var(--line-strong); border: 0; border-radius: var(--radius-pill); overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: var(--radius-pill); transition: width var(--motion-progress) linear; }
+.progress-text { min-width: 4ch; color: var(--fg-strong); font-variant-numeric: tabular-nums; }
+/* "Working…" ends in the brand's block cursor, the only thing that blinks (and not under reduced motion). */
+.progress-indeterminate .progress-text { min-width: 0; }
+.progress-indeterminate .cursor { width: 6px; height: 12px; margin-left: var(--space-1); }
+.step-checklist { list-style: none; margin: var(--space-1) 0; padding: 0; font-size: var(--text-m); color: var(--muted); }
 .step-checklist li.done { color: var(--ok); }
 .step-checklist li.current { color: var(--fg-strong); font-weight: 600; }
-@media (prefers-reduced-motion: reduce) {
-  .progress-fill { transition: none; }
-  .progress-indeterminate .progress-text::after { animation: none; }
-}

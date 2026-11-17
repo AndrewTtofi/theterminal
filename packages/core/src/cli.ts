@@ -5,7 +5,8 @@ import { defaultDataDir, defaultUiDir } from "./paths.js";
 import { createShutdown, failAndExit, parseStartArgs, startErrorLine, writeStartLog } from "./cli-support.js";
 import { BOOTSTRAP_LINE } from "./server/bootstrap-invite.js";
 import { createFolderPicker } from "./server/folder-picker.js";
-import type { HostMessage, ReadyMessage } from "./host.js";
+import { createPreviewHost } from "./server/preview-host.js";
+import type { ChildMessage, HostMessage, ReadyMessage } from "./host.js";
 
 async function main(): Promise<void> {
   const parsed = parseStartArgs(process.argv.slice(2), { dataDir: defaultDataDir, uiDir: defaultUiDir });
@@ -13,21 +14,25 @@ async function main(): Promise<void> {
   const options = parsed.options;
   const dataDir = options.dataDir;
 
-  // Under a host (the desktop app) the folder picker is its native dialog, asked for over the IPC channel.
+  // Under a host (the desktop app) the folder picker is its native dialog and the preview views are its own views,
+  // both asked for over the IPC channel. Each ignores the other's answers.
   const send = process.send?.bind(process);
-  const pickFolder = send
-    ? createFolderPicker({
+  const hostIo = send
+    ? {
         // A closed channel reports through the callback, not as an uncaught error; `disconnect` shuts the server down.
-        send: (m) => void send(m, undefined, undefined, () => {}),
-        on: (listener) => void process.on("message", listener),
-      })
+        send: (m: ChildMessage) => void send(m, undefined, undefined, () => {}),
+        on: (listener: (message: unknown) => void) => void process.on("message", listener),
+      }
     : undefined;
+  const pickFolder = hostIo ? createFolderPicker(hostIo) : undefined;
+  const previewHost = hostIo ? createPreviewHost(hostIo) : undefined;
 
   let running: RunningServer;
   try {
     running = await createServer({
       ...options,
       pickFolder,
+      previewHost,
       // The invite link is the only secret this process ever prints, once per start, until the Owner claims it.
       bootstrapInvite: (url) => console.log(`${BOOTSTRAP_LINE} ${url}`),
     });

@@ -21,6 +21,7 @@ const TOPIC_LABELS: Record<NarrationTopic, string> = {
   machine: "Machines",
   people: "People",
   remote: "Remote access",
+  preview: "Previews",
   other: "Other",
 };
 

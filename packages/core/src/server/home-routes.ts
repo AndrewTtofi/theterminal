@@ -2,11 +2,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   currentStep, finalSummary, jobTitle, narrate, nowLine, progressPercent,
-  type AgentRun, type HomeRun, type HomeRuns, type LedgerEntry,
+  type AgentRun, type HomeRun, type HomeRuns, type LedgerEntry, type PreviewKind,
 } from "@theterminal/shared";
 import type { Db } from "../db.js";
 import { NotFoundError } from "../board/board-service.js";
-import { getRun, listActions } from "../events/projections.js";
+import { getRun, listActions, listMoveRequests, listScreenshots } from "../events/projections.js";
 import { remoteDisplay } from "../link/mirrored.js";
 import { narrationContext } from "../story/story.js";
 import { needs } from "./auth.js";
@@ -19,6 +19,9 @@ export type HomeRouteDeps = {
 
 /** The most runs each list holds: Home shows cards, not a history. */
 const MAX_LISTED = 100;
+/** The screenshots each job card shows: the latest few, not a gallery. */
+const HOME_SCREENSHOTS = 3;
+const KIND_ORDER: readonly PreviewKind[] = ["web", "ios", "android"];
 
 const homeQuery = z.object({ projectId: z.string().min(1).max(200).optional() });
 
@@ -27,6 +30,8 @@ const homeQuery = z.object({ projectId: z.string().min(1).max(200).optional() })
  * its own step reports, what it is doing now and whether it waits on a decision (the current step as the reason), and
  * the runs that finished on the local day of `now` (newest first) with a one-line summary. Every project's runs
  * without `projectId`. A run on a linked machine is shown through this machine's cleaning (`remoteDisplay`).
+ * Each run also carries what it offered to preview, its latest 3 screenshots and its live preview (the newest one not
+ * yet ended); the moves a gate held wait on Home for every project, each with its project's name.
  */
 export function homeRuns(db: Db, o: { projectId?: string; now?: Date; clean: (s: string) => string }): HomeRuns {
   const now = o.now ?? new Date();
@@ -34,6 +39,8 @@ export function homeRuns(db: Db, o: { projectId?: string; now?: Date; clean: (s:
   const nextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
   const shown = remoteDisplay(db, o.clean);
   const ctx = narrationContext(db);
+  const offersOf = db.prepare("SELECT kind FROM preview_offers WHERE run_id = ?");
+  const liveOf = db.prepare("SELECT id FROM previews WHERE run_id = ? AND ended_at IS NULL ORDER BY started_at DESC, rowid DESC LIMIT 1");
   const scope = o.projectId === undefined ? "" : "AND r.project_id = ?";
   const scoped = (params: unknown[]) => (o.projectId === undefined ? params : [...params, o.projectId]);
   const rows = (where: string, params: unknown[], order: string) =>
@@ -60,7 +67,14 @@ export function homeRuns(db: Db, o: { projectId?: string; now?: Date; clean: (s:
       summary: finished ? finalSummary(run.lastMessage, finishedHeadline(run, ctx)) : null,
       waiting,
       reason: waiting ? currentStep(run.progress) : null,
+      offers: offered(id),
+      screenshots: listScreenshots(db, id, HOME_SCREENSHOTS),
+      livePreviewId: (liveOf.get(id) as { id: string } | undefined)?.id ?? null,
     };
+  };
+  const offered = (runId: string): PreviewKind[] => {
+    const kinds = new Set((offersOf.all(runId) as { kind: PreviewKind }[]).map((r) => r.kind));
+    return KIND_ORDER.filter((k) => kinds.has(k));
   };
 
   const working = rows("r.status = 'running'", [], "r.started_at DESC")
@@ -69,7 +83,7 @@ export function homeRuns(db: Db, o: { projectId?: string; now?: Date; clean: (s:
   const finishedToday = rows("r.status <> 'running' AND r.finished_at >= ? AND r.finished_at < ?", [dayStart, nextDay], "r.finished_at DESC")
     .map((r) => card(r.id, r.project_name, true))
     .filter((h): h is HomeRun => h !== null);
-  return { working, finishedToday };
+  return { working, finishedToday, moveRequests: listMoveRequests(db) };
 }
 
 /**

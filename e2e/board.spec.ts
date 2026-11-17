@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { enableBoard, openBoard, operatorLayout } from "./support.js";
+import { addCard, boardCard, enableBoard, moveCardViaApi, openBoard, operatorLayout } from "./support.js";
 
 test("full board + ledger flow served by core", async ({ page, browser }) => {
   const url = process.env.TT_E2E_URL!;
@@ -17,13 +17,24 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await operatorLayout(page);
   await openBoard(page);
 
-  // 3. add a card to Design and move it to Build (no gate stands between them; a move out of Plan needs a plan)
-  await page.getByLabel("Add card to Design").fill("Detect GPU");
-  await page.getByLabel("Add card to Design").press("Enter");
-  const design = page.getByRole("region", { name: "Design" });
-  await expect(design.getByText("Detect GPU")).toBeVisible();
-  await page.getByLabel("Move Detect GPU to").selectOption("build");
-  await expect(page.getByRole("region", { name: "Build" }).getByText("Detect GPU")).toBeVisible();
+  // 3. the Board belongs to the agents: nothing on it adds, drags or moves a card. A card added to Design through the
+  // API (as the intake does) and moved to Build (no gate stands between them; a move out of Plan needs a plan) follows.
+  await expect(page.locator(".agent-board").locator('select, input, textarea, [draggable="true"]')).toHaveCount(0);
+  await expect(page.getByPlaceholder("+ Add")).toHaveCount(0);
+  await expect(page.getByText("Cards are managed by agents · click a card to leave a note")).toBeVisible();
+  const card = await addCard(page, "Design", "Detect GPU");
+  expect((await moveCardViaApi(page, card, "build")).status).toBe(200);
+  await expect(boardCard(page, "Detect GPU", "Build")).toBeVisible();
+
+  // Clicking the card opens its panel beside the columns; Escape closes it and puts focus back on the card.
+  await boardCard(page, "Detect GPU").click();
+  const panel = page.getByRole("complementary", { name: "Card" });
+  await expect(panel.getByText("Detect GPU", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Open the full story" })).toBeVisible();
+  await expect(panel.getByRole("textbox", { name: "Say something about this" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(boardCard(page, "Detect GPU")).toBeFocused();
 
   // 4. the ledger, newest first
   const items = page.getByRole("complementary", { name: "Ledger" }).getByRole("listitem");
@@ -46,7 +57,7 @@ test("full board + ledger flow served by core", async ({ page, browser }) => {
   await page.reload();
   // selection is not persisted by the UI, so pick the project again
   await page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "Local Model Hub" }).click();
-  await expect(page.getByRole("region", { name: "Build" }).getByText("Detect GPU")).toBeVisible();
+  await expect(boardCard(page, "Detect GPU", "Build")).toBeVisible();
   await expect(items).toHaveCount(3);
   await expect(items.first().locator(".headline")).toHaveText(expected[0]!);
 });
