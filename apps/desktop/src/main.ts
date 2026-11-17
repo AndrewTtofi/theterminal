@@ -22,7 +22,7 @@ import { desktopDataDir, devLayout, packagedLayout, profileDir, restrictedSignIn
 import { forgetBootstrapUrl, hardenContents, hardenSession, isFatalLoadFailure } from "./harden.js";
 import { pickedPath } from "./folder-pick.js";
 import { hardenPreviewContents, hardenPreviewSession, policyFor } from "./preview-policy.js";
-import { createPreviewViews } from "./preview-views.js";
+import { closeViewsOnExit, closeViewsOnPageChange, createPreviewViews } from "./preview-views.js";
 import { createColorRecorder, loadWindowColor, saveWindowColor } from "./window-color.js";
 import { finishRestart } from "./lifecycle.js";
 import { menuTemplate } from "./menu.js";
@@ -191,6 +191,7 @@ function run(args: DesktopArgs, dataDir: string): void {
       return;
     }
     if (quitting) return;
+    closeViewsOnExit(server.exited, () => previewViews.closeAll());
     void server.exited
       .then(() => offerRestart("The Terminal's server stopped unexpectedly."))
       .catch((err: unknown) => process.stderr.write(`${(err as Error).message}\n`));
@@ -266,6 +267,8 @@ function run(args: DesktopArgs, dataDir: string): void {
       if (isFatalLoadFailure(errorCode, isMainFrame)) void offerRestart("The Terminal's window could not load.");
     });
     w.webContents.on("render-process-gone", () => void offerRestart("The Terminal's window stopped unexpectedly."));
+    // The device views go with the page they were laid over: on a reload, another page or a crash of the window.
+    closeViewsOnPageChange(w.webContents, () => previewViews.closeAll());
     w.once("ready-to-show", () => w.show());
     // Remember the theme's background so the next window opens in it. The main process reads it itself (no preload
     // or IPC). On close the renderer is usually gone too soon, so it is also saved on blur and every 30 s.

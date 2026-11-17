@@ -228,3 +228,26 @@ export function createPreviewViews<S>(deps: PreviewViewsDeps<S>): {
     },
   };
 }
+
+/** What a navigation event says, in Electron 45's `did-start-navigation` details. */
+type NavigationDetails = { isMainFrame?: boolean; isSameDocument?: boolean };
+
+/**
+ * Closes every device view when the page they were laid over goes: the window's main frame starts loading a new
+ * document (a reload, or another page), or its renderer is gone. A move within the same page, or a frame inside it,
+ * leaves them. Without this the views would stay painted over a page that no longer shows a Preview tab.
+ */
+export function closeViewsOnPageChange(contents: { on(event: string, listener: (...args: any[]) => void): unknown }, closeAll: () => void): void {
+  contents.on("did-start-navigation", (details: NavigationDetails) => {
+    if (details?.isMainFrame === true && details.isSameDocument !== true) closeAll();
+  });
+  contents.on("render-process-gone", () => closeAll());
+}
+
+/** Closes every device view once the server has stopped: its previews' sites stop with it. */
+export function closeViewsOnExit(exited: Promise<unknown>, closeAll: () => void): void {
+  void exited.then(
+    () => closeAll(),
+    () => closeAll(),
+  );
+}

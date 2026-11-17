@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PreviewDeviceView, PreviewViewsMessage } from "@theterminal/core/dist/host.js";
-import { createPreviewViews } from "../src/preview-views.js";
+import { EventEmitter } from "node:events";
+import { closeViewsOnExit, closeViewsOnPageChange, createPreviewViews } from "../src/preview-views.js";
 
 const ORIGIN = "http://127.0.0.1:5173";
 
@@ -250,5 +251,49 @@ describe("createPreviewViews", () => {
     made[1]!.webContents.debugger.sendCommand.mockResolvedValueOnce({ data: 42 });
     expect(await views.capture("p1")).toEqual([]);
     expect(made[0]!.webContents.debugger.detach).toHaveBeenCalled();
+  });
+});
+
+describe("the device views go with the page they were laid over", () => {
+  const nav = (o: { isMainFrame: boolean; isSameDocument: boolean }) => ({ ...o, url: "http://127.0.0.1:4000/", preventDefault: () => {} });
+
+  it("are closed when the window's page starts loading again (a reload or another page)", () => {
+    const contents = new EventEmitter();
+    const closeAll = vi.fn();
+    closeViewsOnPageChange(contents, closeAll);
+    contents.emit("did-start-navigation", nav({ isMainFrame: false, isSameDocument: false }));
+    contents.emit("did-start-navigation", nav({ isMainFrame: true, isSameDocument: true }));
+    expect(closeAll).not.toHaveBeenCalled(); // a frame inside the page, or a move within the same page
+    contents.emit("did-start-navigation", nav({ isMainFrame: true, isSameDocument: false }));
+    expect(closeAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("are closed when the window's page crashes", () => {
+    const contents = new EventEmitter();
+    const closeAll = vi.fn();
+    closeViewsOnPageChange(contents, closeAll);
+    contents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+    expect(closeAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("are closed when the server stops", async () => {
+    let exit!: () => void;
+    const exited = new Promise<void>((r) => (exit = r));
+    const closeAll = vi.fn();
+    closeViewsOnExit(exited, closeAll);
+    await Promise.resolve();
+    expect(closeAll).not.toHaveBeenCalled();
+    exit();
+    await vi.waitFor(() => expect(closeAll).toHaveBeenCalledTimes(1));
+  });
+
+  it("really go: closeAll removes every view", () => {
+    const { views, made, children } = setup();
+    views.apply(msg("show", [iphone, laptop]));
+    const contents = new EventEmitter();
+    closeViewsOnPageChange(contents, () => views.closeAll());
+    contents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+    expect(children.size).toBe(0);
+    for (const v of made) expect(v.webContents.close).toHaveBeenCalled();
   });
 });
