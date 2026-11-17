@@ -17,6 +17,7 @@ import type { ConnectionsModel } from "../src/use-connections";
 import { digestsModel, preview, shareModel } from "./share-fixtures";
 import { OWNER_ME } from "./as-owner";
 import { saveWorkspace } from "../src/shell/workspace-store";
+import { homeRun } from "./home-fixtures";
 
 function connectionsModel(over: Partial<ConnectionsModel> = {}): ConnectionsModel {
   return {
@@ -154,6 +155,16 @@ beforeEach(() => {
 });
 
 describe("Workbench", () => {
+  it("names a Preview tab after its job even when the job is from another project (Home's all-projects scope)", async () => {
+    const other = homeRun("r9", { projectId: "p2" }, { title: "Fix the contact form", offers: ["web"] });
+    render(<Workbench model={model({ runs: [], home: { data: { working: [other], finishedToday: [] }, error: null, scope: "all", setScope: vi.fn(), refresh: vi.fn() } })} />);
+    const open = vi.spyOn(testDock.api!, "open");
+    // The totals strip's "working" shows every project's running jobs.
+    await userEvent.click(screen.getByRole("button", { name: /working$/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(open).toHaveBeenCalledWith("preview:r9", "Preview · Fix the contact form", "main");
+  });
+
   it("lays out the activity bar, side bar, dock and status bar, with the Home view first", () => {
     render(<Workbench model={model()} />);
     expect(view("Home").getAttribute("aria-pressed")).toBe("true");

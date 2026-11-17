@@ -71,7 +71,7 @@ describe("CardPanel", () => {
     const data = { working: [homeRun("r1", {}, { offers: ["web"] })], finishedToday: [] };
     renderInShell(<CardPanel card={card} info={info} onClose={vi.fn()} />, homeModel({ subscribeEntries: subscribe(), openPreview }, data));
     await userEvent.click(screen.getByRole("button", { name: "Preview" }));
-    expect(openPreview).toHaveBeenCalledWith("r1");
+    expect(openPreview).toHaveBeenCalledWith("r1", "Fix the contact form");
   });
 
   it("has no Preview without an offer", () => {

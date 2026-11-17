@@ -297,8 +297,8 @@ export type WorkbenchModel = {
   onOpenDiff: (runId: string, path: string) => void;
   /** Opens (or shows) the read-only tab of one file of a run. */
   onOpenFile: (runId: string, path: string) => void;
-  /** Opens (or shows) the Preview tab `preview:<runId>` in the main group. */
-  openPreview: (runId: string) => void;
+  /** Opens (or shows) the Preview tab `preview:<runId>` in the main group, named after `title` (the job) when given. */
+  openPreview: (runId: string, title?: string) => void;
 
   /**
    * Who is signed in; absent or null (not known) counts as a viewer. The UI disables what the role cannot do; the

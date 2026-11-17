@@ -54,7 +54,7 @@ function LiveRow({ h, canOpen }: { h: HomeRun; canOpen: boolean }) {
       <span className="home-preview-title">{visibleControls(h.title)}</span>
       <span className="home-preview-state">{state}</span>
       {canOpen && (
-        <button type="button" className="quiet" onClick={() => model.openPreview(h.run.id)}>
+        <button type="button" className="quiet" onClick={() => model.openPreview(h.run.id, h.title)}>
           Open
         </button>
       )}

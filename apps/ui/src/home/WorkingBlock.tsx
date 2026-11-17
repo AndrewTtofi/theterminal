@@ -24,7 +24,7 @@ export function PreviewButton({ h }: { h: HomeRun }) {
   const { model } = useShell();
   if ((h.offers ?? []).length === 0 || !atLeast(roleOf(model), "reviewer")) return null;
   return (
-    <button type="button" className="quiet card-preview" onClick={() => model.openPreview(h.run.id)}>
+    <button type="button" className="quiet card-preview" onClick={() => model.openPreview(h.run.id, h.title)}>
       Preview
     </button>
   );

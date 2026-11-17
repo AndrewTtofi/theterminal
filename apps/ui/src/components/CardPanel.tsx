@@ -116,7 +116,7 @@ export const CardPanel = forwardRef<HTMLElement, Props>(function CardPanel({ car
             Open the full story
           </button>
           {offered && info?.runId != null && (
-            <button type="button" className="ghost" onClick={() => model.openPreview(info.runId!)}>
+            <button type="button" className="ghost" onClick={() => model.openPreview(info.runId!, title)}>
               Preview
             </button>
           )}

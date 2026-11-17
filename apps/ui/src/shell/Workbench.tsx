@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LEARN_TOPICS, jobTitle } from "@theterminal/shared";
+import { LEARN_TOPICS, jobTitle, visibleControls } from "@theterminal/shared";
 import { DecisionCard } from "../components/DecisionCard";
 import { GateCards } from "../components/GateCard";
 import { IntakeNotices, intakeNotices } from "../components/IntakeNotices";
@@ -216,10 +216,14 @@ export function Workbench({ model }: Props) {
     ...model,
     onOpenDiff: (runId, path) => dockRef.current?.open(diffPanelId(runId, path), basename(path), "main"),
     onOpenFile: (runId, path) => dockRef.current?.open(filePanelId(runId, path), basename(path), "main"),
-    openPreview: (runId) => {
+    openPreview: (runId, title) => {
+      // The job's title as the opener knows it (Home's all-projects scope shows runs of other projects), else the
+      // selected project's run, else Home's.
       const run = model.runs.find((r) => r.id === runId);
+      const home = [...(model.home.data?.working ?? []), ...(model.home.data?.finishedToday ?? [])].find((h) => h.run.id === runId);
+      const name = title ?? (run ? jobTitle(run) : home ? home.title : "job");
       // The `preview:` panel id joins DockPanelId with the Preview tab (Plan 12, Task 16).
-      dockRef.current?.open(`preview:${runId}` as DockPanelId, `Preview · ${run ? jobTitle(run) : "job"}`, "main");
+      dockRef.current?.open(`preview:${runId}` as DockPanelId, `Preview · ${visibleControls(name)}`, "main");
     },
   };
   const ctx: ShellContextValue = {

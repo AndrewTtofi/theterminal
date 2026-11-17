@@ -54,7 +54,7 @@ describe("PreviewsBlock", () => {
     const row = screen.getByText("Fix the contact form").closest("li")!;
     await waitFor(() => expect(within(row).getByText("Website · ready")).toBeTruthy());
     await userEvent.click(within(row).getByRole("button", { name: "Open" }));
-    expect(openPreview).toHaveBeenCalledWith("r1");
+    expect(openPreview).toHaveBeenCalledWith("r1", "Fix the contact form");
   });
 
   it("reads a live preview again when its ledger entries arrive", async () => {

@@ -272,7 +272,7 @@ describe("Home previews and screenshots", () => {
     const card = screen.getByRole("article", { name: "Fix the contact form" });
     expect(within(card).getAllByRole("img")).toHaveLength(3);
     await userEvent.click(within(card).getByRole("button", { name: "Preview" }));
-    expect(openPreview).toHaveBeenCalledWith("r1");
+    expect(openPreview).toHaveBeenCalledWith("r1", "Fix the contact form");
   });
 
   it("a run that offered nothing has no Preview", () => {
