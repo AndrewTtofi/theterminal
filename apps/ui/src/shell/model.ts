@@ -63,7 +63,8 @@ export type GatePrompt = {
 
 /** Every narration topic, in the order the ledger filter lists them. Overrides are always shown, whatever is chosen. */
 export const LEDGER_TOPICS: NarrationTopic[] = [
-  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "remote", "other",
+  "board", "agent", "decision", "gate", "override", "share", "intake", "connection", "settings", "machine", "people", "preview", "remote",
+  "other",
 ];
 
 /**
