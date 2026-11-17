@@ -70,9 +70,10 @@ function secure(reply: FastifyReply, csp: string = UI_CSP): FastifyReply {
 
 /**
  * Sends the UI's `index.html` from `uiDir` under the policy `csp`, with the page's other headers; 404 when it cannot be
- * read as a regular file. The page routes use UI_CSP; the preview page its own (previewCsp).
+ * read as a regular file, or when it leads to a file never served (isDenied, or one of `deny`: the same checks as every
+ * other file). The page routes use UI_CSP; the preview page its own (previewCsp).
  */
-export function serveIndex(reply: FastifyReply, csp: string, uiDir: string): FastifyReply {
+export function serveIndex(reply: FastifyReply, csp: string, uiDir: string, deny: Iterable<string> = []): FastifyReply {
   secure(reply, csp);
   let file: string;
   let fd: number;
@@ -80,6 +81,8 @@ export function serveIndex(reply: FastifyReply, csp: string, uiDir: string): Fas
     const root = realpathSync(resolve(uiDir));
     file = realpathSync(resolve(root, "index.html"));
     if (!file.startsWith(root + sep)) throw new Error("outside");
+    const denied = new Set([...deny].flatMap(forms));
+    if (denied.has(file) || isDenied(file.slice(root.length + 1))) throw new Error("denied");
     fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
   } catch {
     return reply.code(404).send({ error: "not_found" });
@@ -105,7 +108,8 @@ const JOIN_CODE = /^[A-Za-z0-9_-]{1,200}$/;
 export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { deny?: string[] } = {}): void {
   const root = realpathSync(resolve(uiDir));
   // Files that must never be served whatever their name: the secret store's key file, wherever the CLI put it.
-  const deniedFiles = new Set((opts.deny ?? []).flatMap(forms));
+  const deny = opts.deny ?? [];
+  const deniedFiles = new Set(deny.flatMap(forms));
 
   const serve = (rel: string, reply: FastifyReply) => {
     secure(reply);
@@ -133,11 +137,11 @@ export function registerStaticUi(app: FastifyInstance, uiDir: string, opts: { de
     return reply.type(TYPES[extname(file).toLowerCase()] ?? "application/octet-stream").send(createReadStream(file, { fd }));
   };
 
-  app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root));
-  app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root));
+  app.get("/", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root, deny));
+  app.get("/sign-in", { config: PUBLIC_ROUTE }, (_req, reply) => serveIndex(reply, UI_CSP, root, deny));
   app.get("/join/*", { config: PUBLIC_ROUTE }, (req, reply) => {
     const code = (req.params as { "*": string })["*"];
-    return JOIN_CODE.test(code) ? serveIndex(reply, UI_CSP, root) : secure(reply).code(404).send({ error: "not_found" });
+    return JOIN_CODE.test(code) ? serveIndex(reply, UI_CSP, root, deny) : secure(reply).code(404).send({ error: "not_found" });
   });
   app.get("/*", { config: PUBLIC_ROUTE }, (req, reply) => serve((req.params as { "*": string })["*"], reply));
 }

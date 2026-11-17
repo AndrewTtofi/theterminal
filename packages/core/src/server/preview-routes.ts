@@ -30,6 +30,8 @@ export type PreviewRouteDeps = {
   nativeTools: () => Promise<NativeTools>;
   /** The built UI, whose index.html the preview page serves; absent when the server serves no UI. */
   uiDir?: string;
+  /** Files never served from uiDir whatever their name (the secret store's key file), as registerStaticUi's `deny`. */
+  uiDeny?: string[];
 };
 
 const ID = z.string().min(1).max(200);
@@ -161,6 +163,6 @@ export function registerPreviewRoutes(app: FastifyInstance, deps: PreviewRouteDe
     if (deps.uiDir === undefined || rec === null || rec.kind !== "web" || rec.state !== "ready" || rec.origin === null) {
       throw new NotFoundError("preview", "(given)");
     }
-    return serveIndex(reply, previewCsp(rec.origin), deps.uiDir);
+    return serveIndex(reply, previewCsp(rec.origin), deps.uiDir, deps.uiDeny ?? []);
   });
 }

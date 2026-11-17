@@ -879,6 +879,7 @@ export async function createServer(opts: {
       registerPreviewRoutes(app, {
         db, dataDir: opts.dataDir, previews, nativeTools,
         ...(previewHost !== undefined && { previewHost }), ...(opts.uiDir !== undefined && { uiDir: opts.uiDir }),
+        uiDeny: opts.secretKeyFile === undefined ? [] : [opts.secretKeyFile],
       });
       registerSourcesRoutes(app, {
         db, sources, writeback, github: repos, ...(opts.pickFolder !== undefined && { pickFolder: opts.pickFolder }),

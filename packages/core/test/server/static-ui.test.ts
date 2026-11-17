@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,5 +139,27 @@ describe("the preview page's policy (Ruling 23)", () => {
     expect(res.body).toBe("<html>ui</html>");
     expect(res.headers["content-security-policy"]).toBe(previewCsp("http://127.0.0.1:5173"));
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+});
+
+describe("the page routes keep the file checks", () => {
+  // A link needs extra rights on Windows; the checks are the same code there.
+  it.skipIf(process.platform === "win32")("never serve index.html when it leads to a denied file: the key file, a dotfile or a token", async () => {
+    for (const target of ["key.bin", ".env", "token"]) {
+      const root = mkdtempSync(join(tmpdir(), "tt-static-ui-"));
+      dirs.push(root);
+      writeFileSync(join(root, target), "zq-TESTKEY-static-0001");
+      symlinkSync(join(root, target), join(root, "index.html"));
+      const app = Fastify();
+      apps.push(app);
+      registerStaticUi(app, root, { deny: [join(root, "key.bin")] });
+      app.get("/p", (_req, reply) => serveIndex(reply, previewCsp("http://127.0.0.1:5173"), root, [join(root, "key.bin")]));
+      await app.ready();
+      for (const url of ["/", "/sign-in", "/join/abc", "/p"]) {
+        const res = await app.inject({ method: "GET", url });
+        expect(res.statusCode, `${target} ${url}`).toBe(404);
+        expect(res.body, `${target} ${url}`).not.toContain("TESTKEY");
+      }
+    }
   });
 });
