@@ -817,7 +817,7 @@ describe("preview and card note calls", () => {
   it("words the preview refusals", () => {
     expect(errorMessage(new ApiError(409, "package_manager_not_found", { manager: "pnpm" }))).toBe("pnpm isn't installed on this computer.");
     expect(errorMessage(new ApiError(409, "preview_changed"))).toBe("The agent changed what will run. Look at the commands again before you start it.");
-    expect(errorMessage(new ApiError(403, "preview_not_allowed"))).toBe("Only the Owner, or the person who started this job, can start its preview.");
+    expect(errorMessage(new ApiError(403, "preview_not_allowed"))).toBe("Only the Owner or the person who started this job can run its preview.");
     expect(errorMessage(new ApiError(400, "preview_refused", { reason: "program" }))).toBe(
       "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.",
     );

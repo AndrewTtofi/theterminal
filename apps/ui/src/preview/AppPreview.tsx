@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { failureSentence } from "@theterminal/shared";
+import { atLeast, failureSentence } from "@theterminal/shared";
 import type { NativeTools, PreviewPlan, PreviewView, Screenshot } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
 import { ProgressBar } from "../components/ProgressBar";
 import { Screenshots } from "../components/Screenshots";
-import { useShell } from "../shell/model";
+import { roleOf, useShell } from "../shell/model";
 import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
+import { CANNOT_RUN } from "./who";
 import { ToolsBox } from "./ToolsBox";
 import "./preview.css";
 
@@ -68,6 +69,7 @@ type Props = {
  */
 export function AppPreview({ runId, kind, tools, toolsError = null, follow = null }: Props) {
   const { model } = useShell();
+  const canRun = atLeast(roleOf(model), "maintainer");
   const [view, setView] = useState<PreviewView | null>(null);
   const [times, setTimes] = useState<StageTimes>({});
   const [confirm, setConfirm] = useState<{ plan: PreviewPlan; notice: string | null } | null>(null);
@@ -291,8 +293,9 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
           </p>
         )}
 
+        {!canRun && <p className="preview-note">{CANNOT_RUN}</p>}
         <div className="app-actions">
-          {isLive(view) ? (
+          {!canRun ? null : isLive(view) ? (
             <>
               {view.state === "ready" && (
                 <button type="button" onClick={() => void screenshot()}>

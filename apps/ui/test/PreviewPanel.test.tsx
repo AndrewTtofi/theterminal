@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRun, HomeRuns, LedgerEntry, PreviewPlan, PreviewView } from "@theterminal/shared";
+import type { AgentRun, Role, HomeRuns, LedgerEntry, PreviewPlan, PreviewView } from "@theterminal/shared";
 import { ApiError, api } from "../src/api";
 import { PreviewPanel } from "../src/preview/PreviewPanel";
 import { ShellContext } from "../src/shell/model";
@@ -44,9 +44,10 @@ const ready = (over: Partial<PreviewView> = {}) =>
   view({ state: "ready", origin: "http://127.0.0.1:5173", frameable: true, percent: 100, progress: { steps: ["Starting the site"], done: [1], current: null }, ...over });
 
 let listeners: Set<(e: LedgerEntry) => void>;
-function setup(home: HomeRuns | null = null) {
+function setup(home: HomeRuns | null = null, role: Role = "owner") {
   listeners = new Set();
   const model = {
+    me: { personId: "p1", name: "P", role, listener: "local", method: "token", credentials: [], sessions: [] },
     runs: [run],
     home: { data: home, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
     subscribeEntries: (cb: (e: LedgerEntry) => void) => {
@@ -70,6 +71,27 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("PreviewPanel, who may run it", () => {
+  const sentence = "Only the Owner or the person who started this job can run its preview.";
+  it.each(["reviewer", "viewer"] as const)("a %s sees the sentence and no Preview, Screenshot or Stop", async (role) => {
+    vi.spyOn(api, "getPreview").mockResolvedValue(ready());
+    setup(null, role);
+    expect(screen.getByText(sentence)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+  });
+  it.each(["owner", "maintainer"] as const)("a %s sees Preview", (role) => {
+    setup(null, role);
+    expect(screen.getByRole("button", { name: "Preview" })).toBeTruthy();
+    expect(screen.queryByText(sentence)).toBeNull();
+  });
+  it("preview_not_allowed shows the plain sentence", async () => {
+    vi.spyOn(api, "previewPlan").mockRejectedValue(new ApiError(403, "preview_not_allowed"));
+    setup(null, "maintainer");
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(sentence);
+  });
 });
 
 describe("PreviewPanel", () => {

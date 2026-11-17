@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LedgerEntry, NativeTools, PreviewPlan, PreviewView } from "@theterminal/shared";
+import type { LedgerEntry, Role, NativeTools, PreviewPlan, PreviewView } from "@theterminal/shared";
 import { ApiError, api } from "../src/api";
 import { AppPreview } from "../src/preview/AppPreview";
 import { ShellContext } from "../src/shell/model";
@@ -46,10 +46,10 @@ export const tools = (over: Partial<NativeTools> = {}): NativeTools => ({
 });
 
 let listeners: Set<(e: LedgerEntry) => void>;
-function setup(props: Partial<Parameters<typeof AppPreview>[0]> = {}) {
+function setup(props: Partial<Parameters<typeof AppPreview>[0]> = {}, role: Role = "owner") {
   listeners = new Set();
   const model = {
-    me: OWNER_ME,
+    me: { ...OWNER_ME, role },
     runs: [],
     home: { data: null, error: null, scope: "project", setScope: vi.fn(), refresh: vi.fn() },
     subscribeEntries: (cb: (e: LedgerEntry) => void) => {
@@ -80,6 +80,31 @@ async function startWith(v: PreviewView) {
   fireEvent.click(screen.getByRole("button", { name: "Run the app" }));
   await screen.findByRole("progressbar");
 }
+
+describe("AppPreview, who may run it", () => {
+  const sentence = "Only the Owner or the person who started this job can run its preview.";
+  it.each(["reviewer", "viewer"] as const)("a %s sees the sentence and no Run, Screenshot or Stop", (role) => {
+    setup({ follow: view({ state: "ready" }) }, role);
+    expect(screen.getByText(sentence)).toBeTruthy();
+    for (const name of ["Run the app", "Screenshot", "Stop", "Try again"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  });
+  it.each(["owner", "maintainer"] as const)("a %s sees Screenshot and Stop on a live app, and no sentence", (role) => {
+    setup({ follow: view({ state: "ready" }) }, role);
+    expect(screen.getByRole("button", { name: "Screenshot" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+    expect(screen.queryByText(sentence)).toBeNull();
+  });
+  it("a maintainer sees Run the app", () => {
+    setup({}, "maintainer");
+    expect(screen.getByRole("button", { name: "Run the app" })).toBeTruthy();
+  });
+  it("preview_not_allowed shows the plain sentence", async () => {
+    vi.spyOn(api, "previewPlan").mockRejectedValue(new ApiError(403, "preview_not_allowed"));
+    setup({}, "maintainer");
+    fireEvent.click(screen.getByRole("button", { name: "Run the app" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Only the Owner or the person who started this job can run its preview.");
+  });
+});
 
 describe("AppPreview", () => {
   it("says the app runs in the simulator's own window, and offers Run the app", () => {

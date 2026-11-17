@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DEVICES, DEVICE_IDS, PREVIEW_LIMITS, adapterLabel, failureSentence, jobTitle } from "@theterminal/shared";
+import { DEVICES, DEVICE_IDS, PREVIEW_LIMITS, adapterLabel, atLeast, failureSentence, jobTitle } from "@theterminal/shared";
 import type { DeviceId, NativeTools, PreviewKind, PreviewPlan, PreviewView } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
 import { ProgressBar, StepChecklist } from "../components/ProgressBar";
@@ -7,6 +7,7 @@ import { roleOf, useShell } from "../shell/model";
 import { AppPreview } from "./AppPreview";
 import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
 import { DeviceStage } from "./DeviceStage";
+import { CANNOT_RUN } from "./who";
 import { isDesktop, useLiveViews } from "./live-views";
 import { loadPreviewPrefs, rotateAll, savePreviewPrefs, toggleDevice } from "./preview-store";
 import type { PreviewPrefs } from "./preview-store";
@@ -91,6 +92,8 @@ export function PreviewPanel({ id }: { id: string }) {
 
   // The Owner's tool detection, read once when the tab shows an app.
   const owner = roleOf(model) === "owner";
+  /** Starting, stopping and screenshotting are for the Owner and maintainers; the server also checks the run's starter. */
+  const canRun = atLeast(roleOf(model), "maintainer");
   const [tools, setTools] = useState<NativeTools | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
   const wantTools = owner && appKinds.length > 0;
@@ -331,16 +334,19 @@ export function PreviewPanel({ id }: { id: string }) {
             <button type="button" className="quiet" onClick={() => changePrefs(rotateAll(prefs))}>
               ⤾ Rotate
             </button>
-            {liveHost ? (
-              <button type="button" onClick={() => void screenshotAll()}>
-                Screenshot all
+            {canRun &&
+              (liveHost ? (
+                <button type="button" onClick={() => void screenshotAll()}>
+                  Screenshot all
+                </button>
+              ) : (
+                <span className="preview-note">Screenshots need the desktop app</span>
+              ))}
+            {canRun && (
+              <button type="button" className="quiet" onClick={() => void stop()}>
+                Stop
               </button>
-            ) : (
-              <span className="preview-note">Screenshots need the desktop app</span>
             )}
-            <button type="button" className="quiet" onClick={() => void stop()}>
-              Stop
-            </button>
           </div>
         )}
 
@@ -362,17 +368,23 @@ export function PreviewPanel({ id }: { id: string }) {
               <p className="preview-note">
                 {view?.state === "stopped" ? "The preview stopped." : "See this job's website on phone, tablet and laptop sizes."}
               </p>
-              <button type="button" onClick={() => void begin()} disabled={busy}>
-                Preview
-              </button>
+              {canRun ? (
+                <button type="button" onClick={() => void begin()} disabled={busy}>
+                  Preview
+                </button>
+              ) : (
+                <p className="preview-note">{CANNOT_RUN}</p>
+              )}
             </div>
           ) : view.state === "failed" ? (
             <div className="preview-failed">
               <p className="preview-error-line">{failureSentence(view.error ?? "start_failed", view.kind)}</p>
               {view.tail.length > 0 && <pre className="preview-tail">{view.tail.join("\n")}</pre>}
-              <button type="button" onClick={() => void begin()} disabled={busy}>
-                Try again
-              </button>
+              {canRun && (
+                <button type="button" onClick={() => void begin()} disabled={busy}>
+                  Try again
+                </button>
+              )}
             </div>
           ) : view.state !== "ready" ? (
             <div className="preview-starting">
@@ -382,9 +394,11 @@ export function PreviewPanel({ id }: { id: string }) {
                 caption={`stage ${view.progress.current ?? view.progress.done.length} of ${view.progress.steps.length}`}
               />
               <StepChecklist progress={view.progress} />
-              <button type="button" className="quiet" onClick={() => void stop()}>
-                Stop
-              </button>
+              {canRun && (
+                <button type="button" className="quiet" onClick={() => void stop()}>
+                  Stop
+                </button>
+              )}
             </div>
           ) : liveHost === null ? null : liveHost ? (
             <DeviceStage devices={prefs.devices} rotated={prefs.rotated} onFrames={setFrames} />

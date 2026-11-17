@@ -630,7 +630,7 @@ export function errorMessage(e: unknown, context?: "run" | "intake" | "reopen" |
     if (e.code === "folder_unavailable") return "The original folder can't be found.";
     // Previews: fixed sentences, nothing from the request.
     if (e.code === "preview_changed") return "The agent changed what will run. Look at the commands again before you start it.";
-    if (e.code === "preview_not_allowed") return "Only the Owner, or the person who started this job, can start its preview.";
+    if (e.code === "preview_not_allowed") return "Only the Owner or the person who started this job can run its preview.";
     if (e.code === "preview_refused") {
       return "The Terminal won't run this command. A preview runs only npm, pnpm or yarn scripts, or npx.";
     }
