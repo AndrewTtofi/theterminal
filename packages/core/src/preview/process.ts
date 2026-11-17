@@ -259,6 +259,12 @@ function tcpOpen(host: string, port: number, timeoutMs: number): Promise<boolean
   });
 }
 
+/** Whether anything takes a TCP connection on `port` on `127.0.0.1` or `::1` right now. */
+export async function portInUse(port: number, timeoutMs = 1000): Promise<boolean> {
+  for (const host of HOSTS) if (await tcpOpen(host, port, timeoutMs)) return true;
+  return false;
+}
+
 /** `GET /` on `host:port`: the status and headers of any answer within `timeoutMs`, else null. The body is not read. */
 function httpGet(host: string, port: number, timeoutMs: number): Promise<{ status: number; headers: Record<string, string> } | null> {
   return new Promise((resolve) => {

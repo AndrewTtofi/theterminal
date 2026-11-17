@@ -734,6 +734,7 @@ export async function createServer(opts: {
     const previewHost = opts.previewHost;
     const previews = new PreviewService({
       db, ledger, dataDir: opts.dataDir, worktrees, clean, settling: (id) => runner.settling(id),
+      ownPorts: () => [boundPort, remoteListener.state().port].filter((p) => p > 0),
       ...(previewHost !== undefined && { capture: (id: string) => previewHost.capture(id) }),
     });
     const nativeTools =

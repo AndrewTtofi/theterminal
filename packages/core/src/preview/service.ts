@@ -20,7 +20,7 @@ import {
   NATIVE_TIMEOUTS, PreviewFailedError, androidPlan, androidSdkDir, bundleIdFrom, buildCount, chooseSimulator, detectTools, fillPlaceholders,
   findAppTarget, findIosApp, iosPlan, nativeEnv, readAndroidOutput, realTools, resolveTool, type Simulator, type ToolRunner,
 } from "./native.js";
-import { frameable, freePort, isExposed, listeningAddresses, startSupervised, waitReady, type Exit, type Supervised } from "./process.js";
+import { frameable, freePort, isExposed, listeningAddresses, portInUse, startSupervised, waitReady, type Exit, type Supervised } from "./process.js";
 import { InvalidScreenshotError, storeScreenshot } from "./screenshots.js";
 import { contentKey, resolveWebArgv, webPlan, type ResolveOptions } from "./web-command.js";
 
@@ -114,6 +114,8 @@ export type PreviewDeps = ChangesDeps & {
   execFile?: typeof nodeExecFile;
   /** A logical website command as a program and arguments. Default resolveWebArgv. */
   resolveWeb?: (cmd: string[], port: number, o: ResolveOptions & { scriptText?: string | null }) => { file: string; args: string[] };
+  /** The server's own ports: never probed as a website preview's. */
+  ownPorts?: () => number[];
   /** The program a native tool runs for the supervised steps (builds, the emulator, binary output). Default resolveTool. */
   resolveNative?: (tool: string, env: NodeJS.ProcessEnv) => { file: string; args: string[] } | null;
 };
@@ -477,6 +479,12 @@ export class PreviewService {
       l.procs.delete(install);
       this.progress(l);
     }
+    // The agent's stated port counts only while it is free and not the server's own: a site already listening there
+    // (the person's own dev server, another run's, any local service) is never taken for this preview's.
+    const stated = p.statedPort;
+    const extra: number[] =
+      stated !== null && stated !== port && !(this.deps.ownPorts?.() ?? []).includes(stated) && !(await portInUse(stated)) ? [stated] : [];
+    if (l.ended) return;
     let argv: { file: string; args: string[] };
     try {
       argv = resolve(p.commands.at(-1)!, p.script);
@@ -485,7 +493,7 @@ export class PreviewService {
     }
     const site = this.supervise(l, argv, p.abs, env);
     this.progress(l);
-    const ports = [port, ...(p.statedPort !== null && p.statedPort !== port ? [p.statedPort] : [])];
+    const ports = [port, ...extra];
     const ready = waitReady(ports, {
       deadline: this.nowMs() + PREVIEW_LIMITS.startTimeoutMs,
       signal: l.abort.signal,

@@ -1,5 +1,7 @@
 import { execFile, spawn as nodeSpawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -292,6 +294,57 @@ describe("start", () => {
     expect(of(first.view.id, "preview.requested")).toHaveLength(1);
     for (let i = 1; i < 4; i++) await service.start(maint, runs[i]!.runId, { kind: "web", key: keys[i]! });
     await refused(() => service.start(maint, runs[4]!.runId, { kind: "web", key: keys[4]! }), PreviewBusyError);
+  });
+});
+
+describe("the agent's stated port", () => {
+  /** A local service on its own port, answering every request. */
+  async function otherService(): Promise<{ server: Server; port: number }> {
+    const server = createServer((_req, res) => res.end("someone else's"));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    return { server, port: (server.address() as AddressInfo).port };
+  }
+
+  async function startWithStated(s: PreviewService, port: number): Promise<string> {
+    const { runId } = makeRun(maint, { offer: false });
+    emit("preview.offered", { runId, kind: "web", command: "npm run dev", port }, { kind: "agent", id: runId });
+    const { view } = await s.start(maint, runId, { kind: "web", key: (await s.plan(maint, runId, "web")).key });
+    return view.id;
+  }
+
+  it("is never recorded as the preview's origin when something else already listens there", async () => {
+    const other = await otherService();
+    try {
+      siteEnv = { FAKE_SITE_DELAY_MS: "1500" };
+      const id = await startWithStated(service, other.port);
+      await waitFor(id, "preview.ready");
+      const ready = of(id, "preview.ready")[0]!.payload as { origin: string };
+      expect(ready.origin).toBe(`http://127.0.0.1:${spawned[0]!.PORT}`);
+      expect(ready.origin).not.toContain(`:${other.port}`);
+    } finally {
+      other.server.close();
+    }
+  });
+
+  it("is never probed when it is the server's own port", async () => {
+    const own = await otherService();
+    try {
+      siteEnv = { FAKE_SITE_DELAY_MS: "1500" };
+      // The port is free again before the start, so only the own-port rule keeps it out.
+      await new Promise((r) => own.server.close(r));
+      const s = make({ ownPorts: () => [own.port] });
+      const id = await startWithStated(s, own.port);
+      const again = createServer((_req, res) => res.end("the server itself"));
+      await new Promise<void>((r) => again.listen(own.port, "127.0.0.1", () => r()));
+      try {
+        await waitFor(id, "preview.ready");
+        expect((of(id, "preview.ready")[0]!.payload as { origin: string }).origin).toBe(`http://127.0.0.1:${spawned[0]!.PORT}`);
+      } finally {
+        again.close();
+      }
+    } finally {
+      own.server.close();
+    }
   });
 });
 
