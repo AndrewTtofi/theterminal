@@ -50,6 +50,8 @@ test("a run's website: confirmed once, started with real stage progress, shown o
   await askOnHome(page, "Add a contact form");
   const finished = homeBlock(page, "Finished today").getByRole("listitem").filter({ has: page.locator(".finished-line", { hasText: /^Build — / }) });
   await expect(finished.locator(".finished-line")).toHaveText(/ — done$/);
+  // The agent ended with marker lines only: they are protocol, never the job's summary.
+  await expect(finished.locator(".finished-line")).not.toContainText("[[");
   const runId = await page.evaluate(async (name) => {
     const home = (await (await fetch("/api/home")).json()) as { finishedToday: { projectName: string; run: { id: string } }[] };
     return home.finishedToday.find((h) => h.projectName === name)!.run.id;
@@ -76,7 +78,7 @@ test("a run's website: confirmed once, started with real stage progress, shown o
 
   // Reload loads every device again, and the site still answers.
   await panel.getByRole("button", { name: "⟳ Reload" }).click();
-  await expect(panel.locator('iframe[title="Device previews"]')).toHaveAttribute("src", /&k=1$/);
+  await expect(panel.locator('iframe[title="Device previews"]')).toHaveAttribute("src", /[?&]k=1(&|$)/);
   await expectSiteInEveryDevice(page);
 
   // Closing the tab stops the preview.
