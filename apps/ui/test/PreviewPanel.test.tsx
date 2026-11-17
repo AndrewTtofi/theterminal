@@ -247,6 +247,8 @@ describe("PreviewPanel", () => {
     const r = setup();
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
     await screen.findByTitle("Device previews");
+    // Let the passive effects run, so the minute's interval exists before it is counted from.
+    await act(async () => {});
     const seenBefore = vi.mocked(api.previewSeen).mock.calls.length;
     await act(async () => {
       vi.advanceTimersByTime(60_000);
