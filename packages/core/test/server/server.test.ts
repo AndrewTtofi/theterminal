@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import net from "node:net";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
@@ -7,6 +7,8 @@ import { join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 import WebSocket from "ws";
+import { AgentRunner } from "../../src/agents/runner.js";
+import { PreviewService } from "../../src/preview/service.js";
 import { createServer, selectFetch, selectSecretStore, selectSts, type RunningServer } from "../../src/server/server.js";
 import { fakeSts, realSts } from "../../src/connections/cloud/aws.js";
 import { MemorySecretStore } from "../../src/secrets/memory-store.js";
@@ -340,6 +342,22 @@ describe("createServer", { timeout: 30_000 }, () => {
     expect(fingerprint).toBeNull();
     const join = await fetch(base(s) + "/api/join/" + url.split("/join/")[1]);
     expect(await join.json()).toMatchObject({ role: "viewer", passkeys: false });
+  });
+
+  it("close() stops the runs before the previews, so a slow device never holds a run up", async () => {
+    const order: string[] = [];
+    const runner = vi.spyOn(AgentRunner.prototype, "shutdown");
+    const previews = vi.spyOn(PreviewService.prototype, "shutdown");
+    try {
+      runner.mockImplementation(async () => void order.push("runs"));
+      previews.mockImplementation(async () => void order.push("previews"));
+      const s = await start({ dataDir: tmp(), port: 0 });
+      await stop(s);
+      expect(order).toEqual(["runs", "previews"]);
+    } finally {
+      runner.mockRestore();
+      previews.mockRestore();
+    }
   });
 
   it("closes promptly with a WebSocket client connected", async () => {

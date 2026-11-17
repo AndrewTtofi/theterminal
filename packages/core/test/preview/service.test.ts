@@ -481,6 +481,21 @@ describe("iOS", () => {
     expect(calls).toContain(`xcrun simctl shutdown ${UDID}`);
   });
 
+  it("gives quitting the app a few seconds at most when the server shuts down", async () => {
+    const script: Record<string, unknown> = {};
+    const calls: string[] = [];
+    const ios = native(script, calls);
+    const { runId } = iosRun();
+    const { view } = await ios.start(maint, runId, { kind: "ios", key: (await ios.plan(maint, runId, "ios")).key });
+    await waitFor(view.id, "preview.ready");
+    script.hang = ["xcrun simctl terminate"];
+    const t0 = Date.now();
+    await ios.shutdown();
+    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(calls).toContain(`xcrun simctl terminate ${UDID} com.example.trips`);
+    expect(of(view.id, "preview.stopped").map((e) => e.payload)).toEqual([{ previewId: view.id, reason: "shutdown" }]);
+  });
+
   it("fails with build_failed and the build's tail when the build fails", async () => {
     const ios = make({
       platform: "darwin",

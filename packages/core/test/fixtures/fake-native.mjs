@@ -5,6 +5,7 @@
 //
 // THETERMINAL_FAKE_NATIVE: JSON, every field optional:
 //   fail:          string[]  // "<tool>" or "<tool> <first argument>" (e.g. "xcrun simctl", "adb install"): exit 1
+//   hang:          string[]  // "<tool> <first> <second argument>" (e.g. "xcrun simctl terminate"): never answers
 //   xcode:         string    // the version `xcodebuild -version` prints (default "17.0")
 //   developerDir:  string    // what `xcode-select -p` prints
 //   devices:       object    // `xcrun simctl list devices --json`'s "devices" map (default: one booted iPhone 16, iOS 18.0)
@@ -35,6 +36,11 @@ const fail = script.fail ?? [];
 if (fail.includes(tool) || fail.includes(`${tool} ${args[0] ?? ""}`)) {
   process.stderr.write(`${tool}: fake failure\n`);
   process.exit(1);
+}
+
+if ((script.hang ?? []).includes(`${tool} ${args[0] ?? ""} ${args[1] ?? ""}`)) {
+  // A tool that never answers, until it is killed.
+  await new Promise(() => setInterval(() => undefined, 1000));
 }
 
 /** A 1×1 PNG, as a screenshot. */

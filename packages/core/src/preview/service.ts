@@ -89,6 +89,8 @@ export class ScreenshotsUnavailableError extends Error {
 
 const SYSTEM: Actor = { kind: "system", id: "preview" };
 const SWEEP_MS = 60_000;
+/** On shutdown, how long quitting a phone app (and its device) may take: the whole close has only a few seconds. */
+const SHUTDOWN_QUIT_MS = 3_000;
 const TARGET_CHARS = 200;
 const DEVICE_CHARS = 60;
 
@@ -348,7 +350,8 @@ export class PreviewService {
     clearInterval(this.sweeper);
     this.sweeper = undefined;
     await Promise.all(
-      [...this.live.values()].map((l) => this.end(l, { type: "preview.stopped", payload: { previewId: l.id, reason: "shutdown" } }, SYSTEM)),
+      [...this.live.values()].map((l) =>
+        this.end(l, { type: "preview.stopped", payload: { previewId: l.id, reason: "shutdown" } }, SYSTEM, SHUTDOWN_QUIT_MS)),
     );
   }
 
@@ -703,12 +706,13 @@ export class PreviewService {
       type: "preview.stopped"; payload: { previewId: string; reason: StopReason };
     },
     actor: Actor,
+    quitMs: number = NATIVE_TIMEOUTS.openMs,
   ): Promise<void> {
     if (l.ended) return;
     l.ended = true;
     l.abort.abort();
     await Promise.all([...l.procs].map((p) => p.kill()));
-    await this.quitApp(l);
+    await this.quitApp(l, quitMs);
     this.live.delete(l.id);
     if (this.live.size === 0) {
       clearInterval(this.sweeper);
@@ -717,9 +721,17 @@ export class PreviewService {
     this.record(l.projectId, actor, entry.type, entry.payload);
   }
 
-  private async quitApp(l: Live): Promise<void> {
-    const run = (tool: string, args: string[]) =>
-      this.tools(tool, args, { env: l.env, timeoutMs: NATIVE_TIMEOUTS.openMs }).catch(() => undefined);
+  /** Quits the app (and the device, when The Terminal booted it), within `withinMs` in all. */
+  private async quitApp(l: Live, withinMs: number): Promise<void> {
+    const deadline = Date.now() + withinMs;
+    const run = async (tool: string, args: string[]) => {
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) return undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const limit = new Promise<undefined>((r) => (timer = setTimeout(() => r(undefined), timeoutMs)));
+      const call = this.tools(tool, args, { env: l.env, timeoutMs }).catch(() => undefined);
+      return Promise.race([call, limit]).finally(() => clearTimeout(timer));
+    };
     if (l.kind === "ios" && l.udid !== undefined) {
       if (l.bundleId !== undefined) await run("xcrun", ["simctl", "terminate", l.udid, l.bundleId]);
       if (l.booted) await run("xcrun", ["simctl", "shutdown", l.udid]);

@@ -982,8 +982,8 @@ export async function createServer(opts: {
           await linkService.shutdown(); // no linked machine reaches this computer while the rest shuts down
           await links.shutdown(); // closes every share link's listener and records it, while the db is open
           await overrides.shutdown(); // kills every override's process tree and records it, while the db is open
-          await previews.shutdown(); // kills every preview's process tree and records it, while the db is open
           await runner.shutdown(); // stops runs and denies pending actions while the db is still open
+          await previews.shutdown(); // kills every preview's process tree and records it, while the db is open
           await signin.shutdown(); // kills every login and status check before the db closes
           for (const client of app.websocketServer.clients) client.terminate();
           await app.close();
