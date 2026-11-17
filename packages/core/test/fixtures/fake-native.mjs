@@ -13,17 +13,23 @@
 //   applicationId: string    // applicationId in the output-metadata.json gradlew writes (default "com.example.trips")
 //   buildLines:    string[]  // printed by a build, before it finishes
 //   log:           string    // a file that gets one JSON line { tool, args, cwd } per call
+//   adbDevices:    string[]  // the "<serial>\t<state>" lines `adb devices` lists (default none)
+//   emulatorState: string    // a file `emulator -avd` writes once it runs; while it exists, `adb devices` also lists
+//                            // "emulator-5556\tdevice" (the emulator this fake booted)
+//
+// An adb call may name its device first (`adb -s <serial> …`); the fake reads the rest as it would without it.
 //
 // A build writes what a real one would: xcodebuild `build` writes
 // <derivedDataPath>/Build/Products/Debug-iphonesimulator/<scheme>.app/Info.plist, and gradlew `:<m>:assembleDebug`
 // writes <cwd>/<m>/build/outputs/apk/debug/<m>-debug.apk and output-metadata.json.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const [tool, ...args] = process.argv.slice(2);
+const [tool, ...given] = process.argv.slice(2);
+const args = tool === "adb" && given[0] === "-s" ? given.slice(2) : given;
 const script = JSON.parse(process.env.THETERMINAL_FAKE_NATIVE || "{}");
 
-if (script.log) appendFileSync(script.log, JSON.stringify({ tool, args, cwd: process.cwd() }) + "\n");
+if (script.log) appendFileSync(script.log, JSON.stringify({ tool, args: given, cwd: process.cwd() }) + "\n");
 
 const fail = script.fail ?? [];
 if (fail.includes(tool) || fail.includes(`${tool} ${args[0] ?? ""}`)) {
@@ -124,6 +130,13 @@ switch (tool) {
       out("Android Debug Bridge version 1.0.41\n");
       done();
     }
+    if (sub === "devices") {
+      out("List of devices attached\n");
+      for (const line of script.adbDevices ?? []) out(line + "\n");
+      if (script.emulatorState && existsSync(script.emulatorState)) out("emulator-5556\tdevice\n");
+      out("\n");
+      done();
+    }
     if (sub === "wait-for-device") done();
     if (sub === "install") {
       out("Performing Streamed Install\nSuccess\n");
@@ -153,6 +166,7 @@ switch (tool) {
     if (args[0] === "-avd") {
       // A real emulator keeps running; this one waits to be killed, for a minute at most.
       out(`INFO    | Booting ${args[1]}\n`);
+      if (script.emulatorState) writeFileSync(script.emulatorState, "booted");
       setTimeout(() => done(), 60_000);
       break;
     }

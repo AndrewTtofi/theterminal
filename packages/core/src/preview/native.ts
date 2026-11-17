@@ -339,10 +339,11 @@ export function iosPlan(o: {
 
 /**
  * The Android build-and-run plan (macOS and Linux), to run with the worktree as cwd: the worktree's `gradlew`, run
- * directly, `:<module>:assembleDebug`; `emulator -avd <name>`; `adb wait-for-device`; `adb install -r {{apk}}`; and
- * `adb shell monkey -p {{package}} 1`. `{{apk}}` and `{{package}}` come from readAndroidOutput after the build. The
- * caller polls `adb shell getprop sys.boot_completed` between the wait and the install. `sdk` is where `adb` and
- * `emulator` are found (nativeEnv).
+ * directly, `:<module>:assembleDebug`; `emulator -avd <name>`; `adb -s {{emulator}} wait-for-device`;
+ * `adb -s {{emulator}} install -r {{apk}}`; and `adb -s {{emulator}} shell monkey -p {{package}} 1`. Every adb call names
+ * the emulator (an `emulator-*` serial), so a real phone plugged in over USB is never installed on. `{{apk}}` and
+ * `{{package}}` come from readAndroidOutput after the build. The caller polls `adb shell getprop sys.boot_completed`
+ * between the wait and the install. `sdk` is where `adb` and `emulator` are found (nativeEnv).
  */
 export function androidPlan(o: { worktree: string; module: string; avd: string; sdk: string }): { commands: string[][]; files: string[] } {
   if (!MODULE.test(o.module) || o.module === "." || o.module === "..") throw new TypeError("not a module");
@@ -350,9 +351,9 @@ export function androidPlan(o: { worktree: string; module: string; avd: string; 
   const commands = [
     [join(o.worktree, "gradlew"), `:${o.module}:assembleDebug`],
     ["emulator", "-avd", o.avd],
-    ["adb", "wait-for-device"],
-    ["adb", "install", "-r", "{{apk}}"],
-    ["adb", "shell", "monkey", "-p", "{{package}}", "1"],
+    ["adb", "-s", "{{emulator}}", "wait-for-device"],
+    ["adb", "-s", "{{emulator}}", "install", "-r", "{{apk}}"],
+    ["adb", "-s", "{{emulator}}", "shell", "monkey", "-p", "{{package}}", "1"],
   ];
   const files = [
     gradleFile(o.worktree, "", "settings"),
@@ -362,6 +363,16 @@ export function androidPlan(o: { worktree: string; module: string; avd: string; 
     "gradlew",
   ];
   return { commands, files };
+}
+
+/** The emulators `adb devices` lists: their `emulator-<port>` serials and states, in order. A real device is left out. */
+export function emulatorSerials(adbDevices: string): { serial: string; state: string }[] {
+  const out: { serial: string; state: string }[] = [];
+  for (const line of adbDevices.split(/\r?\n/)) {
+    const m = /^(emulator-\d+)\s+(\S+)\s*$/.exec(line.trim());
+    if (m) out.push({ serial: m[1]!, state: m[2]! });
+  }
+  return out;
 }
 
 /** `cmd` with each `{{name}}` argument replaced; a TypeError when a placeholder has no value. */

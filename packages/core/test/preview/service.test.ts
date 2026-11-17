@@ -494,6 +494,71 @@ describe("iOS", () => {
   });
 });
 
+describe("Android", () => {
+  const PHONE = "R58M123TESTKEY";
+  /** A run whose working copy holds one Android app module and the Gradle wrapper, with an SDK in the home folder. */
+  function androidRun(): { runId: string; wt: string } {
+    const r = makeRun(maint, { offer: false });
+    writeFileSync(join(r.wt, "gradlew"), "#!/bin/sh\n");
+    writeFileSync(join(r.wt, "settings.gradle"), "include ':app'\n");
+    mkdirSync(join(r.wt, "app"), { recursive: true });
+    writeFileSync(join(r.wt, "app", "build.gradle"), "plugins { id 'com.android.application' }\n");
+    mkdirSync(join(dataDir, "Android", "Sdk"), { recursive: true });
+    emit("preview.offered", { runId: r.runId, kind: "android", target: "app" }, { kind: "agent", id: r.runId });
+    return r;
+  }
+  function native(script: Record<string, unknown>, calls: string[]): PreviewService {
+    const full = { avds: ["Pixel_9_API_35"], emulatorState: join(dataDir, "emulator.state"), ...script };
+    siteEnv = { THETERMINAL_FAKE_NATIVE: JSON.stringify(full) };
+    return make({
+      platform: "linux",
+      tools: fakeTools(full, calls),
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 50))),
+      resolveNative: (tool) => ({ file: process.execPath, args: [FAKE, tool.endsWith("gradlew") ? "gradlew" : tool] }),
+    });
+  }
+  const adbCalls = (calls: string[]) => calls.filter((c) => c.startsWith("adb ") && c !== "adb version" && c !== "adb devices");
+
+  it("boots an emulator when only a real phone is plugged in, and never touches the phone", async () => {
+    const calls: string[] = [];
+    const log = join(dataDir, "native.log");
+    const android = native({ adbDevices: [`${PHONE}\tdevice`], log }, calls);
+    const { runId } = androidRun();
+    const { view } = await android.start(maint, runId, { kind: "android", key: (await android.plan(maint, runId, "android")).key });
+    await vi.waitFor(() => expect(of(view.id, "preview.ready").length + of(view.id, "preview.failed").length).toBe(1), { timeout: 15_000 });
+    expect(of(view.id, "preview.failed").map((e) => e.payload)).toEqual([]);
+    await android.screenshot(maint, view.id);
+    await android.stop(maint, view.id, "person");
+    const adb = adbCalls(calls);
+    expect(adb).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^adb -s emulator-5556 install -r /),
+      "adb -s emulator-5556 shell monkey -p com.example.trips 1",
+      "adb -s emulator-5556 shell am force-stop com.example.trips",
+      "adb -s emulator-5556 emu kill",
+    ]));
+    expect(adb.every((c) => c.startsWith("adb -s emulator-5556 "))).toBe(true);
+    expect(calls.some((c) => c.includes(PHONE))).toBe(false);
+    const screencap = readFileSync(log, "utf8").split("\n").filter((l) => l.includes("screencap"));
+    expect(screencap.map((l) => (JSON.parse(l) as { args: string[] }).args.slice(0, 3))).toEqual([["-s", "emulator-5556", "exec-out"]]);
+  });
+
+  it("uses an emulator that is already running, beside a real phone, and leaves it running", async () => {
+    const calls: string[] = [];
+    const android = native({ adbDevices: [`${PHONE}\tdevice`, "emulator-5554\tdevice"] }, calls);
+    const { runId } = androidRun();
+    const { view } = await android.start(maint, runId, { kind: "android", key: (await android.plan(maint, runId, "android")).key });
+    await vi.waitFor(() => expect(of(view.id, "preview.ready").length + of(view.id, "preview.failed").length).toBe(1), { timeout: 15_000 });
+    expect(of(view.id, "preview.failed").map((e) => e.payload)).toEqual([]);
+    await android.stop(maint, view.id, "person");
+    const adb = adbCalls(calls);
+    expect(adb.length).toBeGreaterThan(0);
+    expect(adb.every((c) => c.startsWith("adb -s emulator-5554 "))).toBe(true);
+    expect(adb).toContain("adb -s emulator-5554 shell am force-stop com.example.trips");
+    expect(adb.some((c) => c.includes("emu kill"))).toBe(false);
+    expect(existsSync(join(dataDir, "emulator.state"))).toBe(false); // no emulator was started
+  });
+});
+
 describe("screenshots", () => {
   it("needs the desktop app for a website", async () => {
     const { runId } = makeRun();

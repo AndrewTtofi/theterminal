@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  PreviewFailedError, androidPlan, androidSdkDir, bundleIdFrom, buildCount, chooseSimulator, detectTools, fillPlaceholders,
+  PreviewFailedError, androidPlan, androidSdkDir, emulatorSerials, bundleIdFrom, buildCount, chooseSimulator, detectTools, fillPlaceholders,
   findAppTarget, findIosApp, iosPlan, readAndroidOutput, realTools, type ToolRunner,
 } from "../../src/preview/native.js";
 
@@ -230,11 +230,17 @@ describe("androidPlan", () => {
     expect(plan.commands).toEqual([
       [join(dir, "gradlew"), ":app:assembleDebug"],
       ["emulator", "-avd", "Pixel_9_API_35"],
-      ["adb", "wait-for-device"],
-      ["adb", "install", "-r", "{{apk}}"],
-      ["adb", "shell", "monkey", "-p", "{{package}}", "1"],
+      ["adb", "-s", "{{emulator}}", "wait-for-device"],
+      ["adb", "-s", "{{emulator}}", "install", "-r", "{{apk}}"],
+      ["adb", "-s", "{{emulator}}", "shell", "monkey", "-p", "{{package}}", "1"],
     ]);
     expect(plan.files).toEqual(["settings.gradle", "build.gradle", "app/build.gradle", "gradle/wrapper/gradle-wrapper.properties", "gradlew"]);
+  });
+
+  it("reads only the emulators from adb devices, never a real phone", () => {
+    const listing = "List of devices attached\nR58M123TESTKEY\tdevice\nemulator-5554\toffline\r\nemulator-5556\tdevice\n\n";
+    expect(emulatorSerials(listing)).toEqual([{ serial: "emulator-5554", state: "offline" }, { serial: "emulator-5556", state: "device" }]);
+    expect(emulatorSerials("List of devices attached\n\n")).toEqual([]);
   });
 
   it("names the Kotlin build files when they are the ones present, and refuses a bad module", () => {
@@ -255,8 +261,9 @@ describe("androidPlan", () => {
     expect((await run(file, args, { cwd: dir, env: baseEnv(), timeoutMs: 10_000 })).code).toBe(0);
     const out = readAndroidOutput(dir, "app");
     expect(out).toEqual({ apk: join(dir, "app", "build", "outputs", "apk", "debug", "app-debug.apk"), applicationId: "com.example.trips" });
-    expect(fillPlaceholders(plan.commands[4], { package: out.applicationId })).toEqual(["adb", "shell", "monkey", "-p", "com.example.trips", "1"]);
-    expect(fillPlaceholders(plan.commands[3], { apk: out.apk })).toEqual(["adb", "install", "-r", out.apk]);
+    const serial = { emulator: "emulator-5554" };
+    expect(fillPlaceholders(plan.commands[4], { ...serial, package: out.applicationId })).toEqual(["adb", "-s", "emulator-5554", "shell", "monkey", "-p", "com.example.trips", "1"]);
+    expect(fillPlaceholders(plan.commands[3], { ...serial, apk: out.apk })).toEqual(["adb", "-s", "emulator-5554", "install", "-r", out.apk]);
     expect(() => fillPlaceholders(plan.commands[4], {})).toThrow(TypeError);
   });
 

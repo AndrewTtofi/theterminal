@@ -17,7 +17,7 @@ import { getPreview, latestOffer, livePreviews, previewKeyConfirmed, previewStep
 import { HumanRequiredError } from "../intake/service.js";
 import type { Ledger } from "../ledger/ledger.js";
 import {
-  NATIVE_TIMEOUTS, PreviewFailedError, androidPlan, androidSdkDir, bundleIdFrom, buildCount, chooseSimulator, detectTools, fillPlaceholders,
+  NATIVE_TIMEOUTS, PreviewFailedError, androidPlan, androidSdkDir, bundleIdFrom, buildCount, chooseSimulator, detectTools, emulatorSerials, fillPlaceholders,
   findAppTarget, findIosApp, iosPlan, nativeEnv, readAndroidOutput, realTools, resolveTool, type Simulator, type ToolRunner,
 } from "./native.js";
 import { frameable, freePort, isExposed, listeningAddresses, portInUse, startSupervised, waitReady, type Exit, type Supervised } from "./process.js";
@@ -155,6 +155,8 @@ type Live = {
   udid?: string;
   bundleId?: string;
   appPackage?: string;
+  /** The emulator every adb call names (`-s`), never a real phone. */
+  serial?: string;
   booted: boolean;
 };
 
@@ -296,7 +298,7 @@ export class PreviewService {
       if (this.deps.capture === undefined) throw new ScreenshotsUnavailableError();
       shots = await this.deps.capture(id);
     } else {
-      const png = l.kind === "ios" ? await this.iosScreenshot(l) : await this.binaryOutput(l, "adb", ["exec-out", "screencap", "-p"]);
+      const png = l.kind === "ios" ? await this.iosScreenshot(l) : (l.serial === undefined ? null : await this.binaryOutput(l, "adb", ["-s", l.serial, "exec-out", "screencap", "-p"]));
       shots = png === null ? [] : [{ device: l.device, png }];
     }
     const out: Screenshot[] = [];
@@ -561,27 +563,47 @@ export class PreviewService {
     }
     l.appPackage = out.applicationId;
     this.progress(l);
-    const running = await this.tools("adb", ["get-state"], { env: l.env, timeoutMs: NATIVE_TIMEOUTS.openMs });
+    // Only an emulator is ever used: a real phone plugged in over USB is never installed on.
+    const listed = async (): Promise<{ serial: string; state: string }[] | null> => {
+      const r = await this.tools("adb", ["devices"], { env: l.env, timeoutMs: NATIVE_TIMEOUTS.openMs });
+      return r.code === 0 ? emulatorSerials(r.stdout) : null;
+    };
+    const before = await listed();
     if (l.ended) return;
-    if (running.code !== 0) {
+    if (before === null) return this.fail(l, "boot_failed", []);
+    const running = before.find((e) => e.state === "device");
+    if (running !== undefined) {
+      l.serial = running.serial;
+    } else {
       const emulator = this.resolveNative("emulator", l.env);
       if (emulator === null) return this.fail(l, "boot_failed", []);
       this.supervise(l, { file: emulator.file, args: [...emulator.args, "-avd", p.avd!] }, p.abs, l.env);
       l.booted = true;
-      if ((await this.step(l, ["adb", "wait-for-device"], NATIVE_TIMEOUTS.bootMs, "boot_failed")) === null) return;
       const deadline = this.nowMs() + NATIVE_TIMEOUTS.bootMs;
+      const known = new Set(before.map((e) => e.serial));
+      while (l.serial === undefined) {
+        const now = await listed();
+        if (l.ended) return;
+        const fresh = (now ?? []).find((e) => !known.has(e.serial));
+        if (fresh !== undefined) l.serial = fresh.serial;
+        else if (this.nowMs() >= deadline) return this.fail(l, "boot_failed", []);
+        else await this.sleep(NATIVE_TIMEOUTS.bootPollMs);
+      }
+      const s = l.serial;
+      if ((await this.step(l, ["adb", "-s", s, "wait-for-device"], NATIVE_TIMEOUTS.bootMs, "boot_failed")) === null) return;
       for (;;) {
-        const r = await this.tools("adb", ["shell", "getprop", "sys.boot_completed"], { env: l.env, timeoutMs: NATIVE_TIMEOUTS.openMs });
+        const r = await this.tools("adb", ["-s", s, "shell", "getprop", "sys.boot_completed"], { env: l.env, timeoutMs: NATIVE_TIMEOUTS.openMs });
         if (l.ended) return;
         if (r.code === 0 && r.stdout.trim() === "1") break;
         if (this.nowMs() >= deadline) return this.fail(l, "boot_failed", this.lines(l, r.stdout, r.stderr));
         await this.sleep(NATIVE_TIMEOUTS.bootPollMs);
       }
     }
+    const serial = l.serial;
     this.progress(l);
-    if ((await this.step(l, ["adb", "install", "-r", out.apk], NATIVE_TIMEOUTS.installMs, "install_app_failed")) === null) return;
+    if ((await this.step(l, ["adb", "-s", serial, "install", "-r", out.apk], NATIVE_TIMEOUTS.installMs, "install_app_failed")) === null) return;
     this.progress(l);
-    if ((await this.step(l, ["adb", "shell", "monkey", "-p", out.applicationId, "1"], NATIVE_TIMEOUTS.openMs, "launch_failed")) === null) return;
+    if ((await this.step(l, ["adb", "-s", serial, "shell", "monkey", "-p", out.applicationId, "1"], NATIVE_TIMEOUTS.openMs, "launch_failed")) === null) return;
     this.progress(l);
     this.recordFor(l, "preview.ready", { previewId: l.id });
   }
@@ -701,9 +723,9 @@ export class PreviewService {
     if (l.kind === "ios" && l.udid !== undefined) {
       if (l.bundleId !== undefined) await run("xcrun", ["simctl", "terminate", l.udid, l.bundleId]);
       if (l.booted) await run("xcrun", ["simctl", "shutdown", l.udid]);
-    } else if (l.kind === "android") {
-      if (l.appPackage !== undefined) await run("adb", ["shell", "am", "force-stop", l.appPackage]);
-      if (l.booted) await run("adb", ["emu", "kill"]);
+    } else if (l.kind === "android" && l.serial !== undefined) {
+      if (l.appPackage !== undefined) await run("adb", ["-s", l.serial, "shell", "am", "force-stop", l.appPackage]);
+      if (l.booted) await run("adb", ["-s", l.serial, "emu", "kill"]);
     }
   }
 
