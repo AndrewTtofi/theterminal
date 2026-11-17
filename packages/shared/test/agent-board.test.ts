@@ -88,6 +88,18 @@ describe("narration of board events", () => {
       "Owner said not yet to moving “Fix the form” to Ship",
     );
   });
+  it("says which agent was given the notes: the run's own, else the agent", () => {
+    const fake = { ...ctx, adapterName: (id: string) => (id === "r2" ? "fake" : undefined) };
+    expect(narrate(entry("card.comments_given", { cardId: "c1", runId: "r2", commentIds: ["a"] }), fake).headline).toBe(
+      "1 note on “Fix the form” was given to Fake",
+    );
+    expect(narrate(entry("card.comments_given", { cardId: "c1", runId: "r2", commentIds: ["a", "b"] }), fake).headline).toBe(
+      "2 notes on “Fix the form” were given to Fake",
+    );
+    expect(say("card.comments_given", { cardId: "c1", runId: "r9", commentIds: ["a"] }).headline).toBe(
+      "1 note on “Fix the form” was given to the agent",
+    );
+  });
   it("files them under the board topic", () => {
     for (const [t, p] of [
       ["card.run_linked", { cardId: "c1", runId: "r1" }],

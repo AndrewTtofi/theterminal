@@ -381,11 +381,14 @@ function tell(e: LedgerEntry, p: Payload, ctx: NarrationContext): Told {
       return { headline: `${who} left a note on ${board(cardId)}` };
     case "card.comments_given": {
       const count = Array.isArray(p.commentIds) ? p.commentIds.length : 0;
+      // The run's own agent, as the other board lines say it; "the agent" when the run is not known.
+      const named = claude(runId);
+      const to = named === "The agent" ? "the agent" : named;
       return {
         headline:
           count === 1
-            ? `1 note on ${board(cardId)} was given to Claude`
-            : `${count} notes on ${board(cardId)} were given to Claude`,
+            ? `1 note on ${board(cardId)} was given to ${to}`
+            : `${count} notes on ${board(cardId)} were given to ${to}`,
       };
     }
     case "card.comments_read":
