@@ -244,6 +244,54 @@ describe("hardenPreviewContents", () => {
     expect(confirmOpen).toHaveBeenCalledTimes(2);
   });
 
+  it("after a no, does not ask again for 10 seconds; after three, never asks again for that page", async () => {
+    const c = fakeContents();
+    let t = 0;
+    const confirmOpen = vi.fn(async () => false);
+    const openExternal = vi.fn();
+    hardenPreviewContents(c, { origin: ORIGIN, confirmOpen, openExternal, now: () => t });
+    const go = (i: number) => {
+      const e = event(`https://example.com/${i}`, true);
+      c.emit("will-navigate", e, e.url);
+      expect(e.preventDefault).toHaveBeenCalled();
+      expect(c.openHandler?.({ url: `https://example.com/w${i}` })).toEqual({ action: "deny" });
+    };
+    go(1);
+    await settle();
+    expect(confirmOpen).toHaveBeenCalledTimes(1);
+    t = 9_999;
+    go(2);
+    await settle();
+    expect(confirmOpen).toHaveBeenCalledTimes(1); // still within 10 s of the no
+    t = 10_000;
+    go(3);
+    await settle();
+    expect(confirmOpen).toHaveBeenCalledTimes(2);
+    t = 20_000;
+    go(4);
+    await settle();
+    expect(confirmOpen).toHaveBeenCalledTimes(3);
+    t = 1_000_000;
+    go(5);
+    await settle();
+    expect(confirmOpen).toHaveBeenCalledTimes(3); // three noes: only refused from now on
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it("a yes does not count against the page", async () => {
+    const c = fakeContents();
+    const confirmOpen = vi.fn(async () => true);
+    const openExternal = vi.fn();
+    hardenPreviewContents(c, { origin: ORIGIN, confirmOpen, openExternal, now: () => 0 });
+    for (let i = 0; i < 5; i += 1) {
+      const e = event(`https://example.com/${i}`, true);
+      c.emit("will-navigate", e, e.url);
+      await settle();
+    }
+    expect(confirmOpen).toHaveBeenCalledTimes(5);
+    expect(openExternal).toHaveBeenCalledTimes(5);
+  });
+
   it("refuses webviews and cancels the Bluetooth picker as for the app window", () => {
     const { c } = setup();
     const wv = event();

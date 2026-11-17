@@ -10,6 +10,10 @@ import { externalUrl } from "./navigation.js";
 type Listener = (...args: any[]) => void;
 type Preventable = { preventDefault(): void; url?: string; isMainFrame?: boolean };
 
+/** After a no, how long a preview page is not asked again; after this many noes it is never asked again. */
+const DECLINE_QUIET_MS = 10_000;
+const MAX_DECLINES = 3;
+
 const ORIGIN = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})$/;
 
 /** Exactly `http://127.0.0.1:<1-65535>` or `http://[::1]:<1-65535>`: the only origins a preview view may show. */
@@ -44,16 +48,21 @@ function sameOrigin(url: string | undefined, origin: string): boolean {
  * the person confirms, opened in their browser. A main-frame redirect elsewhere is only prevented. Sub-frame
  * navigations and sub-resources are allowed, so ordinary sites work. New windows are always denied (http(s) ones may
  * open outside after a confirmation). Webviews are refused and the Bluetooth picker is cancelled. One confirmation is
- * open at a time; anything the page asks for meanwhile is only prevented, so a page cannot stack dialogs.
+ * open at a time; anything the page asks for meanwhile is only prevented, so a page cannot stack dialogs. A page
+ * cannot loop the question either: after a no (or a failed confirmation) it is not asked again for 10 seconds, and
+ * after three noes never again for these contents; such links are only refused.
  */
 export function hardenPreviewContents(
   c: ContentsLike,
-  o: { origin: string; confirmOpen: (url: string) => Promise<boolean>; openExternal: (url: string) => void },
+  o: { origin: string; confirmOpen: (url: string) => Promise<boolean>; openExternal: (url: string) => void; now?: () => number },
 ): void {
+  const now = o.now ?? Date.now;
   let asking = false;
+  let declines = 0;
+  let quietUntil = -Infinity;
   const offerOutside = (url: string | undefined) => {
     const external = url === undefined ? null : externalUrl(url);
-    if (external === null || asking) return;
+    if (external === null || asking || declines >= MAX_DECLINES || now() < quietUntil) return;
     asking = true;
     let answer: Promise<boolean>;
     try {
@@ -68,7 +77,12 @@ export function hardenPreviewContents(
       )
       .then((yes) => {
         asking = false;
-        if (yes) o.openExternal(external);
+        if (yes) {
+          o.openExternal(external);
+        } else {
+          declines += 1;
+          quietUntil = now() + DECLINE_QUIET_MS;
+        }
       });
   };
   // A frame event that does not say which frame counts as the main frame.
