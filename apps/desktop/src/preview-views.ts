@@ -15,7 +15,7 @@ export type ViewLike = {
   setBounds(bounds: Rect): void;
   setVisible(visible: boolean): void;
   webContents: {
-    loadURL(url: string): Promise<unknown>;
+    loadURL(url: string, options?: { userAgent?: string }): Promise<unknown>;
     reload(): void;
     close(): void;
     isDestroyed(): boolean;
@@ -67,7 +67,8 @@ export function previewPartition(previewId: string, device: string): string {
 
 /**
  * Applies the server child's `preview_views` requests and captures screenshots.
- * - `show` makes a view per listed device on first use and loads the origin once; every `show` sets the emulation
+ * - `show` makes a view per listed device on first use and loads the origin once, with the device's user agent;
+ *   every `show` sets the emulation
  *   (viewport, device scale factor, mobile, and a scale that fits the viewport into the view), the user agent when
  *   given, and the bounds (the rectangle times the window's zoom factor, rounded), and makes the view visible. Views of
  *   devices no longer listed are removed. A new origin for the same preview starts over.
@@ -152,9 +153,14 @@ export function createPreviewViews<S>(deps: PreviewViewsDeps<S>): {
         entry = { view, viewport: { ...v.viewport } };
         p.devices.set(v.device, entry);
         window.contentView.addChildView(view);
-        view.webContents.loadURL(m.origin).catch(() => {
+        // Placed (emulation and user agent) before the first load, and the load itself carries the device's user
+        // agent, so the site's very first request already sees the device it is shown on.
+        place(entry, v, zoom);
+        const load = v.userAgent === null ? view.webContents.loadURL(m.origin) : view.webContents.loadURL(m.origin, { userAgent: v.userAgent });
+        load.catch(() => {
           // A failed load shows Chromium's error page in the view; the person can reload.
         });
+        continue;
       }
       place(entry, v, zoom);
     }

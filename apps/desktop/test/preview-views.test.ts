@@ -22,7 +22,7 @@ function fakeView(partition: string) {
     }),
     webContents: {
       destroyed: false,
-      loadURL: vi.fn(async (_url: string) => {}),
+      loadURL: vi.fn(async (_url: string, _options?: { userAgent?: string }) => {}),
       reload: vi.fn(),
       close: vi.fn(() => {
         view.webContents.destroyed = true;
@@ -99,6 +99,17 @@ const msg = (action: PreviewViewsMessage["action"], views: PreviewDeviceView[], 
 });
 
 describe("createPreviewViews", () => {
+  it("loads a device's page with its user agent from the first request, and its emulation already set", () => {
+    const { views, made } = setup();
+    views.apply(msg("show", [iphone, laptop]));
+    const [phone, desk] = made;
+    expect(phone!.webContents.loadURL).toHaveBeenCalledWith(ORIGIN, { userAgent: iphone.userAgent });
+    expect(phone!.webContents.setUserAgent.mock.invocationCallOrder[0]).toBeLessThan(phone!.webContents.loadURL.mock.invocationCallOrder[0]!);
+    expect(phone!.webContents.enableDeviceEmulation.mock.invocationCallOrder[0]).toBeLessThan(phone!.webContents.loadURL.mock.invocationCallOrder[0]!);
+    // A device without its own user agent keeps the default one.
+    expect(desk!.webContents.loadURL).toHaveBeenCalledWith(ORIGIN);
+  });
+
   it("shows one in-memory, locked-down view per device", () => {
     const { views, made, children, marked } = setup({ zoom: 1.25 });
     expect(views.apply(msg("show", [iphone, laptop]))).toBe(true);
@@ -111,7 +122,7 @@ describe("createPreviewViews", () => {
       { session: { partition: "preview-p1-laptop" }, origin: ORIGIN },
     ]);
     const [phone, wide] = made as [FakeView, FakeView];
-    expect(phone.webContents.loadURL).toHaveBeenCalledWith(ORIGIN);
+    expect(phone.webContents.loadURL).toHaveBeenCalledWith(ORIGIN, { userAgent: iphone.userAgent });
     // The rectangle is in CSS pixels of the window; main multiplies by the zoom factor and rounds.
     expect(phone.bounds).toEqual({ x: 13, y: 25, width: 246, height: 533 });
     expect(wide.bounds).toEqual({ x: 375, y: 25, width: 900, height: 563 });
@@ -192,7 +203,7 @@ describe("createPreviewViews", () => {
     views.apply({ ...msg("show", [iphone]), origin: "http://127.0.0.1:5174" });
     expect(made).toHaveLength(2);
     expect(made[0]!.webContents.close).toHaveBeenCalled();
-    expect(made[1]!.webContents.loadURL).toHaveBeenCalledWith("http://127.0.0.1:5174");
+    expect(made[1]!.webContents.loadURL).toHaveBeenCalledWith("http://127.0.0.1:5174", { userAgent: iphone.userAgent });
   });
 
   it("refuses to show without a window, and closeAll destroys everything", () => {
