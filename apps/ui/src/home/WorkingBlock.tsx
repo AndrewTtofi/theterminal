@@ -2,7 +2,7 @@ import { useId } from "react";
 import type { CSSProperties } from "react";
 import { adapterLabel, atLeast, formatUsd, visibleControls } from "@theterminal/shared";
 import type { HomeRun } from "@theterminal/shared";
-import { ProgressBar, StepChecklist } from "../components/ProgressBar";
+import { ProgressBar, StepChecklist, progressKey } from "../components/ProgressBar";
 import { Screenshots } from "../components/Screenshots";
 import { roleOf, useShell } from "../shell/model";
 import { decisionSentence } from "./ApprovalsBlock";
@@ -54,7 +54,7 @@ function RunCard({ h, showProject }: { h: HomeRun; showProject: boolean }) {
           {title}
         </button>
       </h3>
-      <ProgressBar percent={h.percent} label={title} />
+      <ProgressBar key={progressKey(h.run.id, h.run.progress?.steps.length ?? 0)} percent={h.percent} label={title} />
       {h.waiting && <p className="card-waiting">Waiting for you: {why}</p>}
       {plan ? (
         <StepChecklist progress={plan} />

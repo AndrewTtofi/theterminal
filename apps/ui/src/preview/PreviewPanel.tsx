@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DEVICES, DEVICE_IDS, PREVIEW_LIMITS, adapterLabel, atLeast, failureSentence, jobTitle } from "@theterminal/shared";
 import type { DeviceId, NativeTools, PreviewKind, PreviewPlan, PreviewView } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
-import { ProgressBar, StepChecklist } from "../components/ProgressBar";
+import { ProgressBar, StepChecklist, progressKey } from "../components/ProgressBar";
 import { roleOf, useShell } from "../shell/model";
 import { AppPreview } from "./AppPreview";
 import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
@@ -389,7 +389,7 @@ export function PreviewPanel({ id }: { id: string }) {
           ) : view.state !== "ready" ? (
             <div className="preview-starting">
               <ProgressBar
-                key={view.id}
+                key={progressKey(view.id, view.progress.steps.length)}
                 percent={view.percent}
                 label="Getting the site running"
                 caption={`stage ${view.progress.current ?? view.progress.done.length} of ${view.progress.steps.length}`}

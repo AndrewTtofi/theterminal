@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { atLeast, failureSentence } from "@theterminal/shared";
 import type { NativeTools, PreviewPlan, PreviewView, Screenshot } from "@theterminal/shared";
 import { ApiError, api, errorMessage } from "../api";
-import { ProgressBar } from "../components/ProgressBar";
+import { ProgressBar, progressKey } from "../components/ProgressBar";
 import { Screenshots } from "../components/Screenshots";
 import { roleOf, useShell } from "../shell/model";
 import { ConfirmPreviewDialog } from "./ConfirmPreviewDialog";
@@ -238,7 +238,7 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
         <h3 id={headingId}>{shown ? `Getting it running · ${shown.percent}%` : kind === "ios" ? "iPhone app" : "Android app"}</h3>
         {shown && progress ? (
           <>
-            <ProgressBar key={shown.id} percent={shown.percent} label="Getting it running" caption={`stage ${stageNo} of ${progress.steps.length}`} />
+            <ProgressBar key={progressKey(shown.id, progress.steps.length)} percent={shown.percent} label="Getting it running" caption={`stage ${stageNo} of ${progress.steps.length}`} />
             <ol className="app-stages">
               {progress.steps.map((text, i) => {
                 const n = i + 1;

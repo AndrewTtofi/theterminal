@@ -10,6 +10,7 @@ vi.mock("../src/api", async (importOriginal) => {
 
 import { api, ApiError, errorMessage } from "../src/api";
 import { CardPanel } from "../src/components/CardPanel";
+import { ShellContext } from "../src/shell/model";
 import { asRole, homeModel, homeRun, renderInShell } from "./home-fixtures";
 
 const m = vi.mocked(api);
@@ -35,6 +36,19 @@ const show = (over = {}, onClose = vi.fn()) =>
   renderInShell(<CardPanel card={card} info={info} onClose={onClose} />, homeModel({ subscribeEntries: subscribe(), ...over }));
 
 describe("CardPanel", () => {
+  it("shows a new run's own lower percent on the same card", () => {
+    const r = show();
+    const panel = () => screen.getByRole("complementary", { name: "Card" });
+    expect(within(panel()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    const next: CardInfo = { ...info, runId: "r2", percent: 25, progress: { ...info.progress!, done: [1], current: 2 } };
+    r.rerender(
+      <ShellContext.Provider value={{ model: r.model, dock: () => r.dock, ...r.nav }}>
+        <CardPanel card={card} info={next} onClose={vi.fn()} />
+      </ShellContext.Provider>,
+    );
+    expect(within(panel()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("25");
+  });
+
   it("shows the title, the bar and the latest run's checklist", async () => {
     show();
     const panel = screen.getByRole("complementary", { name: "Card" });

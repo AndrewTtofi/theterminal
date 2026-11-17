@@ -10,8 +10,14 @@ import "./progress.css";
  * for a plan that is not the agent's (a preview's fixed stages).
  *
  * The bar never moves back: it keeps the highest percent it has shown, so a stale response cannot undo progress. A
- * caller whose subject changes (another run, another preview) gives it a new `key`, which starts it again.
+ * caller keys it with progressKey (the run or preview, and its plan's length): another run, or a plan restated with
+ * more steps, starts it again, so the number shown is always true.
  */
+/** A ProgressBar's `key`: its subject (a run, a preview, a set of runs) and how many steps its plan has. */
+export function progressKey(subject: string, steps: number): string {
+  return `${subject}:${steps}`;
+}
+
 export function ProgressBar({
   percent,
   label,

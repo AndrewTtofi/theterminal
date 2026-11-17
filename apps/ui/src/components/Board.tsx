@@ -1,6 +1,6 @@
 import { STAGES, adapterLabel, visibleControls } from "@theterminal/shared";
 import type { Board as BoardData, Card, CardInfo, Stage } from "@theterminal/shared";
-import { ProgressBar } from "./ProgressBar";
+import { ProgressBar, progressKey } from "./ProgressBar";
 import "./board.css";
 
 type Props = {
@@ -63,7 +63,12 @@ function AgentCard({ card, info, selected, onOpen, cardRef }: {
         <span className="agent-card-title">{title}</span>
         {percent !== null && <span className="agent-card-pct num">{percent}%</span>}
       </span>
-      <ProgressBar compact percent={percent} label={`${title} progress`} />
+      <ProgressBar
+        key={progressKey(info?.runId ?? card.id, info?.progress?.steps.length ?? 0)}
+        compact
+        percent={percent}
+        label={`${title} progress`}
+      />
       {now !== null && (
         <span className={`agent-card-now${now.attention ? " attention" : ""}`}>
           <span className={`dot ${tone}`} aria-hidden="true" />

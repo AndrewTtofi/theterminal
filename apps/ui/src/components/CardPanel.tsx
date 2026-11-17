@@ -3,7 +3,7 @@ import { COMMENT_LIMITS, atLeast, commentStateLabel, innerEntry, visibleControls
 import type { Card, CardComment, CardInfo, LedgerEntry } from "@theterminal/shared";
 import { api, errorMessage } from "../api";
 import { useShell, useViewerRole } from "../shell/model";
-import { ProgressBar, StepChecklist } from "./ProgressBar";
+import { ProgressBar, StepChecklist, progressKey } from "./ProgressBar";
 import "./board.css";
 
 type Props = { card: Card; info: CardInfo | null; onClose: () => void };
@@ -104,7 +104,12 @@ export const CardPanel = forwardRef<HTMLElement, Props>(function CardPanel({ car
       </header>
       <section className="card-panel-sec">
         <p className="card-panel-title">{title}</p>
-        <ProgressBar key={card.id} compact percent={info?.percent ?? null} label={`${title} progress`} />
+        <ProgressBar
+          key={progressKey(info?.runId ?? card.id, info?.progress?.steps.length ?? 0)}
+          compact
+          percent={info?.percent ?? null}
+          label={`${title} progress`}
+        />
         {info?.progress && <StepChecklist progress={info.progress} />}
         <div className="card-panel-actions">
           <button type="button" className="card-panel-link" onClick={() => dock()?.open(`story:${card.id}`, title, "main")}>

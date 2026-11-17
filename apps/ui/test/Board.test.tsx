@@ -44,6 +44,27 @@ const renderBoard = (role: "viewer" | "owner" = "owner", onOpen = vi.fn()) =>
 const cardButton = (title: string) => screen.getByRole("button", { name: `Open ${title}` });
 
 describe("Board", () => {
+  it("the bar always shows the latest run's true percent: a new run, or a longer plan, may show less", () => {
+    const steps = (n: number, done: number[]) => ({ steps: Array.from({ length: n }, (_, i) => `step ${i + 1}`), done, current: null });
+    const withInfo = (i: CardInfo) => (
+      <RoleContext.Provider value="owner">
+        <Board board={board} infos={{ ...infos, c1: i }} selectedId={null} onOpen={vi.fn()} />
+      </RoleContext.Provider>
+    );
+    const bar = () => within(cardButton("Fix the contact form")).getByRole("progressbar").getAttribute("aria-valuenow");
+    const r = render(withInfo(info("c1", { runId: "r1", progress: steps(4, [1, 2, 3]), percent: 75 })));
+    expect(bar()).toBe("75");
+    // The agent restates its plan longer: fewer of its steps are done.
+    r.rerender(withInfo(info("c1", { runId: "r1", progress: steps(8, [1, 2, 3]), percent: 38 })));
+    expect(bar()).toBe("38");
+    // Another run takes the card on.
+    r.rerender(withInfo(info("c1", { runId: "r2", progress: steps(8, [1]), percent: 13 })));
+    expect(bar()).toBe("13");
+    // A stale answer for the same run and plan cannot move it back.
+    r.rerender(withInfo(info("c1", { runId: "r2", progress: steps(8, []), percent: 0 })));
+    expect(bar()).toBe("13");
+  });
+
   it("renders the five columns in order, each with its count", () => {
     renderBoard();
     const columns = screen.getAllByRole("region");

@@ -2,7 +2,7 @@ import { useMemo, useRef } from "react";
 import { innerEntry, jobTitle, narrate, progressPercent, visibleControls } from "@theterminal/shared";
 import type { LedgerEntry, Narration, NarrationContext } from "@theterminal/shared";
 import { ADAPTER_NAMES, onMachine } from "../components/AgentPanel";
-import { ProgressBar, StepChecklist } from "../components/ProgressBar";
+import { ProgressBar, StepChecklist, progressKey } from "../components/ProgressBar";
 import { OverrideTag, RawRecord, entryClass, isOverride } from "../components/LedgerPanel";
 import { clip, stripAnsiDeep } from "../components/text";
 import { namesRun, useShell } from "../shell/model";
@@ -95,7 +95,7 @@ export function AgentFeedPanel() {
       </div>
       {followed && plan && (
         <div className="feed-progress">
-          <ProgressBar key={followed.id} percent={progressPercent(plan)} label={jobTitle(followed)} />
+          <ProgressBar key={progressKey(followed.id, plan.steps.length)} percent={progressPercent(plan)} label={jobTitle(followed)} />
           <StepChecklist progress={plan} />
         </div>
       )}
