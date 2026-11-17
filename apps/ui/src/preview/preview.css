@@ -3,18 +3,18 @@
 .preview-top { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--activity); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .preview-word { font-family: var(--font-mono); font-size: var(--text-m); letter-spacing: 0.1em; color: var(--fg-strong); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-word b { color: var(--accent); font-weight: 600; }
-.preview-open { flex: none; font-size: var(--text-m); color: var(--fg); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); padding: 4px var(--space-3); text-decoration: none; transition: background var(--motion-fast) linear, border-color var(--motion-fast) linear; }
+.preview-open { flex: none; font-size: var(--text-m); color: var(--fg); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); padding: var(--space-1) var(--space-3); text-decoration: none; transition: background var(--motion-fast) linear, border-color var(--motion-fast) linear; }
 .preview-open:hover { background: var(--hover); border-color: var(--accent); }
 
 .preview-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-l); }
 .preview-devices { display: flex; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); overflow: hidden; }
-.preview-devices button { background: none; color: var(--muted); border-radius: 0; border-right: 1px solid var(--line); padding: 4px var(--space-3); transition: background var(--motion-fast) linear, color var(--motion-fast) linear; }
+.preview-devices button { background: none; color: var(--muted); border-radius: 0; border-right: 1px solid var(--line); padding: var(--space-1) var(--space-3); transition: background var(--motion-fast) linear, color var(--motion-fast) linear; }
 .preview-devices button:last-child { border-right: 0; }
 .preview-devices button:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
 .preview-devices button[aria-pressed="true"] { background: var(--selected); color: var(--fg-strong); }
 .preview-devices button:disabled { cursor: default; }
 .preview-devices button[aria-pressed="false"]:disabled { opacity: 0.5; }
-.preview-origin { flex: 1; min-width: 160px; font-family: var(--font-mono); font-size: var(--text-m); color: var(--muted); background: var(--activity); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 4px var(--space-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-origin { flex: 1; min-width: 160px; font-family: var(--font-mono); font-size: var(--text-m); color: var(--muted); background: var(--activity); border: 1px solid var(--line); border-radius: var(--radius-m); padding: var(--space-1) var(--space-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-live { color: var(--ok); }
 .preview-panel button.quiet { background: none; color: var(--fg); border: 1px solid var(--line-strong); transition: background var(--motion-fast) linear, border-color var(--motion-fast) linear; }
 .preview-panel button.quiet:hover:not(:disabled) { background: var(--hover); border-color: var(--accent); }
@@ -54,7 +54,7 @@
 
 /* Website, iOS or Android: a pill switch like the device toggles. */
 .preview-kinds { display: flex; flex: none; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); overflow: hidden; }
-.preview-kinds button { background: none; color: var(--muted); border-radius: 0; border-right: 1px solid var(--line); padding: 4px var(--space-3); font-size: var(--text-m); transition: background var(--motion-fast) linear, color var(--motion-fast) linear; }
+.preview-kinds button { background: none; color: var(--muted); border-radius: 0; border-right: 1px solid var(--line); padding: var(--space-1) var(--space-3); font-size: var(--text-m); transition: background var(--motion-fast) linear, color var(--motion-fast) linear; }
 .preview-kinds button:last-child { border-right: 0; }
 .preview-kinds button:hover { background: var(--hover); color: var(--fg); }
 .preview-kinds button[aria-pressed="true"] { background: var(--selected); color: var(--fg-strong); }
@@ -67,7 +67,7 @@
 @container (max-width: 640px) { .app-preview { grid-template-columns: minmax(0, 1fr); } }
 .preview-panel { container-type: inline-size; }
 .app-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-m); min-width: 0; }
-.app-card h3 { margin: 0; font-size: var(--text-s); font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.app-card h3 { margin: 0; font-size: var(--text-s); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .app-card .progress { align-self: stretch; }
 .app-stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-m); }
 .app-stages li { display: flex; justify-content: space-between; gap: var(--space-2); min-height: 20px; align-items: center; }

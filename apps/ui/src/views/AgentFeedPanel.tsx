@@ -95,7 +95,7 @@ export function AgentFeedPanel() {
       </div>
       {followed && plan && (
         <div className="feed-progress">
-          <ProgressBar percent={progressPercent(plan)} label={jobTitle(followed)} />
+          <ProgressBar key={followed.id} percent={progressPercent(plan)} label={jobTitle(followed)} />
           <StepChecklist progress={plan} />
         </div>
       )}

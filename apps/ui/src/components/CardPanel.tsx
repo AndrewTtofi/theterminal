@@ -104,7 +104,7 @@ export const CardPanel = forwardRef<HTMLElement, Props>(function CardPanel({ car
       </header>
       <section className="card-panel-sec">
         <p className="card-panel-title">{title}</p>
-        <ProgressBar compact percent={info?.percent ?? null} label={`${title} progress`} />
+        <ProgressBar key={card.id} compact percent={info?.percent ?? null} label={`${title} progress`} />
         {info?.progress && <StepChecklist progress={info.progress} />}
         <div className="card-panel-actions">
           <button type="button" className="card-panel-link" onClick={() => dock()?.open(`story:${card.id}`, title, "main")}>

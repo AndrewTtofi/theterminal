@@ -238,7 +238,7 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
         <h3 id={headingId}>{shown ? `Getting it running · ${shown.percent}%` : kind === "ios" ? "iPhone app" : "Android app"}</h3>
         {shown && progress ? (
           <>
-            <ProgressBar percent={shown.percent} label="Getting it running" caption={`stage ${stageNo} of ${progress.steps.length}`} />
+            <ProgressBar key={shown.id} percent={shown.percent} label="Getting it running" caption={`stage ${stageNo} of ${progress.steps.length}`} />
             <ol className="app-stages">
               {progress.steps.map((text, i) => {
                 const n = i + 1;

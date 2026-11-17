@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { progressPercent } from "@theterminal/shared";
 import type { RunProgress } from "@theterminal/shared";
 import "./progress.css";
@@ -7,6 +8,9 @@ import "./progress.css";
  * number and no progressbar value, because a made-up percentage would be fake progress. `compact` draws the bar alone
  * (a Board card shows its own percent), and nothing at all without a number. `caption` replaces "as the agent reports it"
  * for a plan that is not the agent's (a preview's fixed stages).
+ *
+ * The bar never moves back: it keeps the highest percent it has shown, so a stale response cannot undo progress. A
+ * caller whose subject changes (another run, another preview) gives it a new `key`, which starts it again.
  */
 export function ProgressBar({
   percent,
@@ -19,6 +23,9 @@ export function ProgressBar({
   compact?: boolean;
   caption?: string;
 }) {
+  const highest = useRef<number | null>(null);
+  if (percent !== null) highest.current = Math.max(percent, highest.current ?? percent);
+  percent = percent === null ? null : highest.current;
   if (compact) {
     if (percent === null) return null;
     return (
@@ -32,7 +39,9 @@ export function ProgressBar({
   if (percent === null) {
     return (
       <div className="progress progress-indeterminate">
-        <span className="progress-text" role="status">Working…</span>
+        <span className="progress-text" role="status">
+          Working…<span className="cursor" aria-hidden="true" />
+        </span>
       </div>
     );
   }
@@ -41,7 +50,7 @@ export function ProgressBar({
       <div className="progress-track" role="progressbar" aria-label={label} aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
-      <span className="progress-text">{percent}%</span>
+      <span className="progress-text num">{percent}%</span>
       <span className="progress-caption">{caption}</span>
     </div>
   );

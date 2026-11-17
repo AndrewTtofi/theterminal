@@ -389,6 +389,7 @@ export function PreviewPanel({ id }: { id: string }) {
           ) : view.state !== "ready" ? (
             <div className="preview-starting">
               <ProgressBar
+                key={view.id}
                 percent={view.percent}
                 label="Getting the site running"
                 caption={`stage ${view.progress.current ?? view.progress.done.length} of ${view.progress.steps.length}`}

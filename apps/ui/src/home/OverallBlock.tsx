@@ -17,7 +17,7 @@ export function OverallBlock({ runs }: { runs: HomeRun[] }) {
         <p className="home-empty">Nothing is running.</p>
       ) : (
         <>
-          {o.withPlan > 0 && <ProgressBar percent={o.percent} label="Overall progress" />}
+          {o.withPlan > 0 && <ProgressBar key={runs.map((h) => h.run.id).join(" ")} percent={o.percent} label="Overall progress" />}
           {o.withoutPlan > 0 && <p className="home-note">{o.withoutPlan} working without a plan</p>}
         </>
       )}

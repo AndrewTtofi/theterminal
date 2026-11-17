@@ -65,7 +65,7 @@ export function ActivityBar({ active, running, pending, onSelect }: Props) {
             >
               {ICONS[v]}
               {count > 0 && (
-                <span className={`badge badge-${v}`} aria-hidden="true">
+                <span className={`badge badge-${v} num`} aria-hidden="true">
                   {count}
                 </span>
               )}

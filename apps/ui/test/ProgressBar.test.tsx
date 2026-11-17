@@ -26,6 +26,19 @@ describe("ProgressBar", () => {
     expect(screen.getByText("stage 3 of 5")).toBeTruthy();
     expect(screen.queryByText("as the agent reports it")).toBeNull();
   });
+  it("never moves back for the same key, and starts again for a new one", () => {
+    const { rerender } = render(<ProgressBar key="run-1" percent={67} label="Fix login" />);
+    rerender(<ProgressBar key="run-1" percent={33} label="Fix login" />);
+    expect(screen.getByText("67%")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Fix login" }).getAttribute("aria-valuenow")).toBe("67");
+    rerender(<ProgressBar key="run-2" percent={33} label="Fix login" />);
+    expect(screen.getByText("33%")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Fix login" }).getAttribute("aria-valuenow")).toBe("33");
+  });
+  it("sets the percent as a number", () => {
+    render(<ProgressBar percent={40} label="Fix login" />);
+    expect(screen.getByText("40%").classList.contains("num")).toBe(true);
+  });
   it("shows Working… and no number without a plan", () => {
     const { container } = render(<ProgressBar percent={null} label="Fix login" />);
     expect(screen.getByText("Working…")).toBeTruthy();

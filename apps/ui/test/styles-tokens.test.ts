@@ -204,3 +204,34 @@ describe("shape tokens", () => {
     expect(checkShadows(css)).toEqual([]);
   });
 });
+
+describe("the approved style across every stylesheet", () => {
+  const files = cssFiles(join(__dirname, "..", "src"));
+  it("keeps radii, grid, type sizes, shadows and motion on the tokens in every src css", () => {
+    expect(files.length).toBeGreaterThan(5);
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      expect(checkRadii(text), `${f} radii`).toEqual([]);
+      expect(checkGrid(text), `${f} grid`).toEqual([]);
+      expect(checkFontSizes(text, ["h1", ".wordmark"]), `${f} font sizes`).toEqual([]);
+      expect(checkShadows(text), `${f} shadows`).toEqual([]);
+      expect(checkTransitions(text), `${f} transitions`).toEqual([]);
+    }
+  });
+  const rule = (sel: string) => new RegExp(`(?:^|\\n|\\})\\s*${sel.replace(/[.[\]"():]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+  it("floats the shell's panels with gaps between them", () => {
+    expect(rule(".workbench-body")).toMatch(/gap: var\(--space-2\)/);
+    expect(rule(".workbench-body")).toMatch(/padding: var\(--space-2\)/);
+    expect(rule(".workbench-body")).toMatch(/background: var\(--activity\)/);
+    for (const sel of [".activity-bar", ".side-bar", ".main-column"]) {
+      expect(rule(sel), sel).toMatch(/border-radius: var\(--radius-l\)/);
+      expect(rule(sel), sel).toMatch(/border: 1px solid var\(--line\)/);
+      expect(rule(sel), sel).toMatch(/overflow: hidden/);
+    }
+  });
+  it("rounds dialogs and the active tab", () => {
+    const sources = readFileSync(join(__dirname, "..", "src", "components", "sources.css"), "utf8");
+    expect(/(?:^|\n|\})\s*\.modal\s*\{[^}]*border-radius: var\(--radius-l\)/.test(sources)).toBe(true);
+    expect(/\.dv-tab\.dv-active-tab[^{]*\{[^}]*border-radius: var\(--radius-m\) var\(--radius-m\) 0 0/.test(css)).toBe(true);
+  });
+});
