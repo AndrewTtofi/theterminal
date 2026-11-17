@@ -4,12 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DeviceId } from "@theterminal/shared";
 import { api } from "../src/api";
 import type { PreviewViewsBody } from "../src/api";
+import { InviteDialog } from "../src/components/InviteDialog";
 import { Modal } from "../src/components/Modal";
 import { fitScale } from "../src/preview/DeviceStage";
 import { isDesktop, useLiveViews } from "../src/preview/live-views";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   document.body.classList.remove("resizing");
 });
 
@@ -84,6 +86,72 @@ describe("useLiveViews", () => {
     await waitFor(() => expect(calls.at(-1)?.action).toBe("hide"));
     act(() => document.body.classList.remove("resizing"));
     await waitFor(() => expect(calls.at(-1)?.action).toBe("show"));
+  });
+
+  it("follows a frame that moves without changing size: it watches the stage and the panel too", async () => {
+    const observed: { el: Element; cb: () => void }[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private cb: () => void) {}
+        observe(el: Element) {
+          observed.push({ el, cb: this.cb });
+        }
+        disconnect() {}
+      },
+    );
+    const calls = spy();
+    const panel = document.createElement("section");
+    panel.className = "preview-panel";
+    const stage = document.createElement("div");
+    stage.className = "device-stage";
+    panel.append(stage);
+    document.body.append(panel);
+    const f = frames(["laptop"]);
+    const el = f.get("laptop")!;
+    stage.append(el);
+    try {
+      const hook = renderHook(() => useLiveViews({ previewId: "p1", frames: f, rotated: [], visible: true }));
+      expect(observed.map((o) => o.el)).toEqual(expect.arrayContaining([el, stage, panel]));
+      // The side bar folds away: the stage is wider, the frame keeps its size but moves left.
+      el.getBoundingClientRect = () => ({ x: 4, y: 20, left: 4, top: 20, width: 90, height: 180, right: 0, bottom: 0, toJSON: () => ({}) }) as DOMRect;
+      act(() => observed.find((o) => o.el === stage)!.cb());
+      await waitFor(() => expect(calls.at(-1)?.devices[0]).toMatchObject({ x: 4, width: 90 }));
+      hook.unmount();
+    } finally {
+      panel.remove();
+    }
+  });
+
+  it("hides while any of the docking layout's sashes is dragged", async () => {
+    const calls = spy();
+    const sash = document.createElement("div");
+    sash.className = "dv-sash";
+    document.body.append(sash);
+    try {
+      renderHook(() => useLiveViews({ previewId: "p1", frames: frames(["laptop"]), rotated: [], visible: true }));
+      expect(calls.at(-1)?.action).toBe("show");
+      act(() => {
+        sash.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      });
+      await waitFor(() => expect(calls.at(-1)?.action).toBe("hide"));
+      act(() => {
+        document.dispatchEvent(new Event("pointerup", { bubbles: true }));
+      });
+      await waitFor(() => expect(calls.at(-1)?.action).toBe("show"));
+    } finally {
+      sash.remove();
+    }
+  });
+
+  it("hides under the invitation dialog too", async () => {
+    const calls = spy();
+    renderHook(() => useLiveViews({ previewId: "p1", frames: frames(["laptop"]), rotated: [], visible: true }));
+    expect(calls.at(-1)?.action).toBe("show");
+    const dialog = render(createElement(InviteDialog, { remoteOn: false, onClose: () => {} }));
+    expect(calls.at(-1)?.action).toBe("hide");
+    dialog.unmount();
+    expect(calls.at(-1)?.action).toBe("show");
   });
 
   it("sends nothing without a preview", () => {

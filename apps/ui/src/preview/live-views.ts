@@ -9,14 +9,34 @@ export function isDesktop(ua: string = typeof navigator === "undefined" ? "" : n
   return /(^|\s)TheTerminalDesktop(\s|$)/.test(ua);
 }
 
-/** The side bar's sash drag puts `resizing` on the body; live views hide meanwhile. */
+/**
+ * Whether a sash is being dragged: the side bar's (which puts `resizing` on the body) or any of the docking layout's
+ * (a pointer pressed on a `.dv-sash`, until it is released). Live views hide meanwhile (Ruling 21).
+ */
+let sashDragged = false;
 function subscribeResizing(l: () => void): () => void {
-  if (typeof MutationObserver === "undefined") return () => {};
-  const mo = new MutationObserver(l);
-  mo.observe(document.body, { attributes: true, attributeFilter: ["class"] });
-  return () => mo.disconnect();
+  const mo = typeof MutationObserver === "undefined" ? null : new MutationObserver(l);
+  mo?.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  const down = (e: Event) => {
+    const target = e.target;
+    if (!(target instanceof Element) || target.closest(".dv-sash") === null) return;
+    sashDragged = true;
+    l();
+  };
+  const up = () => {
+    if (!sashDragged) return;
+    sashDragged = false;
+    l();
+  };
+  document.addEventListener("pointerdown", down, true);
+  for (const name of ["pointerup", "pointercancel", "contextmenu"]) document.addEventListener(name, up, true);
+  return () => {
+    mo?.disconnect();
+    document.removeEventListener("pointerdown", down, true);
+    for (const name of ["pointerup", "pointercancel", "contextmenu"]) document.removeEventListener(name, up, true);
+  };
 }
-const isResizing = () => document.body.classList.contains("resizing");
+const isResizing = () => sashDragged || document.body.classList.contains("resizing");
 function useResizing(): boolean {
   return useSyncExternalStore(subscribeResizing, isResizing, () => false);
 }
@@ -25,7 +45,7 @@ type Options = { previewId: string | null; frames: Map<DeviceId, HTMLElement>; r
 
 /**
  * Lays the desktop app's device views over the Preview tab's frames: `show` with each frame's rectangle (CSS pixels
- * of the window) on mount, on resize and on scroll (once per animation frame); `hide` while a dialog, menu or toast
+ * of the window) on mount, on a resize of a frame, its stage or its panel, and on scroll (once per animation frame); `hide` while a dialog, menu or toast
  * is open, while the tab is not visible or while a sash is dragged; `close` on unmount.
  */
 export function useLiveViews({ previewId, frames, rotated, visible }: Options): void {
@@ -77,8 +97,17 @@ export function useLiveViews({ previewId, frames, rotated, visible }: Options): 
       });
     };
     const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
-    for (const el of latest.current.frames.values()) ro?.observe(el);
-    ro?.observe(document.body);
+    // The frames, and what holds them: a frame can move without changing size (the side bar folds away, a split
+    // between panels is dragged), and then only the stage or the panel around it changes size.
+    const watched = new Set<Element>([document.body]);
+    for (const el of latest.current.frames.values()) {
+      watched.add(el);
+      const stage = el.closest(".device-stage");
+      const panel = el.closest(".preview-panel");
+      if (stage !== null) watched.add(stage);
+      if (panel !== null) watched.add(panel);
+    }
+    for (const el of watched) ro?.observe(el);
     window.addEventListener("scroll", schedule, true);
     window.addEventListener("resize", schedule);
     return () => {
