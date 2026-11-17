@@ -1,3 +1,6 @@
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { expect, type Locator, type Page } from "@playwright/test";
 
 // Helpers shared by the 5B specs (cloud, github, mcp, capacity). Every spec creates the connections it needs and
@@ -460,3 +463,54 @@ export const approvalRow = (page: Page, sentence: RegExp) =>
 /** The Working now card of the run started with `prompt`, and its progress bar. */
 export const workingCard = (page: Page, prompt: string) => homeBlock(page, "Working now").getByRole("article", { name: prompt });
 
+
+// The website preview and the agents' Board (preview.spec.ts, agent-board.spec.ts).
+
+/** The website fixture: one page served by `node server.mjs` on PORT and HOST, with `node_modules` already there. */
+export const SITE_FIXTURE = join(import.meta.dirname, "fixtures", "site");
+
+/**
+ * Copies the website fixture to a temporary folder and creates a project from it on the site server (headless, so the
+ * folder is typed), then selects it. Returns the temporary folder, for the caller to remove.
+ */
+export async function importSite(page: Page, name: string): Promise<string> {
+  const folder = join(mkdtempSync(join(tmpdir(), "tt-e2e-site-")), "site");
+  cpSync(SITE_FIXTURE, folder, { recursive: true });
+  await page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name: "New project…" }).click();
+  const dialog = page.getByRole("dialog", { name: "New project" });
+  await dialog.getByLabel("Name").fill(name);
+  await dialog.getByText("A folder on this computer", { exact: true }).click();
+  await dialog.getByRole("button", { name: "Choose folder…" }).click();
+  await dialog.getByLabel("Folder path").fill(folder);
+  await dialog.getByRole("button", { name: "Create project" }).click();
+  await expect(dialog.getByText(`${name} is ready.`)).toBeVisible();
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("navigation", { name: "Projects" }).getByRole("button", { name })).toHaveClass(/selected/);
+  return folder;
+}
+
+/** Removes a folder made by `importSite` (file handles can linger briefly on Windows). */
+export function removeSite(folder: string): void {
+  rmSync(dirname(folder), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+/** The Preview tab's panel. */
+export const previewPanel = (page: Page) => page.getByRole("region", { name: "Preview", exact: true });
+
+/**
+ * Clicks Preview on the Home entry of the job titled `jobTitle` (Working now or Finished today) and waits for its
+ * Preview tab, titled "Preview · <job title>". Returns the tab.
+ */
+export async function openPreview(page: Page, jobTitle: string): Promise<Locator> {
+  const working = homeBlock(page, "Working now").getByRole("article", { name: jobTitle });
+  const finished = homeBlock(page, "Finished today")
+    .getByRole("listitem")
+    .filter({ has: page.locator(".finished-line", { hasText: new RegExp(`^${escape(jobTitle)} — `) }) });
+  const entry = working.or(finished);
+  await expect(entry).toHaveCount(1);
+  await entry.getByRole("button", { name: "Preview", exact: true }).click();
+  const tab = page.getByRole("tab", { name: `Preview · ${jobTitle}` });
+  await expect(tab).toBeVisible();
+  await expect(previewPanel(page)).toBeVisible();
+  return tab;
+}
