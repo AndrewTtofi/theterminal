@@ -122,12 +122,15 @@ const NATIVE_MAGIC = [
 /** A `#!` line whose interpreter is Node (`#!/usr/bin/env node`, `#!/usr/local/bin/node`). */
 const NODE_SHEBANG = /^#![^\n]*\bnode(\s|$)/;
 
-/** The entry of `pm` inside an npm-style `node_modules` folder (Ruling 10). */
+/**
+ * The entry of `pm` inside an npm-style `node_modules` folder (Ruling 10); for pnpm and yarn also corepack's, which is
+ * what Node's own `pnpm.cmd` and `yarn.cmd` shims run on Windows.
+ */
 const ENTRIES: Record<PackageManager, readonly string[]> = {
   npm: ["npm/bin/npm-cli.js"],
   npx: ["npm/bin/npx-cli.js"],
-  pnpm: ["pnpm/bin/pnpm.cjs", "pnpm/bin/pnpm.js"],
-  yarn: ["yarn/bin/yarn.cjs", "yarn/bin/yarn.js"],
+  pnpm: ["pnpm/bin/pnpm.cjs", "pnpm/bin/pnpm.js", "corepack/dist/pnpm.js"],
+  yarn: ["yarn/bin/yarn.cjs", "yarn/bin/yarn.js", "corepack/dist/yarn.js"],
 };
 
 /**

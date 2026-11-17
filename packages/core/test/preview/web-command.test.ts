@@ -124,6 +124,21 @@ describe("resolvePackageManager", () => {
     expect(r).toEqual({ file: execPath, args: [cjs] });
   });
 
+  it("uses corepack's entry beside Node's own pnpm and yarn shims", () => {
+    for (const pm of ["pnpm", "yarn"] as const) {
+      const entry = win32.join("C:\\Program Files\\nodejs", "node_modules", "corepack", "dist", `${pm}.js`);
+      const r = resolvePackageManager(pm, {
+        env: {},
+        execPath,
+        platform: "win32",
+        which: () => `C:\\Program Files\\nodejs\\${pm}.cmd`,
+        realpath: same,
+        isFile: only(entry),
+      });
+      expect(r, pm).toEqual({ file: execPath, args: [entry] });
+    }
+  });
+
   it("throws PackageManagerNotFoundError when a .cmd shim has no sibling entry", () => {
     const f = () =>
       resolvePackageManager("pnpm", {
