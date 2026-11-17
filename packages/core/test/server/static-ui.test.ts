@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerStaticUi } from "../../src/server/static-ui.js";
+import { UI_CSP, previewCsp, registerStaticUi, serveIndex } from "../../src/server/static-ui.js";
 
 const dirs: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -110,5 +110,34 @@ describe("registerStaticUi: the favicon", () => {
     expect(res.body).toMatch(/^<svg /);
     // The page links it from this origin, which img-src 'self' allows.
     expect(String(res.headers["content-security-policy"])).toContain("img-src 'self'");
+  });
+});
+
+describe("the preview page's policy (Ruling 23)", () => {
+  it("is UI_CSP with frame-ancestors 'self' and frame-src for exactly the preview's origin", () => {
+    const csp = previewCsp("http://127.0.0.1:5173");
+    expect(csp).toBe(UI_CSP.replace("frame-ancestors 'none'", "frame-src http://127.0.0.1:5173; frame-ancestors 'self'"));
+    expect(previewCsp("http://[::1]:3000")).toContain("frame-src http://[::1]:3000;");
+  });
+
+  it("refuses anything but a loopback http origin with a port", () => {
+    for (const bad of ["https://127.0.0.1:5173", "http://example.com:80", "http://127.0.0.1", "http://127.0.0.1:5173; script-src *", "*", "http://127.0.0.1:70000"]) {
+      expect(() => previewCsp(bad), bad).toThrow();
+    }
+  });
+
+  it("serveIndex serves index.html under the given policy", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tt-static-ui-"));
+    dirs.push(root);
+    writeFileSync(join(root, "index.html"), "<html>ui</html>");
+    const app = Fastify();
+    apps.push(app);
+    app.get("/p", (_req, reply) => serveIndex(reply, previewCsp("http://127.0.0.1:5173"), root));
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: "/p" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("<html>ui</html>");
+    expect(res.headers["content-security-policy"]).toBe(previewCsp("http://127.0.0.1:5173"));
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 });

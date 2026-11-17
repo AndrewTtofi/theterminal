@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { ROLES, type Role } from "@theterminal/shared";
+import { ROLES, type NativeTools, type Role } from "@theterminal/shared";
 import { openDatabase } from "../../src/db.js";
 import { SessionStore } from "../../src/people/sessions.js";
 import { ROUTE_ROLES, assertRoutesHaveRoles, registerAuth, requireRole } from "../../src/server/auth.js";
@@ -13,6 +13,12 @@ import { createServer, type RunningServer } from "../../src/server/server.js";
 import { COLLABORATORS, seedPeople } from "../fixtures/people.js";
 import { localFetch } from "../fixtures/local-fetch.js";
 
+/** What the native tools route answers here, so the test never runs Xcode's or Android's programs. */
+const FAKE_TOOLS: NativeTools = {
+  platform: "linux",
+  ios: { supported: false, xcode: null, simulators: [], missing: [] },
+  android: { supported: true, sdk: false, avds: [], missing: ["android_sdk"] },
+};
 const NO_BUNDLED = { claude: () => null, codex: () => null, gemini: () => null };
 const running: RunningServer[] = [];
 const dirs: string[] = [];
@@ -29,7 +35,7 @@ async function start() {
   const cookies = seedPeople(dataDir);
   const s = await createServer({
     dataDir, port: 0, which: () => null, bundled: NO_BUNDLED, secrets: new MemorySecretStore(), discovery: fakeDiscovery(),
-    linkBind: "127.0.0.1", linkPort: 0,
+    linkBind: "127.0.0.1", linkPort: 0, nativeTools: async () => FAKE_TOOLS,
   });
   running.push(s);
   const as = (role: Role): Record<string, string> =>
@@ -118,6 +124,28 @@ describe("the role table and the routes", { timeout: 60_000 }, () => {
       "GET /api/projects/:id/writeback": "owner",
       "POST /api/projects/:id/apply": "owner",
       "POST /api/projects/:id/publish": "owner",
+    };
+    expect(Object.fromEntries(Object.keys(contract).map((k) => [k, ROUTE_ROLES[k]]))).toEqual(contract);
+  });
+
+  it("lists the board, note, preview, screenshot and host routes with the contract's roles", () => {
+    const contract: Record<string, Role> = {
+      "GET /api/projects/:id/cards/info": "viewer",
+      "GET /api/cards/:id/comments": "viewer",
+      "POST /api/cards/:id/comments": "maintainer",
+      "POST /api/cards/:id/move-request/decline": "reviewer",
+      "GET /api/runs/:id/preview/plan": "maintainer",
+      "POST /api/runs/:id/preview": "maintainer",
+      "GET /api/previews/:id": "reviewer",
+      "POST /api/previews/:id/stop": "maintainer",
+      "POST /api/previews/:id/seen": "reviewer",
+      "POST /api/previews/:id/screenshots": "maintainer",
+      "GET /api/runs/:id/screenshots": "viewer",
+      "GET /api/screenshots/:sha": "viewer",
+      "GET /api/host/capabilities": "reviewer",
+      "POST /api/host/preview-views": "reviewer",
+      "GET /api/host/native-tools": "owner",
+      "GET /preview/:id": "reviewer",
     };
     expect(Object.fromEntries(Object.keys(contract).map((k) => [k, ROUTE_ROLES[k]]))).toEqual(contract);
   });
