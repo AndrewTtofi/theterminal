@@ -45,6 +45,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Sign-in lockouts (5 failures, 15 minutes), rate limits, and presence (in memory only).
 - Self-hosting with Docker: a server image with remote access on, an encrypted file store for secrets with its key on a separate volume, a bootstrap link for the first Owner (valid one hour), and a health check. See `docs/self-hosting.md`.
 - Documentation: `docs/collaboration.md`, `docs/self-hosting.md`, and new sections in `docs/connections-and-credentials.md`.
+- Known limit of previews: if The Terminal crashes while a preview is running, the preview's site may keep running until the computer restarts or you stop it yourself.
 
 ### Changed
 - Signing in with your own Claude plan and Gemini CLI's Google sign-in are turned off, because those providers do not allow other apps to use them. API keys are the recommended way; Codex's Sign in with ChatGPT is unchanged. A server started with `THETERMINAL_RESTRICTED_SIGNIN=1` (or `--allow-restricted-signin`) turns them back on. While off, a mode chosen earlier is not used and runs use the API key.
