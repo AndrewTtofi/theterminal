@@ -30,16 +30,25 @@ function LiveRow({ h, canOpen }: { h: HomeRun; canOpen: boolean }) {
   const { model } = useShell();
   const id = h.livePreviewId!;
   const [state, setState] = useState<string>("live");
+  // Read once, and again whenever one of its ledger entries (progress, ready, failed, stopped) arrives.
   useEffect(() => {
     let on = true;
-    api.getPreview(id).then(
-      (v) => on && setState(`${KIND_WORDS[v.kind]} · ${STATE_WORDS[v.state]}`),
-      () => {},
-    );
+    const read = () =>
+      api.getPreview(id).then(
+        (v) => on && setState(`${KIND_WORDS[v.kind]} · ${STATE_WORDS[v.state]}`),
+        () => {},
+      );
+    void read();
+    const off = model.subscribeEntries?.((e) => {
+      if (!e.type.startsWith("preview.")) return;
+      const p = e.payload as { previewId?: unknown } | null;
+      if (p?.previewId === id) void read();
+    });
     return () => {
       on = false;
+      off?.();
     };
-  }, [id]);
+  }, [id, model.subscribeEntries]);
   return (
     <li className="home-preview">
       <span className="home-preview-title">{visibleControls(h.title)}</span>

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { PreviewView, Screenshot } from "@theterminal/shared";
+import { act } from "@testing-library/react";
+import type { LedgerEntry, PreviewView, Screenshot } from "@theterminal/shared";
 import { api } from "../src/api";
 import { PreviewsBlock } from "../src/home/PreviewsBlock";
 import { homeModel, homeRun, renderInShell } from "./home-fixtures";
@@ -54,6 +55,32 @@ describe("PreviewsBlock", () => {
     await waitFor(() => expect(within(row).getByText("Website · ready")).toBeTruthy());
     await userEvent.click(within(row).getByRole("button", { name: "Open" }));
     expect(openPreview).toHaveBeenCalledWith("r1");
+  });
+
+  it("reads a live preview again when its ledger entries arrive", async () => {
+    const view = (state: PreviewView["state"], over: Partial<PreviewView> = {}): PreviewView => ({
+      id: "pv1", runId: "r1", projectId: "p1", kind: "web", state, progress: { steps: ["Starting the site"], done: [], current: 1 },
+      percent: 0, origin: null, frameable: null, exposed: null, error: null, tail: [], liveCount: null, startedAt: "", ...over,
+    }) as PreviewView;
+    const get = vi.spyOn(api, "getPreview").mockResolvedValueOnce(view("starting")).mockResolvedValue(view("ready", { percent: 100 }));
+    const listeners: ((e: LedgerEntry) => void)[] = [];
+    const subscribeEntries = (l: (e: LedgerEntry) => void) => {
+      listeners.push(l);
+      return () => listeners.splice(listeners.indexOf(l), 1);
+    };
+    renderInShell(<PreviewsBlock />, homeModel({ subscribeEntries }, { working: [homeRun("r1", {}, { title: "Fix the contact form", livePreviewId: "pv1" })], finishedToday: [] }));
+    const row = screen.getByText("Fix the contact form").closest("li")!;
+    await waitFor(() => expect(within(row).getByText("Website · starting")).toBeTruthy());
+    const entry = (previewId: string) =>
+      ({ seq: 1, id: "e1", ts: "", projectId: "p1", actor: { kind: "system", id: "s" }, type: "preview.ready", payload: { previewId }, prevHash: "", hash: "" }) as unknown as LedgerEntry;
+    act(() => {
+      for (const l of [...listeners]) l(entry("other"));
+    });
+    expect(get).toHaveBeenCalledTimes(1); // another preview's entry
+    act(() => {
+      for (const l of [...listeners]) l(entry("pv1"));
+    });
+    await waitFor(() => expect(within(row).getByText("Website · ready")).toBeTruthy());
   });
 
   it("says what it is for when there is nothing yet", () => {
