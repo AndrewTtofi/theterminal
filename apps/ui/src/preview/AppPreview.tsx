@@ -231,11 +231,17 @@ export function AppPreview({ runId, kind, tools, toolsError = null, follow = nul
   const failed = view?.state === "failed";
   const progress = shown?.progress ?? null;
   const stageNo = progress ? (progress.current ?? progress.done.length) : 0;
+  // While it starts the heading carries the percent; once it runs it says so; a failure says nothing of a percent.
+  const heading = shown === null
+    ? kind === "ios" ? "iPhone app" : "Android app"
+    : shown.state === "ready" ? "Running"
+    : shown.state === "failed" ? "Getting it running"
+    : `Getting it running · ${shown.percent}%`;
 
   return (
     <div className="app-preview">
       <section className="app-card" aria-labelledby={headingId}>
-        <h3 id={headingId}>{shown ? `Getting it running · ${shown.percent}%` : kind === "ios" ? "iPhone app" : "Android app"}</h3>
+        <h3 id={headingId}>{heading}</h3>
         {shown && progress ? (
           <>
             <ProgressBar key={progressKey(shown.id, progress.steps.length)} percent={shown.percent} label="Getting it running" caption={`stage ${stageNo} of ${progress.steps.length}`} />

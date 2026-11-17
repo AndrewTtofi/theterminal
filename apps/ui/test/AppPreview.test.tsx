@@ -172,6 +172,7 @@ describe("AppPreview", () => {
     });
     setup();
     await startWith(view({ state: "ready", progress: { steps: STEPS, done: [1, 2, 3, 4, 5], current: null }, percent: 100 }));
+    expect(document.querySelector(".app-card h3")?.textContent).toBe("Running");
     fireEvent.click(screen.getByRole("button", { name: "Screenshot" }));
     await waitFor(() => expect(take).toHaveBeenCalledWith("pv1"));
     expect(await screen.findByText("Saved 1 screenshot on the job.")).toBeTruthy();
@@ -186,6 +187,7 @@ describe("AppPreview", () => {
     act(() => listeners.forEach((l) => l({ type: "preview.failed", payload: { previewId: "pv1" } } as unknown as LedgerEntry)));
     await waitFor(() => expect(get).toHaveBeenCalledWith("pv1"));
     expect(await screen.findByText("The build failed.")).toBeTruthy();
+    expect(document.querySelector(".app-card h3")?.textContent).toBe("Getting it running");
     expect(screen.getByText("error: [redacted]").tagName).toBe("PRE");
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
